@@ -22,15 +22,25 @@
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional, Union, List, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
-import torch_npu
 import torch
+import torch_npu
+from omni.adaptors.vllm.worker.npu_model_runner import \
+    GraphCompileConfiguration
+from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
+from omni.models.common.layers.layernorm import RMSNorm, RMSNormFlashComm
+from omni.models.common.layers.linear import (QKVParallelFlashCommLinear,
+                                              RowParallelFlashCommLinear)
+from omni.models.common.layers.rotary_embedding import get_rope
+from omni.models.qwen.fused_moe import FusedMoE
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
 from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -41,22 +51,12 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-
-from omni.models.qwen.fused_moe import FusedMoE
-from omni.adaptors.vllm.worker.npu_model_runner import GraphCompileConfiguration
-from omni.models.common.layers.layernorm import RMSNormFlashComm, RMSNorm
-from omni.models.common.layers.linear import (RowParallelFlashCommLinear, 
-                                              QKVParallelFlashCommLinear)
-from omni.models.common.layers.rotary_embedding import get_rope
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
-from omni.models.common.config.model_config import model_extra_config
-
 
 logger = init_logger(__name__)
 

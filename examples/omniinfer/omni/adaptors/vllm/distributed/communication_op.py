@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from typing import Optional
+
 import torch
 import torchair as tng
-from typing import Optional
-from vllm.distributed import get_tp_group
-
 from omni.adaptors.vllm.distributed.parallel_state import (
-    get_world_group_from_list,
-    get_local_group_from_list,
-    get_cross_group_from_list,
-    get_far_cross_group_from_list,
-    get_round_cross_group_from_list,
-    get_near_cross_group_from_list,
-    get_mlp_tp_group,
-    GroupCoordinator,
-)
+    GroupCoordinator, get_cross_group_from_list, get_far_cross_group_from_list,
+    get_local_group_from_list, get_mlp_tp_group,
+    get_near_cross_group_from_list, get_round_cross_group_from_list,
+    get_world_group_from_list)
 from omni.models.common.config.model_config import model_extra_config
+from vllm.distributed import get_tp_group
 
 
 def reduce_scatter_two_stage(input_: torch.Tensor, idx: int, reverse=False) -> torch.Tensor:

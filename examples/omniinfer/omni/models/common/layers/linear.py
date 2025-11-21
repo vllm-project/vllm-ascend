@@ -1,45 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from typing import List, Optional, Tuple
 from abc import abstractmethod
-from vllm.platforms import current_platform
+from typing import List, Optional, Tuple
 
 import torch
-import torch_npu
 import torch.distributed as dist
-from torch.nn.parameter import Parameter, UninitializedParameter
-
-from vllm.model_executor.layers.linear import (LinearBase,
-                                               LinearMethodBase,
-                                               ColumnParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear as RowParallelLinearGPU,
-                                               adjust_marlin_shard,
-                                               adjust_scalar_to_fused_array,
-                                               UnquantizedLinearMethod)
-from vllm import logger
-
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
-from vllm.model_executor.utils import set_weight_attrs
-
-from vllm.distributed import (
-    divide,
-    split_tensor_along_last_dim,
-    get_tensor_model_parallel_rank,
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
-    get_tp_group
-)
-
-from omni.adaptors.vllm.distributed.communication_op import mla_tensor_model_parallel_reduce_scatter
-from omni.adaptors.vllm.distributed.parallel_state import (
-    get_mlp_tp_group,
-    get_o_proj_tp_group,
-    GroupCoordinator
-)
+import torch_npu
+from omni.adaptors.vllm.distributed.communication_op import \
+    mla_tensor_model_parallel_reduce_scatter
+from omni.adaptors.vllm.distributed.parallel_state import (GroupCoordinator,
+                                                           get_mlp_tp_group,
+                                                           get_o_proj_tp_group)
 from omni.models.common.config.model_config import model_extra_config
+from torch.nn.parameter import Parameter, UninitializedParameter
+from vllm import logger
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tp_group, split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearBase, LinearMethodBase,
+                                               ReplicatedLinear)
+from vllm.model_executor.layers.linear import \
+    RowParallelLinear as RowParallelLinearGPU
+from vllm.model_executor.layers.linear import (UnquantizedLinearMethod,
+                                               adjust_marlin_shard,
+                                               adjust_scalar_to_fused_array)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 

@@ -19,10 +19,11 @@
 #
 
 from contextlib import contextmanager
-from typing import  Any
+from typing import Any
 
 from vllm import forward_context
 from vllm.config import VllmConfig
+
 
 @contextmanager
 def set_forward_context(attn_metadata: Any,

@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import os
+import sys
+import unittest
 # import torch_npu
 from pathlib import Path
-import unittest
-import torch
-import torch.nn as nn
-import numpy as np
-import sys
-import os
-
 from unittest.mock import MagicMock, patch
 
-from ..omni_placement.omni_planner import OmniPlanner
-from ..omni_placement.config import Config
+import numpy as np
+import torch
+import torch.nn as nn
+
 from ..omni_placement.cluster_status import ClusterStatus
+from ..omni_placement.config import Config
+from ..omni_placement.omni_planner import OmniPlanner
+
 
 #torch.set_printoptions(threshold=float("inf"))  # Print all values
 class TestOmniPlanner(unittest.TestCase):

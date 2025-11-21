@@ -3,10 +3,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
-from setuptools import setup, find_packages
+
 import pybind11
-from pybind11.setup_helpers import Pybind11Extension, build_ext
 import torch
+from pybind11.setup_helpers import Pybind11Extension, build_ext
+from setuptools import find_packages, setup
 
 
 class PathManager:

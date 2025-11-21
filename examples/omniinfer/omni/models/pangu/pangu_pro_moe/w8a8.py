@@ -21,10 +21,9 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
+from omni.models.common.layers.attention.attention import AscendAttentionState
 from vllm.attention.backends.abstract import AttentionType
 
-  
-from omni.models.common.layers.attention.attention import AscendAttentionState
 from .pangu_parallel_state import get_ep_group
 
 

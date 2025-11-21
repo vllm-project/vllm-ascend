@@ -1,42 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from typing import Iterable, List, Optional, Tuple, Set
-
 import os
+from typing import Iterable, List, Optional, Set, Tuple
+
 import torch
 import torch.nn as nn
-
 from transformers import PretrainedConfig
-
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import QuantizationConfig, VllmConfig
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
- 
-from vllm.model_executor.models.utils import is_pp_missing_parameter
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import IntermediateTensors
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import is_pp_missing_parameter
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import IntermediateTensors
 
 if os.getenv("ASCEND_PLATFORM", "A3")=="A2":
     from .pangu_ultra_moe_a2 import PanguUltraMoEDecoderLayer
 else:
     from .pangu_ultra_moe import PanguUltraMoEDecoderLayer
 
-from omni.models.common.layers.layernorm import RMSNorm #zxp: not use
-from omni.models.common.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding
-)
-from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
 from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.layernorm import RMSNorm  # zxp: not use
+from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
+from omni.models.common.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
                                         weight_name: str) -> Optional[int]:

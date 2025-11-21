@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from vllm.v1.worker.block_table import BlockTable
+
 from .kv_cache_interface import OmniAttentionSpec
 
 

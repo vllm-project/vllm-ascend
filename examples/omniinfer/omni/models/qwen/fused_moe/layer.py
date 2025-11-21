@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import os
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
-import os
 import torch
 import torch_npu
-
-from vllm.distributed import get_pp_group, get_world_group
-from vllm.distributed import get_tp_group, get_dp_group, get_ep_group
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.utils import set_weight_attrs
-
 from omni.models.common.config.model_config import model_extra_config
-
+from vllm.distributed import (get_dp_group, get_ep_group, get_pp_group,
+                              get_tp_group, get_world_group)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizeMethodBase
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class FusedMoeWeightScaleSupported(Enum):

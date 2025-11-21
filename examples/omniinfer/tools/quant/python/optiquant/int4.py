@@ -1,18 +1,20 @@
-import os
 import json
+import os
 import re
 from copy import deepcopy
 from glob import glob
-from tqdm import tqdm
+
 import torch
+from tqdm import tqdm
 
 try:
     import torch_npu
 except:
     pass
 
-from safetensors.torch import load_file, save_file
 from huggingface_hub import snapshot_download
+from safetensors.torch import load_file, save_file
+
 
 class QType:
     desc: str

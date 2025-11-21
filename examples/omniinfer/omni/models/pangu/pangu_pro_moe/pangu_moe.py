@@ -21,6 +21,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from omni.models.common.layers.attention.backend.attention import (
+    AscendAttentionState, AttentionMaskBuilder)
 from torch import nn
 from torch.nn import Parameter
 from transformers import PretrainedConfig
@@ -30,8 +32,9 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
-                                             get_world_group)
+from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
+                                             get_tp_group, get_world_group,
+                                             init_model_parallel_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -57,22 +60,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
-from typing import Optional
-
-from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
-                                             init_model_parallel_group)
-
-from .pangu_parallel_state import (
-    get_ep_group,
-    get_etp_group,
-    model_parallel_initialized,
-    init_ascend_model_parallel,
-    destory_ascend_model_parallel,
-)
 from .device import is_310p
 from .fused_moe import patch_fused_moe_ops
-
-from omni.models.common.layers.attention.backend.attention import AttentionMaskBuilder, AscendAttentionState
+from .pangu_parallel_state import (destory_ascend_model_parallel, get_ep_group,
+                                   get_etp_group, init_ascend_model_parallel,
+                                   model_parallel_initialized)
 
 logger = init_logger(__name__)
 
@@ -908,16 +900,18 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
 
         if vllm_config.quant_config is not None:
             # Will merge AscendQuantConfig_Pangu_Pro_Moe into AscendQuantConfig in later builds
-            from omni.models.pangu.pangu_pro_moe.quant_config_pangu_pro_moe import AscendQuantConfig_Pangu_Pro_Moe
+            from omni.models.pangu.pangu_pro_moe.quant_config_pangu_pro_moe import \
+                AscendQuantConfig_Pangu_Pro_Moe
             from omni.quantization import quantizer
-            from vllm.model_executor.layers.quantization import _CUSTOMIZED_METHOD_TO_QUANT_CONFIG
+            from vllm.model_executor.layers.quantization import \
+                _CUSTOMIZED_METHOD_TO_QUANT_CONFIG
             quantizer.AscendQuantConfig = AscendQuantConfig_Pangu_Pro_Moe
             from omni.adaptors.vllm.utils import ASCEND_QUATIZATION_METHOD
 
             _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[ASCEND_QUATIZATION_METHOD] = AscendQuantConfig_Pangu_Pro_Moe
 
-            from vllm.model_executor.model_loader.weight_utils import (
-                    get_quant_config)
+            from vllm.model_executor.model_loader.weight_utils import \
+                get_quant_config
             quant_config = get_quant_config(vllm_config.model_config, vllm_config.load_config)
             quant_config.quant_description = vllm_config.quant_config.quant_description
             quant_config.packed_modules_mapping = vllm_config.quant_config.packed_modules_mapping

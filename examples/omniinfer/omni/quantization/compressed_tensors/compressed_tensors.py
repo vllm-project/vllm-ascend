@@ -17,25 +17,33 @@
 #
 # By using quantization case, this file is called before worker patch achieve,
 from typing import Any, Dict, List, Optional, cast
-from pydantic import BaseModel
+
 import torch
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization import register_quantization_config
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
-from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target, 
-    is_activation_quantization_format,
-)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsLinearMethod, CompressedTensorsKVCacheMethod
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import CompressedTensorsScheme
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy)
+from omni.adaptors.vllm.utils import ASCEND_COMPRESSED_TENSORS
 from omni.models.common.layers.linear import AscendUnquantizedLinearMethod
 from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
-from omni.adaptors.vllm.utils import ASCEND_COMPRESSED_TENSORS
-from .schemes.compressed_tensors_w8a8_int8 import AscendCompressedTensorsW8A8Int8LinearMethod
-from .schemes.compressed_tensors_w4a8_int8 import AscendCompressedTensorsW4A8Int8LinearMethod
-from .compressed_tensors_moe import AscendCompressedTensorsW8A8Int8MoEMethod, AscendCompressedTensorsW4A8Int8MoEMethod
+from pydantic import BaseModel
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization import \
+    register_quantization_config
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizeMethodBase
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig, CompressedTensorsKVCacheMethod,
+    CompressedTensorsLinearMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
+    CompressedTensorsScheme
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    find_matched_target, is_activation_quantization_format)
+
+from .compressed_tensors_moe import (AscendCompressedTensorsW4A8Int8MoEMethod,
+                                     AscendCompressedTensorsW8A8Int8MoEMethod)
+from .schemes.compressed_tensors_w4a8_int8 import \
+    AscendCompressedTensorsW4A8Int8LinearMethod
+from .schemes.compressed_tensors_w8a8_int8 import \
+    AscendCompressedTensorsW8A8Int8LinearMethod
 
 
 @register_quantization_config(ASCEND_COMPRESSED_TENSORS)

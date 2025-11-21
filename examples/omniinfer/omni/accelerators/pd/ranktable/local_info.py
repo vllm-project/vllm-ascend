@@ -5,7 +5,7 @@ import json
 import os
 from copy import deepcopy
 
-from omni.accelerators.pd.ranktable.device import Server, Device, ServerGroup
+from omni.accelerators.pd.ranktable.device import Device, Server, ServerGroup
 from omni.accelerators.pd.ranktable.rank_table import RankTableConfig
 
 LOCAL_RANK_TABLE_ENV = "RANK_TABLE_FILE_PATH"

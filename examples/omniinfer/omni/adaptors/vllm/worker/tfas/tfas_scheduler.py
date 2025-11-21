@@ -1,13 +1,15 @@
-from vllm.v1.core.sched.scheduler import Scheduler
+import math
 import time
 from collections import deque
-from vllm.v1.request import Request, RequestStatus
-import math
-from vllm.v1.structured_output import StructuredOutputManager
+
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.logger import logger
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.request import Request, RequestStatus
+from vllm.v1.structured_output import StructuredOutputManager
+
 
 class TFASScheduler(Scheduler):
     DEFAULT_TFAS_CONFIG = {

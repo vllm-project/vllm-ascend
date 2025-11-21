@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import os
+
 import torch
 import torch_npu
-
 from vllm import LLM, SamplingParams
-
-import os
 
 
 def run_offline_prompts():

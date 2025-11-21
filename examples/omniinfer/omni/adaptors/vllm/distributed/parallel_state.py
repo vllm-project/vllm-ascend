@@ -13,22 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, List, Any
+import os
+from typing import Any, List, Optional
 
 import torch
 import torch.distributed
-from vllm.distributed import GroupCoordinator as GroupCoordinatorGPU
-from vllm.logger import logger
-from vllm.distributed import (
-    parallel_state,
-    init_model_parallel_group,
-    get_world_group,
-    get_ep_group
-)
-from vllm.logger import logger
-from vllm.config import get_current_vllm_config
 from omni.models.common.config.model_config import model_extra_config
-import os
+from vllm.config import get_current_vllm_config
+from vllm.distributed import GroupCoordinator as GroupCoordinatorGPU
+from vllm.distributed import (get_ep_group, get_world_group,
+                              init_model_parallel_group, parallel_state)
+from vllm.logger import logger
 
 initialize_model_parallel_default = parallel_state.initialize_model_parallel
 

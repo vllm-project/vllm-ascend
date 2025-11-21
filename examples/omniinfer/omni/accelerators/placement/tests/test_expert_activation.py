@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import os
-import torch
-import torch_npu
-import torch.nn as nn
-import unittest
-import time
 import multiprocessing as mp
-from ..omni_placement.placement_handler import create_cluster_activation
+import os
 import shutil
+import time
+import unittest
+
 import pytest
+import torch
+import torch.nn as nn
+import torch_npu
+
+from ..omni_placement.placement_handler import create_cluster_activation
 
 
 class TestExpertActivation(unittest.TestCase):

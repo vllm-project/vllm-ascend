@@ -6,11 +6,10 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
-from typing import Dict, ClassVar, Optional
-
-from vllm.logger import logger
+from typing import ClassVar, Dict, Optional
 
 from omni.adaptors.vllm.ems.ems_env import EmsEnv
+from vllm.logger import logger
 
 
 class MetricsType(Enum):

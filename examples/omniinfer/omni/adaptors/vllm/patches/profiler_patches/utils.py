@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import os
-import threading
-import multiprocessing
-from datetime import datetime
 import logging
-import sys
-from pathlib import Path
+import multiprocessing
+import os
 import socket
+import sys
+import threading
+from datetime import datetime
+from pathlib import Path
+
 import requests
 
 

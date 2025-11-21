@@ -2,18 +2,16 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import json
-from collections.abc import Iterator
 import math
-import threading
-from typing import TYPE_CHECKING, Any, Optional, Union
-import zmq
 import os
 import pickle
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import zmq
+from omni.accelerators.pd.utils import get_config_from_dict_or_env
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -23,38 +21,32 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from omni.accelerators.pd.utils import get_config_from_dict_or_env
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig, KVTransferConfig
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
-from vllm.v1.request import Request
-from vllm.utils import round_down
-from dataclasses import dataclass
+
+import mmap as pymmap
+import queue
+import random
+import signal
+import socket
+import struct
+import subprocess
+import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from ctypes import (CDLL, POINTER, Structure, c_bool, c_char_p, c_size_t,
+                    c_uint32, c_uint64, c_void_p, create_string_buffer)
+from dataclasses import dataclass
+
 import torch
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
-
-from vllm.utils import get_open_port
-from vllm.v1.request import RequestStatus
-import queue
-from concurrent.futures import ThreadPoolExecutor
-
-import sys
-import random
-import signal
-import socket
-import subprocess
-import mmap as pymmap
-import struct
-from ctypes import (
-    CDLL, Structure, c_uint64, c_size_t, c_void_p, c_char_p, c_uint32, c_bool,
-    POINTER, create_string_buffer
-)
+from vllm.utils import get_open_port, round_down
+from vllm.v1.request import Request, RequestStatus
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -63,7 +55,8 @@ logger = init_logger(__name__)
 thread_dump_path = os.environ.get("VLLM_THREAD_DUMP_PATH", "/tmp/vllm_thread_info")
 BLOCK_RELEASE_DELAY = 30  # seconds, use to free blocks when the request is finished for a long time 
 
-from omni.accelerators.pd.llmdatadist_manager import LLMDataDistManager, LLMDataDistConfig
+from omni.accelerators.pd.llmdatadist_manager import (LLMDataDistConfig,
+                                                      LLMDataDistManager)
 
 P_NODE_BIN = os.environ.get("P_NODE_BIN", "/data/yyx/omni_infer_cache/omniinfer/omni/accelerators/pd/H2H_pull_kv/p_node_server")
 LIB_PATH = os.environ.get("KV_BRIDGE_SO", "/data/yyx/omni_infer_cache/omniinfer/omni/accelerators/pd/H2H_pull_kv/libkv_py_bridge.so")
@@ -329,7 +322,8 @@ class PrefillConnectorWorker:
             dump_thread_to_file(self.thread, thread_name, thread_dump_path)
 
         # check whether omni attention is enabled
-        from omni.accelerators.cache import OmniBiGroupDataDistManager, check_omni_attn_cmd_arg
+        from omni.accelerators.cache import (OmniBiGroupDataDistManager,
+                                             check_omni_attn_cmd_arg)
         use_omni_attn_mgr = check_omni_attn_cmd_arg(vllm_config.additional_config)
         if use_omni_attn_mgr:
             manager_cls = OmniBiGroupDataDistManager
@@ -574,7 +568,8 @@ class DecodeConnectorWorker:
         if vllm_config.parallel_config.tensor_parallel_size > 1 and self.multi_rank_pull_kv:
             raise ValueError("multi_rank_pull_kv are not supported when tp > 1.")
 
-        from omni.accelerators.cache import OmniBiGroupDataDistManager, check_omni_attn_cmd_arg
+        from omni.accelerators.cache import (OmniBiGroupDataDistManager,
+                                             check_omni_attn_cmd_arg)
         use_omni_attn_mgr = check_omni_attn_cmd_arg(vllm_config.additional_config)
         if use_omni_attn_mgr:
             manager_cls = OmniBiGroupDataDistManager

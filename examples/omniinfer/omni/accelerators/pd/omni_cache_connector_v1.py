@@ -11,15 +11,14 @@ import subprocess
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple, List, Dict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 import zmq
-from concurrent.futures import ThreadPoolExecutor
-
 from omni.accelerators.cache.omni_cache import BaseOmniCache
-
+from omni.accelerators.pd.utils import get_config_from_dict_or_env
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -30,7 +29,6 @@ from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.logger import init_logger
 from vllm.utils import get_open_port
 
-from omni.accelerators.pd.utils import get_config_from_dict_or_env
 # from omni.accelerators.pd.llmdatadist_manager import LLMDataDistManager, LLMDataDistConfig
 
 if TYPE_CHECKING:
@@ -38,10 +36,11 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
+
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.model_executor.models.utils import extract_layer_index
 
 GET_META_MSG = b"get_meta_msg"
 logger = init_logger(__name__)

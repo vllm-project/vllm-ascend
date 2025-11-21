@@ -2,11 +2,10 @@
 
 from typing import List
 
+from omni.adaptors.vllm.ems.ems_env import EmsEnv
+from omni.adaptors.vllm.ems.ems_metrics import MetricsType, collect_metric
 from vllm.v1.engine.core import EngineCoreOutputs, SchedulerOutput
 from vllm.v1.executor.multiproc_executor import EXECUTE_MODEL_TIMEOUT_S, logger
-
-from omni.adaptors.vllm.ems.ems_env import EmsEnv
-from omni.adaptors.vllm.ems.ems_metrics import collect_metric, MetricsType
 
 if EmsEnv.enable_vllm_ems:
     from omni.adaptors.vllm.ems.ems_utils import cal_hash_blocks

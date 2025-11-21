@@ -25,46 +25,40 @@
 """Inference-only DeepseekV3 model."""
 import os
 from typing import Dict, Optional, Tuple
-import torch, torch_npu
+
+import torch
+import torch_npu
+import torchair as tng
 from torch import nn
 from transformers import PretrainedConfig
-import torchair as tng
+
 torch._logging.set_logs(recompiles=True)
+from omni.adaptors.vllm.distributed.communication_op import (
+    all_gather_cross, all_gather_local, all_gather_two_stage,
+    prefill_reduce_scatter_pipeline, reduce_scatter_local,
+    reduce_scatter_two_stage)
+from omni.adaptors.vllm.distributed.parallel_state import \
+    get_round_cross_group_from_list
+from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.activation import SiluAndMul
+from omni.models.common.layers.linear import MergedReplicatedLinear
+from omni.models.common.layers.moe.fused_moe.fused_moe import \
+    fused_experts_moe_dispatch_combine
+from omni.models.common.layers.moe.fused_moe.layer import (DYNAMIC_QUANT_MODE,
+                                                           UNQUANT_MODE,
+                                                           FusedMoE)
+from vllm.attention import AttentionMetadata
+from vllm.config import QuantizationConfig
+from vllm.distributed import (get_dp_group, get_ep_group, get_pp_group,
+                              get_world_group)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 # vllm adaptor
 from vllm.platforms import current_platform
-from vllm.config import QuantizationConfig
-from vllm.attention import AttentionMetadata
-from vllm.distributed import (
-    get_ep_group,
-    get_pp_group,
-    get_dp_group,
-    get_world_group,
-)
-from vllm.model_executor.layers.linear import (
-    ReplicatedLinear,
-)
-from omni.models.common.layers.linear import (
-    MergedReplicatedLinear,
-)
-from omni.models.common.layers.activation import SiluAndMul
-from omni.models.common.layers.moe.fused_moe.layer import FusedMoE, UNQUANT_MODE, DYNAMIC_QUANT_MODE
-from omni.adaptors.vllm.distributed.communication_op import (
-    all_gather_two_stage,
-    reduce_scatter_two_stage,
-    prefill_reduce_scatter_pipeline,
-    all_gather_local, reduce_scatter_local,
-    all_gather_cross
-)
-from omni.adaptors.vllm.distributed.parallel_state import (
-    get_round_cross_group_from_list
-)
-from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
-from omni.models.common.config.model_config import model_extra_config
-from omni.models.common.layers.moe.fused_moe.fused_moe import fused_experts_moe_dispatch_combine
-from omni.adaptors.vllm.utils import get_attr_by_names
 
 if model_extra_config.operator_opt_config.use_omni_placement:
-    from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
+    from omni.accelerators.placement.omni_placement.omni_planner import \
+        OmniPlanner
 
 """NPU Stream Switch Names"""
 STREAM_SHARED_EXPERT = 'stream_shared_expert'

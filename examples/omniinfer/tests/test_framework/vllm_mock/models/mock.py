@@ -28,33 +28,27 @@ Features:
   is enabled.
 """
 
-from vllm import ModelRegistry
-import inspect
-
-from typing import Any, Dict, Optional, Union, List
-from filelock import FileLock
-import json
-import io
-import base64
-import os
-import numpy
-import time
 import ast
+import base64
+import inspect
+import io
+import json
+import os
+import time
+from typing import Any, Dict, List, Optional, Union
 
+import numpy
 import torch
+from filelock import FileLock
 from torch import nn
+from vllm import ModelRegistry
 from vllm.attention import AttentionMetadata
-from vllm.distributed import (
-    get_dp_group,
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-    get_tp_group,
-    tensor_model_parallel_all_reduce,
-)
-from vllm.sequence import IntermediateTensors
+from vllm.distributed import (get_dp_group, get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group, tensor_model_parallel_all_reduce)
 from vllm.forward_context import ForwardContext, get_forward_context
-
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 
 
 def access_variable(variable_name, stack_level=1):
@@ -124,9 +118,8 @@ def mock_model_class_factory(base_class: type) -> type:
 
             self.vocab_size = config.vocab_size
 
-            from vllm.model_executor.models.utils import (
-                make_empty_intermediate_tensors_factory,
-            )
+            from vllm.model_executor.models.utils import \
+                make_empty_intermediate_tensors_factory
 
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(

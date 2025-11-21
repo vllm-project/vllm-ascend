@@ -16,19 +16,19 @@
 # limitations under the License.
 # ============================================================================
 
+import argparse
 import glob
+import json
 import os
 import re
-import subprocess
-import argparse
-import tempfile
-import weakref
-import time
-import signal
-import sys
-import socket
-import json
 import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import weakref
 
 # Get the terminal width
 terminal_width = shutil.get_terminal_size().columns

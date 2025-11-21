@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from collections import deque
+
 import torch
 import torch_npu
-from collections import deque
+
 from .config import Config
 from .expert_mapping import ExpertMapping
+
 
 class ClusterStatus:
     """

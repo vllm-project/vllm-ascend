@@ -5,10 +5,11 @@ import logging
 import os
 import platform
 import shutil
-import sys
 import stat
+import sys
 import tempfile
 from multiprocessing import cpu_count
+
 from Cython.Build import cythonize
 from Cython.Distutils import build_ext
 from setuptools import setup

@@ -1,12 +1,13 @@
-import zmq
-import msgpack
-import time
-import threading
 import random
-import numpy as np
-from collections import deque
-from typing import List, Dict, Optional
+import threading
+import time
 import uuid
+from collections import deque
+from typing import Dict, List, Optional
+
+import msgpack
+import numpy as np
+import zmq
 
 MAX_NUM_BLOCK=1024
 SERVER_ADDRESS = "tcp://localhost:5555"

@@ -1,27 +1,24 @@
 import json
+import os
 import re
 from json import JSONDecodeError, JSONDecoder
-from typing import Dict, List, Sequence, Union, Optional
-from pydantic import Field
+from typing import Dict, List, Optional, Sequence, Union
+
 import partial_json_parser
 from partial_json_parser.core.options import Allow
+from pydantic import Field
 from transformers import PreTrainedTokenizerBase
-
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.tool_parsers.utils import (
-    extract_intermediate_diff)
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall,
-                                              )
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix, 
-                                                        is_complete_json)
+from vllm.entrypoints.openai.tool_parsers.utils import (
+    extract_intermediate_diff, find_common_prefix, is_complete_json)
 from vllm.logger import init_logger
-import os
 
 logger = init_logger(__name__)
 

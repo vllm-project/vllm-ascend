@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from .optimizers import Optimizer
-import torch
 import time
+
+import torch
+
 from ..utils import calculate_time
+from .optimizers import Optimizer
+
+
 class ResDis_ExpertsBalancer(Optimizer):
     """
     TokenBalance optimizer class inherits from Optimizer.

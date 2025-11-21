@@ -28,6 +28,7 @@ from torch.library import Library
 from vllm import utils
 from vllm.utils import vllm_lib
 
+
 def ascend_direct_register_custom_op(
         op_name: str,
         op_func: Callable,
@@ -64,24 +65,24 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import torch
+from omni.adaptors.vllm.utils import ASCEND_QUATIZATION_METHOD
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.layer import \
+    UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config, _CUSTOMIZED_METHOD_TO_QUANT_CONFIG
+from vllm.model_executor.layers.quantization import (
+    _CUSTOMIZED_METHOD_TO_QUANT_CONFIG, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 
 from .quantizer import AscendQuantizer
-from omni.adaptors.vllm.utils import ASCEND_QUATIZATION_METHOD
-
 
 
 # @register_quantization_config(ASCEND_QUATIZATION_METHOD)

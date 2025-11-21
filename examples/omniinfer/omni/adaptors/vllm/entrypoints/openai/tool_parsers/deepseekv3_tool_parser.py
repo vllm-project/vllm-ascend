@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from typing import Union
 
 import regex as re
-
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -16,7 +15,6 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
-
 from vllm_npu.common.entrypoints.openai.tool_parsers.match import StreamMatcher
 
 logger = init_logger(__name__)

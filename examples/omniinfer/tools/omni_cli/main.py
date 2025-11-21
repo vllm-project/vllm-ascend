@@ -15,13 +15,15 @@
 # This file is a part of the vllm-ascend project.
 #
 import argparse
-import subprocess
-import yaml
-import requests
 import json
 import os
-from omni_cli.config_transform import transform_deployment_config
-from omni_cli.config_transform import detect_file_encoding
+import subprocess
+
+import requests
+import yaml
+from omni_cli.config_transform import (detect_file_encoding,
+                                       transform_deployment_config)
+
 
 def execute_command(command):
     """Execute the ansible command"""

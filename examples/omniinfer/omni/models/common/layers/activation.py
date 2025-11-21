@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from typing import Union, Dict, Any
+from typing import Any, Dict, Union
 
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
+
 
 class SiluAndMul(nn.Module):
     def __init__(self, *args, **kwargs):

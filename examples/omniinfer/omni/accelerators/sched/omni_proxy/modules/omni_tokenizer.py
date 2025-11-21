@@ -1,11 +1,10 @@
-import hashlib
-import os
-import json
 import base64
-import pickle
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass
+import hashlib
+import json
 import os
+import pickle
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 os.environ["VLLM_PLUGINS"] = ""
 os.environ["RAYON_NUM_THREADS"] = os.environ.get("RAYON_NUM_THREADS", "2")
@@ -20,7 +19,8 @@ print(f"Using {os.environ['RAYON_NUM_THREADS']} threads for Rayon parallelism")
 print(f"Tokenizers parallelism set to: {os.environ['TOKENIZERS_PARALLELISM']}")
 print(f"Rayon minimum chunk size: {os.environ['RAYON_MIN_CHUNK_SIZE']}")
 
-from transformers import PreTrainedTokenizer, AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
+
 # from vllm.transformers_utils.tokenizer import get_tokenizer
 # from vllm.utils import sha256
 # from vllm.v1.core import kv_cache_utils

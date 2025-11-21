@@ -24,37 +24,40 @@
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional, Union, List
+from typing import Any, List, Optional, Union
 
 import torch
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
+from omni.models.common.layers.fused_mlp import FusedMLP
+from omni.models.common.layers.layernorm import RMSNormFlashComm
+from omni.models.common.layers.linear import (QKVParallelFlashCommLinear,
+                                              RowParallelFlashCommLinear)
+from omni.models.common.layers.rotary_embedding import (QwenRotaryEmbedding,
+                                                        get_rope)
 from torch import nn
 from transformers import Qwen2Config
-
-from vllm.forward_context import get_forward_context
-from vllm.attention import Attention, AttentionType, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
-from vllm.distributed import get_pp_group, get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group)
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-from omni.models.common.layers.layernorm import RMSNormFlashComm
-from omni.models.common.layers.linear import RowParallelFlashCommLinear, QKVParallelFlashCommLinear
-from omni.models.common.layers.rotary_embedding import get_rope, QwenRotaryEmbedding
-from omni.models.common.layers.fused_mlp import FusedMLP
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
-
 
 logger = init_logger(__name__)
 

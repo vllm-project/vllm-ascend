@@ -1,29 +1,21 @@
-from vllm.v1.core import kv_cache_utils
-from vllm.v1.engine import core as engine_core
-from vllm.v1.worker import block_table
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker import gpu_input_batch
 from vllm.v1.core import kv_cache_manager as orig_manager
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.sched import scheduler
-
+from vllm.v1.engine import core as engine_core
+from vllm.v1.worker import block_table, gpu_input_batch
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 ENABLED = False
 
 
 from . import kv_cache_interface as itfc
-from .kv_cache_interface import (
-    get_kv_cache_config_omni_type,
-    get_omni_hybrid_kv_cache_spec,
-    OmniMultiGroupBlockTable,
-    OmniAttentionSpec,
-)
-from .kv_cache_manager import (
-    OmniKVCacheBlocks,
-    OmniKVCacheManager,
-)
+from .kv_cache_interface import (OmniAttentionSpec, OmniMultiGroupBlockTable,
+                                 get_kv_cache_config_omni_type,
+                                 get_omni_hybrid_kv_cache_spec)
+from .kv_cache_manager import OmniKVCacheBlocks, OmniKVCacheManager
+from .nsa_kv_manager import NSAHostDeviceKVCacheManager, get_nsa_kv_cache_spec
 from .pd import OmniBiGroupDataDistManager
 from .utils import compute_omni_attn_metadata, to_bool_or_raise
-from .nsa_kv_manager import get_nsa_kv_cache_spec, NSAHostDeviceKVCacheManager
 
 
 def check_omni_attn_cmd_arg(additional_config: dict) -> bool:

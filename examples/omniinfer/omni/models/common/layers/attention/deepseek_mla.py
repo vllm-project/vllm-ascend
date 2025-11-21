@@ -1,62 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 import os
-from typing import Any, Optional, Tuple, Dict
+from contextlib import nullcontext
+from typing import Any, Dict, Optional, Tuple
+
 import torch
-from torch import nn
+import torch.distributed as dist
 import torch_npu
 import torchair as tng
-import torch.distributed as dist
-from transformers import PretrainedConfig
-from vllm.attention.backends.abstract import (
-    AttentionMetadata,
-)
-from vllm.attention import Attention
-from vllm.utils import supports_dynamo
-from vllm.config import CacheConfig, QuantizationConfig, CompilationLevel, get_current_vllm_config
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    ReplicatedLinear
-)
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.models.utils import extract_layer_index
-from vllm.distributed.communication_op import (
-    tensor_model_parallel_all_gather)
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_rank,
-    get_tp_group
-)
-from vllm.platforms import current_platform
-from contextlib import nullcontext
-
-from omni.models.common.config.model_config import model_extra_config
-from omni.models.common.layers.rotary_embedding import get_rope
-from omni.models.common.layers.linear import (
-    MergedReplicatedLinear,
-    RowParallelLinearWithReduceScatter,
-    DP2TPRowParallelLinear,
-    Tp2DpAndTpRowParallelLinear,
-    RowParallelLinearCross
-)
-from omni.models.common.layers.layernorm import RMSNorm
 from omni.adaptors.vllm.distributed.communication_op import (
-    mla_tensor_model_parallel_all_gather, reduce_scatter_cross, all_gather_world)
+    all_gather_world, mla_tensor_model_parallel_all_gather,
+    reduce_scatter_cross)
 from omni.adaptors.vllm.distributed.parallel_state import (
-    get_o_proj_tp_group,
-    get_o_proj_dp_group,
-    GroupCoordinator,
-    get_npu_device_count,
-    get_local_group_from_list
-)
+    GroupCoordinator, get_local_group_from_list, get_npu_device_count,
+    get_o_proj_dp_group, get_o_proj_tp_group)
 from omni.adaptors.vllm.utils import current_stream
 from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.layernorm import RMSNorm
+from omni.models.common.layers.linear import (
+    DP2TPRowParallelLinear, MergedReplicatedLinear, RowParallelLinearCross,
+    RowParallelLinearWithReduceScatter, Tp2DpAndTpRowParallelLinear)
+from omni.models.common.layers.rotary_embedding import get_rope
+from torch import nn
+from transformers import PretrainedConfig
+from vllm.attention import Attention
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.config import (CacheConfig, CompilationLevel, QuantizationConfig,
+                         get_current_vllm_config)
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    get_tp_group)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear)
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.platforms import current_platform
+from vllm.utils import supports_dynamo
+
 KVCACHE_NZ_DIM = 16
 
+import custom_ops
+import torch.nn.functional as F
 from vllm.logger import logger
 
-import torch.nn.functional as F
-import custom_ops
 
 def stream_context(stream_tag):
     if model_extra_config.operator_opt_config.moe_multi_stream_tune:

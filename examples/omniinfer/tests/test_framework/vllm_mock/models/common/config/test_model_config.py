@@ -5,6 +5,7 @@ import os
 import unittest
 from dataclasses import is_dataclass
 
+
 #TODO: 添加更多的测试用例   
 class TestModelAdditionalConfig(unittest.TestCase):
     
@@ -37,7 +38,7 @@ class TestModelAdditionalConfig(unittest.TestCase):
         
     def test_default_config_when_no_json(self):
          # 准备测试数据
-        from model_config import init_model_extra_config, envs
+        from model_config import envs, init_model_extra_config
         envs.MODEL_EXTRA_CFG_PATH = ""
         config = init_model_extra_config()
 

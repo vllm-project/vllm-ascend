@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import ctypes
+import multiprocessing as mp
 import sys
-from .. import omni_placement
-import numpy as np
 import threading
 import time
-import multiprocessing as mp
-import ctypes
+
+import numpy as np
 import torch
 import torch_npu
+
+from .. import omni_placement
+
 
 def worker(moe, layer, expert):
     # Simulate expert activation
@@ -29,6 +32,7 @@ def simulate_npu(moe):
 
     # 创建PyCapsule封装指针
     import ctypes
+
     # 配置PyCapsule的C API接口
     ctypes.pythonapi.PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
     ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object

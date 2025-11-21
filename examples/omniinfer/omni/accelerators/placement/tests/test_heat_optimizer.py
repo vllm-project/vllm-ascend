@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import unittest
-import torch
-import torch_npu
-import numpy as np
-import sys
 import os
 import random
-from unittest.mock import MagicMock, patch
+import sys
 import time
+import unittest
+import warnings
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import torch
+import torch_npu
+
 from ..omni_placement.cluster_status import ClusterStatus
 from ..omni_placement.expert_mapping import ExpertMapping
 from ..omni_placement.optim.heat_optimizer import HEAT_ExpertsBalancer
-import warnings
-from pathlib import Path
-import random
+
 
 def _convert_pattern_path(path: str) -> str:
     # Check if the path is a relative path

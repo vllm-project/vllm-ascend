@@ -17,7 +17,8 @@ from typing import List, Optional
 
 import torch
 import torch.distributed as dist
-from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.distributed.device_communicators.base_device_communicator import \
+    DeviceCommunicatorBase
 
 
 class NPUCommunicator(DeviceCommunicatorBase):

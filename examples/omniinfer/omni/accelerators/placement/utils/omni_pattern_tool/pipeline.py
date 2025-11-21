@@ -3,19 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import os
 import argparse
-import numpy as np
+import io
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from step_1_generate_csv_with_ceiling import generate_csv
 from step_2_placement_pattern_generation import process_expert_deployments
-from step_3_placement_pattern_checking_and_plot import test_expert_mapping, view_patterns
+from step_3_placement_pattern_checking_and_plot import (test_expert_mapping,
+                                                        view_patterns)
 from step_4_load_analysis_and_plot import analyze_and_plot_deployments
-
-import sys
-import io
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')

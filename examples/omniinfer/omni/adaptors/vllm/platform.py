@@ -14,18 +14,16 @@
 
 import logging
 import os
-from typing import Optional, Tuple, Type, Any
+from typing import Any, Callable, List, Optional, Tuple, Type
 
 import torch
-from torch.library import Library
 import vllm.envs as envs
+from omni.adaptors.vllm.utils import SUPPORTED_QUANTIZATION_METHODS
+from torch.library import Library
+from vllm import utils
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm import utils
 from vllm.utils import FlexibleArgumentParser, supports_dynamo, vllm_lib
-from typing import Callable, List, Optional, Tuple
-
-from omni.adaptors.vllm.utils import SUPPORTED_QUANTIZATION_METHODS
 
 CUSTOM_OP_ENABLED = False  # Custom operations not enabled for Omni inference
 
@@ -131,8 +129,8 @@ def update_utils_custom_op():
 def enable_overwrite_request_id():
     """Patch OpenAIServing to use random UUIDs for request IDs."""
     from fastapi import Request
-    from vllm.utils import random_uuid
     from vllm.entrypoints.openai.serving_engine import OpenAIServing
+    from vllm.utils import random_uuid
     @staticmethod
     def _base_request_id(raw_request: Optional[Request], 
                          default: Optional[str] = None) -> Optional[str]:
@@ -230,7 +228,8 @@ class ConfigUpdater:
         Args:
             vllm_config: The vLLM configuration to update.
         """
-        from omni.adaptors.vllm.compilation.compile_config import NPUCompilationConfig
+        from omni.adaptors.vllm.compilation.compile_config import \
+            NPUCompilationConfig
         additional_config = vllm_config.additional_config
         vllm_config.npu_compilation_config = NPUCompilationConfig()
         if additional_config:
@@ -290,7 +289,8 @@ class ConfigUpdater:
     def _may_enable_omni_attn(vllm_config: 'VllmConfig') -> None:
         if vllm_config.additional_config is None:
             return
-        from omni.accelerators.cache import apply_omni_attn_patch, check_omni_attn_cmd_arg
+        from omni.accelerators.cache import (apply_omni_attn_patch,
+                                             check_omni_attn_cmd_arg)
         enable_omni_attn = check_omni_attn_cmd_arg(vllm_config.additional_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         is_kv_consumer = kv_transfer_config is None or kv_transfer_config.kv_role == 'kv_consumer'
@@ -432,7 +432,8 @@ class NPUPlatform(Platform):
         """
         additional_config = vllm_config.additional_config
         if additional_config and vllm_config.additional_config.get("enable_hybrid_graph_mode", False):
-            from omni.adaptors.vllm.worker.npu_schedule import HybridSchedulerConfig
+            from omni.adaptors.vllm.worker.npu_schedule import \
+                HybridSchedulerConfig
             ascend_scheduler_config = HybridSchedulerConfig.initialize_from_config(
                 vllm_config.scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config

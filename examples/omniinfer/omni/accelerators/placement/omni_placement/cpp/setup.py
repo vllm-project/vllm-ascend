@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from setuptools import setup
-from pybind11.setup_helpers import Pybind11Extension, build_ext
-import pybind11
+import os
 import sys
 import sysconfig
-import os
+
+import pybind11
+from pybind11.setup_helpers import Pybind11Extension, build_ext
+from setuptools import setup
 
 # 检查是否为调试模式
 debug_mode = '--debug' in sys.argv

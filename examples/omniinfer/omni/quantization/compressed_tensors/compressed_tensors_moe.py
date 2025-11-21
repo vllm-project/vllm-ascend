@@ -1,26 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-import os
 import math
+import os
 from typing import Optional
-import torch, torch_npu
 
-from vllm.attention import AttentionMetadata
-from vllm.platforms import current_platform
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import CompressedTensorsMoEMethod
-
-from vllm.distributed import get_ep_group
+import torch
+import torch_npu
 from omni.adaptors.vllm.distributed.parallel_state import GroupCoordinator
 from omni.models.common.config.model_config import model_extra_config
 from omni.models.common.layers.moe.fused_moe.fused_moe import (
-    fused_experts_moe_dispatch_combine,
-    moe_infer_fusion,
-    fused_experts_w8a8_allgather_ep,
-    fused_experts_w8a8_allgather_ep_a2,
-    fused_experts_w4a8_allgather_ep
-)
+    fused_experts_moe_dispatch_combine, fused_experts_w4a8_allgather_ep,
+    fused_experts_w8a8_allgather_ep, fused_experts_w8a8_allgather_ep_a2,
+    moe_infer_fusion)
+from vllm.attention import AttentionMetadata
+from vllm.distributed import get_ep_group
+from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
+    CompressedTensorsMoEMethod
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 SEQ_SPLIT_LENGTH = 4096
 torch.npu.config.allow_internal_format = True

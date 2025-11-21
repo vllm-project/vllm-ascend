@@ -1,5 +1,6 @@
 from omni.adaptors.vllm.utils import get_attr_by_names
 
+
 # The following patches are corresponding to vllm-0.9.0 
 def patch_pangu():
     from vllm.config import ModelConfig
@@ -54,9 +55,9 @@ def patch_pangu():
                     return qk_rope_dim + qk_dim
 
     # for mtp
-    from vllm.config import SpeculativeConfig
-    from transformers import PretrainedConfig
     import vllm.envs as envs
+    from transformers import PretrainedConfig
+    from vllm.config import SpeculativeConfig
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -226,8 +227,8 @@ def patch_pangu():
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
-                    from vllm.transformers_utils.configs.eagle import (
-                        EAGLEConfig)
+                    from vllm.transformers_utils.configs.eagle import \
+                        EAGLEConfig
                     if isinstance(self.draft_model_config.hf_config,
                                   EAGLEConfig):
                         pass

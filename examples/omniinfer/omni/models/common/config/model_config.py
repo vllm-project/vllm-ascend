@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from dataclasses import dataclass, field, fields
 import json
-import threading
-from vllm.logger import logger
-import omni.adaptors.vllm.envs as envs
 import os
+import threading
+from dataclasses import dataclass, field, fields
+
+import omni.adaptors.vllm.envs as envs
+from vllm.logger import logger
+
 
 @dataclass
 class ModelParallelConfig:

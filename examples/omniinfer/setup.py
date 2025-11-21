@@ -3,9 +3,10 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
-from setuptools import setup, Extension
+
 import pybind11
 import torch
+from setuptools import Extension, setup
 
 
 class PathManager:

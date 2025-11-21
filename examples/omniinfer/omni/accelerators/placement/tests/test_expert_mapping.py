@@ -2,14 +2,17 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
 import numpy as np
 import torch
-from pathlib import Path
-import tempfile
+
 from ..omni_placement import omni_placement
 from ..omni_placement.expert_mapping import ExpertMapping
+
 
 class TestExpertMapping(unittest.TestCase):
     def setUp(self):

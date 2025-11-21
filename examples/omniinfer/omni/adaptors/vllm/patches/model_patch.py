@@ -7,11 +7,9 @@ from omni.adaptors.vllm.patches.shm_bug_fix_patch import patch_shm_to_zmq
 
 
 def patch_vllm_distributed():
-    from vllm import distributed
     from omni.adaptors.vllm.distributed.parallel_state import (
-        initialize_model_parallel,
-        GroupCoordinator
-    )
+        GroupCoordinator, initialize_model_parallel)
+    from vllm import distributed
 
     distributed.parallel_state.GroupCoordinator = GroupCoordinator
     distributed.initialize_model_parallel = initialize_model_parallel
@@ -19,15 +17,15 @@ def patch_vllm_distributed():
     print("++++++++++++++++++++++++patch_vllm_distributed++++++++++++++++++++++++++")
  
 def patch_rope():
-    from vllm.model_executor.layers import rotary_embedding
- 
     from omni.models.common.layers.rotary_embedding import get_rope
+    from vllm.model_executor.layers import rotary_embedding
     rotary_embedding.get_rope = get_rope
     print("+++++++++++++++++++++++patch_rope+++++++++++++++++++++++++++")
  
 def patch_embedding():
+    from omni.models.common.layers.vocab_parallel_embedding import (
+        ParallelLMHead, VocabParallelEmbedding)
     from vllm.model_executor.layers import vocab_parallel_embedding
-    from omni.models.common.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
     vocab_parallel_embedding.VocabParallelEmbedding = VocabParallelEmbedding
     vocab_parallel_embedding.ParallelLMHead = ParallelLMHead
     vocab_parallel_embedding.VocabParallelEmbedding.forward = VocabParallelEmbedding.forward_vocab
@@ -36,21 +34,23 @@ def patch_sampler():
     from omni.models.common.layers.sampler import AscendSampler
     from vllm.model_executor.layers import sampler
     sampler.Sampler = AscendSampler
+    from omni.models.common.layers.sampler import (RejectionSampler,
+                                                   _multinomial)
     from vllm.model_executor.layers import rejection_sampler
-    from omni.models.common.layers.sampler import RejectionSampler, _multinomial
     rejection_sampler.RejectionSampler = RejectionSampler
     rejection_sampler._multinomial = _multinomial
     print("++++++++++++++++++++++patch_sampler++++++++++++++++++++++++++++")
 
 def patch_compilation():
-    from omni.adaptors.vllm.compilation.decorators import _support_torch_compile
+    from omni.adaptors.vllm.compilation.decorators import \
+        _support_torch_compile
     from vllm.compilation import decorators
     decorators._support_torch_compile = _support_torch_compile
     print("+++++++++++++++++++++++patch_compilation+++++++++++++++++++++++++++")
 
 def patch_linear():
-    from vllm.model_executor.layers import linear
     from omni.models.common.layers.linear import AscendUnquantizedLinearMethod
+    from vllm.model_executor.layers import linear
     linear.UnquantizedLinearMethod = AscendUnquantizedLinearMethod
 
 _patch_done = False

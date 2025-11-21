@@ -3,6 +3,7 @@
 
 from abc import ABC
 
+
 class Optimizer(ABC):
     """Base class for optimization strategies."""
 

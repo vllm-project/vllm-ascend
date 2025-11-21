@@ -15,10 +15,9 @@
 #
 from collections import deque
 from dataclasses import dataclass, fields
-
 from typing import Iterable, Optional, Type, Union
 
-from vllm.config import VllmConfig, SchedulerConfig
+from vllm.config import SchedulerConfig, VllmConfig
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils import cdiv
@@ -31,6 +30,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+
 
 @dataclass
 class HybridSchedulerConfig(SchedulerConfig):

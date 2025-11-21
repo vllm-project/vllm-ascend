@@ -7,7 +7,6 @@ import sys
 
 from vllm_serve import run_vllm_serve
 
-
 if __name__ == "__main__":
     # Set environment variables
     os.environ['VLLM_ENABLE_MC2'] = '0'

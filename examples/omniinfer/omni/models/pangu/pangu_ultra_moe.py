@@ -17,57 +17,45 @@
 import copy
 import itertools
 from typing import Iterable, List, Optional, Set, Tuple, Union
+
 import torch
-from torch import nn
-from transformers import PretrainedConfig
 import torch.distributed as dist
 import torchair as tng
+from torch import nn
+from transformers import PretrainedConfig
+
 torch._logging.set_logs(recompiles=True)
+from omni.adaptors.vllm.distributed.parallel_state import (
+    GroupCoordinator, get_mlp_tp_group, get_stream1_attn_group,
+    get_stream1_mlp_group, get_stream1_moe_group)
+from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.activation import SiluAndMul
+from omni.models.common.layers.attention.backend.mla import group_request_list
+from omni.models.common.layers.attention.deepseek_mla import DeepseekMLA
+from omni.models.common.layers.layernorm import RMSNorm
+from omni.models.common.layers.linear import (AscendMergedColumnParallelLinear,
+                                              AscendRowParallelLinear)
+from omni.models.common.layers.moe.deepseek_moe import DeepseekMoE
+from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
+from omni.models.common.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.attention import AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import (
+    PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 # vllm adaptor
 from vllm.platforms import current_platform
-from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
-from vllm.compilation.decorators import support_torch_compile
-from vllm.attention import AttentionMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.utils import (
-    PPMissingLayer, 
-    is_pp_missing_parameter, 
-    make_layers, 
-    make_empty_intermediate_tensors_factory,
-)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from omni.models.common.layers.linear import (
-    AscendMergedColumnParallelLinear,
-    AscendRowParallelLinear,
-)
-from omni.models.common.layers.vocab_parallel_embedding import (
-    ParallelLMHead, 
-    VocabParallelEmbedding
-)
-from omni.models.common.layers.activation import SiluAndMul
-from omni.models.common.layers.layernorm import RMSNorm
-from omni.adaptors.vllm.distributed.parallel_state import (
-    get_stream1_attn_group,
-    get_stream1_mlp_group,
-    get_stream1_moe_group,
-    get_mlp_tp_group,
-    GroupCoordinator
-)
-
-from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
-from omni.models.common.layers.moe.deepseek_moe import DeepseekMoE 
-from omni.models.common.layers.attention.deepseek_mla import DeepseekMLA 
-from omni.models.common.config.model_config import model_extra_config
-from omni.models.common.layers.attention.backend.mla import group_request_list
 """MLP module activation split length, split by 64G VRAM, need to confirm the optimal split length based on sequence length and performance"""
 SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER = 64
 

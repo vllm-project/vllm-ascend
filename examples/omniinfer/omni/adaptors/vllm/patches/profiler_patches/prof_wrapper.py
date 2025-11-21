@@ -2,15 +2,17 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import functools
+import inspect
+import logging
 import os
+import time
+import uuid
+from datetime import datetime
+
 import torch
 import torch_npu
-from datetime import datetime
-import inspect
-import time
-import logging
-import uuid
 from vllm.v1.engine import EngineCoreOutputs
+
 
 def execute_operation(operation_str, param_dict):
     if operation_str:
@@ -215,6 +217,7 @@ def marker_prof_wrapper(original_method, params):
 
 def viztracer_prof_wrapper(original_method, params):
     from viztracer import VizTracer
+
     # viztracer --combine ./viztracer_output/*.json --output_file ./viztracer_output/combined.json
     save_dir         = params.get("save_dir", "./viztracer_output")
     max_stack_depth  = params.get("max_stack_depth", -1)

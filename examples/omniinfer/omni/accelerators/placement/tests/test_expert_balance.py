@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import tempfile
-import unittest
-import torch
-import torch_npu
-import numpy as np
-import sys
 import os
 import random
-from unittest.mock import MagicMock, patch
+import sys
+import tempfile
 import time
+import unittest
+import warnings
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import torch
+import torch_npu
+
 from ..omni_placement.cluster_status import ClusterStatus
 from ..omni_placement.expert_mapping import ExpertMapping
-from ..omni_placement.optim.expert_balance_optimizer import ExpertsBalanceOptimizer
-import warnings
+from ..omni_placement.optim.expert_balance_optimizer import \
+    ExpertsBalanceOptimizer
 
 # Suppress warnings
 warnings.filterwarnings('ignore')

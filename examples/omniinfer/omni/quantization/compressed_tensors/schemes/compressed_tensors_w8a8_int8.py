@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from typing import Callable, Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
-from torch.nn import Parameter
 import torch_npu
-
 from compressed_tensors.quantization import QuantizationStrategy
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import CompressedTensorsScheme
+from torch.nn import Parameter
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
+    CompressedTensorsScheme
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)

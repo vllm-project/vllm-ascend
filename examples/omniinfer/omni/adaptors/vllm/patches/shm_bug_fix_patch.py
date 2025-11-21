@@ -5,8 +5,7 @@ from typing import Optional
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
-from zmq import IPV6
-from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context
+from zmq import IPV6, SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context
 
 logger = init_logger(__name__)
 

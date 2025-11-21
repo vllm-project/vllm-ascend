@@ -3,8 +3,9 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
+
 import torch
-from setuptools import setup, find_packages, Extension
+from setuptools import Extension, find_packages, setup
 
 
 class PathManager:

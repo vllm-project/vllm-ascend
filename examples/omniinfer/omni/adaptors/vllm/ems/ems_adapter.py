@@ -1,19 +1,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 
-import time
 import threading
+import time
 from typing import List, Tuple
 
 import torch
-from ems import Ems, EmsConfig, ContextCaching, CcConfig, CcKvOption, KvBufferWrapper, EmsException
+from ems import (CcConfig, CcKvOption, ContextCaching, Ems, EmsConfig,
+                 EmsException, KvBufferWrapper)
+from omni.adaptors.vllm.ems.ems_env import EmsEnv
+from omni.adaptors.vllm.ems.ems_metrics import MetricsType, collect_metric
+from omni.adaptors.vllm.ems.ems_utils import (EmsKeyGenerator,
+                                              EmsKVCacheManager,
+                                              cal_hash_blocks)
 from vllm.config import VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.distributed import get_tp_group
-
-from omni.adaptors.vllm.ems.ems_env import EmsEnv
-from omni.adaptors.vllm.ems.ems_metrics import collect_metric, MetricsType
-from omni.adaptors.vllm.ems.ems_utils import EmsKeyGenerator, EmsKVCacheManager, cal_hash_blocks
 
 SLEEP_SECONDS = 30
 MIN_BLOCK_LEN = 24

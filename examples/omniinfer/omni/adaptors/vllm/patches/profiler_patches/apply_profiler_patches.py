@@ -2,15 +2,17 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import importlib
-import os
-from pathlib import Path
 import logging
-import yaml
-from .utils import safe_print, ip_str, trace_output_directory
-from .prof_wrapper import (torchnpu_prof_wrapper, 
-    timer_prof_wrapper, viztracer_prof_wrapper, marker_prof_wrapper)
+import os
 import time
-from typing import Optional, List, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import yaml
+
+from .prof_wrapper import (marker_prof_wrapper, timer_prof_wrapper,
+                           torchnpu_prof_wrapper, viztracer_prof_wrapper)
+from .utils import ip_str, safe_print, trace_output_directory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -126,8 +128,7 @@ def apply_patches(namelist_path: str):
 # following monkey patch is for triggering a printing message 
 #   when a request enter WAITING_FOR_REMOTE_KVS status
 def monkey_patch_request_status():
-    from vllm.v1.request import Request
-    from vllm.v1.request import RequestStatus
+    from vllm.v1.request import Request, RequestStatus
     original_status = Request.__dict__.get('status', None)
     def status_getter(self):
         return self._status
@@ -158,6 +159,7 @@ def monkey_patch_request_status():
 def monkey_patch_async_generator_io_logger():
     from functools import wraps
     from typing import AsyncGenerator
+
     from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
     original_method = OpenAIServingChat.chat_completion_stream_generator
     @wraps(original_method)

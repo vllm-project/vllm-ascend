@@ -19,29 +19,31 @@
 #
 
 import os
-import numpy as np
-import torch
-import torch_npu
-import torchair as tng
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import numpy as np
+import torch
+import torch_npu
+import torchair as tng
+from omni.models.common.layers.attention.backend.attention_dummy_builder import \
+    DummyAttentionMetadataBuilder
+from omni.models.common.layers.attention.backend.attention_mask import \
+    AttentionMaskBuilder
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import (direct_register_custom_op, supports_dynamo)
+from vllm.logger import logger
+from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op, supports_dynamo
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
-from vllm.platforms import current_platform
-from vllm.config import (get_current_vllm_config, CompilationLevel)
-from omni.models.common.layers.attention.backend.attention_mask import AttentionMaskBuilder
-from omni.models.common.layers.attention.backend.attention_dummy_builder import DummyAttentionMetadataBuilder
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
-from vllm.logger import logger
 
 class AscendAttentionState(Enum):
     PrefillNoCache = 0

@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import ctypes
+import time
+from collections import defaultdict
+from functools import wraps
+
 import torch
 import torch_npu
-import time
-from functools import wraps
-import ctypes
+
 from . import omni_placement
-from collections import defaultdict
+
 
 def get_expert_ids(local_rank_pattern):
     """

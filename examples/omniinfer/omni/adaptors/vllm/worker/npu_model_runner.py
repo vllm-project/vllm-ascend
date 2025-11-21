@@ -21,38 +21,42 @@ import copy
 import gc
 import os
 import time
-from typing import TYPE_CHECKING, Dict, Optional, Union, Any, List
 from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 import torch.distributed as dist
+from omni.adaptors.vllm.ems.ems_env import EmsEnv
+from omni.adaptors.vllm.forward_context import set_forward_context
+from omni.adaptors.vllm.platform import NPUPlatform
+from omni.adaptors.vllm.spec_decode.post_drafter import PostDrafter
+from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.adaptors.vllm.worker.cache_engine import CacheEngine
+from omni.models.common.config.model_config import (model_extra_config,
+                                                    update_model_extra_config)
+from omni.models.common.layers.attention.backend.attention import (
+    AscendAttentionState, AttentionMaskBuilder)
+from omni.models.common.layers.attention.backend.attention_dummy_builder import \
+    DummyAttentionMetadataBuilder
+from omni.models.common.layers.sampler import AscendSamplerV1, SimpleSampler
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import get_pp_group, get_tensor_model_parallel_world_size, get_dp_group
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.parallel_state import (
+    get_dp_group, get_pp_group, get_tensor_model_parallel_world_size)
 from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
-from vllm.sequence import IntermediateTensors, VLLM_INVALID_TOKEN_ID
-from vllm.utils import (DeviceMemoryProfiler, is_pin_memory_available,
-                        LayerBlockType, LazyLoader, cdiv)
+from vllm.sequence import VLLM_INVALID_TOKEN_ID, IntermediateTensors
+from vllm.utils import (DeviceMemoryProfiler, LayerBlockType, LazyLoader, cdiv,
+                        is_pin_memory_available)
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-from omni.adaptors.vllm.forward_context import set_forward_context
-from omni.models.common.layers.attention.backend.attention import AttentionMaskBuilder, AscendAttentionState
-from omni.models.common.layers.attention.backend.attention_dummy_builder import DummyAttentionMetadataBuilder
-from omni.models.common.layers.sampler import SimpleSampler, AscendSamplerV1
-from omni.adaptors.vllm.platform import NPUPlatform
-from omni.models.common.config.model_config import update_model_extra_config, model_extra_config
-from omni.adaptors.vllm.ems.ems_env import EmsEnv
-from omni.adaptors.vllm.spec_decode.post_drafter import PostDrafter
-from omni.adaptors.vllm.worker.cache_engine import CacheEngine
-from omni.adaptors.vllm.utils import get_attr_by_names
 
 MTP_METHOD_NAME_LIST = ["deepseek_mtp", "pangu_ultra_moe_mtp"]
 
@@ -63,7 +67,8 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 if model_extra_config.operator_opt_config.use_omni_placement:
-    from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
+    from omni.accelerators.placement.omni_placement.omni_planner import \
+        OmniPlanner
     _GLOBAL_STEP = 0
 
 MAX_GEAR_NUM = 6

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import torch
+
 from ..cluster_status import ClusterStatus
 from .optimizers import Optimizer
-import torch
+
 
 class AdaRouter(Optimizer):
     def __init__(self, cluster_status: ClusterStatus, threshold: float = 0.9, entropy_bound: float = 0.5, method: str = 'threshold'):

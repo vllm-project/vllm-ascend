@@ -20,61 +20,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only DeepseekV3 model."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union, Literal
 import os
-import torch, torch_npu
+from typing import (Any, Dict, Iterable, List, Literal, Optional, Set, Tuple,
+                    Union)
+
+import torch
+import torch.distributed as dist
+import torch_npu
+import torchair._contrib.custom_torch_ops
+from omni.adaptors.vllm.distributed.communication_op import (
+    all_gather_local, all_gather_pipeline, all_gather_round_pipeline,
+    all_gather_two_stage, reduce_scatter_local, reduce_scatter_pipeline,
+    reduce_scatter_round_pipeline, reduce_scatter_two_stage)
+from omni.adaptors.vllm.distributed.parallel_state import (
+    get_local_group_rank, get_local_group_size, get_npu_device_count)
+from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.activation import SiluAndMul
+from omni.models.common.layers.attention.deepseek_mla import DeepseekMLA
+from omni.models.common.layers.layernorm import RMSNorm
+from omni.models.common.layers.linear import (AscendMergedColumnParallelLinear,
+                                              AscendRowParallelLinear)
+from omni.models.common.layers.moe.deepseek_moe import DeepseekMoE
+from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
+from omni.models.common.layers.rotary_embedding import get_rope
+from omni.models.common.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 from torch import nn
 from transformers import PretrainedConfig
-import torch.distributed as dist
-import torchair._contrib.custom_torch_ops
-
-
-from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
-from vllm.compilation.decorators import support_torch_compile
 from vllm.attention import AttentionMetadata
-from vllm.distributed import (get_pp_group,
-                              get_ep_group,
-                              get_dp_group,
-                              tensor_model_parallel_all_gather,
-                              get_world_group)
-
-from vllm.config import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
+from vllm.distributed import (get_dp_group, get_ep_group, get_pp_group,
+                              get_world_group,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (
-    PPMissingLayer, is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory)
-
+    PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
-from omni.models.common.layers.activation import SiluAndMul
-from omni.models.common.layers.layernorm import RMSNorm
-from omni.models.common.layers.rotary_embedding import get_rope
-
-from omni.models.common.layers.vocab_parallel_embedding import (
-    ParallelLMHead, 
-    VocabParallelEmbedding
-)
-
-from omni.models.common.layers.linear import (
-    AscendMergedColumnParallelLinear,
-    AscendRowParallelLinear
-)
-from omni.adaptors.vllm.distributed.communication_op import (
-    reduce_scatter_two_stage, all_gather_two_stage, all_gather_local, reduce_scatter_local,
-    reduce_scatter_pipeline, all_gather_pipeline,
-    reduce_scatter_round_pipeline, all_gather_round_pipeline)
-from omni.adaptors.vllm.distributed.parallel_state import (
-    get_npu_device_count,
-    get_local_group_size, 
-    get_local_group_rank
-)
-
-from omni.models.common.layers.moe.fused_moe.layer import FusedMoE
-from omni.models.common.layers.attention.deepseek_mla import DeepseekMLA
-from omni.models.common.layers.moe.deepseek_moe import DeepseekMoE
-from omni.models.common.config.model_config import model_extra_config
 
 """MLP 模块激活拆分长度，按64G显存拆分，需要根据序列长度以及性能确认最佳拆分长度"""
 SEQ_SPLIT_LENGTH = 4096

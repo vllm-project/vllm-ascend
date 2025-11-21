@@ -18,16 +18,15 @@
 #
 
 import gc
-import os
 import math
+import os
 import shutil
 from typing import TYPE_CHECKING
 
+import omni.adaptors.vllm.envs as envs
 import torch
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
-
-import omni.adaptors.vllm.envs as envs
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

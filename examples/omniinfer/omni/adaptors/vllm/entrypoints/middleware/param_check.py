@@ -1,11 +1,12 @@
 import json
+import os
 from abc import ABC, abstractmethod
+from http import HTTPStatus
 from typing import Any, Dict, Optional, Type, Union
+
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from http import HTTPStatus
-import os
 from vllm.entrypoints.openai.protocol import ErrorResponse
 
 

@@ -1,13 +1,14 @@
-import json
-import time
 import asyncio
+import json
 import random
+import time
+from multiprocessing import Process
+from typing import Dict, List, Optional
+
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
-import uvicorn
-from multiprocessing import Process
 
 app = FastAPI(title="OpenAI API 模拟服务")
 

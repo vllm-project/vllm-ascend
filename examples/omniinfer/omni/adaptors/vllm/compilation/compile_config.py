@@ -1,12 +1,10 @@
 import hashlib
-
 from typing import Any, Callable, Optional, Union
 
 import torch
 import torch_npu
 import torchair
 from torchair import patch_for_hcom
-
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 

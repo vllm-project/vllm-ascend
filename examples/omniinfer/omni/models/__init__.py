@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from transformers import AutoConfig
-from omni.adaptors.vllm.patches import model_patch 
-from vllm import ModelRegistry
 import os
 
-import os
+from omni.adaptors.vllm.patches import model_patch
+from transformers import AutoConfig
+from vllm import ModelRegistry
+
 if os.getenv("PROFILING_NAMELIST", None):
     print("<<<Profiler patch environmental variable is enabled, applying profiler patches.")
     from omni.adaptors.vllm.patches.profiler_patches import apply_profiler_patches
@@ -82,13 +82,13 @@ def register_model():
         int(os.getenv("REPLAY_MODE", default='0'))
     ):
         from omni.models.mock.mock import mock_model_class_factory
-
         from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
         ModelRegistry.register_model(
             "Qwen2ForCausalLM",
             mock_model_class_factory(Qwen2ForCausalLM))
         if is_A2:   
-            from omni.models.deepseek.deepseek_v3_a2 import DeepseekV3ForCausalLM
+            from omni.models.deepseek.deepseek_v3_a2 import \
+                DeepseekV3ForCausalLM
         else:
             from omni.models.deepseek.deepseek_v3 import DeepseekV3ForCausalLM
         ModelRegistry.register_model(

@@ -16,12 +16,14 @@
 #
 
 import json
-import yaml
-import chardet
-import re
 import logging
 import os
+import re
 import sys
+
+import chardet
+import yaml
+
 
 # Configure the log system 
 def setup_logging(log_file='omni_cli.log', log_level=logging.INFO):

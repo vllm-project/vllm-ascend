@@ -18,18 +18,18 @@
 # limitations under the License.
 #
 
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
-from typing import Optional, List
-
+from omni.adaptors.vllm.forward_context import set_forward_context
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.eagle import EagleProposer
-
-from omni.adaptors.vllm.forward_context import set_forward_context
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
 
 logger = init_logger(__name__)
 

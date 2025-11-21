@@ -1,18 +1,18 @@
-import torch
 from abc import abstractmethod
 from typing import Optional
-from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig, 
-                                                                 QuantizeMethodBase)
+
+import torch
+from omni.models.common.layers.linear import (
+    MergedColumnParallelFlashCommLinear, RowParallelFlashCommLinear)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group, tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_rank,
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
-    get_tp_group
-)
-from omni.models.common.layers.linear import MergedColumnParallelFlashCommLinear, RowParallelFlashCommLinear
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
+
 
 class FusedMLPMethodBase(QuantizeMethodBase):
     """Base method for FusedMLP

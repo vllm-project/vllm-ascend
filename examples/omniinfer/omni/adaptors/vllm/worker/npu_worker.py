@@ -18,43 +18,40 @@
 #
 
 import gc
+import os
 from typing import Dict, List, Optional
 
+import ray
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-import torch.distributed as dist
+import vllm.envs as envs
+from omni.adaptors.vllm.platform import NPUPlatform
+from omni.adaptors.vllm.utils import (check_block_num_cache_exist,
+                                      check_torchair_cache_exists, clear_var,
+                                      delete_torchair_cache_file,
+                                      read_block_num_from_file,
+                                      write_block_num_to_file)
+# from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
+from omni.models.common.config.model_config import model_extra_config
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              set_custom_all_reduce,
-                              get_world_group,
-                              get_dp_group)
+from vllm.distributed import (ensure_model_parallel_initialized, get_dp_group,
+                              get_world_group, init_distributed_environment,
+                              set_custom_all_reduce)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
-from vllm.platforms import current_platform
-from vllm.lora.request import LoRARequest
-
-from omni.adaptors.vllm.platform import NPUPlatform
-# from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
-from omni.adaptors.vllm.utils import (
-    check_torchair_cache_exists, check_block_num_cache_exist, read_block_num_from_file, write_block_num_to_file, delete_torchair_cache_file, clear_var
-)
-
-import vllm.envs as envs
-import os
-import ray
-from omni.models.common.config.model_config import model_extra_config
-
 
 __origin_get_device_properties__ = torch.npu.get_device_properties
 class NPUDeviceProperties:
@@ -170,8 +167,8 @@ class NPUWorker(WorkerBase):
         self.profiler = self._init_profiler()
 
     def _init_graph_options(self):
-        from vllm.utils import supports_dynamo
         from vllm.config import CompilationLevel
+        from vllm.utils import supports_dynamo
 
         self.enable_torchair_graph_mode = (self.vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
         self.use_cached_npu_graph = self.vllm_config.npu_compilation_config.use_ge_graph_cached

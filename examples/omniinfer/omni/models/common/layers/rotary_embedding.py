@@ -24,24 +24,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Rotary Positional Embeddings."""
-from typing import Any, Dict, Optional, Tuple, Union
 import math
-import torch_npu
+from typing import Any, Dict, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from vllm.platforms import current_platform
+import torch_npu
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding as GPURotaryEmbedding
-from vllm.model_executor.layers.rotary_embedding import YaRNScalingRotaryEmbedding as GPUYaRNScalingRotaryEmbedding
-from vllm.model_executor.layers.rotary_embedding import DeepseekScalingRotaryEmbedding as DeepseekScalingRotaryEmbeddingGPU
-from vllm.model_executor.layers.rotary_embedding import (_yarn_find_correction_dim,
-                                            _yarn_find_correction_range,
-                                            _yarn_linear_ramp_mask,
-                                            _yarn_get_mscale,
-                                            _rotate_neox,
-                                            _rotate_gptj)
+from vllm.model_executor.layers.rotary_embedding import \
+    DeepseekScalingRotaryEmbedding as DeepseekScalingRotaryEmbeddingGPU
+from vllm.model_executor.layers.rotary_embedding import \
+    RotaryEmbedding as GPURotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import \
+    YaRNScalingRotaryEmbedding as GPUYaRNScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    _rotate_gptj, _rotate_neox, _yarn_find_correction_dim,
+    _yarn_find_correction_range, _yarn_get_mscale, _yarn_linear_ramp_mask)
+from vllm.platforms import current_platform
 
 SCALE_FACTOR = 8
 LOW_FREQ_FACTOR = 1

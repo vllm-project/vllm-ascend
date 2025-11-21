@@ -1,26 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from typing import Optional, Callable
 import os
-import torch, torch_npu
-import torchair as tng
+from typing import Callable, Optional
+
+import torch
 import torch.distributed as dist
-from vllm.distributed import get_world_group, get_pp_group, get_ep_group, get_tp_group
-from vllm.attention import AttentionMetadata
-from vllm.platforms import current_platform
-from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE as GPUFusedMoE
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod as GPUUnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.layer import FusedMoeWeightScaleSupported
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+import torch_npu
+import torchair as tng
 from omni.adaptors.vllm.distributed.parallel_state import GroupCoordinator
 from omni.models.common.config.model_config import model_extra_config
-from omni.models.common.layers.moe.fused_moe.fused_moe import (
-    fused_topk,
-    grouped_topk
-)
+from omni.models.common.layers.moe.fused_moe.fused_moe import (fused_topk,
+                                                               grouped_topk)
+from vllm.attention import AttentionMetadata
+from vllm.distributed import (get_ep_group, get_pp_group, get_tp_group,
+                              get_world_group)
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE as GPUFusedMoE
+from vllm.model_executor.layers.fused_moe.layer import \
+    FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.fused_moe.layer import \
+    UnquantizedFusedMoEMethod as GPUUnquantizedFusedMoEMethod
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.platforms import current_platform
 
 UNQUANT_MODE = 0
 STATIC_QUANT_MODE = 1

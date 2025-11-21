@@ -2,12 +2,14 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import csv
-import re
 import os
-from collections import defaultdict
+import re
 import sys
-import pandas as pd
+from collections import defaultdict
+
 import openpyxl
+import pandas as pd
+
 
 def parse_trace_logs(root_dir):
     pattern = r'<<<Action: (.*?); Timestamp:([\d.]+); RequestID:([a-z0-9-]+)(?:; Role:(\S+))?'

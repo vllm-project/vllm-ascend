@@ -3,9 +3,8 @@ from typing import List
 
 import blake3
 from ems import KvBufferWrapper
-from vllm.logger import logger
-
 from omni.adaptors.vllm.ems.ems_env import EmsEnv
+from vllm.logger import logger
 
 
 class EmsKeyGenerator:

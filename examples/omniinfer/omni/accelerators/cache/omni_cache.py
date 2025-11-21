@@ -1,20 +1,21 @@
-from dataclasses import dataclass
 import math
 import os
-from abc import ABC, abstractmethod
-from typing import Tuple, Dict, Optional, List
 import threading
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import KVCacheConfig, AttentionSpec
-from vllm.v1.utils import bind_kv_cache
 from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
+from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
-
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.utils import bind_kv_cache
 
 logger = init_logger("vllm.v1.omni")
 

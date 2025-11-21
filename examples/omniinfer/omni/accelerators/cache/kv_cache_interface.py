@@ -1,26 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from dataclasses import dataclass
 import re
-import torch
+from dataclasses import dataclass
 
-from vllm.logger import init_logger
-from vllm.utils import cdiv
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+import torch
 from vllm.attention import AttentionType
 from vllm.attention.layer import Attention
-from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
-    AttentionSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheTensor,
-)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.logger import init_logger
+from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import create_kv_cache_group_specs
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        KVCacheTensor)
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
 
 logger = init_logger("vllm.v1.omni")
 

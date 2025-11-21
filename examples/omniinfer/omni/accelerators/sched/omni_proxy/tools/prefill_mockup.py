@@ -1,8 +1,9 @@
+import asyncio
+from multiprocessing import Process
+
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from multiprocessing import Process
-import uvicorn
-import asyncio
 
 app = FastAPI()
 

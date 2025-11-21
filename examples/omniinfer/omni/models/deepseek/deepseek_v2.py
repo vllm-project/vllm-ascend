@@ -30,10 +30,12 @@
 
 from typing import Any, Dict, List, Optional, Union
 
+import omni.adaptors.vllm.envs as envs_ascend
 import torch
 import torch.distributed as dist
 import torch_npu
 import vllm.envs as envs
+from omni.models.common.layers.fused_moe.layer import FusedMoE
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -67,10 +69,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
 from vllm.sequence import IntermediateTensors
-
-import omni.adaptors.vllm.envs as envs_ascend
-from omni.models.common.layers.fused_moe.layer import FusedMoE
-
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 

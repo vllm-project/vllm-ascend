@@ -16,42 +16,34 @@
 # This file is a part of the vllm-ascend project.
 #
 # By using quantization case, this file is called before worker patch achieve,
-from typing import Any, Callable, Dict, List, Optional
 import os
+from typing import Any, Callable, Dict, List, Optional
+
 import torch
 import torch.distributed as dist
 import torch_npu
 import torchair
+from omni.adaptors.vllm.distributed.parallel_state import (
+    GroupCoordinator, get_scale_parallel_group)
+from omni.adaptors.vllm.utils import NPU_W8A8_DYNAMIC
+from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.fused_mlp import FusedMLP, FusedMLPMethodBase
+from omni.models.common.layers.linear import (FlashCommLinearBase,
+                                              FlashCommLinearMethodBase,
+                                              UnquantizedFlashCommLinearMethod)
+from omni.models.qwen.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization import register_quantization_config
+from vllm.model_executor.layers.quantization import \
+    register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
-)
-from vllm.model_executor.parameter import (
-    ModelWeightParameter,
-    ChannelQuantScaleParameter
-)
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           ModelWeightParameter)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.distributed import get_tp_group, get_dp_group, get_ep_group
-
-from omni.models.common.layers.fused_mlp import FusedMLP, FusedMLPMethodBase
-from omni.models.common.layers.linear import (
-    FlashCommLinearMethodBase,
-    UnquantizedFlashCommLinearMethod,
-    FlashCommLinearBase
-)
-from omni.models.qwen.fused_moe import FusedMoE, FusedMoEMethodBase
-from omni.adaptors.vllm.utils import NPU_W8A8_DYNAMIC
-from omni.adaptors.vllm.distributed.parallel_state import(
-    GroupCoordinator,
-    get_scale_parallel_group
-)
-
-from omni.models.common.config.model_config import model_extra_config
 
 logger = init_logger(__name__)
 

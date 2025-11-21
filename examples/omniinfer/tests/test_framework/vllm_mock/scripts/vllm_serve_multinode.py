@@ -7,6 +7,5 @@ import sys
 
 from vllm_serve import run_vllm_serve
 
-
 if __name__ == "__main__":
     run_vllm_serve(tp=1, dp=16, model="/home/kc/models/DeepSeek-V2-Lite")

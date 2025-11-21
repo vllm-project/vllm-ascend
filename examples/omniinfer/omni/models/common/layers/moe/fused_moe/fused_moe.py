@@ -3,22 +3,16 @@
 
 """Fused MoE kernel."""
 from typing import Optional, Tuple
-import torch_npu
-import torch
-import torchair as tng
+
 import numpy as np
+import torch
 import torch.distributed as dist
-
-from vllm.platforms import current_platform
-from vllm.distributed import get_world_group
-from vllm.forward_context import get_forward_context
-
-from vllm.distributed import (
-    get_world_group,
-    get_dp_group,
-    get_ep_group
-)
+import torch_npu
+import torchair as tng
 from omni.models.common.config.model_config import model_extra_config
+from vllm.distributed import get_dp_group, get_ep_group, get_world_group
+from vllm.forward_context import get_forward_context
+from vllm.platforms import current_platform
 
 
 def fused_topk(

@@ -7,10 +7,13 @@
 note: 该CPP类初始化需放在vllm_npu warmup完成后， 因为warmup阶段experts权重地址会发生改变
 """
 
+import ctypes
+
 import torch
 import torch_npu
+
 from .. import omni_placement
-import ctypes
+
 # 配置PyCapsule的C API接口
 ctypes.pythonapi.PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
 ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object

@@ -2,28 +2,30 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
  
 import csv
-import sys
+import ctypes
 import os
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, cast
+
 import numpy as np
 import torch
 import torch_npu
 import torchair as tng
-import ctypes
 
-from typing import Optional
+from . import omni_placement
 from .cluster_status import ClusterStatus
-from .placement_handler import create_cluster_activation, create_placement_manager, init_dram_weights, do_placement_optimizer
-from .optim.optimizers import Optimizer
-from .optim.optimizers_loader import _create_optimizers
 from .config import Config
 from .expert_mapping import ExpertMapping
+from .optim.optimizers import Optimizer
+from .optim.optimizers_loader import _create_optimizers
+from .placement_handler import (create_cluster_activation,
+                                create_placement_manager,
+                                do_placement_optimizer, init_dram_weights)
 from .utils import calculate_time
-from . import omni_placement
-from datetime import datetime
 
-import time
 
 class OmniPlannerMeta(type):
     """Metaclass to implement singleton pattern for OmniPlanner."""

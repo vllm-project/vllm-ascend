@@ -2,30 +2,35 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Optional
-import torch_npu
-import torch
 import os
+from typing import Dict, List, Optional
 
-from vllm.platforms import current_platform
-from vllm.model_executor.layers.sampler import (
-    _apply_min_p, _build_sampler_output, get_logprobs,
-    Sampler, _apply_min_tokens_penalty, SamplerOutput,
-    SampleResultArgsType, SampleReturnType,
-    SampleResultsDictType, SampleMetadataType, MultinomialSamplesType, get_pythonized_sample_results
-)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.sampling_metadata import SamplingTensors
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler as RejectionSamplerGPU
-from vllm.v1.sample.rejection_sampler import RejectionSampler as RejectionSamplerV1
-from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler as TopKTopPSampler
-from vllm.v1.sample.sampler import Sampler as SamplerV1
-from vllm.v1.outputs import SamplerOutput as SamplerOutputV1
-from vllm.sampling_params import SamplingType
-from vllm.sequence import Logprob, VLLM_INVALID_TOKEN_ID
-
+import torch
+import torch_npu
 from omni.models.common.config.model_config import model_extra_config
-
+from vllm.model_executor.layers.rejection_sampler import \
+    RejectionSampler as RejectionSamplerGPU
+from vllm.model_executor.layers.sampler import (MultinomialSamplesType,
+                                                SampleMetadataType, Sampler,
+                                                SampleResultArgsType,
+                                                SampleResultsDictType,
+                                                SampleReturnType,
+                                                SamplerOutput, _apply_min_p,
+                                                _apply_min_tokens_penalty,
+                                                _build_sampler_output,
+                                                get_logprobs,
+                                                get_pythonized_sample_results)
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingTensors)
+from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingType
+from vllm.sequence import VLLM_INVALID_TOKEN_ID, Logprob
+from vllm.v1.outputs import SamplerOutput as SamplerOutputV1
+from vllm.v1.sample.ops.topk_topp_sampler import \
+    TopKTopPSampler as TopKTopPSampler
+from vllm.v1.sample.rejection_sampler import \
+    RejectionSampler as RejectionSamplerV1
+from vllm.v1.sample.sampler import Sampler as SamplerV1
 
 FP32_EPS = 2 ** -24
 USE_SORT_OP_MIN_BS = 2

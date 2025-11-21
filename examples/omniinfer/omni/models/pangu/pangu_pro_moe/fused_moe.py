@@ -19,23 +19,20 @@
 from typing import Callable, Optional
 
 import torch
+import torch.distributed as dist
 import torch_npu
-from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
+from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
-
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoEParallelConfig, MoEConfig)
-
+    FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
+    determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-
-import torch.distributed as dist
+from vllm.platforms import current_platform
 
 from .device import is_310p
 

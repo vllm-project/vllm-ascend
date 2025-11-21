@@ -1,8 +1,9 @@
-import optiquant.int8 as qint8
-import optiquant.int4 as qint4
-from argparse import ArgumentParser
 import json
 import os
+from argparse import ArgumentParser
+
+import optiquant.int4 as qint4
+import optiquant.int8 as qint8
 
 if __name__ == "__main__":
     parser = ArgumentParser()

@@ -2,14 +2,15 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 """Custom normalization layers."""
+from typing import Any, Optional, Union
+
 import torch
 import torch_npu
-from typing import Optional, Union, Any
-from vllm.model_executor.layers.layernorm import RMSNorm as RMSNormGPU
-from vllm.distributed import get_tp_group
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
-
 from omni.models.common.config.model_config import model_extra_config
+from vllm.distributed import get_tp_group
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.layers.layernorm import RMSNorm as RMSNormGPU
 
 
 class RMSNorm(RMSNormGPU):

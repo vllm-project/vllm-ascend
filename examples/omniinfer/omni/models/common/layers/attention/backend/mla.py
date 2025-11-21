@@ -1,43 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, List, Type, TypeVar, Dict
 import itertools
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, TypeVar
+
 import numpy as np
 import torch
 import torch_npu
-
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionMetadata,
-    MLAAttentionImpl,
-    AttentionType
-)
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata, AttentionType,
+                                              MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import ModelConfig
 from vllm.distributed import get_world_group
 from vllm.platforms import current_platform
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
-from omni.models.common.config.model_config import model_extra_config
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
-from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
-from omni.models.common.layers.attention.backend.attention_dummy_builder import DummyAttentionMetadataBuilder
-from omni.accelerators.cache import OmniAttentionSpec, compute_omni_attn_metadata
-from omni.accelerators.cache.omni_cache import BaseOmniCache, PrefixCopyMeta
-
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_rank,
-)
 import math
+
+from omni.accelerators.cache import (OmniAttentionSpec,
+                                     compute_omni_attn_metadata)
+from omni.accelerators.cache.omni_cache import BaseOmniCache, PrefixCopyMeta
 from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
+from omni.models.common.config.model_config import model_extra_config
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
+from omni.models.common.layers.attention.backend.attention_dummy_builder import \
+    DummyAttentionMetadataBuilder
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+
 
 def group_request_list(seq_lens, query_lens, block_tables, threshold):
     s_lens_result = []

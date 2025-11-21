@@ -3,9 +3,11 @@
 
 import logging
 import pickle
+
 import torch
-import torch_npu
 import torch.distributed as dist
+import torch_npu
+
 from .expert_mapping import ExpertMapping
 
 # 配置日志

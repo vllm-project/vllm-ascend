@@ -22,9 +22,10 @@
 # limitations under the License.
 """Rotary Positional Embeddings."""
 from typing import Any, Dict, Optional, Tuple, Union
+
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

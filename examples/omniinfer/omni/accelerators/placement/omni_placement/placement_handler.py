@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import torch
 import ctypes
-from . import omni_placement
-from .distributed_ops import distribution_warmup
-from collections import defaultdict
-from .utils import filter_dict_keys, convert_param_dict_to_list, convert_param_to_ctype, calculate_time
 import re
 import time
+from collections import defaultdict
+
+import torch
+
+from . import omni_placement
+from .distributed_ops import distribution_warmup
+from .utils import (calculate_time, convert_param_dict_to_list,
+                    convert_param_to_ctype, filter_dict_keys)
+
 
 def deepseek_filter_func(key, first_k_dense_replace=3):
     pattern = r".*\.layers\.(\d+)\..*\.experts(?:\..*)?$"

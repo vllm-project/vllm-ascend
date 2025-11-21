@@ -2,9 +2,12 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
+
 import torch
 import torch_npu
+
 from .optimizers import Optimizer
+
 
 class ExpertsBalanceOptimizer(Optimizer):
     def __init__(self, cluster_status, batch_size=48, top_k_count=8) -> None:

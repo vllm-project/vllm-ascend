@@ -18,13 +18,14 @@
 # limitations under the License.
 
 from collections.abc import Iterable
-from typing import Any, Optional, Union, List
+from typing import Any, List, Optional, Union
 
 import torch
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
 from torch import nn
 from transformers import PretrainedConfig
-
-from vllm.attention import Attention, AttentionType, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -40,15 +41,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+    is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
 
 
 class PanguEmbeddedMLP(nn.Module):
