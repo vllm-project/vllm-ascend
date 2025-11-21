@@ -13,7 +13,8 @@ class TestNPUTorchairModelRunner(PytestBase):
 
     @pytest.fixture
     def setup_npu_torchair_model_runner(self, mocker: MockerFixture):
-        mocker.patch.object(NPUTorchairModelRunner, "__init__", lambda self, *args, **kwargs: None)
+        mocker.patch.object(NPUTorchairModelRunner, "__init__",
+                            lambda self, *args, **kwargs: None)
         runner = NPUTorchairModelRunner(Mock(), Mock())
 
         runner.device = torch.device("cpu")
@@ -22,16 +23,12 @@ class TestNPUTorchairModelRunner(PytestBase):
         runner.speculative_config = MagicMock(
             method="deepseek_mtp",
             num_speculative_tokens=4,
-            disable_padded_drafter_batch=False
-        )
+            disable_padded_drafter_batch=False)
 
-        runner.ascend_config = MagicMock(
-            enable_shared_expert_dp=False,
-            torchair_graph_config=MagicMock(
-                use_cached_graph=True,
-                graph_batch_sizes=[1,2,4]
-            )
-        )
+        runner.ascend_config = MagicMock(enable_shared_expert_dp=False,
+                                         torchair_graph_config=MagicMock(
+                                             use_cached_graph=True,
+                                             graph_batch_sizes=[1, 2, 4]))
 
         runner.decode_token_per_req = 2
         runner.is_kv_consumer = True
