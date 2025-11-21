@@ -3,10 +3,7 @@
 
 import os
 
-import torch
-import torch_npu
 from random_mock_model_tp2 import run_offline_prompts
-from vllm import LLM, SamplingParams
 
 if __name__ == "__main__":
     os.environ["VLLM_USE_V1"] = "1"

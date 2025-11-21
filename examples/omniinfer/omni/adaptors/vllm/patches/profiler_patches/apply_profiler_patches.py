@@ -38,7 +38,7 @@ def apply_patches(namelist_path: str):
         if not (profiler_type == 'torchnpu' or profiler_type == 'timer'
                 or profiler_type == 'viztracer' or profiler_type == 'marker'):
             logger.error(
-                f"<<<type of namelist invalid, should be one of torchnpu/timer/viztracer/marker"
+                "<<<type of namelist invalid, should be one of torchnpu/timer/viztracer/marker"
             )
             raise RuntimeError(
                 "<<<type of namelist invalid, should be one of torchnpu/timer/viztracer/marker"

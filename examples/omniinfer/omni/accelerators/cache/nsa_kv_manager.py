@@ -12,7 +12,6 @@ from vllm.config import get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
@@ -20,7 +19,7 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from .kv_cache_manager import (OmniKVCacheBlocks, OmniKVCacheManager,
+from .kv_cache_manager import (OmniKVCacheManager,
                                get_manager_for_kv_cache_spec)
 from .omni_cache import DecodeOmniCache, PrefillOmniCache
 

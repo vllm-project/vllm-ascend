@@ -10,7 +10,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 from step_1_generate_csv_with_ceiling import generate_csv
 from step_2_placement_pattern_generation import process_expert_deployments
 from step_3_placement_pattern_checking_and_plot import (test_expert_mapping,
@@ -280,7 +279,7 @@ def main():
                       fig_save_path=fig_save_path,
                       log_timestamp=timestamp)
 
-    print(f"Step 4: Analyzing and plotting load distributions")
+    print("Step 4: Analyzing and plotting load distributions")
     analyze_and_plot_deployments(
         load_file=output_csv_path,
         pp_path_lis=pp_path_lis,

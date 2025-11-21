@@ -3,9 +3,7 @@
 
 import os
 
-import torch
 from random_mock_model_tp2 import run_offline_prompts
-from vllm import LLM, SamplingParams
 
 if __name__ == "__main__":
     os.environ["VLLM_USE_V1"] = "1"

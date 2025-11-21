@@ -20,7 +20,6 @@ from typing import Iterable, List, Literal, Optional, Set, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-import torchair._contrib.custom_torch_ops
 from omni.adaptors.vllm.distributed.communication_op import (
     all_gather_local, all_gather_pipeline, all_gather_round_pipeline,
     all_gather_two_stage, reduce_scatter_local, reduce_scatter_pipeline,

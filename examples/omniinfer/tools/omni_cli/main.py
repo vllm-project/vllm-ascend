@@ -16,11 +16,8 @@
 #
 import argparse
 import json
-import os
 import subprocess
 
-import requests
-import yaml
 from omni_cli.config_transform import (detect_file_encoding,
                                        transform_deployment_config)
 
@@ -39,38 +36,38 @@ def execute_command(command):
 def start_omni_service_in_normal_mode(config_path):
     """Run the omni service in normal mode."""
     transform_deployment_config(config_path)
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --skip-tags 'sync_code,pip_install,fetch_log'"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --skip-tags 'sync_code,pip_install,fetch_log'"
     execute_command(command)
 
 
 def prepare_omni_service_in_developer_mode(config_path):
     """In developer mode, preparing to run the omni service."""
     transform_deployment_config(config_path)
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --skip-tags 'sync_code,pip_install,run_server,fetch_log'"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --skip-tags 'sync_code,pip_install,run_server,fetch_log'"
     execute_command(command)
 
 
 def run_omni_service_in_developer_mode():
     """In developer mode, running the omni service."""
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags run_server"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags run_server"
     execute_command(command)
 
 
 def stop_omni_service():
     """Stop the omni service."""
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags stop_server"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags stop_server"
     execute_command(command)
 
 
 def synchronize_code():
     """In developer mode, copy the code from the execution machine to the target machine container."""
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags sync_code"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags sync_code"
     execute_command(command)
 
 
 def install_packages():
     """In developer mode, copy the code and install the packages."""
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags 'sync_code,pip_install'"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags 'sync_code,pip_install'"
     execute_command(command)
 
 
@@ -95,13 +92,13 @@ def inspect_configuration(config_path):
 
 def upgrade_packages():
     """Install the latest wheel package"""
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags pip_install"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags pip_install"
     execute_command(command)
 
 
 def fetch_logs():
     """Fetch logs"""
-    command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags fetch_log"
+    command = "ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags fetch_log"
     execute_command(command)
 
 

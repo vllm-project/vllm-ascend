@@ -53,8 +53,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+    AutoWeightsLoader, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -497,7 +497,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
         self.model = Qwen3MoeModel(config,
                                    vllm_config.cache_config,
                                    quant_config,
-                                   prefix=f"model")
+                                   prefix="model")
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,

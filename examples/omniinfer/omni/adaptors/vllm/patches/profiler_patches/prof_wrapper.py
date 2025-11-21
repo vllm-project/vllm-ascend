@@ -7,11 +7,9 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime
 
 import torch
 import torch_npu
-from vllm.v1.engine import EngineCoreOutputs
 
 
 def execute_operation(operation_str, param_dict):

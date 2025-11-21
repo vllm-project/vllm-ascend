@@ -348,9 +348,9 @@ class FusedMoE(torch.nn.Module):
         if use_grouped_topk:  # and num_expert_group != 1:
             # adapt end.
             if topk_group is None:
-                raise ValueError(f"Unsupported topk_group is None")
+                raise ValueError("Unsupported topk_group is None")
             if num_expert_group is None:
-                raise ValueError(f"Unsupported num_expert_group is None")
+                raise ValueError("Unsupported num_expert_group is None")
 
             if e_score_correction_bias is None and attn_metadata is None:
                 topk_weights, topk_ids, row_idx = grouped_topk(

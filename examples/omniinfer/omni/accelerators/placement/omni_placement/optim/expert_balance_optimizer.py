@@ -4,7 +4,6 @@
 import os
 
 import torch
-import torch_npu
 
 from .optimizers import Optimizer
 

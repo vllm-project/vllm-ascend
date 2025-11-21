@@ -4,13 +4,11 @@
 import os
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import torch
 
-from ..omni_placement import omni_placement
 from ..omni_placement.expert_mapping import ExpertMapping
 
 

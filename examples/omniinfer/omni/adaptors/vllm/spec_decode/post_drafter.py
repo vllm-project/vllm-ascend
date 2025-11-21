@@ -18,7 +18,7 @@
 # limitations under the License.
 #
 
-from typing import List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn

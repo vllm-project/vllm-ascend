@@ -3,8 +3,6 @@
 
 import os
 
-import torch
-import torch_npu
 from vllm import LLM, SamplingParams
 
 

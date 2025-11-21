@@ -5,7 +5,6 @@ from typing import Any, Optional, Union
 
 import torch
 import torch_npu
-from omni.models.common.config.model_config import model_extra_config
 from vllm.distributed import get_tp_group
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)

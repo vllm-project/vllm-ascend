@@ -39,8 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import \
 from vllm.model_executor.layers.rotary_embedding import \
     YaRNScalingRotaryEmbedding as GPUYaRNScalingRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding import (
-    _rotate_gptj, _rotate_neox, _yarn_find_correction_dim,
-    _yarn_find_correction_range, _yarn_get_mscale, _yarn_linear_ramp_mask)
+    _rotate_gptj, _rotate_neox, _yarn_find_correction_range, _yarn_get_mscale, _yarn_linear_ramp_mask)
 from vllm.platforms import current_platform
 
 SCALE_FACTOR = 8

@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import json
-import os
 import time
 from collections import defaultdict, namedtuple
 from functools import cached_property
@@ -16,7 +15,7 @@ from omni.accelerators.pd.ranktable.local_info import LocalInfo
 from omni.accelerators.pd.ranktable.rank_table import (GlobalRankTable,
                                                        RankTableConfig)
 from omni.accelerators.pd.utils import get_p_start_rank, prepare_ranktables
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index

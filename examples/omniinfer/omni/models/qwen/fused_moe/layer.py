@@ -10,7 +10,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 import torch_npu
 from omni.models.common.config.model_config import model_extra_config
-from vllm.distributed import (get_dp_group, get_ep_group, get_pp_group,
+from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tp_group, get_world_group)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.base_config import \

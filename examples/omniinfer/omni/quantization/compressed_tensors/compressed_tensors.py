@@ -31,8 +31,7 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
-    CompressedTensorsConfig, CompressedTensorsKVCacheMethod,
-    CompressedTensorsLinearMethod)
+    CompressedTensorsConfig, CompressedTensorsLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
     CompressedTensorsScheme
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (

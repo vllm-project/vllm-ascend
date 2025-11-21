@@ -4,7 +4,6 @@
 from collections import deque
 
 import torch
-import torch_npu
 
 from .config import Config
 from .expert_mapping import ExpertMapping

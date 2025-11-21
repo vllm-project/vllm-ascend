@@ -2,13 +2,10 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import logging
-import pickle
 
 import torch
 import torch.distributed as dist
-import torch_npu
 
-from .expert_mapping import ExpertMapping
 
 # 配置日志
 logger = logging.getLogger(__name__)

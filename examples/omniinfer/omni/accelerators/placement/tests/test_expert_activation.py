@@ -7,10 +7,7 @@ import shutil
 import time
 import unittest
 
-import pytest
 import torch
-import torch.nn as nn
-import torch_npu
 
 from ..omni_placement.placement_handler import create_cluster_activation
 

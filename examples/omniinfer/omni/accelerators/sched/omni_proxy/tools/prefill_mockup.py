@@ -1,4 +1,3 @@
-import asyncio
 from multiprocessing import Process
 
 import uvicorn

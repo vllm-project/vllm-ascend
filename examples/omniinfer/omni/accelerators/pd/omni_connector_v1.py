@@ -2,12 +2,10 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import json
-import math
 import os
 import pickle
 import threading
 import time
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import zmq
@@ -16,36 +14,28 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig, KVTransferConfig
+    from vllm.config import VllmConfig
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
 import mmap as pymmap
-import queue
-import random
-import signal
 import socket
-import struct
 import subprocess
-import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import (CDLL, POINTER, Structure, c_bool, c_char_p, c_size_t,
-                    c_uint32, c_uint64, c_void_p, create_string_buffer)
+                    c_uint32, c_uint64, c_void_p)
 from dataclasses import dataclass
 
 import torch
 from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
-from vllm.utils import get_open_port, round_down
 from vllm.v1.request import Request, RequestStatus
 
 GET_META_MSG = b"get_meta_msg"
@@ -370,7 +360,7 @@ class PrefillConnectorWorker:
         if use_omni_attn_mgr:
             manager_cls = OmniBiGroupDataDistManager
             logger.warning(
-                f"PrefillingConnector is using Omni datadist manager for KV transfer."
+                "PrefillingConnector is using Omni datadist manager for KV transfer."
             )
             self.datadist_manager = manager_cls(vllm_config)
         else:
@@ -652,7 +642,7 @@ class DecodeConnectorWorker:
         if use_omni_attn_mgr:
             manager_cls = OmniBiGroupDataDistManager
             logger.warning(
-                f"DecodeConnector is using Omni datadist manager for KV transfer."
+                "DecodeConnector is using Omni datadist manager for KV transfer."
             )
             self.datadist_manager = manager_cls(vllm_config)
         else:
@@ -678,7 +668,7 @@ class DecodeConnectorWorker:
                 target=self.on_fast_path_req, daemon=True, name=thread_name)
             self.thread_on_fast_path_req.start()
             logger.warning(
-                f"DecodeConnectorWorker initialized with self.async_pull_kv enabled."
+                "DecodeConnectorWorker initialized with self.async_pull_kv enabled."
             )
 
             # Write thread name and native_id to file
@@ -1017,7 +1007,7 @@ class DecodeConnectorWorker:
                                               c_size_t(total_blocks), d_blocks)
         if filled == 0:
             self.lib.kv_dpool_set_direct_id_mode(c_uint64(0))
-            logger.warning(f"kv_dpool timeout, reset it to direct_id_mode")
+            logger.warning("kv_dpool timeout, reset it to direct_id_mode")
             filled = self.lib.kv_dpool_get_blocks(
                 None, (c_uint64 * total_blocks)(*d_ids_list),
                 c_size_t(total_blocks), d_blocks)

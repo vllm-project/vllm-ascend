@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from omni.models.common.layers.attention.backend.attention import (
-    AscendAttentionState, AttentionMaskBuilder)
+    AscendAttentionState)
 from torch import nn
 from torch.nn import Parameter
 from transformers import PretrainedConfig
@@ -32,9 +32,8 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
-                                             get_tp_group, get_world_group,
-                                             init_model_parallel_group)
+from vllm.distributed.parallel_state import (get_dp_group,
+                                             get_tp_group, get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -62,9 +61,8 @@ from vllm.sequence import IntermediateTensors
 
 from .device import is_310p
 from .fused_moe import patch_fused_moe_ops
-from .pangu_parallel_state import (destory_ascend_model_parallel, get_ep_group,
-                                   get_etp_group, init_ascend_model_parallel,
-                                   model_parallel_initialized)
+from .pangu_parallel_state import (get_ep_group,
+                                   init_ascend_model_parallel)
 
 logger = init_logger(__name__)
 

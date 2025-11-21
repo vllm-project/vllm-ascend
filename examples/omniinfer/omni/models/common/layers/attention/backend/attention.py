@@ -29,14 +29,11 @@ import torch_npu
 import torchair as tng
 from omni.models.common.layers.attention.backend.attention_dummy_builder import \
     DummyAttentionMetadataBuilder
-from omni.models.common.layers.attention.backend.attention_mask import \
-    AttentionMaskBuilder
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_dynamo
 from vllm.v1.core.sched.output import SchedulerOutput

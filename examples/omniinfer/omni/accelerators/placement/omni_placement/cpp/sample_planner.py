@@ -2,14 +2,9 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import ctypes
-import multiprocessing as mp
-import sys
-import threading
 import time
 
-import numpy as np
 import torch
-import torch_npu
 
 from .. import omni_placement
 
@@ -34,7 +29,6 @@ def simulate_npu(moe):
     address = npu_memory.data_ptr()
 
     # 创建PyCapsule封装指针
-    import ctypes
 
     # 配置PyCapsule的C API接口
     ctypes.pythonapi.PyCapsule_New.argtypes = [

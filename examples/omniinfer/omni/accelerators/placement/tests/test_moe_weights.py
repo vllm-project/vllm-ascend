@@ -1,22 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import ctypes
-import gc
-import multiprocessing as mp
-import os
-import random
-import time
 import unittest
-from typing import Dict
 from unittest.mock import Mock, patch
 
 import torch
-import torch.nn as nn
-import torch_npu
 from omni.accelerators.placement.omni_placement import omni_placement
 from omni.accelerators.placement.omni_placement.placement_handler import (
-    deepseek_filter_func, deepseek_get_layer_idx_func, init_dram_weights)
+    init_dram_weights)
 from omni.accelerators.placement.omni_placement.utils import (
     convert_param_dict_to_list, convert_param_to_ctype, filter_dict_keys,
     get_expert_ids)

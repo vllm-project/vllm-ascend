@@ -8,8 +8,6 @@ note: 该CPP类初始化需放在vllm_npu warmup完成后， 因为warmup阶段e
 
 import ctypes
 
-import torch
-import torch_npu
 
 from .. import omni_placement
 

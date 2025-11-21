@@ -1,7 +1,6 @@
 # Copyright (c) HuaWei Technologies Co., Ltd. 2025-2025. All rights reserved
 from typing import List
 
-import blake3
 from ems import KvBufferWrapper
 from omni.adaptors.vllm.ems.ems_env import EmsEnv
 from vllm.logger import logger
@@ -70,7 +69,7 @@ class EmsKVCacheManager:
         kvcache形状：layers个 [k_v_index, GPU_blocks, Block_size, Attention heads Number, Head_size}]
         """
         # moe模型head_size = (512+64)，大EP方案使用k和v分别保存no rope和rope
-        logger.debug(f"[KVCache] 开始初始化非字典格式缓存")
+        logger.debug("[KVCache] 开始初始化非字典格式缓存")
 
         first_layer_cache = kv_caches[0]
         # 提取参考块的元数据

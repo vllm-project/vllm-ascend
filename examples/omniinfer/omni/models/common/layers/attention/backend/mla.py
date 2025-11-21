@@ -775,7 +775,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 sin=sin.clone(),
                 best_topk=best_topk)
         else:
-            raise RuntimeError(f"Full attention metadata should not be None!")
+            raise RuntimeError("Full attention metadata should not be None!")
 
         return self.metadata_cls(
             num_actual_tokens=num_actual_tokens,

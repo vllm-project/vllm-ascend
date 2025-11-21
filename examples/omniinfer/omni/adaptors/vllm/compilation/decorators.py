@@ -1,11 +1,10 @@
-from typing import Callable, Optional, TypeVar, Union
+from typing import TypeVar, Union
 
-import torch
 import torch.nn as nn
 from omni.adaptors.vllm.compilation.wrapper import \
     TorchNpuCompilerWrapperWithCustomDispatcher
 from vllm.compilation.counter import compilation_counter
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

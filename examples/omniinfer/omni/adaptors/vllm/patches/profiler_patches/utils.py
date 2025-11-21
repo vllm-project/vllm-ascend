@@ -5,12 +5,9 @@ import logging
 import multiprocessing
 import os
 import socket
-import sys
 import threading
-from datetime import datetime
 from pathlib import Path
 
-import requests
 
 
 def safe_print(directory, message):

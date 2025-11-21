@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 
 try:
-    import torch_npu
+    pass
 except:
     pass
 

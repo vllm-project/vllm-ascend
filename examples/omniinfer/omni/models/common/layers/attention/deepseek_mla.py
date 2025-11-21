@@ -40,9 +40,7 @@ from vllm.utils import supports_dynamo
 
 KVCACHE_NZ_DIM = 16
 
-import custom_ops
 import torch.nn.functional as F
-from vllm.logger import logger
 
 
 def stream_context(stream_tag):
@@ -891,7 +889,7 @@ class DeepseekMLA(nn.Module):
             kv_cache = kv_cache.get("kv_cache")
         if kv_cache is not None and isinstance(
                 kv_cache, Tuple) and kv_cache[0].numel() > 0:
-            raise RuntimeError(f"Should not come here.")
+            raise RuntimeError("Should not come here.")
             # k_pe:BNS,64 kv_a:BNS, 512, kv_states:bnsd, cos,sin:bnsd,kv cache:bsnd
             _, _, k_pe, kv_a = torch_npu.npu_kv_rmsnorm_rope_cache(
                 latent_cache.view(-1, 1, 1, 576),  # bnsd
@@ -977,7 +975,7 @@ class DeepseekMLA(nn.Module):
                         prefill_metadata.seq_kvlen_group)):
                 if prefill_metadata.kv_index_list and kv_cache is not None and isinstance(kv_cache, Tuple) and\
                         kv_cache[0].numel() > 0 and not self.fa_quant:
-                    raise RuntimeError(f"Should not come here.")
+                    raise RuntimeError("Should not come here.")
                     # adapt nz
                     block_num, block_size, head_size, _ = kv_cache[0].shape
                     kv_cache_a = (kv_cache[0].view(

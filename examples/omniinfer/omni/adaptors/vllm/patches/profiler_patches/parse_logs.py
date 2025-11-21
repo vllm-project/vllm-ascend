@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import csv
 import os
 import re
 import sys
 from collections import defaultdict
 
-import openpyxl
 import pandas as pd
 
 
@@ -37,7 +35,7 @@ def parse_trace_logs(root_dir):
                                         "profile: ")
                                     line = line[st_idx:]
                                     # if "prefill" in line:
-                                    if not "[]" in line:
+                                    if "[]" not in line:
                                         engine_step_lines.append(line)
                                     else:
                                         decode_engine_step_lines.append(line)

@@ -30,22 +30,19 @@ Features:
 import ast
 import base64
 import inspect
-import io
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import numpy
 import torch
 from filelock import FileLock
 from torch import nn
-from vllm import ModelRegistry
 from vllm.attention import AttentionMetadata
-from vllm.distributed import (get_dp_group, get_pp_group,
-                              get_tensor_model_parallel_world_size,
-                              get_tp_group, tensor_model_parallel_all_reduce)
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.distributed import (get_pp_group,
+                              get_tp_group)
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -163,7 +160,7 @@ def mock_model_class_factory(base_class: type) -> type:
             logger.debug(f">>>{self.mock_capture_dir} already exists.")
 
         if self.random_mode:
-            logger.debug(f">>>Running forward in random mode. ")
+            logger.debug(">>>Running forward in random mode. ")
             logger.debug(f">>>Forward time set to {self.forward_time} ms")
 
         self.input_id_cache = {}  # Cache for input token IDs
@@ -173,7 +170,7 @@ def mock_model_class_factory(base_class: type) -> type:
 
         if self.replay_mode:
             logger.debug(
-                f">>>Replay mode is on. Loading mock_cache from " +
+                ">>>Replay mode is on. Loading mock_cache from " +
                 f"{os.path.join(self.mock_capture_dir, self.mock_capture_file)}"
             )
             # Initialize mock cache if in replay mode
@@ -743,7 +740,7 @@ def mock_model_class_factory(base_class: type) -> type:
 
             if input_str not in self.mock_cache_forward:
                 raise KeyError(
-                    f"The input to this model has not been captured before, or temp is not zero:"
+                    "The input to this model has not been captured before, or temp is not zero:"
                     + f"\n{input_str[:min(len(input_str), 100)]}")
 
             # Load outputs from replay cache key
@@ -892,7 +889,7 @@ def mock_model_class_factory(base_class: type) -> type:
 
             if input_id_cache_key not in self.input_id_cache:
                 raise KeyError(
-                    f"The previously allocated block shifted and cannot be found, "
+                    "The previously allocated block shifted and cannot be found, "
                     +
                     f"or KV cache mode is required for prefilled decode nodes:\n{input_id_cache_key}"
                 )
@@ -1169,12 +1166,12 @@ def mock_model_class_factory(base_class: type) -> type:
 
         # Capture the input and model output, or alternatively replay
         if not self.replay_mode:
-            logger.debug(f">>>Running compute_logits in capture mode.")
+            logger.debug(">>>Running compute_logits in capture mode.")
             output = run_and_maybe_capture_logits(self, hidden_states,
                                                   sampling_metadata)
             return output
         else:
-            logger.debug(f">>>Running compute_logits in replay mode.")
+            logger.debug(">>>Running compute_logits in replay mode.")
             outputs = replay_logits(self, hidden_states)
             return outputs
 

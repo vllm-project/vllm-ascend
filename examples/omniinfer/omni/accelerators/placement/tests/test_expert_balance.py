@@ -2,17 +2,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
-import random
-import sys
-import tempfile
-import time
 import unittest
 import warnings
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-import torch_npu
 
 from ..omni_placement.cluster_status import ClusterStatus
 from ..omni_placement.expert_mapping import ExpertMapping

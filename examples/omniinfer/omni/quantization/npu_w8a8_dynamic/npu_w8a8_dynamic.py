@@ -24,7 +24,7 @@ import torch.distributed as dist
 import torch_npu
 import torchair
 from omni.adaptors.vllm.distributed.parallel_state import (
-    GroupCoordinator, get_scale_parallel_group)
+    get_scale_parallel_group)
 from omni.adaptors.vllm.utils import NPU_W8A8_DYNAMIC
 from omni.models.common.config.model_config import model_extra_config
 from omni.models.common.layers.fused_mlp import FusedMLP, FusedMLPMethodBase
@@ -32,7 +32,7 @@ from omni.models.common.layers.linear import (FlashCommLinearBase,
                                               FlashCommLinearMethodBase,
                                               UnquantizedFlashCommLinearMethod)
 from omni.models.qwen.fused_moe import FusedMoE, FusedMoEMethodBase
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.distributed import get_ep_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \

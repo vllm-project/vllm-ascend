@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
-from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -111,7 +110,7 @@ class ExpertMapping:
 
         if self.pattern_path is None:
             print(
-                f"[Placement-Warning]: pattern_path is None, BasePattern will be Used!"
+                "[Placement-Warning]: pattern_path is None, BasePattern will be Used!"
             )
             pattern = build_basepattern(self.world_size,
                                         self.max_moe_layer_num,

@@ -20,7 +20,6 @@ from vllm.model_executor.models.deepseek_v2 import \
     get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
 
 if os.getenv("ASCEND_PLATFORM", "A3") == "A2":
     from .deepseek_v3_a2 import DeepseekDecoderLayer
@@ -291,7 +290,7 @@ class DeepseekV3MTP(nn.Module):
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
         self.model = DeepseekMultiTokenPredictor(vllm_config=vllm_config,
-                                                 prefix=f"model")
+                                                 prefix="model")
 
     def set_share_weight(self, target_model):
         self.model.set_share_weight(target_model)

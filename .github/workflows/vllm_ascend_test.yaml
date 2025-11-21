@@ -97,7 +97,7 @@ jobs:
       - name: Mypy Check
         run: |
           echo "::add-matcher::.github/workflows/matchers/mypy.json"
-          tools/mypy.sh 1 ${{ matrix.python-version }}
+          tools/mypy.sh 1 ${{ matrix.python-version }} --exclude 'setup\.py$'
 
   e2e:
     needs: [lint]

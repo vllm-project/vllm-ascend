@@ -47,7 +47,7 @@ from vllm.distributed.parallel_state import (
     get_dp_group, get_pp_group, get_tensor_model_parallel_world_size)
 from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
-from vllm.sequence import VLLM_INVALID_TOKEN_ID, IntermediateTensors
+from vllm.sequence import IntermediateTensors
 from vllm.utils import (DeviceMemoryProfiler, LayerBlockType, LazyLoader, cdiv,
                         is_pin_memory_available)
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,

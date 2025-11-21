@@ -32,7 +32,7 @@ def dump_json(save_path, json_dict):
         os.remove(save_path)
     with os.fdopen(os.open(save_path, flags, modes), 'w') as f:
         json.dump(json_dict, f, indent=4)
-    logging.info(f"Save %s.", save_path)
+    logging.info("Save %s.", save_path)
 
 
 def load_json(load_path):
@@ -248,7 +248,7 @@ def merge_global_ranktable(args):
             }
             global_ranktable["server_group_list"].append(group_info)
 
-    dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"),
+    dump_json(os.path.join(args.save_dir, "global_ranktable_merge.json"),
               global_ranktable)
 
 
@@ -283,7 +283,7 @@ def merge_local_ranktable(args):
         "server_list": new_server_list
     }
 
-    dump_json(os.path.join(args.save_dir, f"local_ranktable_merge.json"),
+    dump_json(os.path.join(args.save_dir, "local_ranktable_merge.json"),
               local_ranktable)
 
 
@@ -326,7 +326,7 @@ def merge_all(args):
 
             global_ranktable["server_group_list"].append(group_info)
 
-    dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"),
+    dump_json(os.path.join(args.save_dir, "global_ranktable_merge.json"),
               global_ranktable)
 
 
@@ -365,22 +365,22 @@ def main():
     if args.mode == 'gen':
         generate_global_ranktable(args)
         local_ip = args.ip if args.ip else get_host_ip()
-        logging.info(f'Generate global ranktable successful, host ip is %s',
+        logging.info('Generate global ranktable successful, host ip is %s',
                      local_ip)
         generate_local_ranktable(args)
-        logging.info(f'Generate local ranktable successful.')
+        logging.info('Generate local ranktable successful.')
     elif args.mode == 'merge':
         merge_global_ranktable(args)
-        logging.info(f'Merge %d global ranktable successful.',
+        logging.info('Merge %d global ranktable successful.',
                      len(args.global_ranktable_list))
     elif args.mode == 'merge-local':
         merge_local_ranktable(args)
-        logging.info(f'Merge %d local ranktable successful.',
+        logging.info('Merge %d local ranktable successful.',
                      len(args.local_ranktable_list))
     elif args.mode == 'merge-all':
         merge_all(args)
         logging.info(
-            f'Merge %d api server %d prefill server %d decode server successful.',
+            'Merge %d api server %d prefill server %d decode server successful.',
             len(args.api_server_list), len(args.prefill_server_list),
             len(args.decode_server_list))
 

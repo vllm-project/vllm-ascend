@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import os
-import sys
 # import torch_npu
 import unittest
-from unittest.mock import MagicMock, patch
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from ..omni_placement.optim.ada_router_optimizer import AdaRouter

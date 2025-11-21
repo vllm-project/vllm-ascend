@@ -2,7 +2,6 @@ import hashlib
 from typing import Any, Callable, Optional, Union
 
 import torch
-import torch_npu
 import torchair
 from torchair import patch_for_hcom
 from vllm.config import CompilationLevel, VllmConfig
@@ -133,15 +132,15 @@ class NPUCompilationConfig:
             if not self.backend or self.backend == "":
                 config = get_torchair_config()
                 npu_backend = torchair.get_npu_backend(compiler_config=config)
-                logger.info(f"Using torchair backend!")
+                logger.info("Using torchair backend!")
                 return npu_backend
 
-            logger.info(f"Using user-defined backend!")
+            logger.info("Using user-defined backend!")
             return self.backend
 
         assert self.level == CompilationLevel.PIECEWISE
 
-        logger.info(f"Using omni backend!")
+        logger.info("Using omni backend!")
         from omni.adaptors.vllm.compilation.backends import OmniBackend
         return OmniBackend(vllm_config)
 

@@ -94,7 +94,7 @@ class TorchNpuCompilerWrapperWithCustomDispatcher:
                 gear_size = input_ids
                 return self.cached_compiled_models[gear_size](*args, **kwargs)
 
-        logger.error(f"encountered a missed scene")
+        logger.error("encountered a missed scene")
         return None
 
     def __call__(self, *args, **kwargs):

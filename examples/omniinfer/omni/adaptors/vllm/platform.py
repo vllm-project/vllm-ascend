@@ -14,7 +14,7 @@
 
 import logging
 import os
-from typing import Any, Callable, List, Optional, Tuple, Type
+from typing import Callable, List, Optional, Tuple
 
 import torch
 import vllm.envs as envs
@@ -46,7 +46,6 @@ CUSTOM_OP_ENABLED = False  # Custom operations not enabled for Omni inference
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
 
-import torch
 import vllm
 import vllm.distributed
 from torch.distributed import ProcessGroup
@@ -75,7 +74,6 @@ def noops(*args):
 
 
 def init_dp_group(self) -> ProcessGroup:
-    from vllm.config import ParallelConfig
     ProcessGroup.__init__ = pg_patched_init
     ProcessGroup._set_default_backend = noops
     pg = origin_stateless_init_dp_group(self)
@@ -368,7 +366,7 @@ class NPUPlatform(Platform):
         import omni.quantization  # noqa: F401
         from omni.adaptors.vllm.ems.ems_env import EmsEnv
         if EmsEnv.enable_vllm_ems:
-            from omni.adaptors.vllm.patches import ems_patch
+            pass
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> None:

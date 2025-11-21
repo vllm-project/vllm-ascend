@@ -6,7 +6,6 @@ from collections import deque
 from typing import Dict, List, Optional
 
 import msgpack
-import numpy as np
 import zmq
 
 MAX_NUM_BLOCK = 1024

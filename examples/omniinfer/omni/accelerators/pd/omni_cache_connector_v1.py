@@ -23,21 +23,16 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group)
-from vllm.envs import VLLM_RPC_TIMEOUT
+    get_tensor_model_parallel_rank, get_tp_group)
 from vllm.logger import init_logger
-from vllm.utils import get_open_port
 
 # from omni.accelerators.pd.llmdatadist_manager import LLMDataDistManager, LLMDataDistConfig
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -838,7 +833,7 @@ class DecodeConnectorWorker:
 
         if self.omni_cache is None or self.omni_cache.device_cache is None:
             raise RuntimeError(
-                f"Error! omni_cache is None or device_cache is None.")
+                "Error! omni_cache is None or device_cache is None.")
 
         st = time.time()
         self.omni_cache.synchronize_h2d(local_block_ids)

@@ -1,30 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import csv
-import ctypes
 import os
-import sys
 import time
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, Tuple, cast
+from typing import Optional, Tuple
 
-import numpy as np
 import torch
-import torch_npu
 import torchair as tng
 
 from . import omni_placement
 from .cluster_status import ClusterStatus
 from .config import Config
 from .expert_mapping import ExpertMapping
-from .optim.optimizers import Optimizer
-from .optim.optimizers_loader import _create_optimizers
 from .placement_handler import (create_cluster_activation,
                                 create_placement_manager,
-                                do_placement_optimizer, init_dram_weights)
-from .utils import calculate_time
+                                init_dram_weights)
 
 
 class OmniPlannerMeta(type):
@@ -80,7 +71,7 @@ class OmniPlanner(metaclass=OmniPlannerMeta):
         self.max_moe_layer_num = self.config.getattr("max_moe_layer_num", None)
         if self.max_moe_layer_num is None:
             print(
-                f"[Placement-Error]-max_moe_layer_num is not defined in config.yaml"
+                "[Placement-Error]-max_moe_layer_num is not defined in config.yaml"
             )
             exit(1)
 
@@ -94,7 +85,7 @@ class OmniPlanner(metaclass=OmniPlannerMeta):
             "enable_rank_round_robin", None)
         if self.enable_rank_round_robin is None:
             print(
-                f"[Placement-Error]-enable_rank_round_robin is not defined in config.yaml"
+                "[Placement-Error]-enable_rank_round_robin is not defined in config.yaml"
             )
             exit(1)
 
@@ -401,8 +392,6 @@ class OmniPlanner(metaclass=OmniPlannerMeta):
 
 # Example usage
 if __name__ == "__main__":
-    from optimizer.ada_router_optimizer import AdaRouter
-    from optimizer.token_balance_optimizer import TokenBalance
 
     # Example input: 3 tokens, 4 experts each, with importance scores
     input_token = torch.tensor(

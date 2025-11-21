@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from typing_extensions import override
-from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -17,7 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
                                                        )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 
 from .kv_cache_interface import OmniAttentionSpec, OmniKVCacheConfig
 

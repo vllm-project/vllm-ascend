@@ -19,7 +19,7 @@
 
 import gc
 import os
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import ray
 import torch
@@ -36,10 +36,8 @@ from omni.adaptors.vllm.utils import (check_block_num_cache_exist,
 # from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
 from omni.models.common.config.model_config import model_extra_config
-from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized, get_dp_group,
-                              get_world_group, init_distributed_environment,
+from vllm.distributed import (ensure_model_parallel_initialized, get_world_group, init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import logger
@@ -48,7 +46,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+from vllm.v1.kv_cache_interface import (KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
@@ -155,7 +153,7 @@ class NPUWorker(WorkerBase):
     def init_device(self):
         if self.device_config.device.type == current_platform.device_type:
             if int(os.getenv("NO_NPU_MOCK", "0")):
-                self.device = torch.device(f"cpu")
+                self.device = torch.device("cpu")
             else:
                 self.device = torch.device(
                     f"{current_platform.device_type}:{self.local_rank}")
