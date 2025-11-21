@@ -56,8 +56,7 @@ user_guide/release_notes
 developer_guide/contribution/index
 developer_guide/feature_guide/index
 developer_guide/evaluation/index
-developer_guide/performance/index
-developer_guide/debug/index
+developer_guide/performance_and_debug/index
 :::
 
 % How to involve vLLM Ascend

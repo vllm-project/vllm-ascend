@@ -20,7 +20,7 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/debug/index.md:1
-#: ../../developer_guide/debug/index.md:3
-msgid "Debug"
-msgstr "调试"
+#: ../../developer_guide/performance_and_debug/index.md:1
+#: ../../developer_guide/performance_and_debug/index.md:3
+msgid "Performance and Debug"
+msgstr "性能和调试"
