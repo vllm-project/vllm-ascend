@@ -16,12 +16,11 @@
 
 import os
 
-import vllm_ascend.envs as envs_ascend
 import vllm_ascend.patch.platform.patch_config  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 
-if envs_ascend.DYNAMIC_EPLB not in ("true", "1") or os.getenv(
-        "EXPERT_MAP_RECORD", "false") == "true":
+if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
+        "EXPERT_MAP_RECORD", "false").lower() in ("true", "1"):
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
