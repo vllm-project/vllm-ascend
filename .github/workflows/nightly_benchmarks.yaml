@@ -115,7 +115,8 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -e .
+          pip install -r requirements-dev.txt
+          pip install -v -e .
           pip install -r benchmarks/requirements-bench.txt
 
       - name: Run current commit benchmarks
