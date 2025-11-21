@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
@@ -69,7 +69,7 @@ jobs:
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
       env:
         KUBECONFIG: /tmp/kubeconfig
         KUBECTL: /root/.cache/.kube/kubectl
