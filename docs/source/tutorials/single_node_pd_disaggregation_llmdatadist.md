@@ -152,7 +152,7 @@ python load_balance_proxy_server_example.py \
 Check service health using the proxy server endpoint.
 
 ```shell
-curl http://192.0.0.1:8080/v1/completions \
+curl http://192.0.0.1:8080/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen25vl",
