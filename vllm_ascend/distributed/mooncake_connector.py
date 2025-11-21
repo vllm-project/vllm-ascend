@@ -1241,7 +1241,7 @@ class MooncakeConnectorWorker:
                             pcp_dcp_rank][i],
                         offset=i,
                         num_need_pulls=self.num_need_pulls,
-                        all_task_done=(pcp_dcp_rank 
+                        all_task_done=(pcp_dcp_rank
                                        == len(remote_handshake_port_list) - 1
                                        and i == self.num_need_pulls - 1))
 
