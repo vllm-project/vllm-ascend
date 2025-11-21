@@ -20,7 +20,6 @@ if vllm_version_is("0.11.0"):
 else:
     from vllm.utils.torch_utils import direct_register_custom_op
 
-
 def _maybe_chunk_residual_impl(x: torch.Tensor,
                                residual: torch.Tensor) -> torch.Tensor:
     try:
@@ -40,7 +39,6 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
         residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
 
     return residual
-
 
 def _maybe_all_gather_and_maybe_unpad_impl(
         x: torch.Tensor,
@@ -284,7 +282,6 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
                          dtype=input_parallel.dtype)
 
     return output
-
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
