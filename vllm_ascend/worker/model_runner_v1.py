@@ -531,6 +531,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
         self.attn_dummy_run_call_cnt = 0
+        # import os
+        # experimental_config = torch_npu.profiler._ExperimentalConfig(
+        #     export_type=torch_npu.profiler.ExportType.Text,
+        #     profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
+        #     aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+        # )
+        # self.prof = torch_npu.profiler.profile(
+        #     activities=[
+        #         torch_npu.profiler.ProfilerActivity.CPU,
+        #         torch_npu.profiler.ProfilerActivity.NPU
+        #     ],
+        #     schedule=torch_npu.profiler.schedule(wait=5, warmup=2, active=20, repeat=1, skip_first=20),
+        #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
+        #     experimental_config=experimental_config,
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof")
+        # )
+        # self.prof.start()
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
@@ -2001,7 +2018,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 [0],[0],0,self.afd_connector,[0]
             )
 
-        
+        # self.prof.step()
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with set_ascend_forward_context(
