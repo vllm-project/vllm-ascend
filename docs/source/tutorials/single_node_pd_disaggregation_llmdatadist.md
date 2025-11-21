@@ -2,7 +2,7 @@
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with Expert Parallel (EP) options. This guide takes one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide takes one-by-one steps to verify these features with constrained resources.
 
 Using the Qwen2.5-VL-7B-Instruct model as an example, use vllm-ascend v0.11.0rc1 (with vLLM v0.11.0) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture. Assume the IP address is 192.0.0.1.
 
@@ -12,7 +12,7 @@ Using the Qwen2.5-VL-7B-Instruct model as an example, use vllm-ascend v0.11.0rc1
 
 1. Single Node Verification:
 
-Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+Execute the following commands in sequence. The results must all be `success` and the status must be `UP`:
 
 ```bash
 # Check the remote switch ports
@@ -64,6 +64,7 @@ We can run the following scripts to launch a server on the prefiller/decoder NPU
 ::::{tab-item} Prefiller
 
 ```shell
+export ASCEND_RT_VISIBLE_DEVICES=0
 export HCCL_IF_IP=192.0.0.1 # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
@@ -71,6 +72,7 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export VLLM_ASCEND_LLMDD_RPC_PORT=5959
 
 vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --host 0.0.0.0 \
@@ -99,6 +101,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
 ::::{tab-item} Decoder
 
 ```shell
+export ASCEND_RT_VISIBLE_DEVICES=1
 export HCCL_IF_IP=192.0.0.1  # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
@@ -106,6 +109,7 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export VLLM_ASCEND_LLMDD_RPC_PORT=5979
 
 vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --host 0.0.0.0 \
