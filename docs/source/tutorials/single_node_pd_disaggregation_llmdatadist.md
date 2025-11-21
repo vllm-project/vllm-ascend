@@ -79,7 +79,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name qwen25vl \
-  --max-model-len 30000  \
+  --max-model-len 40000  \
   --max-num-batched-tokens 40000  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
