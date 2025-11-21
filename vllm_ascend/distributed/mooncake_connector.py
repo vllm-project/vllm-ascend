@@ -150,10 +150,11 @@ class KVCacheTaskTracker:
 
 class KVCacheSendingThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, prefill_tp_size: int, local_engine_id: str,
-                 side_channel_host: str, side_channel_port: int,
-                 metadata: MooncakeAgentMetadata, ready_event: threading.Event,
-                 kv_caches: dict[str, Any], pcp_rank: int):
+    def __init__(self, tp_rank: int, prefill_tp_size: int,
+                 local_engine_id: str, side_channel_host: str,
+                 side_channel_port: int, metadata: MooncakeAgentMetadata,
+                 ready_event: threading.Event, kv_caches: dict[str, Any],
+                 pcp_rank: int):
         super().__init__(daemon=True, name="KVCacheSendingThread")
         self.tp_rank = tp_rank
         self.prefill_tp_size = prefill_tp_size
@@ -1240,8 +1241,9 @@ class MooncakeConnectorWorker:
                             pcp_dcp_rank][i],
                         offset=i,
                         num_need_pulls=self.num_need_pulls,
-                        all_task_done=(pcp_dcp_rank == len(remote_handshake_port_list) - 1 and 
-                                       i == self.num_need_pulls - 1))
+                        all_task_done=(pcp_dcp_rank 
+                                       == len(remote_handshake_port_list) - 1
+                                       and i == self.num_need_pulls - 1))
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
