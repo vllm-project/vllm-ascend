@@ -181,9 +181,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # Whether to record expert maps
-    "EXPERT_MAP_RECORD":
-    lambda: os.getenv("EXPERT_MAP_RECORD", "false").lower(),
 }
 
 # end-env-vars-definition
