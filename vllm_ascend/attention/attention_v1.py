@@ -1589,7 +1589,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # npu_fused_infer_attention_score does not support cases
                 # where query.shape[0] != attn_metadata.query_start_loc[-1].
                 # Thus we need unpad it here.
-                num_tokens = attn_metadata.query_start_loc[-1]
+                num_tokens = attn_metadata.actual_seq_lengths_q[-1]
                 query = query[:num_tokens]
                 intermediate_output = self._forward_v1_style(
                     query, attn_metadata, output)
