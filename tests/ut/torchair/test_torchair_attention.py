@@ -23,7 +23,7 @@ class TestAscendAttentionTorchairBackendImpl(TestBase):
               mock_zeros):
         mock_tp.world_size = 2  # TODO
         ascend_config.torchair_graph_config.enabled = True  # TODO
-        ascend_config.torchair_graph_config.enable_kv_nz = False  # TODO
+        ascend_config.enable_kv_nz = False  # TODO
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config

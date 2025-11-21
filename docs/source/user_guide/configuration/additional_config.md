@@ -42,6 +42,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `num_wait_worker_iterations`        | int  | `30`    | The  forward iterations when the EPLB worker will finish CPU tasks. In our test default value 30 can cover most cases.                           |
 | `expert_map_record_path`            | str  | `None`  | When dynamic EPLB is completed, save the current expert load heatmap to the specified path.                                                   |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
+| `enable_kv_nz`| bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek). |
 
 The details of each configuration option are as follows:
 
@@ -57,7 +58,6 @@ The details of each configuration option are as follows:
 | `use_cached_graph` | bool | `False` | Whether to use cached graph. |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache. |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty. |
-| `enable_kv_nz`| bool | `False` | Whether to enable KV Cache NZ layout. This option only takes effect on models using MLA (for example, DeepSeek). |
 | `enable_super_kernel` | bool | `False` | Whether to enable super kernel to fuse operators in deepseek moe layers. This option only takes effects on moe models using dynamic w8a8 quantization.|
 
 **ascend_scheduler_config**
@@ -89,14 +89,13 @@ An example of additional configuration is as follows:
         "enabled": True,
         "use_cached_graph": True,
         "graph_batch_sizes": [1, 2, 4, 8],
-        "graph_batch_sizes_init": False,
-        "enable_kv_nz": False
+        "graph_batch_sizes_init": False
     },
     "ascend_scheduler_config": {
         "enabled": True,
         "enable_chunked_prefill": True,
         "max_long_partial_prefills": 1,
-        "long_prefill_token_threshold": 4096,
+        "long_prefill_token_threshold": 4096
     },
     "weight_prefetch_config": {
         "enabled": True,
@@ -110,7 +109,8 @@ An example of additional configuration is as follows:
             }
         },
     },
+    "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
-    "refresh": False,
+    "refresh": False
 }
 ```
