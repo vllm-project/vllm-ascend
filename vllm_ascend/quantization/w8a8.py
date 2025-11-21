@@ -29,6 +29,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                COMPRESSED_TENSORS_METHOD, is_310p,
                                is_enable_nz)
 
+
 def quant_per_tensor(in_tensor: torch.Tensor,
                      input_scale: torch.Tensor,
                      input_offset: torch.Tensor,

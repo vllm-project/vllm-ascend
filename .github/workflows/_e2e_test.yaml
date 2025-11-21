@@ -203,6 +203,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv tests/e2e/multicard/test_quantization.py
 
   e2e-4-cards:
     name: multicard-4

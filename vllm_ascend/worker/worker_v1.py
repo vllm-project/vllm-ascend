@@ -157,8 +157,6 @@ class NPUWorker(WorkerBase):
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import \
             WEIGHT_LOADER_V2_SUPPORTED
-        WEIGHT_LOADER_V2_SUPPORTED.append(
-            "AscendCompressedTensorsLinearMethod")
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 

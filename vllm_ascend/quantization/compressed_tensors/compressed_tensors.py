@@ -145,10 +145,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             quant_method: LinearMethodBase = UnquantizedLinearMethod()
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
-                ascend_quant_config = AscendQuantConfig(
-                                        self.quant_description)
-                quant_method = AscendLinearMethod(ascend_quant_config,
-                                                  prefix, None, layer)
+                ascend_quant_config = AscendQuantConfig(self.quant_description
+                                                        or {})
+                quant_method = AscendLinearMethod(ascend_quant_config, prefix,
+                                                  None, layer)
             return quant_method
         return None
 
@@ -250,55 +250,3 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         self.target_scheme_map = hf_to_vllm_mapper.apply_dict(
             self.target_scheme_map)
         self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
-
-
-class AscendCompressedTensorsLinearMethod(LinearMethodBase):
-
-    def __init__(self, quantization_config: AscendCompressedTensorsConfig):
-        self.quantization_config = quantization_config
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.scheme.process_weights_after_loading(layer)
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        """
-        Use the CompressedTensorsScheme associated with each layer to create
-        the necessary parameters for the layer. See LinearMethodBase for param
-        details
-        """
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.scheme.create_weights(
-            layer=layer,
-            input_size=input_size,
-            input_size_per_partition=input_size_per_partition,
-            output_partition_sizes=output_partition_sizes,
-            output_size=output_size,
-            params_dtype=params_dtype,
-            weight_loader=weight_loader,
-        )
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ):
-        """
-        Use the output of create_weights and the CompressedTensorsScheme
-        associated with the layer to apply the forward pass with the
-        layer input.  See LinearMethodBase for param details
-
-        """
-        scheme = layer.scheme
-        if scheme is None:
-            raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias)

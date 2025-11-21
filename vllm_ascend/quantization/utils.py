@@ -63,7 +63,7 @@ def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
 def get_quant_method(quant_description: Dict[str, Any],
                      prefix: str,
                      layer_type: str,
-                     packed_modules_mapping: Optional[Dict[str, Any]],
+                     packed_modules_mapping: Optional[Dict[str, Any]] = None,
                      layer: torch.nn.Module = None):
     if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
         return get_quant_method_llmcompressor(layer)

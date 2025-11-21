@@ -53,4 +53,3 @@ for output in outputs:
 ### Online inference
 
 Start the quantized model using vLLM Ascend; no modifications to the startup command are required.
-

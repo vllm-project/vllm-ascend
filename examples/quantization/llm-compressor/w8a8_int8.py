@@ -9,7 +9,6 @@ from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
 from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme, QuantizationType, QuantizationStrategy
-from qwen_vl_utils import process_vision_info
 
 W8A8_W_cha_A_ten_static_symmetric = {
     "group_0": QuantizationScheme(
@@ -54,11 +53,11 @@ TOKENIZER_DICT = {
 
 def load_environment_variables():
     env_vars = {
-        'model_path': os.getenv('MODEL_PATH'),
-        'export_path': os.getenv('EXPORT_PATH'),
-        'modifier': os.getenv('MODIFIER'),
-        'schemes': os.getenv('SCHEMES'),
-        'calib_prompt_path': os.getenv('CALIB_PROMPT_PATH')
+        'model_path': "Qwen3-32B",
+        'export_path': "/llm-compressor/export/GPTQ/W8A8_W_cha_A_ten_static_symmetric",
+        'modifier': "GPTQ",
+        'schemes': "W8A8_W_cha_A_ten_static_symmetric",
+        'calib_prompt_path': "dataset/ultrachat_200k"
     }
 
     # verify export model path
@@ -112,7 +111,7 @@ def data_collator(batch):
     }
 
 
-def quantize_model(model, config, env_vars, is_vl_model, dataset_dict=None):
+def quantize_model(model, env_vars, dataset_dict=None):
     # since the MoE gate layers are sensitive to quantization, we add them to the ignore
     # list so they remain at full precision
     ignore = ["lm_head", "re:.*mlp.down_proj"]
@@ -125,29 +124,13 @@ def quantize_model(model, config, env_vars, is_vl_model, dataset_dict=None):
         ),
     ]
 
-    if env_vars['modifier'] == 'PTQ':
-        oneshot(
-            model=model,
-            recipe=recipe,
-            trust_remote_code_model=True,
-        )
-    elif is_vl_model:
-        # quantize the model
-        oneshot(
-            model=model,
-            dataset=dataset_dict,
-            recipe=recipe,
-            data_collator=data_collator,
-            trust_remote_code_model=True,
-        )
-    else:
-        # quantize the model
-        oneshot(
-            model=model,
-            dataset=dataset_dict,
-            recipe=recipe,
-            trust_remote_code_model=True,
-        )
+    # quantize the model
+    oneshot(
+        model=model,
+        dataset=dataset_dict,
+        recipe=recipe,
+        trust_remote_code_model=True,
+    )
 
 
 def save_quantized_model(model, tokenizer, save_path, save_compressed=False):
@@ -175,7 +158,7 @@ if __name__ == '__main__':
     ds = load_calibration_text_dataset(env_vars["calib_prompt_path"], tokenizer)
 
     # Quantize the model
-    quantize_model(model, config, env_vars, is_vl_model, ds)
+    quantize_model(model, env_vars, ds)
 
     # save the quantized model
     save_quantized_model(model, tokenizer, env_vars['export_path'], True)
