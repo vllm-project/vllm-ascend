@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from typing import Optional
+
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
@@ -18,7 +20,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-from typing import Optional
 
 
 class AttentionMaskBuilder:

@@ -20,22 +20,10 @@ from typing import Callable, Optional
 
 import torch
 import torch_npu
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.config import get_current_vllm_config
-from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
-                              tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
-
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoEParallelConfig, MoEConfig)
-
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
-
-import torch.distributed as dist
+    UnquantizedFusedMoEMethod)
 
 from .device import is_310p
 
@@ -98,7 +86,7 @@ def fused_experts_moge(
     group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
 
     w1 = w1.transpose(1, 2)
-    
+
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[sorted_hidden_states],
         weight=[w1],
@@ -131,7 +119,6 @@ def fused_experts_moge(
         bsz, top_k // ep_size, -1).sum(1)
 
     return final_hidden_states
-
 
 
 def native_grouped_topk(
@@ -282,7 +269,7 @@ def forward_oot(
         e_score_correction_bias=e_score_correction_bias,
         global_num_experts=global_num_experts,
     )
-    
+
     assert global_num_experts is not None
 
     return fused_experts_moge(
@@ -300,4 +287,3 @@ def forward_oot(
 def patch_fused_moe_ops():
     UnquantizedFusedMoEMethod.forward_oot = forward_oot
     logger.info("UnquantizedFusedMoEMethod.forward_oot is replaced.")
-    

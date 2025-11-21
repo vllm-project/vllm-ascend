@@ -5,10 +5,11 @@ import logging
 import os
 import platform
 import shutil
-import sys
 import stat
+import sys
 import tempfile
 from multiprocessing import cpu_count
+
 from Cython.Build import cythonize
 from Cython.Distutils import build_ext
 from setuptools import setup
@@ -16,8 +17,9 @@ from setuptools.extension import Extension
 
 logging.basicConfig(level=logging.INFO)
 
-build_root_dir = 'build/lib.' + platform.system().lower() + '-' + platform.machine() + '-' + str(
-    sys.version_info.major) + '.' + str(sys.version_info.minor)
+build_root_dir = 'build/lib.' + platform.system().lower(
+) + '-' + platform.machine() + '-' + str(sys.version_info.major) + '.' + str(
+    sys.version_info.minor)
 
 logging.info('%s', build_root_dir)
 
@@ -62,7 +64,8 @@ def compose_extensions(root='.'):
         abs_file = os.path.join(root, file_)
         if os.path.isfile(abs_file):
             if abs_file.endswith('.py') and "setup.py" not in abs_file:
-                extensions.append(Extension(get_root_path(abs_file) + '.*', [abs_file]))
+                extensions.append(
+                    Extension(get_root_path(abs_file) + '.*', [abs_file]))
             elif abs_file.endswith('.c') or abs_file.endswith('.pyc'):
                 continue
             else:
@@ -80,13 +83,11 @@ def compose_extensions(root='.'):
 compose_extensions()
 os.remove(init_file)
 
-setup(
-    name='optiquant',
-    version='0.0.1',
-    ext_modules=cythonize(
-        extensions,
-        nthreads=cpu_count(),
-        compiler_directives=dict(always_allow_keywords=True),
-        include_path=[]),
-    cmdclass=dict(build_ext=build_ext)
-)
+setup(name='optiquant',
+      version='0.0.1',
+      ext_modules=cythonize(
+          extensions,
+          nthreads=cpu_count(),
+          compiler_directives=dict(always_allow_keywords=True),
+          include_path=[]),
+      cmdclass=dict(build_ext=build_ext))

@@ -412,7 +412,7 @@ if [ $(echo -n "$NODE_IP_LIST" | tr -cd ',' | wc -c) -ge 1 ]; then
     end_time=300
     while true; do
       if [ $cost_time -ge $end_time ]; then
-        echo "error, conneciton timeout"
+        echo "error, connection timeout"
         exit 1
       fi
 

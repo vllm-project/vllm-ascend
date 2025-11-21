@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import yaml
 from pathlib import Path
+
+import yaml
 
 
 class Config:
+
     def __init__(self, config_yaml_path):
         omni_config = self.load_and_validate_config(config_yaml_path)
         if omni_config:
@@ -35,6 +37,6 @@ class Config:
                 setattr(self, key, sub_obj)
             else:
                 setattr(self, key, value)
-    
+
     def getattr(self, key, default_value):
         return getattr(self, key, default_value)

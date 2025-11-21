@@ -114,7 +114,7 @@ Use the provided sample configuration to enable the module and configure upstrea
 * `nginx-static-bucket.conf`: Apply static_bucket for P nodes, and choose length_balance, greedy_timeout, or weighted_least_active for D nodes.
 * `nginx-dynamic-bucket.conf`: Apply dynamic_bucket for P nodes, and choose length_balance, greedy_timeout, or weighted_least_active  for D nodes.
 
-#### 2. **Commom configuration explaination**
+#### 2. **Common configuration explanation**
 * `worker_processes`: Number of worker processes. Each worker process occupies one CPU core.
 * `worker_rlimit_nofile`: Maximum number of open files per worker process.
 

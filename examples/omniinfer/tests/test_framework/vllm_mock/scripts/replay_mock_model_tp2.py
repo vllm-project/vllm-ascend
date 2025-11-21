@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import torch
-import torch_npu
-
-from vllm import LLM, SamplingParams
+import os
 
 from random_mock_model_tp2 import run_offline_prompts
-
-import os
 
 if __name__ == "__main__":
     os.environ["VLLM_USE_V1"] = "1"

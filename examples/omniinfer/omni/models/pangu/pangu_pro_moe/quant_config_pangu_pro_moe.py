@@ -28,6 +28,7 @@ from torch.library import Library
 from vllm import utils
 from vllm.utils import vllm_lib
 
+
 def ascend_direct_register_custom_op(
         op_name: str,
         op_func: Callable,
@@ -59,29 +60,24 @@ def ascend_direct_register_custom_op(
 
 utils.direct_register_custom_op = ascend_direct_register_custom_op
 
-
 from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 import torch
+from omni.adaptors.vllm.utils import ASCEND_QUATIZATION_METHOD
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config, _CUSTOMIZED_METHOD_TO_QUANT_CONFIG
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 
 from .quantizer import AscendQuantizer
-from omni.adaptors.vllm.utils import ASCEND_QUATIZATION_METHOD
-
 
 
 # @register_quantization_config(ASCEND_QUATIZATION_METHOD)
@@ -117,7 +113,8 @@ class AscendQuantConfig_Pangu_Pro_Moe(QuantizationConfig):
         return ["quant_model_description.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AscendQuantConfig_Pangu_Pro_Moe":
+    def from_config(
+            cls, config: Dict[str, Any]) -> "AscendQuantConfig_Pangu_Pro_Moe":
         return cls(config)
 
     @classmethod
@@ -129,7 +126,6 @@ class AscendQuantConfig_Pangu_Pro_Moe(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -188,8 +184,8 @@ class AscendLinearMethod(LinearMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]) -> None:
+    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe,
+                 prefix: str, packed_modules_mapping: Dict[str, Any]) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_linear_method()
@@ -258,7 +254,8 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe, prefix: str) -> None:
+    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe,
+                 prefix: str) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix)
         self.quant_method = self.quantizer.build_attention_method()
@@ -290,8 +287,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]):
+    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe,
+                 prefix: str, packed_modules_mapping: Dict[str, Any]):
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_moe_method()
@@ -353,4 +350,4 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
-            self.quant_method.process_weights_after_loading(layer) 
+            self.quant_method.process_weights_after_loading(layer)

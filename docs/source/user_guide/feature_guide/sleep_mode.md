@@ -13,15 +13,15 @@ With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm wi
 The engine(v0/v1) supports two sleep levels to manage memory during idle periods:
 
 - Level 1 Sleep
-    - Action: Offloads model weights and discards the KV cache.
-    - Memory: Model weights are moved to CPU memory; KV cache is forgotten.
-    - Use Case: Suitable when reusing the same model later.
-    - Note: Ensure sufficient CPU memory is available to hold the model weights.
+  - Action: Offloads model weights and discards the KV cache.
+  - Memory: Model weights are moved to CPU memory; KV cache is forgotten.
+  - Use Case: Suitable when reusing the same model later.
+  - Note: Ensure sufficient CPU memory is available to hold the model weights.
 
 - Level 2 Sleep
-    - Action: Discards both model weights and KV cache.
-    - Memory: The content of both the model weights and kv cache is forgotten.
-    - Use Case: Ideal when switching to a different model or updating the current one.
+  - Action: Discards both model weights and KV cache.
+  - Memory: The content of both the model weights and kv cache is forgotten.
+  - Use Case: Ideal when switching to a different model or updating the current one.
 
 Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default while building from source.
 

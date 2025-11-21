@@ -372,8 +372,8 @@ def rejection_greedy_sample_pytorch(
     output_token_ids[final_copy_mask] = target_argmax[
         global_idx[final_copy_mask]]
     # Fill bonus token.
-    needs_bonus = is_greedy & (first_mismatch_pos_per_req >=
-                               draft_tokens_per_req)
+    needs_bonus = is_greedy & (first_mismatch_pos_per_req
+                               >= draft_tokens_per_req)
     if torch.any(needs_bonus):
         bonus_rows = torch.where(needs_bonus)[0]
         bonus_cols = draft_tokens_per_req[bonus_rows]

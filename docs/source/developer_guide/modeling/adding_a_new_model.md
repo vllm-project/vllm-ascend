@@ -31,7 +31,7 @@ Follow vllm's [OPT model adaptation](https://docs.vllm.ai/en/stable/contributing
 `*` denotes your model's unique identifier.
 :::
 
-3. Critical Implementation Details:
+1. Critical Implementation Details:
 
 All modules must include a `prefix` argument in `__init__()`.
 
@@ -42,11 +42,11 @@ All modules must include a `prefix` argument in `__init__()`.
 | `*ModelForCausalLM`  | `get_input_embeddings`, `compute_logits`, `load_weights` |
 | `*Model`             | `get_input_embeddings`, `load_weights`    |
 
-4. Attention Backend Integration:
+1. Attention Backend Integration:
 
 Importing attention via `from vllm.attention import Attention` can automatically leverage the attention backend routing of vllm-ascend (see: `get_attn_backend_cls()` in `vllm_ascend/platform.py`).
 
-5. Tensor Parallelism:
+1. Tensor Parallelism:
 
 Use vllm's parallel layers (`ColumnParallelLinear`, `VocabParallelEmbedding`, etc.) to implement models supporting tensor parallelism. Note that Ascend-specific customizations are implemented in `vllm_ascend/ops/` directory (RMSNorm, VocabParallelEmbedding, etc.).
 

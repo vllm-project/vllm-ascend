@@ -24,46 +24,42 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional, Union, List
+from typing import Any, List, Optional, Union
 
 import torch
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
+from omni.models.common.layers.fused_mlp import FusedMLP
+from omni.models.common.layers.layernorm import RMSNormFlashComm
+from omni.models.common.layers.linear import (QKVParallelFlashCommLinear,
+                                              RowParallelFlashCommLinear)
+from omni.models.common.layers.rotary_embedding import (QwenRotaryEmbedding,
+                                                        get_rope)
 from torch import nn
 from transformers import Qwen3Config
-
-from vllm.attention import Attention, AttentionType, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
-from vllm.logger import logger
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
-from omni.models.common.layers.layernorm import RMSNormFlashComm
-from omni.models.common.layers.linear import RowParallelFlashCommLinear, QKVParallelFlashCommLinear
-from omni.models.common.layers.rotary_embedding import get_rope, QwenRotaryEmbedding
-from omni.models.common.layers.fused_mlp import FusedMLP
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
+    AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import IntermediateTensors
 
 
 class Qwen3MLP(FusedMLP):
     pass
+
 
 class Qwen3Attention(nn.Module):
 
@@ -87,7 +83,7 @@ class Qwen3Attention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        tp_rank=get_tensor_model_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -139,25 +135,19 @@ class Qwen3Attention(nn.Module):
             base=self.rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn")
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor,
+                kv_cache: torch.Tensor, cos: torch.Tensor,
+                sin: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
@@ -165,7 +155,7 @@ class Qwen3Attention(nn.Module):
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                            self.head_dim)
+                           self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k, cos, sin)
@@ -208,7 +198,7 @@ class Qwen3DecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, 'attention_bias', False),
-            head_dim=getattr(config, 'head_dim', None),            
+            head_dim=getattr(config, 'head_dim', None),
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             cache_config=cache_config,
@@ -226,9 +216,9 @@ class Qwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNormFlashComm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNormFlashComm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNormFlashComm(
+            config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -246,18 +236,18 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            cos=cos,
-            sin=sin
-        )
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       cos=cos,
+                                       sin=sin)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, x_transform=None, reduce_type="AR")
+        hidden_states = self.mlp(hidden_states,
+                                 x_transform=None,
+                                 reduce_type="AR")
         return hidden_states, residual
 
 
@@ -300,9 +290,11 @@ class Qwen3Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
 
         base = getattr(config, "rope_theta", 1000000)
-        rotary_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        rotary_dim = getattr(config, "head_dim",
+                             config.hidden_size // config.num_attention_heads)
         max_len = config.max_position_embeddings
-        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(base, rotary_dim, max_len)
+        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(
+            base, rotary_dim, max_len)
         self.register_buffer("full_cos", full_cos, persistent=False)
         self.register_buffer("full_sin", full_sin, persistent=False)
 
@@ -310,10 +302,8 @@ class Qwen3Model(nn.Module):
         decoder_layer_type = decoder_layer_type or Qwen3DecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer_type(config,
-                                              cache_config,
-                                              quant_config,
-                                              prefix),
+            lambda prefix: decoder_layer_type(config, cache_config,
+                                              quant_config, prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -321,7 +311,8 @@ class Qwen3Model(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
         if get_pp_group().is_last_rank:
-            self.norm = RMSNormFlashComm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNormFlashComm(config.hidden_size,
+                                         eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -348,10 +339,14 @@ class Qwen3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
+        cos = torch.index_select(
+            self.full_cos, dim=0,
+            index=positions)  # cos.shape [num_tokens, head_size]
         sin = torch.index_select(self.full_sin, dim=0, index=positions)
 
-        hidden_states, residual = self.forward_layers(positions, hidden_states, residual, kv_caches, cos, sin)
+        hidden_states, residual = self.forward_layers(positions, hidden_states,
+                                                      residual, kv_caches, cos,
+                                                      sin)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -361,16 +356,14 @@ class Qwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual, y_transform=None)
         return hidden_states
 
-    def forward_layers(self, positions, hidden_states, residual, kv_caches, cos, sin):
+    def forward_layers(self, positions, hidden_states, residual, kv_caches,
+                       cos, sin):
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                kv_caches[layer_idx] if kv_caches is not None else None,
-                cos, sin
-            )
+                positions, hidden_states, residual,
+                kv_caches[layer_idx] if kv_caches is not None else None, cos,
+                sin)
         return hidden_states, residual
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -410,6 +403,7 @@ class Qwen3Model(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+
 @support_torch_compile
 class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -432,7 +426,9 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = vllm_config.quant_config
-        self.model = Qwen3Model(self.config, vllm_config.cache_config, vllm_config.quant_config,
+        self.model = Qwen3Model(self.config,
+                                vllm_config.cache_config,
+                                vllm_config.quant_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self.sampler = Sampler()
 
@@ -440,12 +436,12 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if self.config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
-                self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                              self.config.hidden_size,
-                                              quant_config=vllm_config.quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"),
-                                              parallel_lmhead=False)
+                self.lm_head = ParallelLMHead(
+                    self.config.vocab_size,
+                    self.config.hidden_size,
+                    quant_config=vllm_config.quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                    parallel_lmhead=False)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -457,18 +453,17 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor] = None,
-        attn_metadata: AttentionMetadata = None,
-        selected_indices: Optional[torch.Tensor] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds = None,
-        **kwargs
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors, None)
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor] = None,
+                attn_metadata: AttentionMetadata = None,
+                selected_indices: Optional[torch.Tensor] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds=None,
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors, None)
         return hidden_states
 
     def compute_logits(
@@ -490,9 +485,9 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights)
 
     def sample(
-            self,
-            logits: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -502,5 +497,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if not attn_metadata:
             return True
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

@@ -130,7 +130,8 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         self.num_mtp_layers = config.num_nextn_predict_layers
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict({
-            str(idx): CustomDeepSeekMultiTokenPredictorLayer(
+            str(idx):
+            CustomDeepSeekMultiTokenPredictorLayer(
                 config,
                 f"{prefix}.layers.{idx}",
                 model_config=vllm_config.model_config,

@@ -1,13 +1,15 @@
 from omni.adaptors.vllm.utils import get_attr_by_names
 
-# The following patches are corresponding to vllm-0.9.0 
+
+# The following patches are corresponding to vllm-0.9.0
 def patch_pangu():
     from vllm.config import ModelConfig
 
     @property
     def is_deepseek_mla(self) -> bool:
         kv_lora_dim_names = ['attention_kv_lora_dim', 'kv_lora_rank']
-        kv_lora_dim = get_attr_by_names(self.hf_text_config, kv_lora_dim_names, None)
+        kv_lora_dim = get_attr_by_names(self.hf_text_config, kv_lora_dim_names,
+                                        None)
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
@@ -27,7 +29,7 @@ def patch_pangu():
             "num_experts",  # Jamba
             "n_routed_experts",  # DeepSeek
             "num_local_experts",  # Mixtral
-            "num_routed_experts", # Pangu
+            "num_routed_experts",  # Pangu
         ]
         num_experts = 0
         for name in num_expert_names:
@@ -43,20 +45,23 @@ def patch_pangu():
         if self.is_deepseek_mla:
             qk_rope_dim_names = ['attention_qk_rope_dim', 'qk_rope_head_dim']
             kv_lora_dim_names = ['attention_kv_lora_dim', 'kv_lora_rank']
-            qk_rope_dim = get_attr_by_names(self.hf_text_config, qk_rope_dim_names, 0)
-            kv_lora_dim = get_attr_by_names(self.hf_text_config, kv_lora_dim_names, 0)
+            qk_rope_dim = get_attr_by_names(self.hf_text_config,
+                                            qk_rope_dim_names, 0)
+            kv_lora_dim = get_attr_by_names(self.hf_text_config,
+                                            kv_lora_dim_names, 0)
             if self.use_mla:
                 return kv_lora_dim + qk_rope_dim
             else:
                 qk_dim_names = ['attention_qk_dim', 'qk_nope_head_dim']
-                qk_dim = get_attr_by_names(self.hf_text_config, qk_dim_names, 0)
+                qk_dim = get_attr_by_names(self.hf_text_config, qk_dim_names,
+                                           0)
                 if qk_rope_dim and qk_dim:
                     return qk_rope_dim + qk_dim
 
     # for mtp
-    from vllm.config import SpeculativeConfig
-    from transformers import PretrainedConfig
     import vllm.envs as envs
+    from transformers import PretrainedConfig
+    from vllm.config import SpeculativeConfig
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -68,7 +73,7 @@ def patch_pangu():
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
             })
-        
+
         if hf_config.model_type == "pangu_ultra_moe":
             hf_config.model_type = "pangu_ultra_moe_mtp"
         if hf_config.model_type == "pangu_ultra_moe_mtp":
@@ -186,7 +191,7 @@ def patch_pangu():
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
-                
+
                 # Automatically detect the method
                 if self.method in ('eagle', 'eagle3'):
                     pass
@@ -226,8 +231,8 @@ def patch_pangu():
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
-                    from vllm.transformers_utils.configs.eagle import (
-                        EAGLEConfig)
+                    from vllm.transformers_utils.configs.eagle import \
+                        EAGLEConfig
                     if isinstance(self.draft_model_config.hf_config,
                                   EAGLEConfig):
                         pass
@@ -284,7 +289,8 @@ def patch_pangu():
         self._verify_args()
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp","pangu_ultra_moe_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
+                               "pangu_ultra_moe_mtp")
 
     ModelConfig.is_deepseek_mla = is_deepseek_mla
     ModelConfig._verify_with_expert_parallelism = _verify_with_expert_parallelism

@@ -218,10 +218,10 @@ Placement::~Placement() {
 
 // 等待合适的时机等待专家权重替换
 void quiesce() {
-    // wait 5s before move weights to new postion
+    // wait 5s before move weights to new position
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
-    // TODO: triger by vLLM when token finish
+    // TODO: trigger by vLLM when token finish
 }
 
 std::string convertInstructionToString(ChangeInstruction instruction) {
@@ -300,7 +300,7 @@ void Placement::placement_manager(aclrtContext currentContext) {
                 continue;
             changeInstructions_this_rank.push_back(instruction);
 
-            // Log Infomation
+            // Log Information
             if (instruction.source_rank == rank_) {
                 log_info += " S-L[" + std::to_string(instruction.layer_idx) +
                             "]-T[" + std::to_string((int)instruction.type) +
@@ -479,7 +479,7 @@ void Placement::placement_manager(aclrtContext currentContext) {
 
     dist_ptr->release_recv_buffs();
     aclrtDestroyStream(stream);
-    std::cout << "placement worker thread stoped\n";
+    std::cout << "placement worker thread stopped\n";
 }
 
 void Placement::start_thread() {

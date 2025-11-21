@@ -331,8 +331,10 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={req.request_id: i
-                         for i, req in enumerate(requests)},
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(requests)
+        },
         sampled_token_ids=[[EOS_TOKEN_ID],
                            [10,
                             11]],  # First request hits EOS, second continues
@@ -380,8 +382,10 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={req.request_id: i
-                         for i, req in enumerate(requests)},
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(requests)
+        },
         sampled_token_ids=[[10, 42, 12],
                            [13, 14]],  # First request hits stop token
         spec_token_ids=None,
@@ -427,8 +431,10 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={req.request_id: i
-                         for i, req in enumerate(requests)},
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(requests)
+        },
         sampled_token_ids=[[10, 11, 12],
                            [13]],  # First request exceeds max_tokens
         spec_token_ids=None,

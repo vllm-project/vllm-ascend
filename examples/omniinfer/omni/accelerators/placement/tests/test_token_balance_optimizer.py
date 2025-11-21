@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import unittest
-import torch
-import torch_npu
-import numpy as np
-import sys
-import os
 import random
 import time
-from unittest.mock import MagicMock, patch
+import unittest
+
+import numpy as np
+import torch
 
 from ..omni_placement.cluster_status import ClusterStatus
 from ..omni_placement.expert_mapping import ExpertMapping
@@ -18,14 +15,24 @@ from ..omni_placement.optim.token_balance_optimizer import TokenBalance
 # device = torch.device('npu' if torch.npu.is_available() else 'cpu')
 device = 'cpu'
 
-class TestTokenBalance(unittest.TestCase):
-    def setUp(self):
-        expert_placement = np.load('./patterns/placement_pattern_3d_v3_naivebalance3_16devices_HE.npy').astype(np.int32)
-        self.placement_pattern = torch.tensor(expert_placement, dtype=torch.int64, device=device)
-        print('Testing....shape of ',self.placement_pattern.shape)
 
-        expert_mapping = ExpertMapping('../patterns/placement_pattern_3d_v3_naivebalance3_16devices_HE.npy', device)
-        self.cluster_status = ClusterStatus(config=None, expert_mapping=expert_mapping, rank=0)
+class TestTokenBalance(unittest.TestCase):
+
+    def setUp(self):
+        expert_placement = np.load(
+            './patterns/placement_pattern_3d_v3_naivebalance3_16devices_HE.npy'
+        ).astype(np.int32)
+        self.placement_pattern = torch.tensor(expert_placement,
+                                              dtype=torch.int64,
+                                              device=device)
+        print('Testing....shape of ', self.placement_pattern.shape)
+
+        expert_mapping = ExpertMapping(
+            '../patterns/placement_pattern_3d_v3_naivebalance3_16devices_HE.npy',
+            device)
+        self.cluster_status = ClusterStatus(config=None,
+                                            expert_mapping=expert_mapping,
+                                            rank=0)
         # 创建一个TokenBalance实例用于测试
         self.optimizer = TokenBalance(self.cluster_status)
 
@@ -63,7 +70,10 @@ class TestTokenBalance(unittest.TestCase):
                 for ep_id in range(self.placement_pattern.shape[2]):
                     if self.placement_pattern[device_id, layer_id, ep_id] == 1:
                         # expert_positions.append((device_id, layer_id, ep_id))
-                        expert_positions.append(torch.tensor((device_id, layer_id, ep_id), dtype=torch.int64, device=device))
+                        expert_positions.append(
+                            torch.tensor((device_id, layer_id, ep_id),
+                                         dtype=torch.int64,
+                                         device=device))
                         count += 1
 
         # 验证position_mapping的计算是否正确
@@ -72,7 +82,8 @@ class TestTokenBalance(unittest.TestCase):
         for xx in expert_positions:
             device_id, layer_id, ep_id = xx[0], xx[1], xx[2]
             # 手动计算预期的position_mapping值
-            expected_value = self.optimizer.expert_per_device * device_id + torch.sum(self.placement_pattern[device_id, layer_id, :ep_id]).item()
+            expected_value = self.optimizer.expert_per_device * device_id + torch.sum(
+                self.placement_pattern[device_id, layer_id, :ep_id]).item()
 
             # 开始计时
             start_time = time.time()
@@ -90,7 +101,6 @@ class TestTokenBalance(unittest.TestCase):
 
         print('Total time:', tt_tt)
 
-
     def test_optimize_function(self):
         # 设置随机种子以确保结果可重现
         # random.seed(42)
@@ -102,17 +112,21 @@ class TestTokenBalance(unittest.TestCase):
 
         # 设置测试参数
         num_tokens = 1000  # 输入tokens数量
-        topk = 32          # 每个token选择的专家数
+        topk = 32  # 每个token选择的专家数
 
         # 随机生成layer_id (范围在0到expert_mapping.shape[1]-1之间)
-        layer_id_moe = random.randint(0, self.placement_pattern.shape[1]-1)  # 注意API中layer_id从1开始
+        layer_id_moe = random.randint(0, self.placement_pattern.shape[1] -
+                                      1)  # 注意API中layer_id从1开始
         print(f"\nRandom layer_id: {layer_id_moe}")
 
         # 随机生成origin_topk矩阵 (形状为num_tokens x topk)
         # 值的范围在-1到expert_mapping.shape[2]-1之间
         # origin_topk = torch.randint(-1, self.placement_pattern.shape[2], (num_tokens, topk))
 
-        origin_topk = torch.randint(-1, self.placement_pattern.shape[2], (num_tokens, topk), device=device)
+        origin_topk = torch.randint(-1,
+                                    self.placement_pattern.shape[2],
+                                    (num_tokens, topk),
+                                    device=device)
         print(f"\nRandom origin_topk shape: {origin_topk.shape}")
 
         # 创建虚拟的token和token_expert_scores (值不重要，因为在当前实现中未使用)
@@ -121,13 +135,15 @@ class TestTokenBalance(unittest.TestCase):
 
         # 调用optimize函数获取优化后的映射, 是位置id
         print("\nCalling optimize function...")
-        layer_id_moe = torch.tensor(layer_id_moe, dtype=torch.int64, device=device)
+        layer_id_moe = torch.tensor(layer_id_moe,
+                                    dtype=torch.int64,
+                                    device=device)
 
         start_time = time.time()
 
         _, optimized_mapping, _ = self.optimizer.optimize(
-            layer_id_moe, input_token, origin_topk.clone(), token_expert_scores, self.cluster_status
-        )
+            layer_id_moe, input_token, origin_topk.clone(),
+            token_expert_scores, self.cluster_status)
 
         end_time = time.time()
 
@@ -143,13 +159,19 @@ class TestTokenBalance(unittest.TestCase):
 
                 pos_id = optimized_mapping[i][j].item()
 
-                if pos_id==-1:  continue
+                if pos_id == -1: continue
 
                 device_id = pos_id // ep_per_device
                 pos_this_device = pos_id % ep_per_device
 
-                self.assertEqual(self.placement_pattern[device_id, layer_id_moe, value_ori], 1)
-                self.assertEqual(torch.sum(self.placement_pattern[device_id, layer_id_moe, :value_ori]), pos_this_device)
+                self.assertEqual(
+                    self.placement_pattern[device_id, layer_id_moe, value_ori],
+                    1)
+                self.assertEqual(
+                    torch.sum(
+                        self.placement_pattern[device_id,
+                                               layer_id_moe, :value_ori]),
+                    pos_this_device)
 
 
 if __name__ == "__main__":

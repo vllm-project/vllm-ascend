@@ -19,10 +19,11 @@
 #
 
 from contextlib import contextmanager
-from typing import  Any
+from typing import Any
 
 from vllm import forward_context
 from vllm.config import VllmConfig
+
 
 @contextmanager
 def set_forward_context(attn_metadata: Any,
@@ -34,7 +35,8 @@ def set_forward_context(attn_metadata: Any,
     """
     prev_context = forward_context._forward_context
     forward_context._forward_context = forward_context.ForwardContext(
-        no_compile_layers=vllm_config.compilation_config.static_forward_context,
+        no_compile_layers=vllm_config.compilation_config.
+        static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=None)

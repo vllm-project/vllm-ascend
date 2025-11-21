@@ -55,7 +55,7 @@ Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev
 `Non-MLA` LLMs forcibly disable the `chunked prefill` feature, as the performance of operators supporting this feature functionality is currently suboptimal. Therefore, in this scenario, we enforce the `Ascend scheduler` and forcibly disable `chunked prefill`. It is important to note that when you launch a non-MLA model with a simple script, the underlying behavior deviates from vLLM’s default of enabling chunked prefill: chunked prefill is effectively turned off, and prefill and decode are scheduled separately. Consequently, inference performance may drop significantly compared to expectations.
 
 Accordingly, we recommend the following serving configuration to achieve optimal performance on a single node:
-1. We recommend `--max-model-len` to a value just slightly larger than `max_input_len + max_output_len`; this reserves more KV-cache allocation headroom and reduces the risk of OOM. 
+1. We recommend `--max-model-len` to a value just slightly larger than `max_input_len + max_output_len`; this reserves more KV-cache allocation headroom and reduces the risk of OOM.
 2. We recommend aligning `--max-num-batched-tokens` with `–-max-model-len`, or setting it a few times larger than the average input length in your dataset; this helps maintain a good load balance between prefill and decode phases.
 
 ### 7. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
@@ -88,7 +88,7 @@ Yes, Prefill Disaggregation feature is supported on V1 Engine for NPND support.
 
 ### 11. Does vllm-ascend support quantization method?
 
-w8a8 and w4a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or higher, 
+w8a8 and w4a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or higher,
 
 ### 12. How to run w8a8 DeepSeek model?
 
@@ -162,7 +162,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-2. Set the following enveriments parameters:
+1. Set the following enveriments parameters:
 
 ```bash
 export LCCL_DETERMINISTIC=1

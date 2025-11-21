@@ -39,3 +39,7 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     PATH="$PATH:$(pwd)/shellcheck-${scversion}"
     export PATH
 fi
+
+# should enable this
+# find . -path ./.git -prune -o -name "*.sh" -print0 \
+# | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'

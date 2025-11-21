@@ -1,13 +1,11 @@
-from typing import Callable, Optional, TypeVar, Union
+from typing import TypeVar, Union
 
-import torch
 import torch.nn as nn
-
+from omni.adaptors.vllm.compilation.wrapper import \
+    TorchNpuCompilerWrapperWithCustomDispatcher
 from vllm.compilation.counter import compilation_counter
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
-
-from omni.adaptors.vllm.compilation.wrapper import TorchNpuCompilerWrapperWithCustomDispatcher
 
 logger = init_logger(__name__)
 
@@ -15,13 +13,14 @@ _T = TypeVar('_T', bound=type[nn.Module])
 
 
 def _support_torch_compile(
-        cls: _T,
-        dynamic_arg_dims: dict[str, Union[int, list[int]]],
+    cls: _T,
+    dynamic_arg_dims: dict[str, Union[int, list[int]]],
 ) -> _T:
     if TorchNpuCompilerWrapperWithCustomDispatcher in cls.__bases__:
         return cls
 
-    cls.__bases__ = cls.__bases__ + (TorchNpuCompilerWrapperWithCustomDispatcher,)
+    cls.__bases__ = cls.__bases__ + (
+        TorchNpuCompilerWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__
 

@@ -30,10 +30,12 @@
 
 from typing import Any, Dict, List, Optional, Union
 
+import omni.adaptors.vllm.envs as envs_ascend
 import torch
 import torch.distributed as dist
 import torch_npu
 import vllm.envs as envs
+from omni.models.common.layers.fused_moe.layer import FusedMoE
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -68,10 +70,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
-import omni.adaptors.vllm.envs as envs_ascend
-from omni.models.common.layers.fused_moe.layer import FusedMoE
-
-
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
@@ -104,9 +102,8 @@ class CustomDeepseekV2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
         # NOTE: `torch_npu.npu_dequant_swiglu_quant` can only be enabled in dynamic quant
-        self.is_dynamic_quant = not isinstance(
-            self.gate_up_proj.quant_method,
-            UnquantizedLinearMethod)
+        self.is_dynamic_quant = not isinstance(self.gate_up_proj.quant_method,
+                                               UnquantizedLinearMethod)
 
     def forward(self, x):
         if self.is_dynamic_quant:
@@ -665,16 +662,14 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: Optional[List[torch.Tensor]] = None,
+                attn_metadata: Optional[AttentionMetadata] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)

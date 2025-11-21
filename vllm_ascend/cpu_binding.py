@@ -231,7 +231,8 @@ def _get_numa_info_v2(
 
     device_numa_tbl = {
         device: numa
-        for numa, _devices in numa_devices_tbl.items() for device in _devices
+        for numa, _devices in numa_devices_tbl.items()
+        for device in _devices
     }
 
     return device_numa_tbl, numa_devices_tbl

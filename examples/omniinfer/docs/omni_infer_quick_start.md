@@ -51,7 +51,7 @@ yum install libselinux-python3
 
 ### 修改配置文件
 
-需要修改`omni_infer_inventory_used_for_xx.yml`和 `omni_infer_server_template_xx.yml` 两处配置文件，位于`omniinfer/tools/ansible/templete/`路径下。以1P1D为例(4机组P,4机组D):
+需要修改`omni_infer_inventory_used_for_xx.yml`和 `omni_infer_server_template_xx.yml` 两处配置文件，位于`omniinfer/tools/ansible/template/`路径下。以1P1D为例(4机组P,4机组D):
 
 1. **tools/ansible/template/omni_infer_inventory_used_for_1P32_1D32.yml**
 

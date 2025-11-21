@@ -1,10 +1,11 @@
+from multiprocessing import Process
+
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from multiprocessing import Process
-import uvicorn
-import asyncio
 
 app = FastAPI()
+
 
 @app.api_route("/v1/chat/completions", methods=["POST", "GET"])
 async def generate(request: Request):
@@ -18,7 +19,9 @@ async def generate(request: Request):
     response_data = {
         "node": "node1",
         "block_list": [1, 2, 3, 4, 5],
-        "kv_transfer_params": {"blocks":[2,3,4]}
+        "kv_transfer_params": {
+            "blocks": [2, 3, 4]
+        }
     }
     return JSONResponse(content=response_data)
 
@@ -26,12 +29,13 @@ async def generate(request: Request):
 def run_server(port):
     uvicorn.run(app, host="0.0.0.0", port=port)
 
+
 if __name__ == "__main__":
     ports = [8000, 8001, 8002, 8003]
     processes = []
 
     for port in ports:
-        p = Process(target=run_server, args=(port,))
+        p = Process(target=run_server, args=(port, ))
         p.start()
         processes.append(p)
 

@@ -24,42 +24,47 @@
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional, Union, List
+from typing import Any, List, Optional, Union
 
 import torch
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
+from omni.models.common.layers.fused_mlp import FusedMLP
+from omni.models.common.layers.layernorm import RMSNormFlashComm
+from omni.models.common.layers.linear import (QKVParallelFlashCommLinear,
+                                              RowParallelFlashCommLinear)
+from omni.models.common.layers.rotary_embedding import (QwenRotaryEmbedding,
+                                                        get_rope)
 from torch import nn
 from transformers import Qwen2Config
-
-from vllm.forward_context import get_forward_context
-from vllm.attention import Attention, AttentionType, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
-from vllm.distributed import get_pp_group, get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group)
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-from omni.models.common.layers.layernorm import RMSNormFlashComm
-from omni.models.common.layers.linear import RowParallelFlashCommLinear, QKVParallelFlashCommLinear
-from omni.models.common.layers.rotary_embedding import get_rope, QwenRotaryEmbedding
-from omni.models.common.layers.fused_mlp import FusedMLP
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
-
 
 logger = init_logger(__name__)
 
+
 class Qwen2MLP(FusedMLP):
     pass
+
 
 class Qwen2Attention(nn.Module):
 
@@ -80,7 +85,7 @@ class Qwen2Attention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        tp_rank=get_tensor_model_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -132,25 +137,21 @@ class Qwen2Attention(nn.Module):
             base=self.rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn")
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor,
+                kv_cache: torch.Tensor, cos: torch.Tensor,
+                sin: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
+        if attn_metadata is not None and attn_metadata[next(
+                iter(attn_metadata
+                     ))].attn_state == AscendAttentionState.PrefillNoCache:
             is_prefill = True
         else:
             is_prefill = False
@@ -211,9 +212,9 @@ class Qwen2DecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNormFlashComm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNormFlashComm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNormFlashComm(
+            config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -231,23 +232,26 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            cos=cos,
-            sin=sin
-        )
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       cos=cos,
+                                       sin=sin)
 
         # Fully Connected
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
+        if attn_metadata is not None and attn_metadata[next(
+                iter(attn_metadata
+                     ))].attn_state == AscendAttentionState.PrefillNoCache:
             is_prefill = True
         else:
             is_prefill = False
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, x_transform=None, reduce_type="AR", is_prefill=is_prefill)
+        hidden_states = self.mlp(hidden_states,
+                                 x_transform=None,
+                                 reduce_type="AR",
+                                 is_prefill=is_prefill)
         return hidden_states, residual
 
 
@@ -290,9 +294,11 @@ class Qwen2Model(nn.Module):
             self.embed_tokens = PPMissingLayer()
 
         base = getattr(config, "rope_theta", 1000000)
-        rotary_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        rotary_dim = getattr(config, "head_dim",
+                             config.hidden_size // config.num_attention_heads)
         max_len = config.max_position_embeddings
-        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(base, rotary_dim, max_len)
+        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(
+            base, rotary_dim, max_len)
         self.register_buffer("full_cos", full_cos, persistent=False)
         self.register_buffer("full_sin", full_sin, persistent=False)
 
@@ -300,10 +306,8 @@ class Qwen2Model(nn.Module):
         decoder_layer_type = decoder_layer_type or Qwen2DecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer_type(config,
-                                              cache_config,
-                                              quant_config,
-                                              prefix),
+            lambda prefix: decoder_layer_type(config, cache_config,
+                                              quant_config, prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -311,7 +315,8 @@ class Qwen2Model(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
         if get_pp_group().is_last_rank:
-            self.norm = RMSNormFlashComm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNormFlashComm(config.hidden_size,
+                                         eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -338,14 +343,20 @@ class Qwen2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
+        cos = torch.index_select(
+            self.full_cos, dim=0,
+            index=positions)  # cos.shape [num_tokens, head_size]
         sin = torch.index_select(self.full_sin, dim=0, index=positions)
 
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache and self.tp_size > 1:
-            hidden_states, residual = self.forward_layers_prefill_microbatch_tp8_allreduce(positions, hidden_states, residual, kv_caches, cos, sin)
+        if attn_metadata is not None and attn_metadata[next(
+                iter(attn_metadata)
+        )].attn_state == AscendAttentionState.PrefillNoCache and self.tp_size > 1:
+            hidden_states, residual = self.forward_layers_prefill_microbatch_tp8_allreduce(
+                positions, hidden_states, residual, kv_caches, cos, sin)
         else:
-            hidden_states, residual = self.forward_layers(positions, hidden_states, residual, kv_caches, cos, sin)
+            hidden_states, residual = self.forward_layers(
+                positions, hidden_states, residual, kv_caches, cos, sin)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -355,13 +366,15 @@ class Qwen2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual, y_transform=None)
         return hidden_states
 
-    def forward_layers_prefill_microbatch_tp8_allreduce(self, positions, hidden_states, residual, kv_caches, cos, sin):
+    def forward_layers_prefill_microbatch_tp8_allreduce(
+            self, positions, hidden_states, residual, kv_caches, cos, sin):
         n_tokens = hidden_states.shape[0]
         if n_tokens % 2 == 0:
             split_sizes = [n_tokens // 2, n_tokens // 2]
         else:
             split_sizes = [n_tokens // 2, n_tokens // 2 + 1]
-        hidden_states_mb0, hidden_states_mb1 = torch.split(hidden_states, split_sizes)
+        hidden_states_mb0, hidden_states_mb1 = torch.split(
+            hidden_states, split_sizes)
         assert residual is None
         residual_mb0, residual_mb1 = None, None
         cos_mb0, cos_mb1 = torch.split(cos, split_sizes)
@@ -372,40 +385,70 @@ class Qwen2Model(nn.Module):
 
             if hidden_states_mb0_handle is not None:
                 hidden_states_mb0_handle.wait()
-            hidden_states_mb0, residual_mb0 = layer.input_layernorm.forward_with_residual(hidden_states_mb0, residual_mb0)
-            qkv_mb0, _ = layer.self_attn.qkv_proj(hidden_states_mb0, is_prefill=True)
-            q_mb0, k_mb0, v_mb0 = qkv_mb0.split([layer.self_attn.q_size, layer.self_attn.kv_size, layer.self_attn.kv_size], dim=-1)
-            q_mb0, k_mb0 = layer.self_attn.rotary_emb.forward_cos_sin(q_mb0, k_mb0, cos_mb0, sin_mb0)
+            hidden_states_mb0, residual_mb0 = layer.input_layernorm.forward_with_residual(
+                hidden_states_mb0, residual_mb0)
+            qkv_mb0, _ = layer.self_attn.qkv_proj(hidden_states_mb0,
+                                                  is_prefill=True)
+            q_mb0, k_mb0, v_mb0 = qkv_mb0.split([
+                layer.self_attn.q_size, layer.self_attn.kv_size,
+                layer.self_attn.kv_size
+            ],
+                                                dim=-1)
+            q_mb0, k_mb0 = layer.self_attn.rotary_emb.forward_cos_sin(
+                q_mb0, k_mb0, cos_mb0, sin_mb0)
 
             if hidden_states_mb1_handle is not None:
                 hidden_states_mb1_handle.wait()
-            hidden_states_mb1, residual_mb1 = layer.input_layernorm.forward_with_residual(hidden_states_mb1, residual_mb1)
-            qkv_mb1, _ = layer.self_attn.qkv_proj(hidden_states_mb1, is_prefill=True)
-            q_mb1, k_mb1, v_mb1 = qkv_mb1.split([layer.self_attn.q_size, layer.self_attn.kv_size, layer.self_attn.kv_size], dim=-1)
-            q_mb1, k_mb1 = layer.self_attn.rotary_emb.forward_cos_sin(q_mb1, k_mb1, cos_mb1, sin_mb1)
+            hidden_states_mb1, residual_mb1 = layer.input_layernorm.forward_with_residual(
+                hidden_states_mb1, residual_mb1)
+            qkv_mb1, _ = layer.self_attn.qkv_proj(hidden_states_mb1,
+                                                  is_prefill=True)
+            q_mb1, k_mb1, v_mb1 = qkv_mb1.split([
+                layer.self_attn.q_size, layer.self_attn.kv_size,
+                layer.self_attn.kv_size
+            ],
+                                                dim=-1)
+            q_mb1, k_mb1 = layer.self_attn.rotary_emb.forward_cos_sin(
+                q_mb1, k_mb1, cos_mb1, sin_mb1)
 
             q = torch.cat([q_mb0, q_mb1])
             k = torch.cat([k_mb0, k_mb1])
             v = torch.cat([v_mb0, v_mb1])
-            attn_output = layer.self_attn.attn(q.contiguous(), k.contiguous(), v.contiguous())
+            attn_output = layer.self_attn.attn(q.contiguous(), k.contiguous(),
+                                               v.contiguous())
 
-            attn_output_mb0, attn_output_mb1 = torch.split(attn_output, split_sizes)
+            attn_output_mb0, attn_output_mb1 = torch.split(
+                attn_output, split_sizes)
 
-            output_mb0, _ = layer.self_attn.o_proj(attn_output_mb0, reduce_type=None)
-            hidden_states_mb0, hidden_states_mb0_handle = get_tp_group().all_reduce_async(output_mb0)
+            output_mb0, _ = layer.self_attn.o_proj(attn_output_mb0,
+                                                   reduce_type=None)
+            hidden_states_mb0, hidden_states_mb0_handle = get_tp_group(
+            ).all_reduce_async(output_mb0)
 
-            output_mb1, _ = layer.self_attn.o_proj(attn_output_mb1, reduce_type=None)
-            hidden_states_mb1, hidden_states_mb1_handle = get_tp_group().all_reduce_async(output_mb1)
+            output_mb1, _ = layer.self_attn.o_proj(attn_output_mb1,
+                                                   reduce_type=None)
+            hidden_states_mb1, hidden_states_mb1_handle = get_tp_group(
+            ).all_reduce_async(output_mb1)
 
             hidden_states_mb0_handle.wait()
-            hidden_states_mb0, residual_mb0 = layer.post_attention_layernorm(hidden_states_mb0, residual_mb0)
-            hidden_states_mb0 = layer.mlp(hidden_states_mb0, x_transform=None, reduce_type=None, is_prefill=True)
-            hidden_states_mb0, hidden_states_mb0_handle = get_tp_group().all_reduce_async(hidden_states_mb0)
+            hidden_states_mb0, residual_mb0 = layer.post_attention_layernorm(
+                hidden_states_mb0, residual_mb0)
+            hidden_states_mb0 = layer.mlp(hidden_states_mb0,
+                                          x_transform=None,
+                                          reduce_type=None,
+                                          is_prefill=True)
+            hidden_states_mb0, hidden_states_mb0_handle = get_tp_group(
+            ).all_reduce_async(hidden_states_mb0)
 
             hidden_states_mb1_handle.wait()
-            hidden_states_mb1, residual_mb1 = layer.post_attention_layernorm(hidden_states_mb1, residual_mb1)
-            hidden_states_mb1 = layer.mlp(hidden_states_mb1, x_transform=None, reduce_type=None, is_prefill=True)
-            hidden_states_mb1, hidden_states_mb1_handle = get_tp_group().all_reduce_async(hidden_states_mb1)
+            hidden_states_mb1, residual_mb1 = layer.post_attention_layernorm(
+                hidden_states_mb1, residual_mb1)
+            hidden_states_mb1 = layer.mlp(hidden_states_mb1,
+                                          x_transform=None,
+                                          reduce_type=None,
+                                          is_prefill=True)
+            hidden_states_mb1, hidden_states_mb1_handle = get_tp_group(
+            ).all_reduce_async(hidden_states_mb1)
 
         hidden_states_mb0_handle.wait()
         hidden_states_mb1_handle.wait()
@@ -413,16 +456,14 @@ class Qwen2Model(nn.Module):
         residual = torch.cat([residual_mb0, residual_mb1])
         return hidden_states, residual
 
-    def forward_layers(self, positions, hidden_states, residual, kv_caches, cos, sin):
+    def forward_layers(self, positions, hidden_states, residual, kv_caches,
+                       cos, sin):
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                kv_caches[layer_idx] if kv_caches is not None else None,
-                cos, sin
-            )
+                positions, hidden_states, residual,
+                kv_caches[layer_idx] if kv_caches is not None else None, cos,
+                sin)
         return hidden_states, residual
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -483,6 +524,7 @@ class Qwen2Model(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+
 @support_torch_compile
 class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -505,7 +547,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = vllm_config.quant_config
-        self.model = Qwen2Model(self.config, vllm_config.cache_config, vllm_config.quant_config,
+        self.model = Qwen2Model(self.config,
+                                vllm_config.cache_config,
+                                vllm_config.quant_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self.sampler = Sampler()
 
@@ -513,12 +557,12 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if self.config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
-                self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                              self.config.hidden_size,
-                                              quant_config=vllm_config.quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"),
-                                              parallel_lmhead=False)
+                self.lm_head = ParallelLMHead(
+                    self.config.vocab_size,
+                    self.config.hidden_size,
+                    quant_config=vllm_config.quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                    parallel_lmhead=False)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -530,18 +574,17 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor] = None,
-        attn_metadata: AttentionMetadata = None,
-        selected_indices: Optional[torch.Tensor] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds = None,
-        **kwargs
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors, None)
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor] = None,
+                attn_metadata: AttentionMetadata = None,
+                selected_indices: Optional[torch.Tensor] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds=None,
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors, None)
         return hidden_states
 
     def compute_logits(
@@ -563,9 +606,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights)
 
     def sample(
-            self,
-            logits: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -575,5 +618,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if not attn_metadata:
             return True
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

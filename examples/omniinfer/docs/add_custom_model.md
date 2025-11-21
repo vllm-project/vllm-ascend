@@ -249,7 +249,7 @@ class RowParallelLinear(RowParallelLinearGPU)
 class RowParallelLinearWithReduceScatter(RowParallelLinear)
 class MergedReplicatedLinear(ReplicatedLinear)
 ```
-### 3.4 Activiation
+### 3.4 Activation
 ```python
 class SiluAndMul(nn.Module)
 ```

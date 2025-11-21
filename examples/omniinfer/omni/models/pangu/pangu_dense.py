@@ -18,13 +18,14 @@
 # limitations under the License.
 
 from collections.abc import Iterable
-from typing import Any, Optional, Union, List
+from typing import Any, List, Optional, Union
 
 import torch
+from omni.models.common.layers.attention.backend.attention import \
+    AscendAttentionState
 from torch import nn
 from transformers import PretrainedConfig
-
-from vllm.attention import Attention, AttentionType, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -40,15 +41,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+    is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-from omni.models.common.layers.attention.backend.attention import AscendAttentionState
 
 
 class PanguEmbeddedMLP(nn.Module):
@@ -463,6 +462,7 @@ class PanguEmbeddedModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+
 @support_torch_compile
 class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -559,8 +559,8 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     prefix: str = "",
                     layer_type: type[nn.Module] = PanguEmbeddedDecoderLayer):
         return PanguEmbeddedModel(vllm_config=vllm_config,
-                          prefix=prefix,
-                          layer_type=layer_type)
+                                  prefix=prefix,
+                                  layer_type=layer_type)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -596,11 +596,12 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-    
+
     def should_use_eager_mode(self, *args, **kwargs):
         attn_metadata = kwargs.get("attn_metadata", None)
         if not attn_metadata:
             return True
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

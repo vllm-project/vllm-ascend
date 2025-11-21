@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from transformers import PreTrainedTokenizerBase
-
 from vllm.logger import init_logger
 from vllm.reasoning import Qwen3ReasoningParser, ReasoningParserManager
 

@@ -886,8 +886,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        if (self.use_aclgraph and
-                total_num_scheduled_tokens <= self.aclgraph_batch_sizes[-1]):
+        if (self.use_aclgraph and total_num_scheduled_tokens
+                <= self.aclgraph_batch_sizes[-1]):
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 total_num_scheduled_tokens)

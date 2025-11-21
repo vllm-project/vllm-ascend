@@ -30,8 +30,8 @@ def get_masked_input_and_mask(
         added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
     # torch.compile will fuse all of the pointwise ops below
     # into a single kernel, making it very fast
-    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <
-                                                          org_vocab_end_index)
+    org_vocab_mask = (input_ >= org_vocab_start_index) & (
+        input_ < org_vocab_end_index)
     # Adapt: avoid create added_vocab_mask when added_vocab_start_index == added_vocab_end_index.
     if added_vocab_start_index == added_vocab_end_index:
         valid_offset = (org_vocab_start_index * org_vocab_mask)

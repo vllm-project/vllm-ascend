@@ -1,16 +1,14 @@
-import os
 import json
-from glob import glob
-from tqdm import tqdm
+import os
+
 import torch
 
 try:
-    import torch_npu
+    pass
 except:
     pass
 
 from safetensors.torch import load_file, save_file
-from huggingface_hub import snapshot_download
 
 
 def cal_scale(faquant_path, layer_idx, method='max'):
@@ -50,7 +48,8 @@ def main(args, model_path, faquant_path, kvs_safetensor_name, layer_num=61):
         kvs = cal_scale(faquant_path, layer_idx)
         print(f"the kvscale of layer_idx={layer_idx} is {kvs}")
         faquant_scale[f'model.layers.{layer_idx}.self_attn.kv_scale'] = kvs
-        weight_map[f'model.layers.{layer_idx}.self_attn.kv_scale'] = kvs_safetensor_name
+        weight_map[
+            f'model.layers.{layer_idx}.self_attn.kv_scale'] = kvs_safetensor_name
 
     file = os.path.join(model_path, f"{kvs_safetensor_name}")
 
@@ -60,7 +59,7 @@ def main(args, model_path, faquant_path, kvs_safetensor_name, layer_num=61):
 
     state_dict = load_file(file)
     model_index["weight_map"] = weight_map
-    save_file(state_dict, file+'.bak')
+    save_file(state_dict, file + '.bak')
     state_dict.update(faquant_scale)
     save_file(state_dict, file)
     with open(model_config, "w", encoding="utf-8") as f:

@@ -43,7 +43,7 @@ class AscendQuantizer:
 
         if quantization_algorithm in CUSTOMIZED_QUANTIZER_TYPE:
             return
-        
+
         return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
                                                  packed_modules_mapping)
 
@@ -250,11 +250,11 @@ class W8A8Quantizer(VLLMAscendQuantizer):
     @staticmethod
     def build_linear_method():
         return AscendW8A8LinearMethod()
-        
+
     @staticmethod
     def get_linear_method():
         return AscendW8A8LinearMethod()
-        
+
     @staticmethod
     def build_moe_method():
         return AscendW8A8FusedMoEMethod()
@@ -262,7 +262,7 @@ class W8A8Quantizer(VLLMAscendQuantizer):
     @staticmethod
     def get_moe_method():
         return AscendW8A8FusedMoEMethod()
-        
+
     @staticmethod
     def build_attention_method():
         return AscendC8KVCacheMethod()
