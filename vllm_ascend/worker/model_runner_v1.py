@@ -2963,23 +2963,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
+            max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
+            dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                        dtype=torch.int32)
 
-            if need_dummy_logits:
-                max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
-                dummy_indices = torch.zeros(max_num_reqs_across_dp,
-                                            dtype=torch.int32)
+            def dummy_compute_logits(hidden_states):
+                if not need_dummy_logits:
+                    return None
+                return self.model.compute_logits(hidden_states[dummy_indices])
 
-                def dummy_compute_logits(hidden_states):
-                    return self.model.compute_logits(
-                        hidden_states[dummy_indices])
-
-                def dummy_drafter_compute_logits(hidden_states):
+            def dummy_drafter_compute_logits(hidden_states):
+                if not need_dummy_logits:
+                    return
+                if hasattr(self.drafter, "model") and hasattr(
+                        self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
-
-            else:
-                dummy_compute_logits = lambda hidden_states: None
-                dummy_drafter_compute_logits = lambda hidden_states: None
 
             with set_ascend_forward_context(
                     attn_metadata,
