@@ -48,8 +48,7 @@ class TestExpertLoadBalancer(TestBase):
         with open(json_file, 'r') as f:
             self.expert_map: MockData = json.load(f)
 
-        self.expert_load_balancer = ExpertLoadBalancer(json_file,
-                                                       global_expert_num=8)
+        self.expert_load_balancer = ExpertLoadBalancer(json_file, 8)
 
     def test_init(self):
 
@@ -83,7 +82,7 @@ class TestExpertLoadBalancer(TestBase):
         )
         self.assertEqual(expert_placement_map.shape,
                          (self.expert_load_balancer.layers_num,
-                          self.expert_load_balancer.ranks_num, 8))
+                          self.expert_load_balancer.ranks_num, 10))
         self.assertTrue(torch.all(expert_placement_map >= -1))
 
     def test_generate_log2phy_expert_map(self):
@@ -91,7 +90,7 @@ class TestExpertLoadBalancer(TestBase):
         log2phy_map = self.expert_load_balancer.generate_log2phy_expert_map(
             layer_id)
         self.assertEqual(log2phy_map.shape,
-                         (self.expert_load_balancer.ranks_num, 8))
+                         (self.expert_load_balancer.ranks_num, 10))
         self.assertTrue(torch.all(log2phy_map >= -1))
 
     @mock.patch("torch_npu.npu._lazy_init")
@@ -102,7 +101,7 @@ class TestExpertLoadBalancer(TestBase):
         rank_local_expert_num, rank_expert_map = self.expert_load_balancer.get_rank_placement_map(
             layer_id, rank_id)
         self.assertEqual(rank_local_expert_num, 5)
-        expected_tensor = torch.tensor([2, -1, 1, 3, -1, 4, -1, 0],
+        expected_tensor = torch.tensor([2, -1, 1, 3, -1, 4, -1, 0, -1, -1],
                                        dtype=torch.int32).to(
                                            rank_expert_map.device)
         self.assertTrue(rank_expert_map.equal(expected_tensor))
@@ -110,7 +109,7 @@ class TestExpertLoadBalancer(TestBase):
         rank_id = 1
         rank_local_expert_num, rank_expert_map = self.expert_load_balancer.get_rank_placement_map(
             layer_id, rank_id)
-        expected_tensor = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3],
+        expected_tensor = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3, -1, -1],
                                        dtype=torch.int32).to(
                                            rank_expert_map.device)
         self.assertTrue(rank_expert_map.equal(expected_tensor))
@@ -120,7 +119,7 @@ class TestExpertLoadBalancer(TestBase):
         rank_id = 0
         log2phy_map = self.expert_load_balancer.get_rank_log2phy_map(
             layer_id, rank_id)
-        expected_tensor = torch.tensor([2, 6, 1, 3, 7, 4, 5, 0],
+        expected_tensor = torch.tensor([2, 6, 1, 3, 7, 4, 5, 0, -1, -1],
                                        dtype=torch.int32).to(
                                            log2phy_map.device)
         self.assertTrue(log2phy_map.equal(expected_tensor))
@@ -128,7 +127,7 @@ class TestExpertLoadBalancer(TestBase):
         rank_id = 1
         log2phy_map = self.expert_load_balancer.get_rank_log2phy_map(
             layer_id, rank_id)
-        expected_tensor = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8],
+        expected_tensor = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8, -1, -1],
                                        dtype=torch.int32).to(
                                            log2phy_map.device)
         self.assertTrue(log2phy_map.equal(expected_tensor))

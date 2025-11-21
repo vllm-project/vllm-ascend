@@ -25,32 +25,6 @@ from vllm.logger import logger
 import vllm_ascend.envs as envs_ascend
 
 
-def determine_default_expert_map(global_expert_num, world_size, rank_id,
-                                 global_redundant_expert_num):
-    if world_size == 1:
-        local_ids = torch.arange(global_expert_num, dtype=torch.int32)
-        return (global_expert_num, local_ids)
-
-    local_num_experts = global_expert_num // world_size
-
-    expert_map = torch.full((global_expert_num, ), -1, dtype=torch.int32)
-
-    if rank_id < world_size - 1:
-        start = rank_id * local_num_experts
-        end = (rank_id + 1) * local_num_experts
-        local_count = local_num_experts
-    else:
-        start = rank_id * local_num_experts
-        end = global_expert_num
-        local_count = global_expert_num - rank_id * local_num_experts
-
-    if isinstance(local_count, int):
-        local_ids = torch.arange(local_count, dtype=torch.int32)
-        expert_map[start:end] = local_ids
-
-    return (local_count, expert_map)
-
-
 def generate_log2phy_map(expert_map):
     num_local_experts = expert_map.max() + 1
     log2phy_map = expert_map.clone()
@@ -90,8 +64,7 @@ def generate_log2phy_map(expert_map):
     return log2phy_map
 
 
-def determine_default_log2phy_map(global_expert_num, world_size, rank_id,
-                                  global_redundant_expert_num):
+def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
         expert_map_all = local_ids.unsqueeze(0).expand(world_size, -1)
