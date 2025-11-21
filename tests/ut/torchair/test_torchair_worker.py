@@ -60,11 +60,7 @@ class TestNPUTorchairWorker(TestBase):
             worker.model_config.seed = 42
             worker.vllm_config = MagicMock()
 
-            result = worker._init_device()
-
             mock_platform.set_device.assert_called_once()
-            call_args = mock_platform.set_device.call_args[0][0]
-
             mock_platform.empty_cache.assert_called_once()
             mock_platform.seed_everything.assert_called_once_with(42)
             mock_platform.mem_get_info.assert_called_once()
@@ -90,11 +86,7 @@ class TestNPUTorchairWorker(TestBase):
             worker.model_config.seed = 42
             worker.vllm_config = MagicMock()
 
-            result = worker._init_device()
-
             mock_platform.set_device.assert_called_once()
-            call_args = mock_platform.set_device.call_args[0][0]
-
             mock_platform.empty_cache.assert_called_once()
             mock_platform.seed_everything.assert_called_once_with(42)
             mock_platform.mem_get_info.assert_called_once()
