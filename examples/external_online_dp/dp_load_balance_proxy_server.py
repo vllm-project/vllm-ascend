@@ -15,7 +15,7 @@
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
-# - Python 3.8+
+# - Python 3.10+
 # - Install dependencies:
 #     pip install fastapi httpx uvicorn
 #

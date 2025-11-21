@@ -14,7 +14,7 @@ The functionality of [external DP](https://docs.vllm.ai/en/latest/serving/data_p
 This tutorial will introduce the usage of them.
 
 ### Prerequisites:
-- Python 3.8+
+- Python 3.10+
 - Install dependencies needed by load-balance proxy server:
 
 ```
