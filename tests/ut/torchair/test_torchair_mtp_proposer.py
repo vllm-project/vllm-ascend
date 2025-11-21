@@ -6,7 +6,6 @@ from pytest_mock import MockerFixture
 from vllm.config import CacheConfig, VllmConfig
 
 from tests.ut.base import PytestBase
-from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -14,6 +13,7 @@ class TestTorchairMtpProposer(PytestBase):
 
     @pytest.fixture
     def setup_torchair_mtp_proposer(self, mocker: MockerFixture):
+        from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
         vllm_config = MagicMock(spec=VllmConfig)
         vllm_config.device_config = MagicMock()
         vllm_config.device_config.device = torch.device("cpu")
