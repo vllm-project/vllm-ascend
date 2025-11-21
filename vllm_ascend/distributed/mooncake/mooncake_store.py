@@ -3,7 +3,7 @@ import os
 
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
-from vllm.config import ParallelConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.utils import get_ip, logger
 
@@ -18,7 +18,7 @@ BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
 
 class Mooncakestore():
 
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(self, vllm_config: VllmConfig):
         try:
             from mooncake.store import MooncakeDistributedStore  # type: ignore
         except ImportError as e:
@@ -27,8 +27,8 @@ class Mooncakestore():
                 "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
                 "to run vLLM with MooncakeConnector.") from e
         tp_rank = get_tensor_model_parallel_rank()
-        tp_size = parallel_config.tensor_parallel_size
-        dp_rank = parallel_config.data_parallel_rank_local
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         all_device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
         if not all_device_ids:
             device_ids_list = list(
@@ -38,6 +38,8 @@ class Mooncakestore():
         assert len(device_ids_list) > tp_rank
         device_id = device_ids_list[tp_rank]
         self.config = MooncakeStoreConfig.load_from_env()
+        self.preferred_segment = self.config.preferred_segment
+        self.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
         self.store = MooncakeDistributedStore()
         if self.config.protocol == "ascend" and not self.config.use_ascend_direct:
             local_hostname = get_ip() + ":" + str(BASE_PORT + int(device_id)) + \
@@ -89,8 +91,9 @@ class Mooncakestore():
                   sizes: list[list[int]], block_ids: list[int]):
         try:
             config = ReplicateConfig()
-            config.preferred_segment = self.local_seg
-            config.prefer_alloc_in_same_node = True
+            if self.preferred_segment:
+                config.preferred_segment = self.local_seg
+            config.prefer_alloc_in_same_node = self.prefer_alloc_in_same_node
             res = self.store.batch_put_from_multi_buffers(
                 keys, addrs, sizes, config)
             for value in res:

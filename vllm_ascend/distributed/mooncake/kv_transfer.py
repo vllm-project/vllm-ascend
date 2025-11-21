@@ -30,6 +30,14 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
 
+        self.group_num = self.tp_size // self.token_database.save_nums
+        if self.use_mla and self.token_database.save_nums == 1:
+            self.start_rank = self.tp_rank
+        elif self.token_database.save_nums < self.tp_size:
+            self.start_rank = self.tp_rank % self.group_num
+        else:
+            self.start_rank = 0
+
         self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
@@ -156,7 +164,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 size_list.append(size)
                 blockIds.append(block_id)
             torch.npu.current_stream().synchronize()
-            self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
+            if self.start_rank < len(key_list):
+                self.m_store.put_batch(
+                    key_list[self.start_rank::self.group_num],
+                    addr_list[self.start_rank::self.group_num],
+                    size_list[self.start_rank::self.group_num], blockIds)
         else:
             torch.npu.current_stream().synchronize()
             for start, end, key in self.token_database.process_tokens(
@@ -202,7 +214,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
                 blockIds.append(block_id)
-            self.m_store.get_batch(key_list, addr_list, size_list, blockIds)
+            self.m_store.get_batch(
+                key_list[:self.tp_rank] + key_list[self.tp_rank:],
+                addr_list[:self.tp_rank] + addr_list[self.tp_rank:],
+                size_list[:self.tp_rank] + size_list[self.tp_rank:], blockIds)
         else:
             for start, end, key in self.token_database.process_tokens(
                     tokens, mask):
