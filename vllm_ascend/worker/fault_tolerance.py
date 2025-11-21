@@ -8,10 +8,9 @@ from datetime import timedelta
 from typing import Callable,List
 from vllm_ascend.worker.memory_block_info import MemoryBlockInfo
 from vllm.logger import logger
-from vllm_ascend.worker.common import FaultAction
+from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
 from vllm_ascend.worker.recovery_chain import UCEHandler, RecoveryHandler, ForceStopHandler, NetworkHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
-from common import FaultToleranceLevel,RecoveryStatus
 
 class FaultTolerance:
     _recovery_group = None

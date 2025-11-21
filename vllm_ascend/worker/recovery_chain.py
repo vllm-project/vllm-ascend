@@ -1,16 +1,16 @@
 import json
 import os.path
 import torch
+import yaml
+
 
 from abc import ABC, abstractmethod
 from typing import List,Tuple,Dict,Any
-from common import FaultStatus,UCEType
 from vllm.logger import logger
-from vllm_ascend.worker.common import RecoveryStatus
+from vllm_ascend.worker.common import RecoveryStatus,FaultStatus,UCEType,FaultToleranceLevel
 from vllm_ascend.worker.recovery_context import RecoveryContext
 from torch_npu.npu.utils import _get_uce_addr
 from collections.abc import Generator
-from fault_tolerance import FaultToleranceLevel
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from safetensors.torch import safe_open
 """
