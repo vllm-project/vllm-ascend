@@ -4,7 +4,7 @@ import pytest
 import torch
 from pytest_mock import MockerFixture
 from vllm.config import CacheConfig, VllmConfig
-
+from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from tests.ut.base import PytestBase
 from vllm_ascend.utils import vllm_version_is
 
@@ -13,7 +13,6 @@ class TestTorchairMtpProposer(PytestBase):
 
     @pytest.fixture
     def setup_torchair_mtp_proposer(self, mocker: MockerFixture):
-        from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
         vllm_config = MagicMock(spec=VllmConfig)
         vllm_config.device_config = MagicMock()
         vllm_config.device_config.device = torch.device("cpu")
@@ -37,9 +36,9 @@ class TestTorchairMtpProposer(PytestBase):
         runner.max_num_reqs = 10
         runner._use_aclgraph.return_value = True
 
-        mocker.patch(
-            "vllm_ascend.torchair.torchair_mtp_proposer.MtpProposer.__init__",
-            return_value=None)
+        # mocker.patch(
+        #     "vllm_ascend.torchair.torchair_mtp_proposer.MtpProposer.__init__",
+        #     return_value=None)
 
         if vllm_version_is("0.11.0"):
             mock_set_default_dtype = mocker.patch(
