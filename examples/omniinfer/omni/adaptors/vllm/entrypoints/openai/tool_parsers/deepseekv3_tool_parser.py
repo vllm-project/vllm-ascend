@@ -32,15 +32,18 @@ class DeepSeekV3ToolParser(ToolParser):
             [])  # map what has been streamed for each tool so far to a list
 
         self.tool_calls_start_token: str = "<tool_calls_begin>"
-        self.tool_calls_end_token: str = "<tool_calls_end>" 
+        self.tool_calls_end_token: str = "<tool_calls_end>"
 
         self.tool_call_start_token: str = "<tool_call_begin>"
         self.tool_call_end_token: str = "<tool_call_end>"
 
         self.tool_sep_token: str = "<tool_sep>"
 
-        self.matcher = StreamMatcher([self.tool_calls_start_token,self.tool_calls_end_token,self.tool_call_start_token,self.tool_call_end_token,self.tool_sep_token])
-
+        self.matcher = StreamMatcher([
+            self.tool_calls_start_token, self.tool_calls_end_token,
+            self.tool_call_start_token, self.tool_call_end_token,
+            self.tool_sep_token
+        ])
 
         self.tool_call_regex = re.compile(
             r"<tool_call_begin>(?P<type>.*)<tool_sep>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```\n*<tool_call_end>"
@@ -57,7 +60,7 @@ class DeepSeekV3ToolParser(ToolParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-        
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -108,7 +111,7 @@ class DeepSeekV3ToolParser(ToolParser):
         delta_text = ""
         for match in matches:
             delta_text += match[1]
-        
+
         return delta_text
 
     def extract_tool_calls_streaming(
@@ -124,11 +127,11 @@ class DeepSeekV3ToolParser(ToolParser):
         matched = self.matcher.feed(delta_text)
         if matched is None:
             return None
-        
+
         if self.tool_calls_start_token not in current_text:
             logger.debug("No tool call tokens found!")
             return DeltaMessage(content=self.combine_char(matched))
-        
+
         if matched[0][1] == self.tool_calls_start_token:
             delta_text = self.combine_char(matched[1:])
         elif matched[0][1] == self.tool_calls_end_token:
@@ -141,12 +144,10 @@ class DeepSeekV3ToolParser(ToolParser):
             # start & end tags0
             prev_tool_start_count = previous_text.count(
                 self.tool_call_start_token)
-            prev_tool_end_count = previous_text.count(
-                self.tool_call_end_token)
+            prev_tool_end_count = previous_text.count(self.tool_call_end_token)
             cur_tool_start_count = current_text.count(
                 self.tool_call_start_token)
-            cur_tool_end_count = current_text.count(
-                self.tool_call_end_token)
+            cur_tool_end_count = current_text.count(self.tool_call_end_token)
             tool_call_portion = None
             text_portion = None
 
@@ -155,7 +156,8 @@ class DeepSeekV3ToolParser(ToolParser):
                     and prev_tool_end_count == cur_tool_end_count
                     and self.tool_call_end_token not in delta_text):
                 logger.debug("Generating text content! skipping tool parsing.")
-                return DeltaMessage(content=delta_text) if len(delta_text) > 0 else None
+                return DeltaMessage(
+                    content=delta_text) if len(delta_text) > 0 else None
 
             if self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")

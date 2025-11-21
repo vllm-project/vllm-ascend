@@ -14,7 +14,12 @@ class ClusterStatus:
     """
     A class to represent the status of the cluster.
     """
-    def __init__(self, config: Config, expert_mapping: ExpertMapping = None, rank: int = 0, **kwargs):
+
+    def __init__(self,
+                 config: Config,
+                 expert_mapping: ExpertMapping = None,
+                 rank: int = 0,
+                 **kwargs):
         """
         Initialize ClusterStatus。
 
@@ -30,9 +35,6 @@ class ClusterStatus:
         self.state_actions_queue = deque()
         self.rank = rank
         self.device = self.placement_pattern.device
-
-
-
 
     def add_state_action(self, state, action):
         """
@@ -63,8 +65,8 @@ class ClusterStatus:
         """
         self.current_status[name] = tensor
 
-
-    def add_status_by_layer(self, name: str, layer_id: int, tensor: torch.Tensor):
+    def add_status_by_layer(self, name: str, layer_id: int,
+                            tensor: torch.Tensor):
         """
         Add a new status tensor for a specific layer
         Args:
@@ -79,14 +81,16 @@ class ClusterStatus:
         #if the tensor is not in the current_status, create a new one
         if name not in self.current_status:
             #new a  torch tensor with shape (layer_num, token_num, expert_num, expert_metric_dim) and fill with 0
-            self.current_status[name] = torch.zeros((layer_num, token_num, expert_num, expert_metric_dim))
+            self.current_status[name] = torch.zeros(
+                (layer_num, token_num, expert_num, expert_metric_dim))
 
         # if input tensor is shape (token_num, expert_num, expert_metric_dim), copy it to the corresponding layer of current_status
         if tensor.shape == (token_num, expert_num, expert_metric_dim):
             self.current_status[name][layer_id] = tensor
         else:
-            raise ValueError(f"Invalid tensor shape: {tensor.shape}. Expected {(token_num, expert_num, expert_metric_dim)}.")
-
+            raise ValueError(
+                f"Invalid tensor shape: {tensor.shape}. Expected {(token_num, expert_num, expert_metric_dim)}."
+            )
 
     def get_status(self, name: str) -> torch.Tensor:
         """

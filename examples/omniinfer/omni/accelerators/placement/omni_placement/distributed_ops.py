@@ -13,6 +13,7 @@ from .expert_mapping import ExpertMapping
 # 配置日志
 logger = logging.getLogger(__name__)
 
+
 # 全局函数
 def sync_mapping_to_nodes(rank, mapping):
     print(f"Node {rank} before broadcast: mapping = {mapping}")
@@ -31,19 +32,20 @@ def broadcast_mapping(tensor, src_rank, rank):
     dist.broadcast(tensor, src=src_rank)
     print(f"Node {rank} after broadcast: tensor = {tensor}")
 
+
 def reduce_activation(dst_rank, rank):
     from .omni_planner import OmniPlanner
     planner = OmniPlanner()
     activation_tensor = planner.npu_activation_count
-
     """将所有节点的activation归约到master节点"""
     print(f"Node {rank} before reduce: tensor = {activation_tensor}")
     dist.reduce(activation_tensor, dst=dst_rank, op=dist.ReduceOp.SUM)
     print(f"Node {rank} after reduce: tensor = {activation_tensor}")
 
+
 def distribution_warmup():
-    tmp = torch.tensor(4018, dtype=torch.int64,device="npu")
-    torch.distributed.broadcast(tmp,src=0) # warmup
+    tmp = torch.tensor(4018, dtype=torch.int64, device="npu")
+    torch.distributed.broadcast(tmp, src=0)  # warmup
     torch.npu.synchronize()
 
 

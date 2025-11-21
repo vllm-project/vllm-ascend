@@ -21,6 +21,7 @@ class FusedMLPMethodBase(QuantizeMethodBase):
     The weights' creation is handled by submodules.
     This method only implement the apply method.
     """
+
     def create_weights(self, layer: torch.nn.Module, *weight_args,
                        **extra_weight_attrs):
         """Create weights for a layer.
@@ -57,6 +58,7 @@ class UnquantizedFusedMLPMethod(FusedMLPMethodBase):
         x = layer.act_fn(gate_up)
         x, _ = layer.down_proj(x, reduce_type=None)
         return x
+
 
 class FusedMLP(torch.nn.Module):
     """FusedMLP layer 
@@ -111,9 +113,12 @@ class FusedMLP(torch.nn.Module):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMLPMethodBase)
         self.quant_method = quant_method
-    
+
     def forward(self, x, x_transform=None, reduce_type="AR", is_prefill=True):
-        output = self.quant_method.apply(self, x, x_transform=x_transform, is_prefill=is_prefill)
+        output = self.quant_method.apply(self,
+                                         x,
+                                         x_transform=x_transform,
+                                         is_prefill=is_prefill)
         if self.down_proj.tp_size > 1:
             if reduce_type == "AR":
                 output = tensor_model_parallel_all_reduce(output)

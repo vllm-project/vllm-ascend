@@ -21,15 +21,9 @@ class GroupType(enum.Enum):
     DECODE = "2"
 
 
-GROUP_INDEX_TO_TYPE = {
-    "1": GroupType.PREFILL,
-    "2": GroupType.DECODE
-}
+GROUP_INDEX_TO_TYPE = {"1": GroupType.PREFILL, "2": GroupType.DECODE}
 
-GROUP_TYPE_TO_ROLE = {
-    GroupType.PREFILL: "prefill",
-    GroupType.DECODE: "decode"
-}
+GROUP_TYPE_TO_ROLE = {GroupType.PREFILL: "prefill", GroupType.DECODE: "decode"}
 
 ARGS_TO_ENV = {
     "global_rank_table_path": "GLOBAL_RANK_TABLE_FILE_PATH",
@@ -60,11 +54,19 @@ class RankTableConfig:
 
         filtered_args_data = {k: v for k, v in data.items() if k in fields}
 
-        args_data = {field: get_config_from_dict_or_env(filtered_args_data, field, ARGS_TO_ENV[field], 
-                                                        ARGS_TO_DEFAULT[field], fields_type[field]) for field in fields}
+        args_data = {
+            field:
+            get_config_from_dict_or_env(filtered_args_data, field,
+                                        ARGS_TO_ENV[field],
+                                        ARGS_TO_DEFAULT[field],
+                                        fields_type[field])
+            for field in fields
+        }
         return cls(**args_data)
 
+
 class GlobalRankTable:
+
     def __init__(self, config: RankTableConfig):
         self.config = config
 
@@ -94,11 +96,10 @@ class GlobalRankTable:
 
                     cluster_id += 1
             group_dict.setdefault(
-                group_id, ServerGroup(
-                    server_group,
-                    need_sort=self.get_server_role(group_id) == GROUP_TYPE_TO_ROLE[GroupType.PREFILL]
-                )
-            )
+                group_id,
+                ServerGroup(server_group,
+                            need_sort=self.get_server_role(group_id) ==
+                            GROUP_TYPE_TO_ROLE[GroupType.PREFILL]))
 
         return group_dict
 
@@ -125,12 +126,18 @@ class GlobalRankTable:
     def prefill_group(self):
         group_id_start = 0
         group_id_end = self.config.prefill_pod_num
-        prefill_group_list = [self.group_dict.get(i, None) for i in range(group_id_start, group_id_end)]
+        prefill_group_list = [
+            self.group_dict.get(i, None)
+            for i in range(group_id_start, group_id_end)
+        ]
         return prefill_group_list
 
     @property
     def decode_group(self):
         group_id_start = self.config.prefill_pod_num
         group_id_end = self.config.prefill_pod_num + self.config.decode_pod_num
-        decode_group_list = [self.group_dict.get(i, None) for i in range(group_id_start, group_id_end)]
+        decode_group_list = [
+            self.group_dict.get(i, None)
+            for i in range(group_id_start, group_id_end)
+        ]
         return decode_group_list

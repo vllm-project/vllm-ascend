@@ -25,35 +25,41 @@ def weight_quant(tensor: torch.Tensor):
     return quantized.to(torch.int8), scale.to(torch.float32)
 
 
-def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai/DeepSeek-R1"):
+def main(args,
+         bf16_path,
+         output_path,
+         next,
+         pangu_mode,
+         model_name="deepseek-ai/DeepSeek-R1"):
     quant_prefix = "quant_model_weight_w8a8_dynamic"
     disable_names = []
     for i in range(62):
         disable_names.append(f"model.layers.{i}.self_attn.kv_b_proj.weight")
         disable_names.append(f"model.layers.{i}.mlp.gate.weight")
-        disable_names.append(f"model.layers.{i}.mlp.gate.e_score_correction_bias")
+        disable_names.append(
+            f"model.layers.{i}.mlp.gate.e_score_correction_bias")
 
     disable_names.append("lm_head")
     disable_names.append("model.embed_tokens.weight")
 
     torch.set_default_dtype(torch.bfloat16)
     os.makedirs(output_path, exist_ok=True)
-    model_index_file = os.path.join(output_path, "model.safetensors.index.json")
+    model_index_file = os.path.join(output_path,
+                                    "model.safetensors.index.json")
     config_file = os.path.join(output_path, "config.json")
 
     if not os.path.exists(model_index_file) or not os.path.exists(config_file):
-        snapshot_download(
-            repo_id=model_name,
-            ignore_patterns=["*.safetensors"],
-            local_dir=output_path,
-            local_dir_use_symlinks=False
-        )
+        snapshot_download(repo_id=model_name,
+                          ignore_patterns=["*.safetensors"],
+                          local_dir=output_path,
+                          local_dir_use_symlinks=False)
         print(f"model index file and config file download to {output_path}")
 
     with open(model_index_file, "r") as f:
         model_index = json.load(f)
     weight_map = model_index["weight_map"]
-    scale_count = len([key for key in weight_map.keys() if key.endswith("_scale_inv")])
+    scale_count = len(
+        [key for key in weight_map.keys() if key.endswith("_scale_inv")])
 
     safetensor_files = list(glob(os.path.join(bf16_path, "*.safetensors")))
     safetensor_files.sort()
@@ -102,4 +108,6 @@ def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai
     model_index["weight_map"] = new_weight_map
     with open(model_index_file, "w", encoding="utf-8") as f:
         json.dump(model_index, f, indent=2, ensure_ascii=False, sort_keys=True)
-    print(f"model.safetensors.index.json modified and saved to {model_index_file}")
+    print(
+        f"model.safetensors.index.json modified and saved to {model_index_file}"
+    )

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+
 class Device:
+
     def __init__(self, device_info):
         self.device_id = int(device_info["device_id"])
         self.device_ip = device_info["device_ip"]
@@ -19,6 +21,7 @@ class Device:
 
 
 class Server:
+
     def __init__(self, server_info):
         self.server_id = server_info["server_id"]
         self.server_ip = server_info["server_ip"]
@@ -45,6 +48,7 @@ class Server:
 
 
 class ServerGroup:
+
     def __init__(self, group_info, need_sort=False):
         self.group_id = int(group_info["group_id"])
         self.server_count = int(group_info.get("server_count", "0"))
@@ -52,10 +56,12 @@ class ServerGroup:
 
         # Due to the scheduling initiated by Ray, the non-first nodes of prefill mast be sorted in lexicographical order.
         if need_sort:
-            self.server_list = self.server_list[:1] + sorted(self.server_list[1:], key=lambda server: server.server_ip)
+            self.server_list = self.server_list[:1] + sorted(
+                self.server_list[1:], key=lambda server: server.server_ip)
 
     def __eq__(self, other):
-        return sorted(self.server_list, key=lambda x: x.server_ip) == sorted(other.server_list, key=lambda x: x.server_ip)
+        return sorted(self.server_list, key=lambda x: x.server_ip) == sorted(
+            other.server_list, key=lambda x: x.server_ip)
 
     @property
     def cluster_id_start(self) -> int:
@@ -69,8 +75,7 @@ class ServerGroup:
     def init_server_list(group_info):
         server_list = []
         for cluster_id, server_info in enumerate(group_info["server_list"]):
-            server_list.append(
-                Server(server_info))
+            server_list.append(Server(server_info))
         return server_list
 
     @property

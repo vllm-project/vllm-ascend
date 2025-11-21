@@ -23,9 +23,11 @@ def get_expert_ids(local_rank_pattern):
         list: 转换后的列表[list[list]]，索引为layer_idx对应的整数, local_expert_idx
     """
     if not isinstance(local_rank_pattern, torch.Tensor):
-        raise TypeError("placement_pattern_current_rank must be a torch.Tensor")
+        raise TypeError(
+            "placement_pattern_current_rank must be a torch.Tensor")
     if local_rank_pattern.dtype != torch.bool:
-        raise ValueError("placement_pattern_current_rank must have dtype torch.bool")
+        raise ValueError(
+            "placement_pattern_current_rank must have dtype torch.bool")
     if local_rank_pattern.dim() != 2:
         raise ValueError("placement_pattern_current_rank must be a 2D tensor")
 
@@ -53,9 +55,13 @@ def filter_dict_keys(param_dict, filter_func, filter_param={}):
     if not callable(filter_func):
         raise TypeError("filter_func must be callable")
 
-    return {k: v for k, v in param_dict.items() if filter_func(k, **filter_param)}
+    return {
+        k: v
+        for k, v in param_dict.items() if filter_func(k, **filter_param)
+    }
 
-def convert_param_dict_to_list(param_dict,layer_func, layer_func_param={}):
+
+def convert_param_dict_to_list(param_dict, layer_func, layer_func_param={}):
     """
     将字典转换为列表，列表索引由layer_func提取的layer_idx决定
 
@@ -95,11 +101,11 @@ def convert_param_dict_to_list(param_dict,layer_func, layer_func_param={}):
         # 检查所有元素是否为张量并形状一致
         for t in tensor_list:
             if not isinstance(t, torch.Tensor):
-                raise TypeError("All elements in tensor_list must be torch.Tensor")
+                raise TypeError(
+                    "All elements in tensor_list must be torch.Tensor")
 
         unbound_tensors = [torch.unbind(t, dim=0) for t in tensor_list]
         return [list(group) for group in zip(*unbound_tensors)]
-
 
     if not isinstance(param_dict, dict):
         raise TypeError("param_dict must be a dictionary")
@@ -109,7 +115,7 @@ def convert_param_dict_to_list(param_dict,layer_func, layer_func_param={}):
     # 确定最大索引
     max_idx = -1
     for key in param_dict.keys():
-        layer_idx = layer_func(key,**layer_func_param)
+        layer_idx = layer_func(key, **layer_func_param)
         max_idx = max(max_idx, layer_idx)
 
     # 初始化列表，每个元素为独立的defaultdict(list)
@@ -117,13 +123,14 @@ def convert_param_dict_to_list(param_dict,layer_func, layer_func_param={}):
 
     # 填充列表
     for key, value in param_dict.items():
-        layer_idx = layer_func(key,**layer_func_param)
+        layer_idx = layer_func(key, **layer_func_param)
         result_list[layer_idx].append(value)
 
-    for layer_idx,tensor_list in enumerate(result_list):
-        if len(tensor_list)==0: continue
+    for layer_idx, tensor_list in enumerate(result_list):
+        if len(tensor_list) == 0: continue
         result_list[layer_idx] = combine_tensors_to_nested_list(tensor_list)
     return result_list
+
 
 def convert_param_to_ctype(param_list):
     """
@@ -145,29 +152,29 @@ def convert_param_to_ctype(param_list):
         element_size = tensor.element_size()
         address = tensor.data_ptr()
         dtype = str(tensor.dtype)[len('torch.'):]
-        weight = omni_placement.Tensor(
-            data_ptr=address,
-            length=length,
-            element_size=element_size,
-            dtype = dtype,
-            name=tensor_name
-        )
+        weight = omni_placement.Tensor(data_ptr=address,
+                                       length=length,
+                                       element_size=element_size,
+                                       dtype=dtype,
+                                       name=tensor_name)
         return weight
 
     # 递归处理三维嵌套列表
-    return [
-        [
-            [tensor_to_omni_tensor(tensor,f"layer.{layer_idx}.expert.{expert_idx}.weight.{tensor_idx}") for tensor_idx,tensor in enumerate(expert_params)]
-            for expert_idx,expert_params in enumerate(local_expert_params)
-        ]
-        for layer_idx,local_expert_params in enumerate(param_list)
-    ]
+    return [[[
+        tensor_to_omni_tensor(
+            tensor,
+            f"layer.{layer_idx}.expert.{expert_idx}.weight.{tensor_idx}")
+        for tensor_idx, tensor in enumerate(expert_params)
+    ] for expert_idx, expert_params in enumerate(local_expert_params)]
+            for layer_idx, local_expert_params in enumerate(param_list)]
+
 
 def calculate_time(func):
+
     @wraps(func)  # 保留原始函数的元信息
     def wrapper(*args, **kwargs):
         prefix = kwargs.pop('prefix', "")
-        start_time =  time.perf_counter()  # 记录开始时间
+        start_time = time.perf_counter()  # 记录开始时间
         result = func(*args, **kwargs)  # 执行被装饰的函数
         torch.npu.synchronize()
         end_time = time.perf_counter()  # 记录结束时间
@@ -176,7 +183,10 @@ def calculate_time(func):
             rank = torch.distributed.get_rank()
         except:
             rank = 0
-        if rank ==0:
-            print(f"rank: {rank}:, {prefix}Function '{func.__name__}' took {elapsed_time:.6f} seconds to execute",flush=True)
+        if rank == 0:
+            print(
+                f"rank: {rank}:, {prefix}Function '{func.__name__}' took {elapsed_time:.6f} seconds to execute",
+                flush=True)
         return result  # 返回原函数的结果
+
     return wrapper

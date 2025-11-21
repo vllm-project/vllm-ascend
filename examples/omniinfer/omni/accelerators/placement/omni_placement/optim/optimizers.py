@@ -7,7 +7,8 @@ from abc import ABC
 class Optimizer(ABC):
     """Base class for optimization strategies."""
 
-    def optimize(self, layer_id, token, token_expert_id, token_scores, cluster_status):
+    def optimize(self, layer_id, token, token_expert_id, token_scores,
+                 cluster_status):
         """
         Return the optimized expert selections in a proper order for all tokens.
 

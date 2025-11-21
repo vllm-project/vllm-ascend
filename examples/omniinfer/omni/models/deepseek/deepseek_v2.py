@@ -102,9 +102,8 @@ class CustomDeepseekV2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
         # NOTE: `torch_npu.npu_dequant_swiglu_quant` can only be enabled in dynamic quant
-        self.is_dynamic_quant = not isinstance(
-            self.gate_up_proj.quant_method,
-            UnquantizedLinearMethod)
+        self.is_dynamic_quant = not isinstance(self.gate_up_proj.quant_method,
+                                               UnquantizedLinearMethod)
 
     def forward(self, x):
         if self.is_dynamic_quant:
@@ -663,16 +662,14 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: Optional[List[torch.Tensor]] = None,
+                attn_metadata: Optional[AttentionMetadata] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)

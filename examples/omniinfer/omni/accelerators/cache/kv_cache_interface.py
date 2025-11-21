@@ -22,7 +22,12 @@ logger = init_logger("vllm.v1.omni")
 SINK = 1
 RECENT = 3
 BETA = 0.2
-PATTERN = [1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+PATTERN = [
+    1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1,
+    0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0
+]
+
 
 @dataclass
 class OmniKVCacheConfig(KVCacheConfig):
@@ -56,6 +61,7 @@ class OmniAttentionSpec(AttentionSpec):
 
 
 class OmniMultiGroupBlockTable(MultiGroupBlockTable):
+
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_batched_tokens: int, pin_memory: bool,
                  device: torch.device, *args, **kwargs) -> None:
@@ -68,9 +74,11 @@ class OmniMultiGroupBlockTable(MultiGroupBlockTable):
             # when upgraded to vllm 0.9.2, this argument will change from block_size to block_sizes
             block_size = kwargs['block_sizes'][0]
         else:
-            raise RuntimeError("Neither `block_size` nor `block_sizes` is given.")
+            raise RuntimeError(
+                "Neither `block_size` nor `block_sizes` is given.")
         if not isinstance(block_size, int) or block_size <= 0:
-            raise ValueError(f"block_size should be a positive int, but is {block_size}.")
+            raise ValueError(
+                f"block_size should be a positive int, but is {block_size}.")
         self.block_tables = [
             BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
                        max_num_batched_tokens, pin_memory, device),
@@ -108,21 +116,25 @@ def get_kv_cache_config_omni_type(vllm_config: VllmConfig,
     omni_num_blocks = int(num_blocks * BETA)
     # This computation is to ensure that the total number of blocks
     # of all layers does not exceed the original number.
-    full_num_blocks = int(num_blocks * (1 + (1-BETA)*num_omni_layers/(num_full_layers+1)))
+    full_num_blocks = int(num_blocks * (1 + (1 - BETA) * num_omni_layers /
+                                        (num_full_layers + 1)))
 
     # logging
     num_tokens = num_blocks * vllm_config.cache_config.block_size
     full_num_tokens = full_num_blocks * vllm_config.cache_config.block_size
     omni_num_tokens = omni_num_blocks * vllm_config.cache_config.block_size
     logger.info(f"GPU KV cache size: {num_tokens:,} tokens")
-    logger.info(f"With Omni enabled, GPU KV Cache size: {full_num_tokens:,}"
-                f" tokens in full layers and {omni_num_tokens:,} in swa layers.")
+    logger.info(
+        f"With Omni enabled, GPU KV Cache size: {full_num_tokens:,}"
+        f" tokens in full layers and {omni_num_tokens:,} in swa layers.")
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = num_tokens / vllm_config.model_config.max_model_len
-    omni_max_concur = min(full_num_tokens / vllm_config.model_config.max_model_len,
-                          omni_num_blocks / (SINK + RECENT))
-    logger.info("Maximum concurrency for %s tokens per request changes from %.2fx to %.2fx",
-                max_model_len_str, max_concurrency, omni_max_concur)
+    omni_max_concur = min(
+        full_num_tokens / vllm_config.model_config.max_model_len,
+        omni_num_blocks / (SINK + RECENT))
+    logger.info(
+        "Maximum concurrency for %s tokens per request changes from %.2fx to %.2fx",
+        max_model_len_str, max_concurrency, omni_max_concur)
 
     # create a KVCacheConfig with exactly two groups
     # 1. divide the layers to full and omni groups
@@ -135,23 +147,29 @@ def get_kv_cache_config_omni_type(vllm_config: VllmConfig,
                 ValueError("Omni attention implements its own sliding window. \
                     Manually setting sliding window is not supported.")
             grouped_layer_names[0].append(layer_name)
-            layer2size[layer_name] = KVCacheTensor(size=page_size*full_num_blocks)
+            layer2size[layer_name] = KVCacheTensor(size=page_size *
+                                                   full_num_blocks)
         elif isinstance(layer_spec, OmniAttentionSpec):
             grouped_layer_names[1].append(layer_name)
-            layer2size[layer_name] = KVCacheTensor(size=page_size*omni_num_blocks)
+            layer2size[layer_name] = KVCacheTensor(size=page_size *
+                                                   omni_num_blocks)
         else:
-            raise RuntimeError(f"Unsupported KV Cache Spec type {type(layer_spec)}.")
+            raise RuntimeError(
+                f"Unsupported KV Cache Spec type {type(layer_spec)}.")
     kv_cache_config = OmniKVCacheConfig(
         num_blocks=full_num_blocks,
-        num_blocks_per_group={FullAttentionSpec: full_num_blocks, OmniAttentionSpec: omni_num_blocks},
+        num_blocks_per_group={
+            FullAttentionSpec: full_num_blocks,
+            OmniAttentionSpec: omni_num_blocks
+        },
         tensors=layer2size,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
-                                                    grouped_layer_names)
-    )
+                                                    grouped_layer_names))
     return kv_cache_config
 
 
-def get_omni_hybrid_kv_cache_spec(self: GPUModelRunner) -> dict[str, KVCacheSpec]:
+def get_omni_hybrid_kv_cache_spec(
+        self: GPUModelRunner) -> dict[str, KVCacheSpec]:
     """Generates the KVCacheSpec by parsing the kv cache format from
     each attention module in the static forward context.
     Returns:
@@ -181,5 +199,6 @@ def get_omni_hybrid_kv_cache_spec(self: GPUModelRunner) -> dict[str, KVCacheSpec
                     dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
         else:
-            raise NotImplementedError("Omni attention supports decoder-only models.")
+            raise NotImplementedError(
+                "Omni attention supports decoder-only models.")
     return kv_cache_spec

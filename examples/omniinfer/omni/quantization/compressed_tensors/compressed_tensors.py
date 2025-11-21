@@ -74,23 +74,22 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
     def get_config_filenames(cls) -> List[str]:
         return ["quant_model_description.json"]
 
-    def _get_weight_num_bits(self,
-                            layer_name: str,
-                            weight_quant: BaseModel) -> bool:
+    def _get_weight_num_bits(self, layer_name: str,
+                             weight_quant: BaseModel) -> bool:
         if isinstance(weight_quant.num_bits, dict):
             for module, module_num_bits in weight_quant.num_bits.items():
                 if module in layer_name:
                     return module_num_bits
-            raise ValueError(f"weight name mismatch, please check weights num_bits in config.json and model weight name. layer_name={layer_name}")
-    
+            raise ValueError(
+                f"weight name mismatch, please check weights num_bits in config.json and model weight name. layer_name={layer_name}"
+            )
+
         else:
             return weight_quant.num_bits
-    
-    
-    def _is_dynamic_token_w8a8(self,
-                            weight_quant: BaseModel,
-                            input_quant: BaseModel,
-                            weight_num_bits: int) -> bool:
+
+    def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel,
+                               weight_num_bits: int) -> bool:
         is_8_bits = weight_num_bits == input_quant.num_bits == 8
         weight_strategy = (
             weight_quant.strategy == QuantizationStrategy.TENSOR.value
@@ -99,52 +98,50 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
         is_token = (weight_strategy and input_quant.strategy
                     == QuantizationStrategy.TOKEN.value)
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
-    
+
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
-    
-    
-    def _is_dynamic_token_w4a8(self,
-                            weight_quant: BaseModel,
-                            input_quant: BaseModel,
-                            weight_num_bits: int) -> bool:
+
+    def _is_dynamic_token_w4a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel,
+                               weight_num_bits: int) -> bool:
         is_w4a8_bits = (weight_num_bits == 4) and (input_quant.num_bits == 8)
         weight_strategy = (
-                weight_quant.strategy == QuantizationStrategy.TENSOR.value
-                or weight_quant.strategy == QuantizationStrategy.CHANNEL.value
-                or weight_quant.strategy == QuantizationStrategy.GROUP.value)
+            weight_quant.strategy == QuantizationStrategy.TENSOR.value
+            or weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+            or weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_token = (weight_strategy and input_quant.strategy
                     == QuantizationStrategy.TOKEN.value)
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
-    
+
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_w4a8_bits and is_token and weight_quant.symmetric and is_dynamic
-    
-    
+
     def _get_scheme_from_parts(
-            self,
-            layer_name: str,
-            weight_quant: BaseModel,
+            self, layer_name: str, weight_quant: BaseModel,
             input_quant: BaseModel) -> "CompressedTensorsScheme":
         # Detect If Activation Quantization.
         # TODO @dsikka: clean-up conditions
-        if is_activation_quantization_format(self.quant_format):        
-            weight_num_bits = self._get_weight_num_bits(layer_name, weight_quant)
-            if self._is_dynamic_token_w8a8(weight_quant, input_quant, weight_num_bits):
+        if is_activation_quantization_format(self.quant_format):
+            weight_num_bits = self._get_weight_num_bits(
+                layer_name, weight_quant)
+            if self._is_dynamic_token_w8a8(weight_quant, input_quant,
+                                           weight_num_bits):
                 return AscendCompressedTensorsW8A8Int8LinearMethod(
-                strategy=weight_quant.strategy,
-                is_static_input_scheme=False,
-                input_symmetric=input_quant.symmetric)
-    
-            if self._is_dynamic_token_w4a8(weight_quant, input_quant, weight_num_bits):
+                    strategy=weight_quant.strategy,
+                    is_static_input_scheme=False,
+                    input_symmetric=input_quant.symmetric)
+
+            if self._is_dynamic_token_w4a8(weight_quant, input_quant,
+                                           weight_num_bits):
                 return AscendCompressedTensorsW4A8Int8LinearMethod(
                     strategy=weight_quant.strategy,
                     is_static_input_scheme=False,
                     input_symmetric=input_quant.symmetric,
                     group_size=weight_quant.group_size)
-    
+
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
 
@@ -153,7 +150,7 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
             layer_name=layer_name,
             module=layer,
             targets=self.target_scheme_map.keys())
-    
+
         # Find the quant_scheme
         scheme_dict = self.target_scheme_map[matched_target]
         return self._get_weight_num_bits(layer_name, scheme_dict["weights"])
@@ -178,7 +175,7 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
         use the quantization scheme corresponding to the matched target
         to select the CompressedTensorsScheme used for infernece.
         """
-    
+
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
         # so we do not have to re-write these functions
@@ -187,15 +184,15 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
             layer_name=layer_name,
             module=layer,
             targets=self.target_scheme_map.keys())
-    
+
         # Find the quant_scheme
         scheme_dict = self.target_scheme_map[matched_target]
-    
+
         # Adapter: pass layer_name
         scheme = self._get_scheme_from_parts(
             layer_name=layer_name,
             weight_quant=scheme_dict["weights"],
-            input_quant=scheme_dict["input_activations"])    
+            input_quant=scheme_dict["input_activations"])
         return scheme
 
     @classmethod
@@ -204,7 +201,7 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
         target_scheme_map: Dict[str, Any] = dict()
         ignore = cast(List[str], config.get("ignore"))
         quant_format = cast(str, config.get("format"))
-    
+
         # The quant_config has multiple config_groups, each containing
         # an input_activations key with details about how the activations are
         # quantized, a weights key indicating how the weights are quantized,
@@ -221,22 +218,23 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
                 module_num_bits = quant_config.get("weights").get("num_bits")
                 quant_config["weights"]["num_bits"] = 0
                 target_scheme_map[target][
-                    "weights"] = QuantizationArgs.parse_obj(quant_config.get("weights"))
+                    "weights"] = QuantizationArgs.parse_obj(
+                        quant_config.get("weights"))
                 quant_config["weights"]["num_bits"] = module_num_bits
                 target_scheme_map[target]["weights"].num_bits = module_num_bits
                 try:
                     target_scheme_map[target][
                         "input_activations"] = QuantizationArgs.parse_obj(
-                        quant_config.get("input_activations"))
+                            quant_config.get("input_activations"))
                 except Exception:
                     target_scheme_map[target]["input_activations"] = None
-    
+
         return cls(target_scheme_map=target_scheme_map,
-                ignore=ignore,
-                quant_format=quant_format,
-                kv_cache_scheme=config.get("kv_cache_scheme"),
-                sparsity_scheme_map=None,
-                sparsity_ignore_list=None)
+                   ignore=ignore,
+                   quant_format=quant_format,
+                   kv_cache_scheme=config.get("kv_cache_scheme"),
+                   sparsity_scheme_map=None,
+                   sparsity_ignore_list=None)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -250,14 +248,18 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
         weight_quant = self.target_scheme_map["Linear"].get("weights")
-        input_quant = self.target_scheme_map["Linear"].get(
-            "input_activations")
+        input_quant = self.target_scheme_map["Linear"].get("input_activations")
 
-        weight_num_bits = self._get_weight_num_bits("mlp.experts", weight_quant)
-        if self._is_dynamic_token_w8a8(weight_quant, input_quant, weight_num_bits):
-            return (AscendCompressedTensorsW8A8Int8MoEMethod(), weight_num_bits)
-        elif self._is_dynamic_token_w4a8(weight_quant, input_quant, weight_num_bits):
-            return (AscendCompressedTensorsW4A8Int8MoEMethod(self), weight_num_bits)
+        weight_num_bits = self._get_weight_num_bits("mlp.experts",
+                                                    weight_quant)
+        if self._is_dynamic_token_w8a8(weight_quant, input_quant,
+                                       weight_num_bits):
+            return (AscendCompressedTensorsW8A8Int8MoEMethod(),
+                    weight_num_bits)
+        elif self._is_dynamic_token_w4a8(weight_quant, input_quant,
+                                         weight_num_bits):
+            return (AscendCompressedTensorsW4A8Int8MoEMethod(self),
+                    weight_num_bits)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")

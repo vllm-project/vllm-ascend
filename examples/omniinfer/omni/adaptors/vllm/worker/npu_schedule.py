@@ -84,6 +84,7 @@ class HybridSchedulerConfig(SchedulerConfig):
                 "currently AscendScheduler doesn't support scheduler_delay_factor."
             )
 
+
 class NpuHybridScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
     with prefill-first scheduling strategy."""
@@ -136,6 +137,7 @@ class NpuHybridScheduler(Scheduler):
                 break
 
             request = self.waiting[0]
+
             def skip_cur_request():
                 self.waiting.popleft()
                 skipped_waiting_requests.appendleft(request)
@@ -199,7 +201,8 @@ class NpuHybridScheduler(Scheduler):
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
 
-            all_block_ids = computed_blocks.get_block_ids()[0] + new_blocks.get_block_ids()[0]    
+            all_block_ids = computed_blocks.get_block_ids(
+            )[0] + new_blocks.get_block_ids()[0]
             req_to_new_block_ids[request.request_id] = [all_block_ids]
 
             # Update request info.
@@ -259,7 +262,8 @@ class NpuHybridScheduler(Scheduler):
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                req_to_new_block_ids[request.request_id] = new_blocks.get_block_ids()
+                req_to_new_block_ids[
+                    request.request_id] = new_blocks.get_block_ids()
 
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
@@ -417,7 +421,8 @@ class NpuHybridScheduler(Scheduler):
                 outputs=[],
                 scheduler_stats=None,
             )
-        if not model_runner_output.sampled_token_ids or isinstance(model_runner_output.prompt_logprobs_dict, dict):
+        if not model_runner_output.sampled_token_ids or isinstance(
+                model_runner_output.prompt_logprobs_dict, dict):
             sampled_token_ids = model_runner_output.sampled_token_ids
             spec_token_ids = model_runner_output.spec_token_ids
             logprobs = model_runner_output.logprobs

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -13,8 +12,9 @@ from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager, SingleTypeKVCacheManager)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       SingleTypeKVCacheManager
+                                                       )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -34,8 +34,7 @@ class OmniKVCacheBlocks:
         if len(other.blocks) == 0:
             return OmniKVCacheBlocks(self.blocks)
         return OmniKVCacheBlocks(
-            [b1 + b2 for b1, b2 in zip(self.blocks, other.blocks)]
-        )
+            [b1 + b2 for b1, b2 in zip(self.blocks, other.blocks)])
 
     @classmethod
     def create_empty(cls) -> "OmniKVCacheBlocks":
@@ -55,10 +54,9 @@ class OmniKVCacheBlocks:
 
     def get_unhashed_block_ids(self) -> list[list[int]]:
         """Get block_ids of unhashed blocks from OmniKVCacheBlocks instance."""
-        return [
-            [block.block_id for block in group if block.block_hash is None]
-            for group in self.blocks
-        ]
+        return [[
+            block.block_id for block in group if block.block_hash is None
+        ] for group in self.blocks]
 
 
 class OmniKVCacheManager(KVCacheManager):
@@ -76,16 +74,19 @@ class OmniKVCacheManager(KVCacheManager):
         if len(kv_cache_config.kv_cache_groups) != 2:
             raise ValueError(
                 "OmniKVCacheManager does not support hybrid models with more than 2 "
-                "kv cache groups"
-            )
+                "kv cache groups")
         if enable_caching:
             enable_caching = False
-            logger.warning("OmniKVCacheManager does not support prefix caching yet, enable_caching is set to False")
+            logger.warning(
+                "OmniKVCacheManager does not support prefix caching yet, enable_caching is set to False"
+            )
 
         if enable_kv_cache_events:
-            raise ValueError("OmniKVCacheManager does not support cache events yet")
+            raise ValueError(
+                "OmniKVCacheManager does not support cache events yet")
         # `block_size` of all groups are assumed to be the same
-        self.block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        self.block_size = kv_cache_config.kv_cache_groups[
+            0].kv_cache_spec.block_size
         self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
 
@@ -106,23 +107,23 @@ class OmniKVCacheManager(KVCacheManager):
                 caching_hash_fn=self.caching_hash_fn,
             )
             if isinstance(group.kv_cache_spec, FullAttentionSpec):
-                full_attn_pool = BlockPool(
-                    self.num_gpu_blocks, enable_caching, enable_kv_cache_events
-                )
+                full_attn_pool = BlockPool(self.num_gpu_blocks, enable_caching,
+                                           enable_kv_cache_events)
                 full_attn_mgr = get_manager_for_kv_cache_spec(
                     block_pool=full_attn_pool,
                     **mgr_kwargs,
                 )
             else:
-                num_blocks = kv_cache_config.num_blocks_per_group[type(group.kv_cache_spec)]
-                bp = BlockPool(
-                    num_blocks, enable_caching, enable_kv_cache_events
-                )
+                num_blocks = kv_cache_config.num_blocks_per_group[type(
+                    group.kv_cache_spec)]
+                bp = BlockPool(num_blocks, enable_caching,
+                               enable_kv_cache_events)
                 self.block_pools.append(bp)
-                self.hybrid_managers.append(get_manager_for_kv_cache_spec(
-                    block_pool=bp,
-                    **mgr_kwargs,
-                ))
+                self.hybrid_managers.append(
+                    get_manager_for_kv_cache_spec(
+                        block_pool=bp,
+                        **mgr_kwargs,
+                    ))
         # put full attention at the first position
         if full_attn_pool is None:
             raise RuntimeError("No FullAttentionSpec is found.")
@@ -136,7 +137,9 @@ class OmniKVCacheManager(KVCacheManager):
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: defaultdict[
             str, list[BlockHashType]] = defaultdict(list)
-        logger.warning(f"OmniKVCacheManager is being used with {len(self.hybrid_managers)} KV cache groups.")
+        logger.warning(
+            f"OmniKVCacheManager is being used with {len(self.hybrid_managers)} KV cache groups."
+        )
 
     @property
     def usage(self) -> float:
@@ -222,7 +225,8 @@ class OmniKVCacheManager(KVCacheManager):
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
         for mgr in self.hybrid_managers:
-            mgr.remove_skipped_blocks(request.request_id, request.num_computed_tokens)
+            mgr.remove_skipped_blocks(request.request_id,
+                                      request.num_computed_tokens)
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
@@ -236,10 +240,12 @@ class OmniKVCacheManager(KVCacheManager):
                 request_id=request.request_id,
                 num_tokens=num_tokens_need_slot,
                 new_computed_blocks=new_computed_block_list,
-            ) for mgr in self.hybrid_managers]
+            ) for mgr in self.hybrid_managers
+        ]
 
         free_blocks = [bp.get_num_free_blocks() for bp in self.block_pools]
-        if any(need > free for need, free in zip(num_blocks_to_allocate, free_blocks)):
+        if any(need > free
+               for need, free in zip(num_blocks_to_allocate, free_blocks)):
             # Cannot allocate new blocks
             return None
 
@@ -260,8 +266,9 @@ class OmniKVCacheManager(KVCacheManager):
         # inner list is blocks of each group
         new_blocks: list[list[KVCacheBlock]] = []
         for mgr in self.hybrid_managers:
-            new_blocks.append(mgr.allocate_new_blocks(
-                request.request_id, num_tokens_need_slot))
+            new_blocks.append(
+                mgr.allocate_new_blocks(request.request_id,
+                                        num_tokens_need_slot))
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -272,7 +279,8 @@ class OmniKVCacheManager(KVCacheManager):
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
         # NOTE: call `cache_blocks` only on full attention layers
-        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens, request.num_tokens)
+        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
+                                  request.num_tokens)
         self.single_type_manager.cache_blocks(
             request, self.req_to_block_hashes[request.request_id],
             num_tokens_to_cache)
@@ -309,6 +317,7 @@ class OmniKVCacheManager(KVCacheManager):
 
 
 class OmniAttentionManager(SingleTypeKVCacheManager):
+
     def __init__(self, kv_cache_spec: OmniAttentionSpec, *args, **kwargs):
         super().__init__(kv_cache_spec, *args, **kwargs)
         self.max_tokens = self.kv_cache_spec.max_compressed_len
@@ -340,7 +349,8 @@ class OmniAttentionManager(SingleTypeKVCacheManager):
             return []
         else:
             if num_new_blocks != self.max_num_blocks:
-                raise RuntimeError(f"{num_new_blocks=}, while {self.max_num_blocks=}")
+                raise RuntimeError(
+                    f"{num_new_blocks=}, while {self.max_num_blocks=}")
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             return new_blocks
@@ -352,7 +362,9 @@ class OmniAttentionManager(SingleTypeKVCacheManager):
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
                                max_length: int) -> list[KVCacheBlock]:
-        raise NotImplementedError("Method find_longest_cache_hit is not implemented yet for OmniAttentionManager")
+        raise NotImplementedError(
+            "Method find_longest_cache_hit is not implemented yet for OmniAttentionManager"
+        )
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:

@@ -24,6 +24,7 @@ class MetricsType(Enum):
 
 @dataclass
 class MetricsStat:
+
     def __init__(self):
         self.total_count: int = 0
         self.total_latency_us: int = 0
@@ -36,7 +37,7 @@ class MetricsStat:
     @property
     def average_latency_us(self) -> Optional[int]:
         return self.total_latency_us // self.total_count if self.total_count > 0 else None
-    
+
     def update_stat(self, elapsed_time_us) -> None:
         self.total_count += 1
         self.total_latency_us += elapsed_time_us
@@ -50,7 +51,8 @@ class MetricsManager:
     def __init__(self, log_interval_second: int = 30):
         self.log_interval_second = log_interval_second
         self.metrics_stats: Dict[MetricsType, MetricsStat] = {
-            metric: MetricsStat() for metric in MetricsType
+            metric: MetricsStat()
+            for metric in MetricsType
         }
 
         if EmsEnv.enable_ems_profiling:
@@ -58,16 +60,19 @@ class MetricsManager:
 
     def metrics_start(self, metrics_type: MetricsType) -> Optional[int]:
         return time.perf_counter_ns() if EmsEnv.enable_ems_profiling else None
-    
-    def metrics_end(self, metrics_type: MetricsType, start_time: Optional[int]) -> None:
+
+    def metrics_end(self, metrics_type: MetricsType,
+                    start_time: Optional[int]) -> None:
         if not EmsEnv.enable_ems_profiling or start_time is None:
             return
-        
-        elapsed_time_us = (time.perf_counter_ns() - start_time) // self.NS_TO_US
+
+        elapsed_time_us = (time.perf_counter_ns() -
+                           start_time) // self.NS_TO_US
         self.metrics_stats[metrics_type].update_stat(elapsed_time_us)
 
     def _start_log_task(self):
-        background_thread = threading.Thread(target=self._log_task, name="ems-metrics")
+        background_thread = threading.Thread(target=self._log_task,
+                                             name="ems-metrics")
         background_thread.daemon = True
         background_thread.start()
 
@@ -78,20 +83,25 @@ class MetricsManager:
             self._reset()
 
     def _log_metrics(self) -> None:
-        for metrics_type, stat in self. metrics_stats.items():
+        for metrics_type, stat in self.metrics_stats.items():
             if stat.total_count <= 0:
                 continue
-            
-            values = [metrics_type.name, stat.total_count, stat.average_latency_us,
-                      stat.max_latency_us, stat.min_latency_us, stat.total_latency_us]
+
+            values = [
+                metrics_type.name, stat.total_count, stat.average_latency_us,
+                stat.max_latency_us, stat.min_latency_us, stat.total_latency_us
+            ]
             logger.info(f"{' '.join(str(value) for value in values)}")
 
     def _reset(self) -> None:
         for stat in self.metrics_stats.values():
             stat.reset()
 
+
 def collect_metric(metrics_type: MetricsType):
+
     def decorator(func):
+
         @wraps(func)
         def wrapper(*args, **kwargs):
             start_time = g_metrics_manager.metrics_start(metrics_type)
@@ -102,9 +112,8 @@ def collect_metric(metrics_type: MetricsType):
                 g_metrics_manager.metrics_end(metrics_type, start_time)
 
         return wrapper
-    
-    return decorator
 
+    return decorator
 
 
 g_metrics_manager = MetricsManager()

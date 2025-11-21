@@ -21,10 +21,13 @@ def worker(moe, layer, expert):
         print(f"Worker {layer},{expert} activations: {moe.get_activations()}")
         time.sleep(5)
 
+
 def simulate_npu(moe):
     # Simulate NPU memory (in reality, use NPU API)
     npu_size = 4 * 2 * 3 * 4  # num_layers * experts_per_layer * weights_per_expert * sizeof(float)
-    npu_memory = torch.zeros((16,7192,1024),dtype=torch.float,device="npu:0")  # Shared array as NPU proxy
+    npu_memory = torch.zeros((16, 7192, 1024),
+                             dtype=torch.float,
+                             device="npu:0")  # Shared array as NPU proxy
     print(f"NPU memory init: {list(npu_memory)[:12]}")  # First layer
 
     # 获取NPU内存指针地址
@@ -34,35 +37,42 @@ def simulate_npu(moe):
     import ctypes
 
     # 配置PyCapsule的C API接口
-    ctypes.pythonapi.PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    ctypes.pythonapi.PyCapsule_New.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p
+    ]
     ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
 
     # 创建胶囊对象（关键步骤）
     capsule = ctypes.pythonapi.PyCapsule_New(
         ctypes.c_void_p(address),
         None,  # 无析构函数名
-        None    # 无析构参数
+        None  # 无析构参数
     )
 
     # 调用C++函数传递胶囊
     moe.replicate_weight(capsule)
 
     # moe.replicate_weight(npu_ptr)
-    print(f"NPU memory replicated: {list(npu_memory)[:12]}")  # First layer for brevity
+    print(f"NPU memory replicated: {list(npu_memory)[:12]}"
+          )  # First layer for brevity
+
 
 def create_cluster_activation(placement_pattern):
     # 将expert_mapping的形状信息传递给C++，创建ClusterActivation对象
     num_layers = placement_pattern.shape[1]
-    experts_per_layer = int(torch.sum(placement_pattern[:,0,:]).item() + 0.5)
+    experts_per_layer = int(torch.sum(placement_pattern[:, 0, :]).item() + 0.5)
     activation_window_size = 10  # 假设激活窗口大小为10
 
-    cluster_activation = omni_placement.ClusterActivation(num_layers, experts_per_layer, activation_window_size, True)
+    cluster_activation = omni_placement.ClusterActivation(
+        num_layers, experts_per_layer, activation_window_size, True)
     return cluster_activation
 
-def create_moe_weights(rank, world_size, cluster_activation, expert_mapping, placement_pattern):
+
+def create_moe_weights(rank, world_size, cluster_activation, expert_mapping,
+                       placement_pattern):
     # 将 torch.dtype 映射到 c10::ScalarType 的整数值
     dtype_map = {
-        torch.int32: 3,     # c10::ScalarType::Int
+        torch.int32: 3,  # c10::ScalarType::Int
         # 根据需要添加更多类型
     }
     scalar_type = dtype_map[torch.int32]
@@ -71,18 +81,15 @@ def create_moe_weights(rank, world_size, cluster_activation, expert_mapping, pla
     placement_shape = list(placement_pattern.size())
 
     # 调用 MoEWeights
-    moe_weights = omni_placement.MoEWeights(
-        rank,
-        world_size,
-        cluster_activation,
-        expert_mapping.data_ptr(),
-        expert_shape,
-        scalar_type,
-        placement_pattern.data_ptr(),
-        placement_shape,
-        scalar_type
-    )
+    moe_weights = omni_placement.MoEWeights(rank, world_size,
+                                            cluster_activation,
+                                            expert_mapping.data_ptr(),
+                                            expert_shape, scalar_type,
+                                            placement_pattern.data_ptr(),
+                                            placement_shape, scalar_type)
     return moe_weights
+
+
 """
 # 创建 NPU 张量
 device = torch.device("npu")

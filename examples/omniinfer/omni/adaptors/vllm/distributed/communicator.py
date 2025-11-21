@@ -22,78 +22,79 @@ from vllm.distributed.device_communicators.base_device_communicator import \
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
-    def all_to_all(
-            self,
-            input_: torch.Tensor,
-            scatter_dim: int = 0,
-            gather_dim: int = -1,
-            scatter_sizes: Optional[List[int]] = None,
-            gather_sizes: Optional[List[int]] = None
-    ) -> torch.Tensor:
+
+    def all_to_all(self,
+                   input_: torch.Tensor,
+                   scatter_dim: int = 0,
+                   gather_dim: int = -1,
+                   scatter_sizes: Optional[List[int]] = None,
+                   gather_sizes: Optional[List[int]] = None) -> torch.Tensor:
         scatter_dim = self._normalize_dim(scatter_dim, input_.dim())
         gather_dim = self._normalize_dim(gather_dim, input_.dim())
         self._validate_inputs(input_, scatter_dim, gather_sizes, scatter_sizes)
-        input_list = self._prepare_input_list(input_, scatter_dim, scatter_sizes)
-        output_list = self._prepare_output_list(input_list, gather_dim, gather_sizes)
+        input_list = self._prepare_input_list(input_, scatter_dim,
+                                              scatter_sizes)
+        output_list = self._prepare_output_list(input_list, gather_dim,
+                                                gather_sizes)
         dist.all_to_all(output_list, input_list, group=self.device_group)
         return torch.cat(output_list, dim=gather_dim).contiguous()
 
-    def gather(
-        self, input_: torch.Tensor, dst: int = 0, dim: int = -1
-    ) -> Optional[torch.Tensor]:
+    def gather(self,
+               input_: torch.Tensor,
+               dst: int = 0,
+               dim: int = -1) -> Optional[torch.Tensor]:
         output_tensor = self.all_gather(input_, dim)
         if self.rank_in_group == dst:
             return output_tensor
         else:
             return None
 
-    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    def reduce_scatter(self,
+                       input_: torch.Tensor,
+                       dim: int = -1) -> torch.Tensor:
         input_size = tuple(input_.size())
         output_tensor = torch.empty(
-            (input_size[0] // self.world_size,) + input_size[1:],
+            (input_size[0] // self.world_size, ) + input_size[1:],
             dtype=input_.dtype,
             device=input_.device,
         )
-        torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_, group=self.device_group
-        )
+        torch.distributed.reduce_scatter_tensor(output_tensor,
+                                                input_,
+                                                group=self.device_group)
         return output_tensor
 
     def _normalize_dim(self, dim: int, tensor_dim: int) -> int:
         if dim < -tensor_dim or dim >= tensor_dim:
-            raise ValueError(f"Dimension {dim} is out of bounds for tensor with {tensor_dim} dimensions")
+            raise ValueError(
+                f"Dimension {dim} is out of bounds for tensor with {tensor_dim} dimensions"
+            )
         return dim if dim >= 0 else dim + tensor_dim
 
-    def _validate_inputs(
-            self,
-            input_: torch.Tensor,
-            scatter_dim: int,
-            gather_sizes: Optional[List[int]],
-            scatter_sizes: Optional[List[int]]
-        ) -> None:
+    def _validate_inputs(self, input_: torch.Tensor, scatter_dim: int,
+                         gather_sizes: Optional[List[int]],
+                         scatter_sizes: Optional[List[int]]) -> None:
         if scatter_sizes is not None and gather_sizes is not None:
-            if len(scatter_sizes) != self.world_size or len(gather_sizes) != self.world_size:
+            if len(scatter_sizes) != self.world_size or len(
+                    gather_sizes) != self.world_size:
                 raise ValueError(
                     f"scatter_sizes and gather_sizes must have length {self.world_size}, "
-                    f"got {len(scatter_sizes)} and {len(gather_sizes)}"
-                )
+                    f"got {len(scatter_sizes)} and {len(gather_sizes)}")
             if sum(scatter_sizes) != input_.size(scatter_dim):
                 raise ValueError(
                     f"Sum of scatter_sizes ({sum(scatter_sizes)}) does not match "
-                    f"input size at scatter_dim ({input_.size(scatter_dim)})"
-                )
+                    f"input size at scatter_dim ({input_.size(scatter_dim)})")
         elif scatter_sizes is not None or gather_sizes is not None:
-            raise ValueError("Both scatter_sizes and gather_sizes must be provided or neither")
+            raise ValueError(
+                "Both scatter_sizes and gather_sizes must be provided or neither"
+            )
 
     def _prepare_input_list(
-            self,
-            input_: torch.Tensor,
-            scatter_dim: int,
-            scatter_sizes: Optional[List[int]]
-    ) -> List[torch.Tensor]:
+            self, input_: torch.Tensor, scatter_dim: int,
+            scatter_sizes: Optional[List[int]]) -> List[torch.Tensor]:
         if scatter_sizes is not None:
             return [
-                t.contiguous() for t in torch.split(input_, scatter_sizes, scatter_dim)
+                t.contiguous()
+                for t in torch.split(input_, scatter_sizes, scatter_dim)
             ]
         return [
             t.contiguous()
@@ -117,14 +118,15 @@ class NPUCommunicator(DeviceCommunicatorBase):
                         tensor_shape,
                         dtype=input_list[0].dtype,
                         device=input_list[0].device,
-                    )
-                )
+                    ))
         else:
             output_list = [torch.empty_like(chunk) for chunk in input_list]
         return output_list
 
     def all_reduce_async(self, input_: torch.Tensor) -> torch.Tensor:
-        handle = dist.all_reduce(input_, group=self.device_group, async_op=True)
+        handle = dist.all_reduce(input_,
+                                 group=self.device_group,
+                                 async_op=True)
         return input_, handle
 
     def all_gather_async(self, input_: torch.Tensor, dim: int = -1):
@@ -148,17 +150,22 @@ class NPUCommunicator(DeviceCommunicatorBase):
     def reduce_scatter_async(self, input_: torch.Tensor):
         input_size = tuple(input_.size())
         output_tensor = torch.empty(
-            (input_size[0] // self.world_size,) + input_size[1:],
+            (input_size[0] // self.world_size, ) + input_size[1:],
             dtype=input_.dtype,
             device=input_.device,
         )
         handle = torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_, group=self.device_group, async_op=True
-        )
+            output_tensor, input_, group=self.device_group, async_op=True)
         return output_tensor, handle
 
-    def all_gather_v(self, output_list_: List[torch.Tensor], input_:torch.Tensor) -> None:
-        torch.distributed.all_gather(output_list_, input_, group=self.device_group)
+    def all_gather_v(self, output_list_: List[torch.Tensor],
+                     input_: torch.Tensor) -> None:
+        torch.distributed.all_gather(output_list_,
+                                     input_,
+                                     group=self.device_group)
 
-    def reduce_scatter_v(self, output_:torch.Tensor, input_list_:List[torch.Tensor]) -> None:
-        torch.distributed.reduce_scatter(output_, input_list_, group=self.device_group)
+    def reduce_scatter_v(self, output_: torch.Tensor,
+                         input_list_: List[torch.Tensor]) -> None:
+        torch.distributed.reduce_scatter(output_,
+                                         input_list_,
+                                         group=self.device_group)

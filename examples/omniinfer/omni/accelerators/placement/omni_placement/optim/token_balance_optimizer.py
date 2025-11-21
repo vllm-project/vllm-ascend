@@ -30,19 +30,17 @@ class TokenBalance(Optimizer):
         self.expert_mapping = cluster_status.placement_pattern
         self.device = self.expert_mapping.device
 
-
-
         # Calculate the number of experts assigned per device.
         # It sums the expert mapping tensor on the first row of the first dimension.
         # Adding 0.5 before converting to integer ensures proper rounding.
-        self.expert_per_device = int(torch.sum(self.expert_mapping[0][0]) + 0.5)
+        self.expert_per_device = int(
+            torch.sum(self.expert_mapping[0][0]) + 0.5)
 
         # self.expert_per_device = int((torch.sum(self.expert_mapping[0][0].to(device)) + 0.5).item())
-        self.expert_per_device = torch.tensor(
-            int((torch.sum(self.expert_mapping[0][0]) + 0.5).item()),
-            dtype=torch.int32,
-            device=self.device   )
-
+        self.expert_per_device = torch.tensor(int(
+            (torch.sum(self.expert_mapping[0][0]) + 0.5).item()),
+                                              dtype=torch.int32,
+                                              device=self.device)
 
         # Construct a mapping from expert IDs back to their original positions.
         # This is required for later optimization steps.
@@ -50,13 +48,11 @@ class TokenBalance(Optimizer):
 
     """Optimizes based solely on scores, ignoring loads."""
 
-    def optimize(self,
-                layer_idx_moe: int,
-                tokens: torch.Tensor,
-                token_expert_id: torch.Tensor,
-                token_scores: torch.Tensor,
-                cluster_status: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    def optimize(
+        self, layer_idx_moe: int, tokens: torch.Tensor,
+        token_expert_id: torch.Tensor, token_scores: torch.Tensor,
+        cluster_status: list
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         基于 `expert_position` 进行 token 分配优化，直接映射到全局 expert ID。
 
@@ -81,14 +77,14 @@ class TokenBalance(Optimizer):
         # token_expert_id_dtype = token_expert_id.dtype
 
         # 查询 `expert_position` 以获取全局 expert ID
-        token_expert_placement_ids = self.expert_position[layer_idx_moe, token_expert_id]
+        token_expert_placement_ids = self.expert_position[layer_idx_moe,
+                                                          token_expert_id]
 
         return tokens, token_expert_placement_ids, token_scores
 
-
-    def _map_topk_to_device_epid(self,
-                                layer_idx_moe: int,
-                                topk_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _map_topk_to_device_epid(
+        self, layer_idx_moe: int, topk_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         **Accepts `-1` as token_expert_id inputs, used for adaptive router selection.**
 
@@ -121,7 +117,6 @@ class TokenBalance(Optimizer):
         # Shape: (num_devices, num_epids)
         layer_expert_mapping = self.expert_mapping[:, layer_idx_moe, :]
 
-
         # Create a boolean mask indicating valid expert selections (not equal to -1)
         # Shape: (num_tokens, topk)
         valid_mask = topk_ids != -1
@@ -133,46 +128,43 @@ class TokenBalance(Optimizer):
         # Replace invalid expert selections (-1) with 0 to prevent indexing errors
         topk_ids[~valid_mask] = 0
 
-
         # Calculate device IDs corresponding to each selected expert ID
         # For each token and top-k selection, find which device hosts the expert.
         # Note: For originally invalid positions, device IDs are computed but should be ignored.
         # Shape of indexing result: (num_devices, num_tokens, topk)
         # Shape after argmax: (num_tokens, topk)
-        topk_device_ids = torch.argmax(layer_expert_mapping[:, topk_ids], dim=0)
-
+        topk_device_ids = torch.argmax(layer_expert_mapping[:, topk_ids],
+                                       dim=0)
 
         return topk_ids, valid_mask, topk_device_ids
 
-
-
     def _construct_expert_mapping_to_origin_pos(self):
-            """
+        """
             计算 `expert_position`，从 `expert_mapping` 生成唯一的 global expert 索引。
 
             Returns:
                 - self.expert_position: 形状为 (num_layers, num_epids) 的张量，存储每个 expert 的唯一索引。
             """
-            num_devices, num_layers, num_epids = self.expert_mapping.shape
+        num_devices, num_layers, num_epids = self.expert_mapping.shape
 
-            # 初始化 expert_position，默认值为 -1（表示没有 expert）
-            expert_position = torch.full(
-                (num_layers, num_epids), -1, dtype=torch.long, device=self.device
-            )
+        # 初始化 expert_position，默认值为 -1（表示没有 expert）
+        expert_position = torch.full((num_layers, num_epids),
+                                     -1,
+                                     dtype=torch.long,
+                                     device=self.device)
 
-            # 遍历所有设备
-            for i in range(num_devices):
-                for j in range(num_layers):
-                    # 计算该设备在该层的 cumulative sum（用于计算前面有多少个 expert）
-                    cumsum_expert = torch.cumsum(self.expert_mapping[i, j], dim=0)
+        # 遍历所有设备
+        for i in range(num_devices):
+            for j in range(num_layers):
+                # 计算该设备在该层的 cumulative sum（用于计算前面有多少个 expert）
+                cumsum_expert = torch.cumsum(self.expert_mapping[i, j], dim=0)
 
-                    # 选取存在 expert 的位置
-                    mask = self.expert_mapping[i, j] == 1
+                # 选取存在 expert 的位置
+                mask = self.expert_mapping[i, j] == 1
 
-                    # 计算全局 expert 索引，并填充到 expert_position
-                    expert_position[j, mask] = i * self.expert_per_device + cumsum_expert[mask] - 1
-            self.expert_position = expert_position.to(torch.int32)
-            return  0
-
-
-
+                # 计算全局 expert 索引，并填充到 expert_position
+                expert_position[
+                    j,
+                    mask] = i * self.expert_per_device + cumsum_expert[mask] - 1
+        self.expert_position = expert_position.to(torch.int32)
+        return 0

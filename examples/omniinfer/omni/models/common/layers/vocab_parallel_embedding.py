@@ -25,7 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import pad_vocab_size
 from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
- 
+
 
 def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
@@ -34,27 +34,28 @@ def get_masked_input_and_mask(
         added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
     # torch.jit.script will fuse all of the pointwise ops below
     # into a single kernel, making it very fast
-    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <
-                                                          org_vocab_end_index)
+    org_vocab_mask = (input_ >= org_vocab_start_index) & (
+        input_ < org_vocab_end_index)
     # Adapt: avoid create added_vocab_mask when added_vocab_start_index == added_vocab_end_index.
     if added_vocab_start_index == added_vocab_end_index:
-        valid_offset = (org_vocab_start_index *
-                        org_vocab_mask)
+        valid_offset = (org_vocab_start_index * org_vocab_mask)
         vocab_mask = org_vocab_mask
     else:
         added_vocab_mask = (input_ >= added_vocab_start_index) & (
             input_ < added_vocab_end_index)
         added_offset = added_vocab_start_index - (
-            org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
+            org_vocab_end_index -
+            org_vocab_start_index) - num_org_vocab_padding
         valid_offset = (org_vocab_start_index *
                         org_vocab_mask) + (added_offset * added_vocab_mask)
         vocab_mask = org_vocab_mask | added_vocab_mask
     # Adapt end.
     input_ = vocab_mask * (input_ - valid_offset)
     return input_, ~vocab_mask
- 
- 
+
+
 class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
+
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
@@ -64,9 +65,9 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
                  parallel_lmhead: bool = False):
- 
+
         torch.nn.Module.__init__(self)
- 
+
         # Keep the input dimensions.
         # adapt: lm_head use local tp
         self.parallel_lmhead = parallel_lmhead
@@ -76,7 +77,7 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
         else:
             tp_rank = get_tensor_model_parallel_rank()
             self.tp_size = get_tensor_model_parallel_world_size()
- 
+
         # adapt end.
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
@@ -88,21 +89,22 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
             self.org_vocab_size_padded + num_added_embeddings,
             self.padding_size)
         if self.org_vocab_size_padded > self.num_embeddings_padded:
-            raise RuntimeError("self.org_vocab_size_padded > self.num_embeddings_padded")
- 
+            raise RuntimeError(
+                "self.org_vocab_size_padded > self.num_embeddings_padded")
+
         self.shard_indices = self._get_indices(self.num_embeddings_padded,
                                                self.org_vocab_size_padded,
                                                self.num_embeddings,
                                                self.org_vocab_size, tp_rank,
                                                self.tp_size)
         self.embedding_dim = embedding_dim
- 
+
         quant_method = None
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
- 
+
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
         # layer type like ParallelLMHead, this is not important.
@@ -113,9 +115,9 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
             raise NotImplementedError(
                 f"The class {type(quant_method).__name__} must implement "
                 "the 'embedding' method, see UnquantizedEmbeddingMethod.")
- 
+
         self.quant_method: QuantizeMethodBase = quant_method
- 
+
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         # Divide the weight matrix along the vocaburaly dimension.
@@ -123,14 +125,16 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
         self.num_embeddings_per_partition = divide(self.num_embeddings_padded,
                                                    self.tp_size)
         if self.shard_indices.num_elements_padded != self.num_embeddings_per_partition:
-            raise RuntimeError("self.shard_indices.num_elements_padded != self.num_embeddings_per_partition")
+            raise RuntimeError(
+                "self.shard_indices.num_elements_padded != self.num_embeddings_per_partition"
+            )
         self.num_org_embeddings_per_partition = (
             self.shard_indices.org_vocab_end_index -
             self.shard_indices.org_vocab_start_index)
         self.num_added_embeddings_per_partition = (
             self.shard_indices.added_vocab_end_index -
             self.shard_indices.added_vocab_start_index)
- 
+
         self.quant_method.create_weights(self,
                                          self.embedding_dim,
                                          [self.num_embeddings_per_partition],
@@ -138,8 +142,8 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
                                          self.num_embeddings_padded,
                                          params_dtype=params_dtype,
                                          weight_loader=self.weight_loader)
- 
-    def forward_vocab(self, input_, reduce = 0):
+
+    def forward_vocab(self, input_, reduce=0):
         if self.tp_size > 1:
             # Build the mask.
             if self.parallel_lmhead:
@@ -153,7 +157,7 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
                 self.shard_indices.added_vocab_end_index)
         else:
             masked_input = input_
- 
+
         if masked_input.dtype != torch.long:
             masked_input = masked_input.long()
         # Get the embeddings.
@@ -170,7 +174,8 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
             # Reduce across all the model parallel GPUs.
             output = tensor_model_parallel_reduce_scatter(output_parallel)
         return output
- 
+
+
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
  
@@ -186,7 +191,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
     """
- 
+
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
@@ -214,7 +219,8 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def forward(self, hidden_states, embedding_bias):
         if model_extra_config.parall_config.dp_size > 1:
-            hidden_states = get_local_world_group().all_gather(hidden_states, dim=0)
+            hidden_states = get_local_world_group().all_gather(hidden_states,
+                                                               dim=0)
 
         logits = self.quant_method.apply(self,
                                          hidden_states,

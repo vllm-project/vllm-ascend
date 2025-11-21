@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-
 """
 This module provides a mock model implementation for vLLM, designed for
 capturing and replaying model inferences. It allows for simulating model
@@ -123,9 +122,7 @@ def mock_model_class_factory(base_class: type) -> type:
 
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states", "residual"], config.hidden_size
-                )
-            )
+                    ["hidden_states", "residual"], config.hidden_size))
         else:
             # Otherwise, initialize using the base class's __init__ method.
             base_class.__init__(self, vllm_config=vllm_config, prefix=prefix)
@@ -136,38 +133,37 @@ def mock_model_class_factory(base_class: type) -> type:
         self.torch_compile_mode = (
             vllm_config.additional_config
             and "enable_graph_mode" in vllm_config.additional_config
-            and vllm_config.additional_config["enable_graph_mode"]
-        )
+            and vllm_config.additional_config["enable_graph_mode"])
         self.torch_compile_mode = self.torch_compile_mode or os.getenv(
-            "TORCH_COMPILE_MODE_MOCK", default=False
-        )
+            "TORCH_COMPILE_MODE_MOCK", default=False)
         # Environment variables to control mock behavior
         self.prefill_process = os.getenv("PREFILL_PROCESS", default=False)
         self.kv_cache_mode = os.getenv("KV_CACHE_MODE", default=False)
         self.capture_mode = os.getenv("CAPTURE_MODE", default=False)
         self.replay_mode = os.getenv("REPLAY_MODE", default=False)
-        self.mock_capture_dir = os.getenv(
-            "MOCK_CAPTURE_DIR", default="/home/kc/capture"
-        )
-        self.mock_capture_file_lock = os.getenv(
-            "MOCK_CAPTURE_FILE_LOCK", default=".lock"
-        )
+        self.mock_capture_dir = os.getenv("MOCK_CAPTURE_DIR",
+                                          default="/home/kc/capture")
+        self.mock_capture_file_lock = os.getenv("MOCK_CAPTURE_FILE_LOCK",
+                                                default=".lock")
         self.mock_capture_file = os.getenv(
-            "MOCK_CAPTURE_FILE", default="mock_cache_20250519"
-        ) + ("p" if self.prefill_process else "") # Append 'p' for prefill process
-        self.simulate_elapsed_time = os.getenv("SIMULATE_ELAPSED_TIME", default=False)
+            "MOCK_CAPTURE_FILE", default="mock_cache_20250519") + (
+                "p" if self.prefill_process else ""
+            )  # Append 'p' for prefill process
+        self.simulate_elapsed_time = os.getenv("SIMULATE_ELAPSED_TIME",
+                                               default=False)
         self.random_mode = os.getenv("RANDOM_MODE", default=False)
-        self.forward_time = int(os.getenv("FORWARD_TIME", "0"))  # Simulated forward time in ms
-        self.mock_compute_logits = os.getenv(
-            "MOCK_COMPUTE_LOGITS", default=self.random_mode
-        )
+        self.forward_time = int(os.getenv("FORWARD_TIME",
+                                          "0"))  # Simulated forward time in ms
+        self.mock_compute_logits = os.getenv("MOCK_COMPUTE_LOGITS",
+                                             default=self.random_mode)
 
         # Create capture directory if it doesn't exist
         if not os.path.exists(self.mock_capture_dir):
             logger.debug(f">>>Creating {self.mock_capture_dir}.")
             import pathlib
 
-            pathlib.Path(self.mock_capture_dir).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.mock_capture_dir).mkdir(parents=True,
+                                                      exist_ok=True)
         else:
             logger.debug(f">>>{self.mock_capture_dir} already exists.")
 
@@ -176,13 +172,14 @@ def mock_model_class_factory(base_class: type) -> type:
             logger.debug(f">>>Forward time set to {self.forward_time} ms")
 
         self.input_id_cache = {}  # Cache for input token IDs
-        self.req_id_to_prompt = {}  # Mapping from request ID to prompt token IDs
+        self.req_id_to_prompt = {
+        }  # Mapping from request ID to prompt token IDs
         self.dummy_run = False  # Flag for dummy runs (e.g., for graph compilation)
 
         if self.replay_mode:
             logger.debug(
-                f">>>Replay mode is on. Loading mock_cache from "
-                + f"{os.path.join(self.mock_capture_dir, self.mock_capture_file)}"
+                f">>>Replay mode is on. Loading mock_cache from " +
+                f"{os.path.join(self.mock_capture_dir, self.mock_capture_file)}"
             )
             # Initialize mock cache if in replay mode
             initialize_mock_cache(self)
@@ -196,9 +193,8 @@ def mock_model_class_factory(base_class: type) -> type:
         self.mock_cache_forward = {}
         self.mock_cache_compute_logits = {}
         self.mock_cache_sample = {}
-        with open(
-            os.path.join(self.mock_capture_dir, self.mock_capture_file), "r"
-        ) as f:
+        with open(os.path.join(self.mock_capture_dir, self.mock_capture_file),
+                  "r") as f:
             for l in f:
                 line = json.loads(l)
                 if line["method"] == "forward":
@@ -215,7 +211,8 @@ def mock_model_class_factory(base_class: type) -> type:
                             kv_cache_shape,
                         )
                     else:
-                        self.mock_cache_forward[input_str] = (output_str, elapsed_time)
+                        self.mock_cache_forward[input_str] = (output_str,
+                                                              elapsed_time)
                 elif line["method"] == "compute_logits":
                     input_str = line["input_str"]
                     output_str = line["output_str"]
@@ -252,20 +249,21 @@ def mock_model_class_factory(base_class: type) -> type:
         Returns:
             The output tensor or intermediate tensors from the mock forward pass.
         """
-        attn_metadata = (
-            get_forward_context().attn_metadata if not attn_metadata else attn_metadata
-        )
+        attn_metadata = (get_forward_context().attn_metadata
+                         if not attn_metadata else attn_metadata)
         self.dummy_run = (
-            attn_metadata is None
-        )  # Dummy run info for compute_logits and other methods
+            attn_metadata
+            is None)  # Dummy run info for compute_logits and other methods
 
         # Fast random mock output / dummy run except for capture mode and
         # kv_cache_mode does not need to call model forward
         if self.random_mode:
-            return generate_random_output(self, input_ids, positions, attn_metadata)
+            return generate_random_output(self, input_ids, positions,
+                                          attn_metadata)
 
         if attn_metadata is None and not self.capture_mode and not self.kv_cache_mode:
-            return generate_random_output(self, input_ids, positions, attn_metadata)
+            return generate_random_output(self, input_ids, positions,
+                                          attn_metadata)
 
         # Dummy run in kv cache mode or capture mode needs to call model forward,
         # because other workers are waiting
@@ -281,8 +279,7 @@ def mock_model_class_factory(base_class: type) -> type:
             )
 
         block_table, seq_lens, query_lens, new_reqs = extract_attn_metadata(
-            attn_metadata
-        )
+            attn_metadata)
 
         # For decode node in PD separation: get the original prompt ids from call stack (model runner)
         req_ids = get_req_ids_for_prefill(self, positions)
@@ -305,7 +302,8 @@ def mock_model_class_factory(base_class: type) -> type:
 
         # In non-KV cache mode as well as for prefill node capture / replay,
         # we use the cached prompt input ids as the capture-replay cache key, which needs to be cached
-        maintain_forward_cache(self, input_ids, block_table, query_lens, new_reqs)
+        maintain_forward_cache(self, input_ids, block_table, query_lens,
+                               new_reqs)
 
         # Capture the input and model output (or KV cache for prefill nodes), or alternatively replay
         if not self.replay_mode:
@@ -376,10 +374,8 @@ def mock_model_class_factory(base_class: type) -> type:
         if not self.torch_compile_mode:
             end_time = time.time()
             elapsed_time = end_time - start_time
-            if (
-                self.simulate_elapsed_time
-                and total_captured_elapsed_time > elapsed_time
-            ):
+            if (self.simulate_elapsed_time
+                    and total_captured_elapsed_time > elapsed_time):
                 time.sleep(total_captured_elapsed_time - elapsed_time)
 
         return output
@@ -445,7 +441,8 @@ def mock_model_class_factory(base_class: type) -> type:
 
         return output
 
-    def maintain_forward_cache(self, input_ids, block_table, query_lens, new_reqs):
+    def maintain_forward_cache(self, input_ids, block_table, query_lens,
+                               new_reqs):
         """
         Maintains the input token cache for forward passes.
 
@@ -456,14 +453,12 @@ def mock_model_class_factory(base_class: type) -> type:
             new_reqs: Boolean indicating if it's a new request.
         """
         if not self.kv_cache_mode:
-            maintain_input_token_cache(
-                self, input_ids, block_table, query_lens, new_reqs
-            )
+            maintain_input_token_cache(self, input_ids, block_table,
+                                       query_lens, new_reqs)
 
         if self.prefill_process and (self.capture_mode or self.replay_mode):
-            maintain_input_token_cache(
-                self, input_ids, block_table, query_lens, new_reqs
-            )
+            maintain_input_token_cache(self, input_ids, block_table,
+                                       query_lens, new_reqs)
 
     def get_kv_caches(
         self,
@@ -495,7 +490,8 @@ def mock_model_class_factory(base_class: type) -> type:
             - output: Model output (if computed).
             - elapsed_time: Elapsed time for computation (if computed).
         """
-        if self.kv_cache_mode and (not self.prefill_process or self.capture_mode):
+        if self.kv_cache_mode and (not self.prefill_process
+                                   or self.capture_mode):
             output, elapsed_time = base_forward(
                 self,
                 input_ids,
@@ -505,7 +501,8 @@ def mock_model_class_factory(base_class: type) -> type:
                 intermediate_tensors,
                 inputs_embeds,
             )
-            concatenated_kv_caches = collect_kv_caches(self, block_table, seq_lens)
+            concatenated_kv_caches = collect_kv_caches(self, block_table,
+                                                       seq_lens)
             return concatenated_kv_caches, output, elapsed_time
         else:
             concatenated_kv_caches = [None] * len(block_table)
@@ -523,11 +520,8 @@ def mock_model_class_factory(base_class: type) -> type:
         """
         if not self.prefill_process and self.kv_cache_mode:
             scheduler_output, input_batch = find_scheduled_data_in_call_stack()
-            for req in (
-                scheduler_output.scheduled_new_reqs
-                if scheduler_output.scheduled_new_reqs
-                else []
-            ):
+            for req in (scheduler_output.scheduled_new_reqs
+                        if scheduler_output.scheduled_new_reqs else []):
                 self.req_id_to_prompt[req.req_id] = req.prompt_token_ids
             req_ids = input_batch.req_ids
         else:
@@ -544,11 +538,8 @@ def mock_model_class_factory(base_class: type) -> type:
         """
         for i in [6] + list(range(15)):
             scheduler_output = access_variable("scheduler_output", i)
-            input_batch = (
-                access_variable("self", i).input_batch
-                if hasattr(access_variable("self", i), "input_batch")
-                else None
-            )
+            input_batch = (access_variable("self", i).input_batch if hasattr(
+                access_variable("self", i), "input_batch") else None)
             if scheduler_output is not None and input_batch is not None:
                 break
         return scheduler_output, input_batch
@@ -609,11 +600,8 @@ def mock_model_class_factory(base_class: type) -> type:
         """
         if self.prefill_process:
             for i_layer, layer in enumerate(self.model.layers):
-                attn_obj = (
-                    layer.self_attn.attn
-                    if hasattr(layer.self_attn, "attn")
-                    else layer.self_attn.mla_attn
-                )
+                attn_obj = (layer.self_attn.attn if hasattr(
+                    layer.self_attn, "attn") else layer.self_attn.mla_attn)
                 for i, seq_len in enumerate(seq_lens):
                     for block_seq_num, block_id in enumerate(block_table[i]):
                         set_kv_cache(
@@ -657,13 +645,12 @@ def mock_model_class_factory(base_class: type) -> type:
                 attn_obj.kv_cache[get_forward_context().virtual_engine][
                     :,
                     block_id,
-                    : seq_len - block_seq_num * self.block_size,
+                    :seq_len - block_seq_num * self.block_size,
                     0,
                     :,
                 ] = saved_kv_caches[i][i_layer][
                     :,
-                    block_seq_num
-                    * self.block_size : min(
+                    block_seq_num * self.block_size:min(
                         seq_len,
                         block_seq_num * self.block_size + self.block_size,
                     ),
@@ -671,16 +658,16 @@ def mock_model_class_factory(base_class: type) -> type:
             else:
                 attn_obj.kv_cache[get_forward_context().virtual_engine][
                     block_id,
-                    : seq_len - block_seq_num * self.block_size,
+                    :seq_len - block_seq_num * self.block_size,
                     0,
                     :,
-                ] = saved_kv_caches[i][i_layer][
-                    block_seq_num
-                    * self.block_size : min(
-                        seq_len,
-                        block_seq_num * self.block_size + self.block_size,
-                    )
-                ]
+                ] = saved_kv_caches[i][i_layer][block_seq_num *
+                                                self.block_size:min(
+                                                    seq_len,
+                                                    block_seq_num *
+                                                    self.block_size +
+                                                    self.block_size,
+                                                )]
 
     def replay_mock_cache(
         self,
@@ -710,15 +697,11 @@ def mock_model_class_factory(base_class: type) -> type:
         saved_kv_caches = []
         total_captured_elapsed_time = 0.0
         for block_row, query_len, req_id, position in zip(
-            block_table, query_lens, req_ids, positions
-        ):
+                block_table, query_lens, req_ids, positions):
             input_id_cache_key = get_unique_req_identifier(block_row)
             input_str = self.cache_repr_from_inputs(
-                (
-                    self.input_id_cache[input_id_cache_key]
-                    if input_id_cache_key in self.input_id_cache
-                    else None
-                ),
+                (self.input_id_cache[input_id_cache_key]
+                 if input_id_cache_key in self.input_id_cache else None),
                 req_id,
                 position,
             )
@@ -726,32 +709,26 @@ def mock_model_class_factory(base_class: type) -> type:
             if input_str not in self.mock_cache_forward:
                 raise KeyError(
                     f"The input to this model has not been captured before, or temp is not zero:"
-                    + f"\n{input_str[:min(len(input_str), 100)]}"
-                )
+                    + f"\n{input_str[:min(len(input_str), 100)]}")
 
             # Load outputs from replay cache key
             if self.prefill_process:
-                (output_str, captured_elapsed_time, kv_cache_str, kv_cache_shape) = (
-                    self.mock_cache_forward[input_str]
-                )
+                (output_str, captured_elapsed_time, kv_cache_str,
+                 kv_cache_shape) = (self.mock_cache_forward[input_str])
                 tensor_bytes = base64.b64decode(kv_cache_str)
-                saved_kv_cache = (
-                    torch.Tensor(numpy.frombuffer(tensor_bytes, dtype=numpy.float32))
-                    .to(input_ids.device)
-                    .type(torch.bfloat16)
-                    .view(ast.literal_eval(kv_cache_shape))
-                )
+                saved_kv_cache = (torch.Tensor(
+                    numpy.frombuffer(tensor_bytes, dtype=numpy.float32)).to(
+                        input_ids.device).type(torch.bfloat16).view(
+                            ast.literal_eval(kv_cache_shape)))
                 saved_kv_caches.append(saved_kv_cache)
             else:
-                (output_str, captured_elapsed_time) = self.mock_cache_forward[input_str]
+                (output_str,
+                 captured_elapsed_time) = self.mock_cache_forward[input_str]
 
             tensor_bytes = base64.b64decode(output_str)
-            output = (
-                torch.Tensor(numpy.frombuffer(tensor_bytes, dtype=numpy.float32))
-                .to(input_ids.device)
-                .type(torch.bfloat16)
-                .view(query_len, -1)
-            )
+            output = (torch.Tensor(
+                numpy.frombuffer(tensor_bytes, dtype=numpy.float32)).to(
+                    input_ids.device).type(torch.bfloat16).view(query_len, -1))
             outputs.append(output)
             total_captured_elapsed_time += captured_elapsed_time
         return (
@@ -771,7 +748,8 @@ def mock_model_class_factory(base_class: type) -> type:
         Returns:
             A unique identifier for the request.
         """
-        return block_row[0].item()  # The first block table entry is unique for each request
+        return block_row[0].item(
+        )  # The first block table entry is unique for each request
 
     def capture_mock_cache(
         self,
@@ -796,76 +774,65 @@ def mock_model_class_factory(base_class: type) -> type:
             req_ids: Request IDs.
             positions: Positional IDs of the tokens.
         """
-        if get_pp_group().is_last_rank and (
-            get_tp_group().is_last_rank or self.kv_cache_mode
-        ):
+        if get_pp_group().is_last_rank and (get_tp_group().is_last_rank
+                                            or self.kv_cache_mode):
             curr_idx = 0
             for block_row, query_len, concatenated_kv_cache, req_id, position in zip(
-                block_table,
-                query_lens,
-                (
-                    concatenated_kv_caches
-                    if self.kv_cache_mode
-                    else [None] * len(block_table)
-                ),
-                req_ids,
-                positions,
+                    block_table,
+                    query_lens,
+                (concatenated_kv_caches if self.kv_cache_mode else [None] *
+                 len(block_table)),
+                    req_ids,
+                    positions,
             ):
                 input_id_cache_key = get_unique_req_identifier(block_row)
                 input_str = self.cache_repr_from_inputs(
-                    (
-                        self.input_id_cache[input_id_cache_key]
-                        if input_id_cache_key in self.input_id_cache
-                        else None
-                    ),
+                    (self.input_id_cache[input_id_cache_key]
+                     if input_id_cache_key in self.input_id_cache else None),
                     req_id,
                     position,
                 )
                 if self.prefill_process:
                     kv_cache_str = base64.b64encode(
-                        concatenated_kv_cache.type(torch.float32)
-                        .cpu()
-                        .numpy()
-                        .tobytes()
-                    ).decode("utf-8")
+                        concatenated_kv_cache.type(
+                            torch.float32).cpu().numpy().tobytes()).decode(
+                                "utf-8")
                     kv_cache_shape = str(tuple(concatenated_kv_cache.shape))
                 output_str = base64.b64encode(
-                    output[curr_idx : curr_idx + query_len]
-                    .type(torch.float32)
-                    .cpu()
-                    .numpy()
-                    .tobytes()
-                ).decode("utf-8")
+                    output[curr_idx:curr_idx + query_len].type(
+                        torch.float32).cpu().numpy().tobytes()).decode("utf-8")
                 curr_idx += query_len
 
                 lock = FileLock(
-                    os.path.join(self.mock_capture_dir, self.mock_capture_file_lock)
-                )
+                    os.path.join(self.mock_capture_dir,
+                                 self.mock_capture_file_lock))
                 with lock:
                     with open(
-                        os.path.join(self.mock_capture_dir, self.mock_capture_file), "a"
-                    ) as f:
+                            os.path.join(self.mock_capture_dir,
+                                         self.mock_capture_file), "a") as f:
                         logger.debug(f">>>Dump to {self.mock_capture_file}.")
                         f.write(
                             json.dumps(
                                 {
-                                    "method": "forward",
-                                    "input_str": input_str,
-                                    "output_str": output_str,
-                                    "elapsed_time": elapsed_time,
-                                    "kv_cache_str": (
-                                        kv_cache_str if self.prefill_process else ""
-                                    ),
-                                    "kv_cache_shape": (
-                                        kv_cache_shape if self.prefill_process else ""
-                                    ),
+                                    "method":
+                                    "forward",
+                                    "input_str":
+                                    input_str,
+                                    "output_str":
+                                    output_str,
+                                    "elapsed_time":
+                                    elapsed_time,
+                                    "kv_cache_str": (kv_cache_str if self.
+                                                     prefill_process else ""),
+                                    "kv_cache_shape":
+                                    (kv_cache_shape if self.
+                                     prefill_process else ""),
                                 },
                                 ensure_ascii=False,
-                            )
-                            + "\n"
-                        )
+                            ) + "\n")
 
-    def maintain_input_token_cache(self, input_ids, block_table, query_lens, new_reqs):
+    def maintain_input_token_cache(self, input_ids, block_table, query_lens,
+                                   new_reqs):
         """
         Maintains a cache of input token IDs mapped to unique request identifiers.
         This is used to reconstruct the full prompt for replay.
@@ -883,25 +850,22 @@ def mock_model_class_factory(base_class: type) -> type:
         # Make the cache from allocated block (req identifier) to all past token ids
         curr_idx = 0
         for input_id_cache_key, new_req, query_len in zip(
-            input_id_cache_keys, new_reqs, query_lens
-        ):
+                input_id_cache_keys, new_reqs, query_lens):
             if new_req:
-                self.input_id_cache[input_id_cache_key] = (
-                    torch.Tensor([]).type(torch.int32).to(input_ids.device)
-                )
+                self.input_id_cache[input_id_cache_key] = (torch.Tensor(
+                    []).type(torch.int32).to(input_ids.device))
 
             if input_id_cache_key not in self.input_id_cache:
                 raise KeyError(
                     f"The previously allocated block shifted and cannot be found, "
-                    + f"or KV cache mode is required for prefilled decode nodes:\n{input_id_cache_key}"
+                    +
+                    f"or KV cache mode is required for prefilled decode nodes:\n{input_id_cache_key}"
                 )
 
-            self.input_id_cache[input_id_cache_key] = torch.cat(
-                [
-                    self.input_id_cache[input_id_cache_key],
-                    input_ids[curr_idx : curr_idx + query_len],
-                ]
-            )
+            self.input_id_cache[input_id_cache_key] = torch.cat([
+                self.input_id_cache[input_id_cache_key],
+                input_ids[curr_idx:curr_idx + query_len],
+            ])
             curr_idx += query_len
 
     def collect_kv_caches(self, block_table, seq_lens):
@@ -939,24 +903,26 @@ def mock_model_class_factory(base_class: type) -> type:
                 kv_cache_entries = torch.ones(
                     2,
                     seq_len,
-                    attn_obj.kv_cache[get_forward_context().virtual_engine].shape[-1],
+                    attn_obj.kv_cache[
+                        get_forward_context().virtual_engine].shape[-1],
                 )
                 for block_seq_num, block_id in enumerate(block_table[i]):
                     if block_seq_num <= seq_len // self.block_size:
                         kv_cache_entries[
                             :,
-                            block_seq_num
-                            * self.block_size : min(
+                            block_seq_num * self.block_size:min(
                                 seq_len,
-                                block_seq_num * self.block_size + self.block_size,
+                                block_seq_num * self.block_size +
+                                self.block_size,
                             ),
-                        ] = attn_obj.kv_cache[get_forward_context().virtual_engine][
-                            :,
-                            block_id,
-                            : seq_len - block_seq_num * self.block_size,
-                            0,
-                            :,
-                        ]
+                        ] = attn_obj.kv_cache[
+                            get_forward_context().virtual_engine][
+                                :,
+                                block_id,
+                                :seq_len - block_seq_num * self.block_size,
+                                0,
+                                :,
+                            ]
                 kv_caches[i].append(kv_cache_entries)
         concatenated_kv_caches = [torch.stack(kvs) for kvs in kv_caches]
         return concatenated_kv_caches
@@ -978,22 +944,21 @@ def mock_model_class_factory(base_class: type) -> type:
             for i, seq_len in enumerate(seq_lens):
                 kv_cache_entries = torch.ones(
                     seq_len,
-                    attn_obj.kv_cache[get_forward_context().virtual_engine].shape[-1],
+                    attn_obj.kv_cache[
+                        get_forward_context().virtual_engine].shape[-1],
                 )
                 for block_seq_num, block_id in enumerate(block_table[i]):
                     if block_seq_num <= seq_len // self.block_size:
-                        kv_cache_entries[
-                            block_seq_num
-                            * self.block_size : min(
-                                seq_len,
-                                block_seq_num * self.block_size + self.block_size,
-                            )
-                        ] = attn_obj.kv_cache[get_forward_context().virtual_engine][
-                            block_id,
-                            : seq_len - block_seq_num * self.block_size,
-                            0,
-                            :,
-                        ]
+                        kv_cache_entries[block_seq_num * self.block_size:min(
+                            seq_len,
+                            block_seq_num * self.block_size + self.block_size,
+                        )] = attn_obj.kv_cache[
+                            get_forward_context().virtual_engine][
+                                block_id,
+                                :seq_len - block_seq_num * self.block_size,
+                                0,
+                                :,
+                            ]
                 kv_caches[i].append(kv_cache_entries)
         concatenated_kv_caches = [torch.stack(kvs) for kvs in kv_caches]
         return concatenated_kv_caches
@@ -1020,7 +985,8 @@ def mock_model_class_factory(base_class: type) -> type:
             query_lens = attn_metadata.query_lens
         elif attn_metadata.decode and attn_metadata.prefill:
             block_table = torch.cat(
-                (attn_metadata.decode.block_table, attn_metadata.prefill.block_table),
+                (attn_metadata.decode.block_table,
+                 attn_metadata.prefill.block_table),
                 dim=0,
             )
             seq_lens = (
@@ -1028,7 +994,8 @@ def mock_model_class_factory(base_class: type) -> type:
             )  # On reaching new versions of vllm_ascend, this may be incorrect and need cat like block table
             query_lens = torch.cat(
                 (
-                    torch.ones_like(attn_metadata.decode.seq_lens).type(torch.int32),
+                    torch.ones_like(attn_metadata.decode.seq_lens).type(
+                        torch.int32),
                     attn_metadata.prefill.query_lens,
                 ),
                 dim=0,
@@ -1041,8 +1008,7 @@ def mock_model_class_factory(base_class: type) -> type:
             block_table = attn_metadata.decode.block_table
             seq_lens = attn_metadata.decode.seq_lens
             query_lens = torch.ones_like(attn_metadata.decode.seq_lens).type(
-                torch.int32
-            )
+                torch.int32)
         new_reqs = seq_lens == query_lens
         return block_table, seq_lens, query_lens, new_reqs
 
@@ -1093,11 +1059,8 @@ def mock_model_class_factory(base_class: type) -> type:
         torch.manual_seed(self.seed)
         self.seed += 1
         for layer in self.model.layers:
-            attn_obj = (
-                layer.self_attn.attn
-                if hasattr(layer.self_attn, "attn")
-                else layer.self_attn.mla_attn
-            )
+            attn_obj = (layer.self_attn.attn if hasattr(
+                layer.self_attn, "attn") else layer.self_attn.mla_attn)
             for virt_kv_cache in attn_obj.kv_cache:
                 virt_kv_cache[...] = torch.randn(
                     virt_kv_cache.shape,
@@ -1120,11 +1083,11 @@ def mock_model_class_factory(base_class: type) -> type:
         """
         # Define the cache key
         if not self.prefill_process and self.kv_cache_mode:
-            return str(self.req_id_to_prompt[req_id]) + "p" + str(position.item())
+            return str(self.req_id_to_prompt[req_id]) + "p" + str(
+                position.item())
         else:
-            return base64.b64encode(prompt_token_ids.cpu().numpy().tobytes()).decode(
-                "utf-8"
-            )
+            return base64.b64encode(
+                prompt_token_ids.cpu().numpy().tobytes()).decode("utf-8")
 
     def compute_logits(
         self,
@@ -1144,7 +1107,8 @@ def mock_model_class_factory(base_class: type) -> type:
 
         # Can turn off mocking compute_logits
         if not self.mock_compute_logits:
-            return base_class.compute_logits(self, hidden_states, sampling_metadata)
+            return base_class.compute_logits(self, hidden_states,
+                                             sampling_metadata)
 
         # Fast random mock output / dummy run does not need to compute anything
         if self.random_mode or self.dummy_run:
@@ -1156,14 +1120,14 @@ def mock_model_class_factory(base_class: type) -> type:
 
         # Prefill process needs to compute everything, unless random mode / dummy run
         if self.prefill_process:
-            return base_class.compute_logits(self, hidden_states, sampling_metadata)
+            return base_class.compute_logits(self, hidden_states,
+                                             sampling_metadata)
 
         # Capture the input and model output, or alternatively replay
         if not self.replay_mode:
             logger.debug(f">>>Running compute_logits in capture mode.")
-            output = run_and_maybe_capture_logits(
-                self, hidden_states, sampling_metadata
-            )
+            output = run_and_maybe_capture_logits(self, hidden_states,
+                                                  sampling_metadata)
             return output
         else:
             logger.debug(f">>>Running compute_logits in replay mode.")
@@ -1183,16 +1147,14 @@ def mock_model_class_factory(base_class: type) -> type:
         outputs = []
         for hidden_state in hidden_states:
             input_str = base64.b64encode(
-                hidden_state.type(torch.float32).cpu().numpy().tobytes()
-            ).decode("utf-8")
+                hidden_state.type(
+                    torch.float32).cpu().numpy().tobytes()).decode("utf-8")
             output_str = self.mock_cache_compute_logits[input_str]
             tensor_bytes = base64.b64decode(output_str)
-            output = (
-                torch.Tensor(numpy.frombuffer(tensor_bytes, dtype=numpy.float32))
-                .to(hidden_states.device)
-                .type(torch.bfloat16)
-                .view(-1, self.config.vocab_size)
-            )
+            output = (torch.Tensor(
+                numpy.frombuffer(tensor_bytes, dtype=numpy.float32)).to(
+                    hidden_states.device).type(torch.bfloat16).view(
+                        -1, self.config.vocab_size))
             outputs.append(output)
         outputs = torch.concat(outputs, dim=0)
         return outputs
@@ -1208,25 +1170,27 @@ def mock_model_class_factory(base_class: type) -> type:
         Returns:
             The computed logits tensor.
         """
-        output = base_class.compute_logits(self, hidden_states, sampling_metadata)
+        output = base_class.compute_logits(self, hidden_states,
+                                           sampling_metadata)
 
         # Save captured input-output pair
         if self.capture_mode:
             for hidden_state, o in zip(hidden_states, output):
                 input_str = base64.b64encode(
-                    hidden_state.type(torch.float32).cpu().numpy().tobytes()
-                ).decode("utf-8")
+                    hidden_state.type(
+                        torch.float32).cpu().numpy().tobytes()).decode("utf-8")
                 output_str = base64.b64encode(
-                    o.type(torch.float32).cpu().numpy().tobytes()
-                ).decode("utf-8")
+                    o.type(
+                        torch.float32).cpu().numpy().tobytes()).decode("utf-8")
 
                 lock = FileLock(
-                    os.path.join(self.mock_capture_dir, self.mock_capture_file_lock)
-                )
+                    os.path.join(self.mock_capture_dir,
+                                 self.mock_capture_file_lock))
                 with lock:
                     with open(
-                        os.path.join(self.mock_capture_dir, self.mock_capture_file),
-                        "a",
+                            os.path.join(self.mock_capture_dir,
+                                         self.mock_capture_file),
+                            "a",
                     ) as f:
                         logger.debug(f">>>Dump to {self.mock_capture_file}.")
                         f.write(
@@ -1237,9 +1201,7 @@ def mock_model_class_factory(base_class: type) -> type:
                                     "output_str": output_str,
                                 },
                                 ensure_ascii=False,
-                            )
-                            + "\n"
-                        )
+                            ) + "\n")
 
         return output
 
@@ -1259,9 +1221,8 @@ def mock_model_class_factory(base_class: type) -> type:
         Returns:
             The sampled output.
         """
-        return base_class.sample(
-            self, logits, sampling_metadata
-        )  # not needed to capture
+        return base_class.sample(self, logits,
+                                 sampling_metadata)  # not needed to capture
 
     def load_weights(self, weights):
         """

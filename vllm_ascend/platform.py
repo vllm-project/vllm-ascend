@@ -151,8 +151,8 @@ class NPUPlatform(Platform):
                 ascend_scheduler_config.enabled = True
                 if hasattr(ascend_scheduler_config, "enable_chunked_prefill"):
                     ascend_scheduler_config.enable_chunked_prefill = False
-            if (scheduler_config.max_num_batched_tokens <
-                    scheduler_config.max_model_len
+            if (scheduler_config.max_num_batched_tokens
+                    < scheduler_config.max_model_len
                     and not scheduler_config.chunked_prefill_enabled):
                 scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
 

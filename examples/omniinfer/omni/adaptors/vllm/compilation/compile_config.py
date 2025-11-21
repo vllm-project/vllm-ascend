@@ -64,23 +64,31 @@ class NPUCompilationConfig:
     block_num_floating_range: int = BLOCK_NUM_FLOATING_RANGE
     """The compilation cache allows for the range of fluctuations"""
 
-    def build_from_cli(self, raw_graph_config: dict[str,Any], vllm_config: VllmConfig):
+    def build_from_cli(self, raw_graph_config: dict[str, Any],
+                       vllm_config: VllmConfig):
         """Parse the CLI value for the compilation config.
         -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
         """
-        self.level = raw_graph_config.get("level", CompilationLevel.NO_COMPILATION)
+        self.level = raw_graph_config.get("level",
+                                          CompilationLevel.NO_COMPILATION)
         self.backend = raw_graph_config.get("backend", None)
         self.use_aclgraph = raw_graph_config.get("use_aclgraph", False)
-        self.aclgraph_num_of_warmups = raw_graph_config.get("aclgraph_num_of_warmups", 0)
-        self.aclgraph_capture_sizes = raw_graph_config.get("aclgraph_capture_sizes", None)
-        self.use_ge_graph_cached = raw_graph_config.get("use_ge_graph_cached", False)
+        self.aclgraph_num_of_warmups = raw_graph_config.get(
+            "aclgraph_num_of_warmups", 0)
+        self.aclgraph_capture_sizes = raw_graph_config.get(
+            "aclgraph_capture_sizes", None)
+        self.use_ge_graph_cached = raw_graph_config.get(
+            "use_ge_graph_cached", False)
         self.decode_gear_list = raw_graph_config.get("decode_gear_list", None)
-        self.block_num_floating_range = raw_graph_config.get("block_num_floating_range", BLOCK_NUM_FLOATING_RANGE)
+        self.block_num_floating_range = raw_graph_config.get(
+            "block_num_floating_range", BLOCK_NUM_FLOATING_RANGE)
 
-        if self.aclgraph_capture_sizes and not isinstance(self.aclgraph_capture_sizes, list):
+        if self.aclgraph_capture_sizes and not isinstance(
+                self.aclgraph_capture_sizes, list):
             raise TypeError("aclgraph_capture_sizes must be a list")
 
-        if self.decode_gear_list and not isinstance(self.decode_gear_list, list):
+        if self.decode_gear_list and not isinstance(self.decode_gear_list,
+                                                    list):
             raise TypeError("decode_gear_list must be a list")
 
         self.update_gear_options(vllm_config)
@@ -90,21 +98,29 @@ class NPUCompilationConfig:
     def update_gear_options(self, vllm_config: VllmConfig):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         use_spec_decode = False if not vllm_config.speculative_config else (
-                    vllm_config.speculative_config.method == "deepseek_mtp" or vllm_config.speculative_config.method == "pangu_ultra_moe_mtp")
-        max_batch_size = max_num_reqs if not use_spec_decode else max_num_reqs * (1 + vllm_config.speculative_config.num_speculative_tokens)
+            vllm_config.speculative_config.method == "deepseek_mtp"
+            or vllm_config.speculative_config.method == "pangu_ultra_moe_mtp")
+        max_batch_size = max_num_reqs if not use_spec_decode else max_num_reqs * (
+            1 + vllm_config.speculative_config.num_speculative_tokens)
         if not self.decode_gear_list:
             self.decode_gear_list = [max_batch_size]
 
         if len(self.decode_gear_list) > MAX_GEAR_NUM:
             raise ValueError(f"Max gear num supported is {MAX_GEAR_NUM} now.")
 
-        if self.decode_gear_list and max(self.decode_gear_list) > max_batch_size:
-            decode_gear_list = [gear for gear in self.decode_gear_list if gear <= max_batch_size]
+        if self.decode_gear_list and max(
+                self.decode_gear_list) > max_batch_size:
+            decode_gear_list = [
+                gear for gear in self.decode_gear_list
+                if gear <= max_batch_size
+            ]
             logger.warning(
-                f"PTA_TORCHAIR_DECODE_GEAR_LIST({self.decode_gear_list}) becomes ({decode_gear_list}) due to max_batch_size({max_batch_size})")
+                f"PTA_TORCHAIR_DECODE_GEAR_LIST({self.decode_gear_list}) becomes ({decode_gear_list}) due to max_batch_size({max_batch_size})"
+            )
             self.decode_gear_list = decode_gear_list
 
-        if len(self.decode_gear_list) < MAX_GEAR_NUM and max(self.decode_gear_list) < max_batch_size:
+        if len(self.decode_gear_list) < MAX_GEAR_NUM and max(
+                self.decode_gear_list) < max_batch_size:
             self.decode_gear_list.append(max_batch_size)
 
     def init_backend(self, vllm_config: VllmConfig) -> Union[str, Callable]:
@@ -112,7 +128,7 @@ class NPUCompilationConfig:
             raise ValueError("No compilation level is set.")
 
         if self.level in [
-            CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
+                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
         ]:
             if not self.backend or self.backend == "":
                 config = get_torchair_config()
@@ -135,5 +151,7 @@ class NPUCompilationConfig:
         ensure that it is included in the factors list if
         it affects the computation graph.
         """
-        factors: list[Any] = [self.level, self.backend, self.block_num_floating_range]
+        factors: list[Any] = [
+            self.level, self.backend, self.block_num_floating_range
+        ]
         return hashlib.sha256(str(factors).encode()).hexdigest()

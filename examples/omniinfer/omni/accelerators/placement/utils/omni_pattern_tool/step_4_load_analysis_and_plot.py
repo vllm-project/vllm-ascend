@@ -14,10 +14,15 @@ import seaborn as sns
 
 # Configure font to support Unicode characters for plotting
 try:
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+    plt.rcParams['font.sans-serif'] = [
+        'SimHei', 'Microsoft YaHei', 'Arial Unicode MS'
+    ]
     plt.rcParams['axes.unicode_minus'] = False
 except ImportError:
-    logging.warning("matplotlib is not installed. Unicode font settings are skipped, but this does not affect load analysis or plotting.")
+    logging.warning(
+        "matplotlib is not installed. Unicode font settings are skipped, but this does not affect load analysis or plotting."
+    )
+
 
 def setup_logging(log_timestamp=None):
     """Set up logging configuration with a specified timestamp."""
@@ -27,13 +32,13 @@ def setup_logging(log_timestamp=None):
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file, encoding='utf-8', mode='a')
-        ]
-    )
+        handlers=[logging.FileHandler(log_file, encoding='utf-8', mode='a')])
     return logging.getLogger(__name__)
 
-def analyze_device_load(placement_pattern: np.ndarray, load_array: np.ndarray, log_timestamp=None) -> pd.DataFrame:
+
+def analyze_device_load(placement_pattern: np.ndarray,
+                        load_array: np.ndarray,
+                        log_timestamp=None) -> pd.DataFrame:
     """
     Analyze device load based on placement pattern and load array.
 
@@ -56,7 +61,8 @@ def analyze_device_load(placement_pattern: np.ndarray, load_array: np.ndarray, l
             total_load = 0
             for ep in range(num_experts):
                 if placement_pattern[rank, layer, ep] == 1:
-                    ranks_with_ep = np.where(placement_pattern[:, layer, ep] == 1)[0]
+                    ranks_with_ep = np.where(placement_pattern[:, layer,
+                                                               ep] == 1)[0]
                     num_deployment = len(ranks_with_ep)
                     if num_deployment > 0:
                         load_for_ep = load_array[layer, ep] / num_deployment
@@ -71,10 +77,14 @@ def analyze_device_load(placement_pattern: np.ndarray, load_array: np.ndarray, l
     df_pivot = df_load.pivot(index='layer', columns='rank_id', values='load')
     df_pivot.rename(columns=lambda x: f"rank_{x}", inplace=True)
     df_pivot = df_pivot.reset_index(drop=True)
-    logger.info(f"Device load analysis completed. DataFrame shape: {df_pivot.shape}")
+    logger.info(
+        f"Device load analysis completed. DataFrame shape: {df_pivot.shape}")
     return df_pivot
 
-def calculate_best_ep_per_layer(load_array: np.ndarray, num_ranks: int, log_timestamp=None) -> np.ndarray:
+
+def calculate_best_ep_per_layer(load_array: np.ndarray,
+                                num_ranks: int,
+                                log_timestamp=None) -> np.ndarray:
     """
     Calculate the best expert placement load per layer.
 
@@ -90,10 +100,15 @@ def calculate_best_ep_per_layer(load_array: np.ndarray, num_ranks: int, log_time
     num_layers, num_experts = load_array.shape
     total_load_per_layer = np.sum(load_array, axis=1)
     best_ep_per_layer = total_load_per_layer / num_ranks
-    logger.info(f"Calculated best expert placement load per layer. Shape: {best_ep_per_layer.shape}")
+    logger.info(
+        f"Calculated best expert placement load per layer. Shape: {best_ep_per_layer.shape}"
+    )
     return best_ep_per_layer
 
-def analyze_default_deployment_load(load_array: np.ndarray, num_ranks: int, log_timestamp=None) -> pd.DataFrame:
+
+def analyze_default_deployment_load(load_array: np.ndarray,
+                                    num_ranks: int,
+                                    log_timestamp=None) -> pd.DataFrame:
     """
     Analyze default deployment load.
 
@@ -109,7 +124,8 @@ def analyze_default_deployment_load(load_array: np.ndarray, num_ranks: int, log_
     num_layers, num_experts = load_array.shape
     if num_experts % num_ranks != 0:
         logger.error("Number of experts must be divisible by number of ranks.")
-        raise ValueError("Number of experts must be divisible by number of ranks.")
+        raise ValueError(
+            "Number of experts must be divisible by number of ranks.")
 
     experts_per_rank = num_experts // num_ranks
     default_load_records = []
@@ -125,18 +141,19 @@ def analyze_default_deployment_load(load_array: np.ndarray, num_ranks: int, log_
 
     df_default = pd.DataFrame(default_load_records)
     df_default = df_default.reset_index(drop=True)
-    logger.info(f"Default deployment load analysis completed. DataFrame shape: {df_default.shape}")
+    logger.info(
+        f"Default deployment load analysis completed. DataFrame shape: {df_default.shape}"
+    )
     return df_default
 
-def plot_load_comparison_heatmaps_multi(
-    optimized_df_lis: list,
-    ppname_lis: list,
-    figsize=(18, 8),
-    num_ranks=32,
-    dataset_name='Rand',
-    save_path=None,
-    log_timestamp=None
-) -> None:
+
+def plot_load_comparison_heatmaps_multi(optimized_df_lis: list,
+                                        ppname_lis: list,
+                                        figsize=(18, 8),
+                                        num_ranks=32,
+                                        dataset_name='Rand',
+                                        save_path=None,
+                                        log_timestamp=None) -> None:
     """
     Plot multiple heatmaps comparing load distributions.
 
@@ -150,7 +167,9 @@ def plot_load_comparison_heatmaps_multi(
         log_timestamp: Timestamp for log file naming (optional).
     """
     logger = setup_logging(log_timestamp)
-    logger.info(f"Generating load comparison heatmaps for {len(optimized_df_lis)} patterns: {ppname_lis}")
+    logger.info(
+        f"Generating load comparison heatmaps for {len(optimized_df_lis)} patterns: {ppname_lis}"
+    )
 
     vmin = optimized_df_lis[0].min().min()
     vmax = vmin
@@ -163,17 +182,17 @@ def plot_load_comparison_heatmaps_multi(
     fig, axes = plt.subplots(1, num_lis, figsize=figsize)
 
     for i in range(num_lis):
-        sns.heatmap(
-            optimized_df_lis[i],
-            ax=axes[i] if num_lis > 1 else axes,
-            cmap="YlOrRd",
-            vmin=vmin,
-            vmax=vmax,
-            cbar=True,
-            cbar_kws={'shrink': 0.7}
-        )
+        sns.heatmap(optimized_df_lis[i],
+                    ax=axes[i] if num_lis > 1 else axes,
+                    cmap="YlOrRd",
+                    vmin=vmin,
+                    vmax=vmax,
+                    cbar=True,
+                    cbar_kws={'shrink': 0.7})
         title = ppname_lis[i] + '\n' + f'Dataset: {dataset_name}'
-        (axes[i] if num_lis > 1 else axes).set_title(title, fontsize=10, pad=10)
+        (axes[i] if num_lis > 1 else axes).set_title(title,
+                                                     fontsize=10,
+                                                     pad=10)
         (axes[i] if num_lis > 1 else axes).set_xlabel("Rank ID", fontsize=10)
         (axes[i] if num_lis > 1 else axes).set_ylabel("Layer ID", fontsize=10)
 
@@ -189,21 +208,21 @@ def plot_load_comparison_heatmaps_multi(
             logger.info(f"Heatmap image saved to: {save_file_path}")
             print(f"Image generated successfully, saved to: {save_file_path}")
         except Exception as e:
-            logger.error(f"Failed to save heatmap image to {save_file_path}: {e}")
+            logger.error(
+                f"Failed to save heatmap image to {save_file_path}: {e}")
             raise
     else:
         plt.show()
         logger.info("Heatmap displayed (not saved).")
 
-def plot_max_load_comparison_lis(
-    optimized_df_lis: list,
-    ppname_lis: list,
-    num_ranks=32,
-    dataset_name='Rand',
-    save_path=None,
-    load_array=None,
-    log_timestamp=None
-) -> None:
+
+def plot_max_load_comparison_lis(optimized_df_lis: list,
+                                 ppname_lis: list,
+                                 num_ranks=32,
+                                 dataset_name='Rand',
+                                 save_path=None,
+                                 load_array=None,
+                                 log_timestamp=None) -> None:
     """
     Plot bar chart comparing maximum loads across layers.
 
@@ -217,7 +236,9 @@ def plot_max_load_comparison_lis(
         log_timestamp: Timestamp for log file naming (optional).
     """
     logger = setup_logging(log_timestamp)
-    logger.info(f"Generating max load comparison bar chart for {len(optimized_df_lis)} patterns: {ppname_lis}")
+    logger.info(
+        f"Generating max load comparison bar chart for {len(optimized_df_lis)} patterns: {ppname_lis}"
+    )
 
     max_lis = [df.max(axis=1) for df in optimized_df_lis]
 
@@ -229,30 +250,36 @@ def plot_max_load_comparison_lis(
     fig_width = max(12, n_layers * 0.3)
     fig, ax = plt.subplots(figsize=(fig_width, 6))
 
-    bar_pos = -bar_width/2 + np.array([i * bar_width/len(optimized_df_lis) for i in range(len(optimized_df_lis))])
+    bar_pos = -bar_width / 2 + np.array([
+        i * bar_width / len(optimized_df_lis)
+        for i in range(len(optimized_df_lis))
+    ])
 
     for i in range(len(optimized_df_lis)):
-        ax.bar(indices + bar_pos[i], max_lis[i], bar_width/len(optimized_df_lis),
-               label=ppname_lis[i], color=f'C{i}')
+        ax.bar(indices + bar_pos[i],
+               max_lis[i],
+               bar_width / len(optimized_df_lis),
+               label=ppname_lis[i],
+               color=f'C{i}')
 
     if load_array is not None:
-        best_ep_per_layer = calculate_best_ep_per_layer(load_array, num_ranks, log_timestamp)
+        best_ep_per_layer = calculate_best_ep_per_layer(
+            load_array, num_ranks, log_timestamp)
         min_best_ep = np.min(best_ep_per_layer)
-        ax.axhline(
-            y=min_best_ep,
-            color='gray',
-            linestyle='--',
-            linewidth=1.9,
-            alpha=0.9,
-            label='Best EP'
-        )
+        ax.axhline(y=min_best_ep,
+                   color='gray',
+                   linestyle='--',
+                   linewidth=1.9,
+                   alpha=0.9,
+                   label='Best EP')
         max_y = max(max_lis[i].max() for i in range(len(max_lis)))
         line_y = min_best_ep
         ax.set_ylim(0, max(max_y, line_y) * 1.02)
 
     ax.set_xlabel('Layer ID')
     ax.set_ylabel('Load Balance Degree')
-    ax.set_title(f'Load Balance Degree Comparison per Layer, Dataset: {dataset_name}')
+    ax.set_title(
+        f'Load Balance Degree Comparison per Layer, Dataset: {dataset_name}')
     ax.set_xticks(indices)
     ax.set_xticklabels(layers, rotation=45)
     ax.legend()
@@ -267,26 +294,28 @@ def plot_max_load_comparison_lis(
             logger.info(f"Bar chart image saved to: {save_file_path}")
             print(f"Image generated successfully, saved to: {save_file_path}")
         except Exception as e:
-            logger.error(f"Failed to save bar chart image to {save_file_path}: {e}")
+            logger.error(
+                f"Failed to save bar chart image to {save_file_path}: {e}")
             raise
     else:
         plt.show()
         logger.info("Bar chart displayed (not saved).")
 
-def plot_unbalanced_ratio_comparison_lis(
-    optimized_df_lis: list,
-    ppname_lis: list,
-    num_ranks=32,
-    dataset_name='Rand',
-    save_path=None,
-    load_array=None,
-    log_timestamp=None
-) -> None:
+
+def plot_unbalanced_ratio_comparison_lis(optimized_df_lis: list,
+                                         ppname_lis: list,
+                                         num_ranks=32,
+                                         dataset_name='Rand',
+                                         save_path=None,
+                                         load_array=None,
+                                         log_timestamp=None) -> None:
     """
     Plot bar chart comparing unbalanced ratios (max_rank_load / avg_rank_load) across layers.
     """
     logger = setup_logging(log_timestamp)
-    logger.info(f"Generating unbalanced ratio comparison bar chart for {len(optimized_df_lis)} patterns: {ppname_lis}")
+    logger.info(
+        f"Generating unbalanced ratio comparison bar chart for {len(optimized_df_lis)} patterns: {ppname_lis}"
+    )
 
     # Calculate unbalanced ratio: max_rank_load / avg_rank_load for each layer
     ratio_lis = []
@@ -304,21 +333,25 @@ def plot_unbalanced_ratio_comparison_lis(
     fig_width = max(12, n_layers * 0.3)
     fig, ax = plt.subplots(figsize=(fig_width, 6))
 
-    bar_pos = - bar_width / 2 + np.array([i * bar_width / len(optimized_df_lis) for i in range(len(optimized_df_lis))])
+    bar_pos = -bar_width / 2 + np.array([
+        i * bar_width / len(optimized_df_lis)
+        for i in range(len(optimized_df_lis))
+    ])
 
     for i in range(len(optimized_df_lis)):
-        ax.bar(indices + bar_pos[i], ratio_lis[i], bar_width / len(optimized_df_lis),
-               label=ppname_lis[i], color=f'C{i}')
+        ax.bar(indices + bar_pos[i],
+               ratio_lis[i],
+               bar_width / len(optimized_df_lis),
+               label=ppname_lis[i],
+               color=f'C{i}')
 
     # Add ideal line at y=1 (perfect balance)
-    ax.axhline(
-        y=1.0,
-        color='gray',
-        linestyle='--',
-        linewidth=1.9,
-        alpha=0.9,
-        label='Best EP'
-    )
+    ax.axhline(y=1.0,
+               color='gray',
+               linestyle='--',
+               linewidth=1.9,
+               alpha=0.9,
+               label='Best EP')
 
     # Set y-axis limits
     max_y = max(ratio_lis[i].max() for i in range(len(ratio_lis)))
@@ -326,7 +359,8 @@ def plot_unbalanced_ratio_comparison_lis(
 
     ax.set_xlabel('Layer ID')
     ax.set_ylabel('Load Imbalance Degree (Max/Avg)')
-    ax.set_title(f'Load Imbalance Degree Comparison per Layer, Dataset: {dataset_name}')
+    ax.set_title(
+        f'Load Imbalance Degree Comparison per Layer, Dataset: {dataset_name}')
     ax.set_xticks(indices)
     ax.set_xticklabels(layers, rotation=45)
     ax.legend()
@@ -338,22 +372,24 @@ def plot_unbalanced_ratio_comparison_lis(
         try:
             plt.savefig(save_file_path, bbox_inches='tight', dpi=100)
             plt.close()
-            logger.info(f"Unbalanced ratio bar chart image saved to: {save_file_path}")
+            logger.info(
+                f"Unbalanced ratio bar chart image saved to: {save_file_path}")
             print(f"Image generated successfully, saved to: {save_file_path}")
         except Exception as e:
-            logger.error(f"Failed to save unbalanced ratio bar chart image to {save_file_path}: {e}")
+            logger.error(
+                f"Failed to save unbalanced ratio bar chart image to {save_file_path}: {e}"
+            )
             raise
     else:
         plt.show()
         logger.info("Unbalanced ratio bar chart displayed (not saved).")
 
-def calculate_max_load_reduction(
-    optimized_df_lis: list,
-    ppname_lis: list,
-    save_path: str,
-    dataset_name: str,
-    log_timestamp=None
-) -> pd.DataFrame:
+
+def calculate_max_load_reduction(optimized_df_lis: list,
+                                 ppname_lis: list,
+                                 save_path: str,
+                                 dataset_name: str,
+                                 log_timestamp=None) -> pd.DataFrame:
     """
     Calculate maximum load reduction and save results to CSV.
 
@@ -374,8 +410,8 @@ def calculate_max_load_reduction(
     total_max_loads = [np.sum(max_load) for max_load in max_loads]
     default_total_max_load = total_max_loads[0]
     percentage_reductions = [
-        ((default_total_max_load - total_max_load) / default_total_max_load) * 100
-        for total_max_load in total_max_loads
+        ((default_total_max_load - total_max_load) / default_total_max_load) *
+        100 for total_max_load in total_max_loads
     ]
     results_df = pd.DataFrame({
         'Placement Method': ppname_lis,
@@ -389,19 +425,19 @@ def calculate_max_load_reduction(
         logger.info(f"Max load reduction CSV saved to: {save_file_path}")
         print(f"CSV generated successfully, saved to: {save_file_path}")
     except Exception as e:
-        logger.error(f"Failed to save max load reduction CSV to {save_file_path}: {e}")
+        logger.error(
+            f"Failed to save max load reduction CSV to {save_file_path}: {e}")
         raise
     return results_df
 
-def analyze_and_plot_deployments(
-    load_file: str,
-    pp_path_lis: list,
-    ppname_lis: list,
-    fig_save_path: str,
-    num_ranks: int,
-    dataset_name: str,
-    log_timestamp=None
-) -> None:
+
+def analyze_and_plot_deployments(load_file: str,
+                                 pp_path_lis: list,
+                                 ppname_lis: list,
+                                 fig_save_path: str,
+                                 num_ranks: int,
+                                 dataset_name: str,
+                                 log_timestamp=None) -> None:
     """
     Analyze deployments and generate load distribution plots.
 
@@ -415,10 +451,13 @@ def analyze_and_plot_deployments(
         log_timestamp: Timestamp for log file naming (optional).
     """
     logger = setup_logging(log_timestamp)
-    logger.info(f"Starting deployment analysis for load file: {load_file}, patterns: {ppname_lis}")
+    logger.info(
+        f"Starting deployment analysis for load file: {load_file}, patterns: {ppname_lis}"
+    )
 
     try:
-        load_array = np.genfromtxt(load_file, delimiter=',', skip_header=1)[:, 1:]
+        load_array = np.genfromtxt(load_file, delimiter=',', skip_header=1)[:,
+                                                                            1:]
         logger.info(f"Loaded load array with shape: {load_array.shape}")
     except Exception as e:
         logger.error(f"Failed to load CSV file {load_file}: {e}")
@@ -436,48 +475,46 @@ def analyze_and_plot_deployments(
             logger.error(f"Failed to load placement pattern {path}: {e}")
             raise
 
-    df_lis = [analyze_default_deployment_load(load_array, num_ranks=num_ranks, log_timestamp=log_timestamp)]
+    df_lis = [
+        analyze_default_deployment_load(load_array,
+                                        num_ranks=num_ranks,
+                                        log_timestamp=log_timestamp)
+    ]
     for placement_pattern in placement_pattern_lis:
-        df_lis.append(analyze_device_load(placement_pattern, load_array, log_timestamp))
+        df_lis.append(
+            analyze_device_load(placement_pattern, load_array, log_timestamp))
 
-    plot_load_comparison_heatmaps_multi(
-        optimized_df_lis=df_lis,
-        ppname_lis=ppname_lis,
-        figsize=(23, 10),
-        num_ranks=num_ranks,
-        dataset_name=dataset_name,
-        save_path=fig_save_path,
-        log_timestamp=log_timestamp
-    )
-    
-    plot_unbalanced_ratio_comparison_lis(
-        optimized_df_lis=df_lis,
-        ppname_lis=ppname_lis,
-        num_ranks=num_ranks,
-        dataset_name=dataset_name,
-        save_path=fig_save_path,
-        load_array=load_array,
-        log_timestamp=log_timestamp
-    )
+    plot_load_comparison_heatmaps_multi(optimized_df_lis=df_lis,
+                                        ppname_lis=ppname_lis,
+                                        figsize=(23, 10),
+                                        num_ranks=num_ranks,
+                                        dataset_name=dataset_name,
+                                        save_path=fig_save_path,
+                                        log_timestamp=log_timestamp)
 
-    plot_max_load_comparison_lis(
-        optimized_df_lis=df_lis,
-        ppname_lis=ppname_lis,
-        num_ranks=num_ranks,
-        dataset_name=dataset_name,
-        save_path=fig_save_path,
-        load_array=load_array,
-        log_timestamp=log_timestamp
-    )
+    plot_unbalanced_ratio_comparison_lis(optimized_df_lis=df_lis,
+                                         ppname_lis=ppname_lis,
+                                         num_ranks=num_ranks,
+                                         dataset_name=dataset_name,
+                                         save_path=fig_save_path,
+                                         load_array=load_array,
+                                         log_timestamp=log_timestamp)
 
-    calculate_max_load_reduction(
-        optimized_df_lis=df_lis,
-        ppname_lis=ppname_lis,
-        save_path=fig_save_path,
-        dataset_name=dataset_name,
-        log_timestamp=log_timestamp
-    )
+    plot_max_load_comparison_lis(optimized_df_lis=df_lis,
+                                 ppname_lis=ppname_lis,
+                                 num_ranks=num_ranks,
+                                 dataset_name=dataset_name,
+                                 save_path=fig_save_path,
+                                 load_array=load_array,
+                                 log_timestamp=log_timestamp)
+
+    calculate_max_load_reduction(optimized_df_lis=df_lis,
+                                 ppname_lis=ppname_lis,
+                                 save_path=fig_save_path,
+                                 dataset_name=dataset_name,
+                                 log_timestamp=log_timestamp)
     logger.info("Deployment analysis and plotting completed.")
+
 
 if __name__ == "__main__":
     main()

@@ -95,7 +95,7 @@ def fused_experts_moge(
     group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
 
     w1 = w1.transpose(1, 2)
-    
+
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[sorted_hidden_states],
         weight=[w1],
@@ -128,7 +128,6 @@ def fused_experts_moge(
         bsz, top_k // ep_size, -1).sum(1)
 
     return final_hidden_states
-
 
 
 def native_grouped_topk(
@@ -279,7 +278,7 @@ def forward_oot(
         e_score_correction_bias=e_score_correction_bias,
         global_num_experts=global_num_experts,
     )
-    
+
     assert global_num_experts is not None
 
     return fused_experts_moge(
@@ -297,4 +296,3 @@ def forward_oot(
 def patch_fused_moe_ops():
     UnquantizedFusedMoEMethod.forward_oot = forward_oot
     logger.info("UnquantizedFusedMoEMethod.forward_oot is replaced.")
-    

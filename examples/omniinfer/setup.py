@@ -10,11 +10,13 @@ from setuptools import Extension, setup
 
 
 class PathManager:
+
     def __init__(self):
         # torch
         torch_root = os.path.dirname(torch.__file__)
         self.torch_inc = os.path.join(torch_root, "include")
-        self.torch_csrc_inc = os.path.join(torch_root, "include/torch/csrc/api/include")
+        self.torch_csrc_inc = os.path.join(torch_root,
+                                           "include/torch/csrc/api/include")
         self.torch_lib = os.path.join(torch_root, "lib")
 
         # pybind11
@@ -23,7 +25,9 @@ class PathManager:
         # ascend
         ascend_root = os.getenv('ASCEND_TOOLKIT_HOME', None)
         if ascend_root is None:
-            raise EnvironmentError("Environment variable 'ASCEND_TOOLKIT_HOME' is not set. Please set this environment variable before running the program.")
+            raise EnvironmentError(
+                "Environment variable 'ASCEND_TOOLKIT_HOME' is not set. Please set this environment variable before running the program."
+            )
         self.ascend_inc = os.path.join(ascend_root, "include")
         self.ascend_lib = os.path.join(ascend_root, "lib64")
 
@@ -48,14 +52,19 @@ class PathManager:
 
     def check(self):
         if not os.path.exists(self.torch_inc):
-            raise FileNotFoundError(f"PyTorch include path not found: {self.torch_inc}")
+            raise FileNotFoundError(
+                f"PyTorch include path not found: {self.torch_inc}")
         if not os.path.exists(self.torch_lib):
-            raise FileNotFoundError(f"PyTorch lib path not found: {self.torch_lib}")
+            raise FileNotFoundError(
+                f"PyTorch lib path not found: {self.torch_lib}")
         if not os.path.exists(self.header):
-            raise FileNotFoundError(f"omni_placement include path not found: {self.header}")
+            raise FileNotFoundError(
+                f"omni_placement include path not found: {self.header}")
 
     def get_include_dirs(self):
-        include_dirs = [self.header, self.pybind_inc, self.ascend_inc, self.torch_inc]
+        include_dirs = [
+            self.header, self.pybind_inc, self.ascend_inc, self.torch_inc
+        ]
         if os.path.exists(self.torch_csrc_inc):
             include_dirs.append(self.torch_csrc_inc)
         return include_dirs
@@ -71,7 +80,6 @@ class PathManager:
 
 
 paths = PathManager()
-
 
 # 定义扩展模块
 ext_modules = [
@@ -94,7 +102,6 @@ ext_modules = [
         language='c++',
     ),
 ]
-
 
 setup(
     name='omni_infer',

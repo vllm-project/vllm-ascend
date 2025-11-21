@@ -62,6 +62,7 @@ logger = init_logger(__name__)
 
 SEQ_SPLIT_LENGTH = 4096
 
+
 class Qwen3MoeSparseMoeBlock(nn.Module):
 
     def __init__(
@@ -86,7 +87,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
-    def forward(self, hidden_states: torch.Tensor, is_prefill: bool = False) -> torch.Tensor:
+    def forward(self,
+                hidden_states: torch.Tensor,
+                is_prefill: bool = False) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
@@ -142,26 +145,23 @@ class Qwen3MoeAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         tp_rank = get_tp_group().rank_in_group
 
-        self.qkv_proj = QKVParallelFlashCommLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-            bias=qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj"
-        )
-        self.o_proj = RowParallelFlashCommLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj"
-        )
+        self.qkv_proj = QKVParallelFlashCommLinear(hidden_size,
+                                                   self.head_dim,
+                                                   self.total_num_heads,
+                                                   self.total_num_kv_heads,
+                                                   tp_size=tp_size,
+                                                   tp_rank=tp_rank,
+                                                   bias=qkv_bias,
+                                                   quant_config=quant_config,
+                                                   prefix=f"{prefix}.qkv_proj")
+        self.o_proj = RowParallelFlashCommLinear(self.total_num_heads *
+                                                 self.head_dim,
+                                                 hidden_size,
+                                                 tp_size=tp_size,
+                                                 tp_rank=tp_rank,
+                                                 bias=False,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.o_proj")
 
         if rope_scaling is None:
             rope_scaling = {'factor': '0'}
@@ -173,15 +173,14 @@ class Qwen3MoeAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn")
-        
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
+
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -193,7 +192,9 @@ class Qwen3MoeAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
-        qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill = is_prefill)
+        qkv, _ = self.qkv_proj(hidden_states,
+                               x_transform='AG',
+                               is_prefill=is_prefill)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
@@ -202,7 +203,7 @@ class Qwen3MoeAttention(nn.Module):
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                            self.head_dim)
+                           self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
 
@@ -262,18 +263,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
         else:
             raise NotImplementedError("Qwen3MoeMLP not implemented")
         self.input_layernorm = RMSNormFlashComm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNormFlashComm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNormFlashComm(
+            config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: Optional[AttentionMetadata]
-    ) -> torch.Tensor:
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor,
+                residual: Optional[torch.Tensor],
+                kv_cache: Optional[torch.Tensor],
+                attn_metadata: Optional[AttentionMetadata]) -> torch.Tensor:
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
         # Self Attention
@@ -281,7 +278,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
             residual = hidden_states
             if model_extra_config.operator_opt_config.use_prefetch:
                 QKV_PREFETCH_SIZE = 8 * 1024 * 1024
-                torch_npu.npu_prefetch(self.self_attn.qkv_proj.weight, residual , QKV_PREFETCH_SIZE)
+                torch_npu.npu_prefetch(self.self_attn.qkv_proj.weight,
+                                       residual, QKV_PREFETCH_SIZE)
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
@@ -306,7 +304,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
             hidden_states_list = hidden_states.split(SEQ_SPLIT_LENGTH)
             hidden_states_out = []
             for i in range(len(hidden_states_list)):
-                hidden_states = self.mlp(hidden_states_list[i], is_prefill=is_prefill)
+                hidden_states = self.mlp(hidden_states_list[i],
+                                         is_prefill=is_prefill)
                 hidden_states_out.append(hidden_states)
             hidden_states = torch.cat(hidden_states_out)[:local_length]
         else:
@@ -343,14 +342,15 @@ class Qwen3MoeModel(nn.Module):
                                                 prefix=prefix),
             prefix=f"{prefix}.layers",
         )
-        self.norm = RMSNormFlashComm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNormFlashComm(config.hidden_size,
+                                     eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
-    
+
     def forward_opening(attn_metadata: AttentionMetadata):
         if attn_metadata.prefill_metadata is not None:
             pass
@@ -359,9 +359,10 @@ class Qwen3MoeModel(nn.Module):
         tp_size = get_tp_group().world_size
         tp_rank = get_tp_group().rank_in_group
 
-        assert x.shape[0] % tp_size == 0, f"x can't be divided along tp_size {tp_size}!"
+        assert x.shape[
+            0] % tp_size == 0, f"x can't be divided along tp_size {tp_size}!"
         slice_size = x.shape[0] // tp_size
-        x_slice = x[tp_rank * slice_size: (tp_rank + 1) * slice_size]
+        x_slice = x[tp_rank * slice_size:(tp_rank + 1) * slice_size]
 
         return x_slice
 
@@ -390,11 +391,9 @@ class Qwen3MoeModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions,
-                                            hidden_states,
-                                            residual,
-                                            kv_caches[i] if kv_caches is not None else None,
-                                            attn_metadata)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual,
+                kv_caches[i] if kv_caches is not None else None, attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -404,7 +403,8 @@ class Qwen3MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual, y_transform='AG')
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -413,7 +413,7 @@ class Qwen3MoeModel(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-    
+
         moe_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -455,10 +455,10 @@ class Qwen3MoeModel(nn.Module):
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
-                                loaded_weight,
-                                name,
-                                shard_id=shard_id,
-                                expert_id=expert_id)
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
                     break
                 else:
 
@@ -470,6 +470,7 @@ class Qwen3MoeModel(nn.Module):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
 
 @support_torch_compile
 class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
@@ -493,13 +494,15 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = Qwen3MoeModel(config, vllm_config.cache_config, quant_config,
+        self.model = Qwen3MoeModel(config,
+                                   vllm_config.cache_config,
+                                   quant_config,
                                    prefix=f"model")
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
                                       parallel_lmhead=False)
-        
+
         self.sampler = Sampler()
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -510,18 +513,17 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor] = None,
-            attn_metadata: AttentionMetadata = None,
-            selected_indices: Optional[torch.Tensor] = None,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds = None,
-            **kwargs
-    ) -> Optional[torch.Tensor]:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors, None)
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor] = None,
+                attn_metadata: AttentionMetadata = None,
+                selected_indices: Optional[torch.Tensor] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds=None,
+                **kwargs) -> Optional[torch.Tensor]:
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors, None)
         return hidden_states
 
     def compute_logits(
@@ -539,14 +541,15 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
         return loader.load_weights(weights)
 
     def sample(
-            self,
-            logits: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
-    
-    def mark_static_for_graph(self, input_ids, positions, attn_metadata, kv_caches):
+
+    def mark_static_for_graph(self, input_ids, positions, attn_metadata,
+                              kv_caches):
         # if not self.input_marked:
         torch._dynamo.mark_static(input_ids)
         torch._dynamo.mark_static(positions)
@@ -562,6 +565,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
             return True
 
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
 
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

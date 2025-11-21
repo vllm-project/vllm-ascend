@@ -62,7 +62,8 @@ try:
     npu_mem_available = True
 except ImportError as e:
     logger.warning(
-        "Failed to import npu_mem_allocator:%s. Sleep mode will be disabled. ", e)
+        "Failed to import npu_mem_allocator:%s. Sleep mode will be disabled. ",
+        e)
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
@@ -92,8 +93,8 @@ def get_pluggable_allocator(
     python_free_func: Callable[[int], tuple[int, int, int, int]]
 ) -> torch.npu.memory.NPUPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
-    new_alloc = torch.npu.memory.NPUPluggableAllocator(
-        lib_name, 'my_malloc', 'my_free')
+    new_alloc = torch.npu.memory.NPUPluggableAllocator(lib_name, 'my_malloc',
+                                                       'my_free')
     return new_alloc
 
 

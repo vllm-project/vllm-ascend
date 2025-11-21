@@ -14,14 +14,18 @@ def patch_vllm_distributed():
     distributed.parallel_state.GroupCoordinator = GroupCoordinator
     distributed.initialize_model_parallel = initialize_model_parallel
     distributed.parallel_state.initialize_model_parallel = initialize_model_parallel
-    print("++++++++++++++++++++++++patch_vllm_distributed++++++++++++++++++++++++++")
- 
+    print(
+        "++++++++++++++++++++++++patch_vllm_distributed++++++++++++++++++++++++++"
+    )
+
+
 def patch_rope():
     from omni.models.common.layers.rotary_embedding import get_rope
     from vllm.model_executor.layers import rotary_embedding
     rotary_embedding.get_rope = get_rope
     print("+++++++++++++++++++++++patch_rope+++++++++++++++++++++++++++")
- 
+
+
 def patch_embedding():
     from omni.models.common.layers.vocab_parallel_embedding import (
         ParallelLMHead, VocabParallelEmbedding)
@@ -29,6 +33,7 @@ def patch_embedding():
     vocab_parallel_embedding.VocabParallelEmbedding = VocabParallelEmbedding
     vocab_parallel_embedding.ParallelLMHead = ParallelLMHead
     vocab_parallel_embedding.VocabParallelEmbedding.forward = VocabParallelEmbedding.forward_vocab
+
 
 def patch_sampler():
     from omni.models.common.layers.sampler import AscendSampler
@@ -41,19 +46,24 @@ def patch_sampler():
     rejection_sampler._multinomial = _multinomial
     print("++++++++++++++++++++++patch_sampler++++++++++++++++++++++++++++")
 
+
 def patch_compilation():
     from omni.adaptors.vllm.compilation.decorators import \
         _support_torch_compile
     from vllm.compilation import decorators
     decorators._support_torch_compile = _support_torch_compile
-    print("+++++++++++++++++++++++patch_compilation+++++++++++++++++++++++++++")
+    print(
+        "+++++++++++++++++++++++patch_compilation+++++++++++++++++++++++++++")
+
 
 def patch_linear():
     from omni.models.common.layers.linear import AscendUnquantizedLinearMethod
     from vllm.model_executor.layers import linear
     linear.UnquantizedLinearMethod = AscendUnquantizedLinearMethod
 
+
 _patch_done = False
+
 
 def patch_all():
     global _patch_done
@@ -69,4 +79,5 @@ def patch_all():
     patch_shm_to_zmq()
     _patch_done = True
 
-patch_all() 
+
+patch_all()

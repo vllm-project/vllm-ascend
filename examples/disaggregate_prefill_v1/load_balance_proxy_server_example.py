@@ -235,12 +235,12 @@ def parse_args():
         raise ValueError(
             "Number of prefiller ports inc must match number of prefiller ports"
         )
-    if args.decoder_hosts_num is not None and (len(args.decoder_hosts_num) !=
-                                               len(args.decoder_hosts)):
+    if args.decoder_hosts_num is not None and (len(args.decoder_hosts_num)
+                                               != len(args.decoder_hosts)):
         raise ValueError(
             "Number of decoder hosts num must match number of decoder hosts")
-    if args.decoder_ports_inc is not None and (len(args.decoder_ports_inc) !=
-                                               len(args.decoder_ports)):
+    if args.decoder_ports_inc is not None and (len(args.decoder_ports_inc)
+                                               != len(args.decoder_ports)):
         raise ValueError(
             "Number of decoder ports inc must match number of decoder ports")
 

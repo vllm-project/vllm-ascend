@@ -28,8 +28,7 @@ class PanguToolParser(ToolParser):
         super().__init__(tokenizer)
 
         if isinstance(self.model_tokenizer, MistralTokenizer):
-            logger.error(
-                "Detected Mistral tokenizer when using a Pangu model")
+            logger.error("Detected Mistral tokenizer when using a Pangu model")
             self.model_tokenizer = self.model_tokenizer.tokenizer
 
         self.current_tool_name_sent: bool = False
@@ -58,9 +57,9 @@ class PanguToolParser(ToolParser):
                 "tokens in the tokenizer!")
 
     def extract_tool_calls(
-            self,
-            model_output: str,
-            request: ChatCompletionRequest,
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         # sanity check; avoid unnecessary processing
         if self.tool_call_start_token not in model_output:
@@ -105,7 +104,7 @@ class PanguToolParser(ToolParser):
                 ]
 
                 content = model_output[:model_output.
-                find(self.tool_call_start_token)]
+                                       find(self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -119,14 +118,14 @@ class PanguToolParser(ToolParser):
                                                     content=model_output)
 
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
-            request: ChatCompletionRequest,
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
@@ -162,7 +161,7 @@ class PanguToolParser(ToolParser):
                 full_text = current_text + delta_text
                 tool_call_portion = full_text.split(
                     self.tool_call_start_token)[-1].split(
-                    self.tool_call_end_token)[0].rstrip()
+                        self.tool_call_end_token)[0].rstrip()
                 delta_text = delta_text.split(
                     self.tool_call_end_token)[0].rstrip()
                 text_portion = delta_text.split(
@@ -229,7 +228,7 @@ class PanguToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
                                           arguments=diff).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
 
             # case -- otherwise we're just generating text
@@ -242,7 +241,8 @@ class PanguToolParser(ToolParser):
             try:
                 # 仅支持 name|{...} 管道风格
                 name_part, arg_part = tool_call_portion.split("|", 1)
-                parsed_args = partial_json_parser.loads(arg_part.strip(), flags)
+                parsed_args = partial_json_parser.loads(
+                    arg_part.strip(), flags)
                 current_tool_call = {
                     "name": name_part.strip(),
                     "arguments": parsed_args
@@ -270,7 +270,7 @@ class PanguToolParser(ToolParser):
                                       id=random_tool_call_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
                 else:
                     return None
@@ -341,7 +341,7 @@ class PanguToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=arguments_delta).model_dump(
-                                      exclude_none=True))
+                                          exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += arguments_delta
@@ -358,7 +358,7 @@ class PanguToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=delta_text).model_dump(
-                                      exclude_none=True))
+                                          exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += delta_text

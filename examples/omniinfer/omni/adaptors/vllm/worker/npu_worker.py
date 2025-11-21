@@ -54,14 +54,19 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 __origin_get_device_properties__ = torch.npu.get_device_properties
+
+
 class NPUDeviceProperties:
+
     def __init__(self, device):
         self.properties = __origin_get_device_properties__(device)
         self.multi_processor_count = self.properties.multi_processor_count \
             if hasattr(self.properties, 'multi_processor_count') else 0
 
+
 def get_device_properties(device):
     return NPUDeviceProperties(device)
+
 
 class NPUWorker(WorkerBase):
 
@@ -84,17 +89,21 @@ class NPUWorker(WorkerBase):
                 if dp_rank_size >= 1:
                     local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
                     vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank % dp_rank_size
-            super().__init__(vllm_config=vllm_config,
-                            local_rank=local_rank + vllm_config.parallel_config.data_parallel_rank_local * vllm_config.parallel_config.tensor_parallel_size - int(os.environ.get("SERVER_OFFSET", 0)),
-                            rank=rank,
-                            distributed_init_method=distributed_init_method,
-                            is_driver_worker=is_driver_worker)
+            super().__init__(
+                vllm_config=vllm_config,
+                local_rank=local_rank +
+                vllm_config.parallel_config.data_parallel_rank_local *
+                vllm_config.parallel_config.tensor_parallel_size -
+                int(os.environ.get("SERVER_OFFSET", 0)),
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                is_driver_worker=is_driver_worker)
         else:
             super().__init__(vllm_config=vllm_config,
-                            local_rank=local_rank,
-                            rank=rank,
-                            distributed_init_method=distributed_init_method,
-                            is_driver_worker=is_driver_worker)
+                             local_rank=local_rank,
+                             rank=rank,
+                             distributed_init_method=distributed_init_method,
+                             is_driver_worker=is_driver_worker)
         # Try to import mindie_turbo to accelerate vLLM inference.
         # try_register_lib(
         #     "mindie_turbo",
@@ -124,7 +133,7 @@ class NPUWorker(WorkerBase):
         from omni.adaptors.vllm.npu_mem_pool import NpuMemAllocator
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         allocator = NpuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
         free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -132,7 +141,7 @@ class NPUWorker(WorkerBase):
         logger.info(
             "Sleep mode freed %.2f GiB memory, "
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
-                                                used_bytes / GiB_bytes)
+            used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         if not NPUPlatform.is_sleep_mode_available():
@@ -143,13 +152,13 @@ class NPUWorker(WorkerBase):
         allocator = NpuMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-
     def init_device(self):
         if self.device_config.device.type == current_platform.device_type:
             if int(os.getenv("NO_NPU_MOCK", "0")):
                 self.device = torch.device(f"cpu")
             else:
-                self.device = torch.device(f"{current_platform.device_type}:{self.local_rank}")
+                self.device = torch.device(
+                    f"{current_platform.device_type}:{self.local_rank}")
                 NPUPlatform.set_device(self.device)
                 NPUPlatform.empty_cache()
                 self.init_npu_memory = NPUPlatform.mem_get_info()[0]
@@ -170,7 +179,9 @@ class NPUWorker(WorkerBase):
         from vllm.config import CompilationLevel
         from vllm.utils import supports_dynamo
 
-        self.enable_torchair_graph_mode = (self.vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
+        self.enable_torchair_graph_mode = (
+            self.vllm_config.npu_compilation_config.level
+            > CompilationLevel.NO_COMPILATION and supports_dynamo())
         self.use_cached_npu_graph = self.vllm_config.npu_compilation_config.use_ge_graph_cached
 
     def page_size_bytes(self) -> int:
@@ -180,7 +191,8 @@ class NPUWorker(WorkerBase):
         block_size = self.vllm_config.cache_config.block_size
         kv_lora_rank = config.kv_lora_rank
         qk_rope_head_dim = config.qk_rope_head_dim
-        return coef * config.num_hidden_layers * block_size * (kv_lora_rank + qk_rope_head_dim) * 2
+        return coef * config.num_hidden_layers * block_size * (
+            kv_lora_rank + qk_rope_head_dim) * 2
 
     def determine_available_memory(self) -> int:
         if int(os.getenv("NO_NPU_MOCK", "0")):
@@ -191,7 +203,8 @@ class NPUWorker(WorkerBase):
             clear_var()
             # Only For Prefill Stage
             if model_extra_config.operator_opt_config.use_omni_placement:
-                self.model_runner.planner.start_dynamic_optimize_expert_load_balance()
+                self.model_runner.planner.start_dynamic_optimize_expert_load_balance(
+                )
             return cur_npu_kv_cache_bytes
 
         last_use_kv_cache_bytes = cur_npu_kv_cache_bytes
@@ -200,33 +213,47 @@ class NPUWorker(WorkerBase):
             dp_size = get_world_group().world_size
             if check_torchair_cache_exists() and check_block_num_cache_exist():
                 logger.info("Currently use graph cache")
-                npu_kv_cache_bytes = read_block_num_from_file(torch.distributed.get_rank())
+                npu_kv_cache_bytes = read_block_num_from_file(
+                    torch.distributed.get_rank())
                 if npu_kv_cache_bytes == -1:
-                    raise RuntimeError(f"Read npu_kv_cache_bytes: {npu_kv_cache_bytes} error, "
-                                        f"please make sure the block num cache file is correct")
-                old_kv_cache_bytes = torch.tensor([npu_kv_cache_bytes], device="cpu")
+                    raise RuntimeError(
+                        f"Read npu_kv_cache_bytes: {npu_kv_cache_bytes} error, "
+                        f"please make sure the block num cache file is correct"
+                    )
+                old_kv_cache_bytes = torch.tensor([npu_kv_cache_bytes],
+                                                  device="cpu")
                 all_kv_cache_bytes = [
-                    torch.tensor([0], dtype=old_kv_cache_bytes.dtype, device="cpu")
-                    for _ in range(dp_size)
+                    torch.tensor([0],
+                                 dtype=old_kv_cache_bytes.dtype,
+                                 device="cpu") for _ in range(dp_size)
                 ]
-                dist.all_gather(all_kv_cache_bytes, old_kv_cache_bytes, group=get_world_group().cpu_group)
+                dist.all_gather(all_kv_cache_bytes,
+                                old_kv_cache_bytes,
+                                group=get_world_group().cpu_group)
                 for kv_cache_bytes in all_kv_cache_bytes:
                     if kv_cache_bytes != old_kv_cache_bytes:
-                        raise RuntimeError(f"The block num data of some ranks has been modified, origin: {old_kv_cache_bytes}, now: {kv_cache_bytes}")
+                        raise RuntimeError(
+                            f"The block num data of some ranks has been modified, origin: {old_kv_cache_bytes}, now: {kv_cache_bytes}"
+                        )
 
                 clear_var(old_kv_cache_bytes, all_kv_cache_bytes)
                 last_use_kv_cache_bytes = npu_kv_cache_bytes
             else:
                 logger.warning("Currently no graph cache available")
                 delete_torchair_cache_file()
-                cur_npu_kv_cache_bytes = torch.tensor([cur_npu_kv_cache_bytes], device="cpu")
+                cur_npu_kv_cache_bytes = torch.tensor([cur_npu_kv_cache_bytes],
+                                                      device="cpu")
                 all_kv_cache_bytes = [
-                    torch.tensor([0], dtype=cur_npu_kv_cache_bytes.dtype, device="cpu")
-                    for _ in range(dp_size)
+                    torch.tensor([0],
+                                 dtype=cur_npu_kv_cache_bytes.dtype,
+                                 device="cpu") for _ in range(dp_size)
                 ]
-                dist.all_gather(all_kv_cache_bytes, cur_npu_kv_cache_bytes, group=get_world_group().cpu_group)
+                dist.all_gather(all_kv_cache_bytes,
+                                cur_npu_kv_cache_bytes,
+                                group=get_world_group().cpu_group)
                 kv_cache_bytes = int(min(all_kv_cache_bytes[:]))
-                write_block_num_to_file(torch.distributed.get_rank(), kv_cache_bytes)
+                write_block_num_to_file(torch.distributed.get_rank(),
+                                        kv_cache_bytes)
                 clear_var(cur_npu_kv_cache_bytes, all_kv_cache_bytes)
                 last_use_kv_cache_bytes = kv_cache_bytes
 
@@ -339,10 +366,12 @@ class NPUWorker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
+
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
         if model_extra_config.operator_opt_config.use_omni_placement:
             self.model_runner.planner.place_experts()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
@@ -354,6 +383,7 @@ class NPUWorker(WorkerBase):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
+
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         additional_config = self.vllm_config.additional_config
@@ -377,8 +407,10 @@ class NPUWorker(WorkerBase):
         self.profile_step = 0
         self.profile_finished = True
         if envs.VLLM_TORCH_PROFILER_DIR:
-            self.profiler_token_threshold = int(os.environ.get('PROFILER_TOKEN_THRESHOLD',"1"))
-            self.profiler_stop_step = int(os.environ.get('PROFILER_STOP_STEP',"5"))
+            self.profiler_token_threshold = int(
+                os.environ.get('PROFILER_TOKEN_THRESHOLD', "1"))
+            self.profiler_stop_step = int(
+                os.environ.get('PROFILER_STOP_STEP', "5"))
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)

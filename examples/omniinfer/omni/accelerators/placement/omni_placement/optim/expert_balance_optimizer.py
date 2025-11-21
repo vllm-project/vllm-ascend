@@ -10,6 +10,7 @@ from .optimizers import Optimizer
 
 
 class ExpertsBalanceOptimizer(Optimizer):
+
     def __init__(self, cluster_status, batch_size=48, top_k_count=8) -> None:
         """
         Initializes the Expert Balance optimizer instance.
@@ -25,22 +26,26 @@ class ExpertsBalanceOptimizer(Optimizer):
         # print(f"redundant_expert_mapping: {self.redundant_expert_mapping.size()}")
         # print(f"redundant_expert_mapping: {self.redundant_expert_mapping}")
 
-        self.max_redundant_num = cluster_status.expert_mapping.get_max_redundant_expert_num()
-        self.batch_size = int(os.environ.get("PTA_TORCHAIR_DECODE_GEAR_LIST", batch_size))
+        self.max_redundant_num = cluster_status.expert_mapping.get_max_redundant_expert_num(
+        )
+        self.batch_size = int(
+            os.environ.get("PTA_TORCHAIR_DECODE_GEAR_LIST", batch_size))
         self.top_k_count = top_k_count
-        self.selector = torch.arange(self.batch_size, device=self.device) % self.max_redundant_num  # Shape: (batch_size,)
-        self.selector = self.selector.view(self.batch_size, 1).expand(self.batch_size, self.top_k_count)  # Broadcast to (batch_size, expert_count)
+        self.selector = torch.arange(
+            self.batch_size, device=self.device
+        ) % self.max_redundant_num  # Shape: (batch_size,)
+        self.selector = self.selector.view(self.batch_size, 1).expand(
+            self.batch_size,
+            self.top_k_count)  # Broadcast to (batch_size, expert_count)
 
         # print(f"selector: {self.selector.size()}")
         # print(f"selector: {self.selector}")
 
-    def optimize(self,
-                layer_idx_moe: int,
-                tokens: torch.Tensor,
-                token_expert_id: torch.Tensor,
-                token_scores: torch.Tensor,
-                cluster_status: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    def optimize(
+        self, layer_idx_moe: int, tokens: torch.Tensor,
+        token_expert_id: torch.Tensor, token_scores: torch.Tensor,
+        cluster_status: list
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Optimizes token distribution based on `expert_position` by directly mapping to global expert IDs.
 
@@ -65,5 +70,5 @@ class ExpertsBalanceOptimizer(Optimizer):
         """
         # Return the updated token distribution
         expert_mapping = self.redundant_expert_mapping[layer_idx_moe]
-        return tokens, expert_mapping[self.selector, token_expert_id], token_scores
-
+        return tokens, expert_mapping[self.selector,
+                                      token_expert_id], token_scores

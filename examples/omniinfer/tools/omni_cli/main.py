@@ -27,12 +27,7 @@ from omni_cli.config_transform import (detect_file_encoding,
 
 def execute_command(command):
     """Execute the ansible command"""
-    process = subprocess.Popen(
-        command,
-        shell=True,
-        stdout=None,
-        stderr=None
-    )
+    process = subprocess.Popen(command, shell=True, stdout=None, stderr=None)
 
     return_code = process.wait()
     if return_code != 0:
@@ -40,11 +35,13 @@ def execute_command(command):
     else:
         print("Deployment succeeded")
 
+
 def start_omni_service_in_normal_mode(config_path):
     """Run the omni service in normal mode."""
     transform_deployment_config(config_path)
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --skip-tags 'sync_code,pip_install,fetch_log'"
     execute_command(command)
+
 
 def prepare_omni_service_in_developer_mode(config_path):
     """In developer mode, preparing to run the omni service."""
@@ -52,33 +49,40 @@ def prepare_omni_service_in_developer_mode(config_path):
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --skip-tags 'sync_code,pip_install,run_server,fetch_log'"
     execute_command(command)
 
+
 def run_omni_service_in_developer_mode():
     """In developer mode, running the omni service."""
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags run_server"
     execute_command(command)
+
 
 def stop_omni_service():
     """Stop the omni service."""
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags stop_server"
     execute_command(command)
 
+
 def synchronize_code():
     """In developer mode, copy the code from the execution machine to the target machine container."""
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags sync_code"
     execute_command(command)
+
 
 def install_packages():
     """In developer mode, copy the code and install the packages."""
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags 'sync_code,pip_install'"
     execute_command(command)
 
+
 def set_configuration(config_path):
     """Set configuration."""
     transform_deployment_config(config_path)
 
+
 def del_configuration(config_path):
     """Delete configuration"""
     transform_deployment_config(config_path)
+
 
 def inspect_configuration(config_path):
     """Inspect detailed configuration information"""
@@ -86,69 +90,79 @@ def inspect_configuration(config_path):
     with open(config_path, 'r', encoding=encoding) as file:
         data = json.load(file)
 
-    print(json.dumps(
-        data,
-        indent=4,
-        sort_keys=True,
-        ensure_ascii=False
-    ))
+    print(json.dumps(data, indent=4, sort_keys=True, ensure_ascii=False))
+
 
 def upgrade_packages():
     """Install the latest wheel package"""
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags pip_install"
     execute_command(command)
 
+
 def fetch_logs():
     """Fetch logs"""
     command = f"ansible-playbook -i omni_infer_inventory.yml omni_infer_server.yml --tags fetch_log"
     execute_command(command)
 
+
 def main():
     # Create main argument parser with description
-    parser = argparse.ArgumentParser(description="Omni Inference Service Management")
+    parser = argparse.ArgumentParser(
+        description="Omni Inference Service Management")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # START command configuration
-    start_parser = subparsers.add_parser("start", help="Start the omni services")
-    start_parser.add_argument(
-        "config_path",
-        nargs='?',
-        default=None,
-        help='Start in normal mode with config file'
-    )
+    start_parser = subparsers.add_parser("start",
+                                         help="Start the omni services")
+    start_parser.add_argument("config_path",
+                              nargs='?',
+                              default=None,
+                              help='Start in normal mode with config file')
     start_group = start_parser.add_mutually_exclusive_group()
     start_group.add_argument(
         "--normal",
         nargs=1,
         metavar='config_path',
-        help="Start in normal mode (default) with config file"
-    )
+        help="Start in normal mode (default) with config file")
     start_group.add_argument(
         "--prepare_dev",
         nargs=1,
         metavar='config_path',
-        help="Start in developer mode with config file: Environmental preparation"
-    )
-    start_group.add_argument("--run_dev", action="store_true", help="Start in developer mode: Start the service")
+        help=
+        "Start in developer mode with config file: Environmental preparation")
+    start_group.add_argument("--run_dev",
+                             action="store_true",
+                             help="Start in developer mode: Start the service")
 
     # STOP command configuration
     subparsers.add_parser("stop", help="Stop the omni service")
 
     # SYNC_DEV command configuration
-    subparsers.add_parser("sync_dev", help="Developer mode: Synchronize the code")
+    subparsers.add_parser("sync_dev",
+                          help="Developer mode: Synchronize the code")
 
     # INSTALL_DEV command configuration
-    subparsers.add_parser("install_dev", help="Developer mode: Install packages")
+    subparsers.add_parser("install_dev",
+                          help="Developer mode: Install packages")
 
     # CFG command configuration
     cfg_parser = subparsers.add_parser("cfg", help="Modify configuration")
     cfg_group = cfg_parser.add_mutually_exclusive_group()
-    cfg_group.add_argument("--set", nargs=1, metavar='config_path', help="Set configuration")
-    cfg_group.add_argument("--delete", nargs=1, metavar='config_path', help="Delete configuration")
+    cfg_group.add_argument("--set",
+                           nargs=1,
+                           metavar='config_path',
+                           help="Set configuration")
+    cfg_group.add_argument("--delete",
+                           nargs=1,
+                           metavar='config_path',
+                           help="Delete configuration")
 
     # INSPECT command configuration
-    inspect_parser = subparsers.add_parser("inspect", help="Inspect Configuration")
-    inspect_parser.add_argument('config_path', type=str, help='Path to the configuration file')
+    inspect_parser = subparsers.add_parser("inspect",
+                                           help="Inspect Configuration")
+    inspect_parser.add_argument('config_path',
+                                type=str,
+                                help='Path to the configuration file')
 
     # UPGRADE command configuration
     subparsers.add_parser("upgrade", help="Upgrade packages")
@@ -157,7 +171,8 @@ def main():
     subparsers.add_parser("fetch_log", help="Fetch logs")
 
     args = parser.parse_args()
-    if args.command == "start" and not any([args.normal, args.prepare_dev, args.run_dev]):
+    if args.command == "start" and not any(
+        [args.normal, args.prepare_dev, args.run_dev]):
         args.normal = True
 
     # Command processing logic

@@ -20,7 +20,7 @@ from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-if os.getenv("ASCEND_PLATFORM", "A3")=="A2":
+if os.getenv("ASCEND_PLATFORM", "A3") == "A2":
     from .pangu_ultra_moe_a2 import PanguUltraMoEDecoderLayer
 else:
     from .pangu_ultra_moe import PanguUltraMoEDecoderLayer
@@ -34,13 +34,13 @@ from omni.models.common.layers.vocab_parallel_embedding import (
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
                                         weight_name: str) -> Optional[int]:
-    if (hasattr(config, "num_mtp_layers")
-            and config.num_mtp_layers > 0):
+    if (hasattr(config, "num_mtp_layers") and config.num_mtp_layers > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_mtp_layers):
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):
                 return layer_idx + i
     return None
+
 
 class SharedHead(nn.Module):
 
@@ -58,57 +58,71 @@ class SharedHead(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(hidden_states)
 
+
 @support_torch_compile
 class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
-    def __init__(self, *,
-                 vllm_config,
-                 prefix: str,
+
+    def __init__(
+        self,
+        *,
+        vllm_config,
+        prefix: str,
     ):
         self.config = vllm_config.model_config.hf_config
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
 
-        super().__init__(self.config, prefix,
-                         cache_config=self.cache_config,
-                         quant_config=self.quant_config,
-                        )
+        super().__init__(
+            self.config,
+            prefix,
+            cache_config=self.cache_config,
+            quant_config=self.quant_config,
+        )
 
-        self.ignore_share_weight = True # TODO get from config
+        self.ignore_share_weight = True  # TODO get from config
         self.embed_tokens = None if self.ignore_share_weight else \
             VocabParallelEmbedding(
                 self.config.vocab_size,
                 self.config.hidden_size,
                 prefix=prefix,
             )
-        self.shared_head = SharedHead(self.config, self.quant_config, self.ignore_share_weight)
-        self.enorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.hnorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.eh_proj = nn.Linear(2 * self.config.hidden_size, self.config.hidden_size, bias=False)
-        self.logits_processor = LogitsProcessor(self.config.vocab_size, logits_as_input=True)
+        self.shared_head = SharedHead(self.config, self.quant_config,
+                                      self.ignore_share_weight)
+        self.enorm = RMSNorm(self.config.hidden_size,
+                             eps=self.config.rms_norm_eps)
+        self.hnorm = RMSNorm(self.config.hidden_size,
+                             eps=self.config.rms_norm_eps)
+        self.eh_proj = nn.Linear(2 * self.config.hidden_size,
+                                 self.config.hidden_size,
+                                 bias=False)
+        self.logits_processor = LogitsProcessor(self.config.vocab_size,
+                                                logits_as_input=True)
         self.layer_idx = int(prefix.split('.')[-1])
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
-            previous_hidden_states: torch.Tensor,
-            selected_indices: Optional[torch.Tensor] = None,
-            **kwargs,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        previous_hidden_states: torch.Tensor,
+        selected_indices: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         tok_embeds = self.enorm(self.get_input_embeddings(input_ids))
         if len(tok_embeds.shape) > 2:
             tok_embeds = tok_embeds.view(-1, self.config.hidden_size)
 
-        tp_size = get_tensor_model_parallel_world_size()  # cloud: get_tp_group().world_size
+        tp_size = get_tensor_model_parallel_world_size(
+        )  # cloud: get_tp_group().world_size
         rank_in_group = get_tensor_model_parallel_rank()
 
         if tp_size > 1:
             token_num = previous_hidden_states.shape[0]
             start_range = rank_in_group * (token_num // tp_size)
             end_range = (1 + rank_in_group) * (token_num // tp_size)
-            previous_hidden_states = previous_hidden_states[start_range: end_range, :]
+            previous_hidden_states = previous_hidden_states[
+                start_range:end_range, :]
 
         previous = self.hnorm(previous_hidden_states)
         cat_hidden_states = torch.cat([tok_embeds, previous], dim=-1)
@@ -117,7 +131,8 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
         encoded_states, residual = PanguUltraMoEDecoderLayer.forward(
             self,
             positions=positions,
-            kv_cache=kv_caches[self.layer_idx] if kv_caches is not None else None,
+            kv_cache=kv_caches[self.layer_idx]
+            if kv_caches is not None else None,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
             residual=None,
@@ -138,10 +153,10 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
         return self.embed_tokens(input_ids, reduce=1)
 
     def compute_lmhead(
-            self,
-            hidden_states: torch.Tensor,
-            selected_indices: Optional[torch.Tensor] = None,
-            embedding_bias: Optional[torch.Tensor] = None,
+        self,
+        hidden_states: torch.Tensor,
+        selected_indices: Optional[torch.Tensor] = None,
+        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if model_extra_config.parall_config.dp_size <= 1 and selected_indices is not None:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -151,17 +166,15 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
         logits = self.shared_head.head(hidden_states, embedding_bias)
         return logits
 
-    def compute_logits(
-            self,
-            hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(self.shared_head["head"], hidden_states, sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.shared_head["head"], hidden_states,
+                                       sampling_metadata)
         return logits
 
     def should_use_eager_mode(self, *args, **kwargs):
         if len(kwargs) == 0:
-           return True
+            return True
 
         attn_metadata = kwargs.get("attn_metadata", None)
         if not attn_metadata:
@@ -175,7 +188,9 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
 
         return False
 
+
 class PanguUltraMoEMultiTokenPredictor(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -184,19 +199,25 @@ class PanguUltraMoEMultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = self.config.num_hidden_layers
         self.num_mtp_layers = self.config.num_mtp_layers
 
-        self.ignore_share_weight = True # TODO get from config
+        self.ignore_share_weight = True  # TODO get from config
         if self.num_mtp_layers > 1:
-            raise ValueError(f"Only support 1 mtp layers at most, while get num_nextn_predict_layers = {self.num_mtp_layers}.")
+            raise ValueError(
+                f"Only support 1 mtp layers at most, while get num_nextn_predict_layers = {self.num_mtp_layers}."
+            )
         mtp_class_list = [PanguUltraMoEMultiTokenPredictorLayer]
         self.layers = nn.ModuleDict({
             str(i + self.mtp_start_layer_idx):
-            mtp_class_list[i](vllm_config=vllm_config,
-                              prefix=f"{prefix}.layers.{i + self.mtp_start_layer_idx}")
-            for i in range(min(self.num_mtp_layers, vllm_config.speculative_config.num_speculative_tokens))
+            mtp_class_list[i](
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.layers.{i + self.mtp_start_layer_idx}")
+            for i in range(
+                min(self.num_mtp_layers,
+                    vllm_config.speculative_config.num_speculative_tokens))
         })
-        self.logits_processor = LogitsProcessor(self.config.vocab_size, logits_as_input=True)
+        self.logits_processor = LogitsProcessor(self.config.vocab_size,
+                                                logits_as_input=True)
         self.greedy_sampler = Sampler()
-    
+
     def set_share_weight(self, target_model):
         if self.ignore_share_weight:
             for _, layer in self.layers.items():
@@ -204,14 +225,14 @@ class PanguUltraMoEMultiTokenPredictor(nn.Module):
                 layer.shared_head.head = target_model.lm_head
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
-            previous_hidden_states: torch.Tensor,
-            selected_indices: Optional[torch.Tensor] = None,
-            mtp_layer_idx = 0,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        previous_hidden_states: torch.Tensor,
+        selected_indices: Optional[torch.Tensor] = None,
+        mtp_layer_idx=0,
     ) -> torch.Tensor:
         return self.layers[str(self.mtp_start_layer_idx + mtp_layer_idx)](
             input_ids=input_ids,
@@ -224,27 +245,29 @@ class PanguUltraMoEMultiTokenPredictor(nn.Module):
 
 
 class PanguUltraMoEMTP(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
-        self.model = PanguUltraMoEMultiTokenPredictor(vllm_config=vllm_config, prefix=f"model")
-    
+        self.model = PanguUltraMoEMultiTokenPredictor(vllm_config=vllm_config,
+                                                      prefix=f"model")
+
     def set_share_weight(self, target_model):
         self.model.set_share_weight(target_model)
-    
+
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
-            previous_hidden_states: torch.Tensor,
-            selected_indices: Optional[torch.Tensor] = None,
-            mtp_layer_idx = 0,
-            **kwargs,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        previous_hidden_states: torch.Tensor,
+        selected_indices: Optional[torch.Tensor] = None,
+        mtp_layer_idx=0,
+        **kwargs,
     ) -> torch.Tensor:
         return self.model(
             input_ids=input_ids,
@@ -256,7 +279,8 @@ class PanguUltraMoEMTP(nn.Module):
             mtp_layer_idx=mtp_layer_idx,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # 字段说明: (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -277,7 +301,8 @@ class PanguUltraMoEMTP(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
             if self.model.ignore_share_weight and any(
-                    substring in name for substring in ["embed_tokens.weight", "shared_head.head"]):
+                    substring in name for substring in
+                ["embed_tokens.weight", "shared_head.head"]):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:

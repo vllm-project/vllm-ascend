@@ -30,6 +30,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 class RotaryEmbedding(torch.nn.Module):
 
     def __init__(self,
@@ -48,12 +49,15 @@ class RotaryEmbedding(torch.nn.Module):
         self.is_neox_style = is_neox_style
 
         self.head_size = head_size
-        cos, sin = RotaryEmbedding.compute_full_cos_sin(self.base, self.rotary_dim, self.max_len)
+        cos, sin = RotaryEmbedding.compute_full_cos_sin(
+            self.base, self.rotary_dim, self.max_len)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
-    
+
     @staticmethod
-    def compute_full_cos_sin(base: Union[int, float], rotary_dim: int, max_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def compute_full_cos_sin(
+            base: Union[int, float], rotary_dim: int,
+            max_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the cos and sin cache."""
         inv_freq = RotaryEmbedding.compute_inv_freq(base, rotary_dim)
         t = torch.arange(max_len, device=inv_freq.device, dtype=inv_freq.dtype)
@@ -65,10 +69,11 @@ class RotaryEmbedding(torch.nn.Module):
         return cos, sin
 
     @staticmethod
-    def compute_inv_freq(base: Union[int, float], rotary_dim: int) -> torch.Tensor:
+    def compute_inv_freq(base: Union[int, float],
+                         rotary_dim: int) -> torch.Tensor:
         """Compute the inverse frequency."""
-        inv_freq = 1.0 / (base**(torch.arange(
-            0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        inv_freq = 1.0 / (base**(
+            torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         return inv_freq
 
     # use small ops
@@ -87,7 +92,8 @@ class RotaryEmbedding(torch.nn.Module):
         """
 
         if self.rotary_dim != 128:
-            query = query.view(*query.shape[:-1], -1, self.head_size).contiguous()
+            query = query.view(*query.shape[:-1], -1,
+                               self.head_size).contiguous()
             key = key.view(*key.shape[:-1], -1, self.head_size).contiguous()
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
@@ -103,7 +109,8 @@ class RotaryEmbedding(torch.nn.Module):
             query = query.view(query.shape[0], 1, -1, self.head_size)
             key = key.view(key.shape[0], 1, -1, self.head_size)
 
-            q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
+            q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(
+                query, key, cos, sin)
 
             q_embed = q_embed.view(q_embed.shape[0], -1)
             k_embed = k_embed.view(k_embed.shape[0], -1)
@@ -119,7 +126,8 @@ class RotaryEmbedding(torch.nn.Module):
         """
 
         if self.rotary_dim != 128:
-            query = query.view(*query.shape[:-1], -1, self.head_size).contiguous()
+            query = query.view(*query.shape[:-1], -1,
+                               self.head_size).contiguous()
             key = key.view(*key.shape[:-1], -1, self.head_size).contiguous()
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
@@ -135,7 +143,8 @@ class RotaryEmbedding(torch.nn.Module):
             query = query.view(query.shape[0], 1, -1, self.head_size)
             key = key.view(key.shape[0], 1, -1, self.head_size)
 
-            q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
+            q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(
+                query, key, cos, sin)
 
             q_embed = q_embed.view(q_embed.shape[0], -1)
             k_embed = k_embed.view(k_embed.shape[0], -1)
@@ -145,14 +154,15 @@ class RotaryEmbedding(torch.nn.Module):
 
 _ROPE_DICT: Dict[Tuple, nn.Module] = {}
 
+
 def get_rope(
-        head_size: int,
-        rotary_dim: int,
-        max_position: int,
-        base: int,
-        is_neox_style: bool = True,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        dtype: Optional[torch.dtype] = None,
+    head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    base: int,
+    is_neox_style: bool = True,
+    rope_scaling: Optional[Dict[str, Any]] = None,
+    dtype: Optional[torch.dtype] = None,
 ):
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -162,8 +172,7 @@ def get_rope(
         return _ROPE_DICT[key]
 
     rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
-                                            is_neox_style)
+                                 is_neox_style)
 
     _ROPE_DICT[key] = rotary_emb
     return rotary_emb
-

@@ -31,7 +31,7 @@ from .deepseek_v3 import DeepseekV3ForCausalLM
 class DeepseekV32Config(DeepseekV3Config):
     model_type = "deepseek_v32"
     keys_to_ignore_at_inference = ["past_key_values"]
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

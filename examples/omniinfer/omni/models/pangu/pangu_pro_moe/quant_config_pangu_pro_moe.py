@@ -60,7 +60,6 @@ def ascend_direct_register_custom_op(
 
 utils.direct_register_custom_op = ascend_direct_register_custom_op
 
-
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -118,7 +117,8 @@ class AscendQuantConfig_Pangu_Pro_Moe(QuantizationConfig):
         return ["quant_model_description.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AscendQuantConfig_Pangu_Pro_Moe":
+    def from_config(
+            cls, config: Dict[str, Any]) -> "AscendQuantConfig_Pangu_Pro_Moe":
         return cls(config)
 
     @classmethod
@@ -189,8 +189,8 @@ class AscendLinearMethod(LinearMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]) -> None:
+    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe,
+                 prefix: str, packed_modules_mapping: Dict[str, Any]) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_linear_method()
@@ -259,7 +259,8 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe, prefix: str) -> None:
+    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe,
+                 prefix: str) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix)
         self.quant_method = self.quantizer.build_attention_method()
@@ -291,8 +292,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]):
+    def __init__(self, quant_config: AscendQuantConfig_Pangu_Pro_Moe,
+                 prefix: str, packed_modules_mapping: Dict[str, Any]):
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_moe_method()
@@ -354,4 +355,4 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
-            self.quant_method.process_weights_after_loading(layer) 
+            self.quant_method.process_weights_after_loading(layer)

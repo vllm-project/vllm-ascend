@@ -61,21 +61,22 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
 """MLP 模块激活拆分长度，按64G显存拆分，需要根据序列长度以及性能确认最佳拆分长度"""
 SEQ_SPLIT_LENGTH = 4096
 SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER = 64 if model_extra_config.operator_opt_config.prefill_moe_all_to_all else 256
+
+
 class ParallelDeepseekMLP(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
-            tp_parallel: Literal["global", "local", "no_tp"] = "no_tp",
-            quant_config: Optional[QuantizationConfig] = None,
-            reduce_results: bool = True,
-            prefix: str = "",
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        tp_parallel: Literal["global", "local", "no_tp"] = "no_tp",
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.tp_parallel = tp_parallel
@@ -100,21 +101,23 @@ class ParallelDeepseekMLP(nn.Module):
         if os.environ["ROLE"] == "decode":
             self.gate_up_proj.throw_dequant = True
         self.down_proj = AscendRowParallelLinear(intermediate_size,
-                                                   hidden_size,
-                                                   tp_size=self.tp_size,
-                                                   tp_rank=self.tp_rank,
-                                                   bias=False,
-                                                   quant_config=quant_config,
-                                                   reduce_results=False,
-                                                   prefix=f"{prefix}.down_proj")
+                                                 hidden_size,
+                                                 tp_size=self.tp_size,
+                                                 tp_rank=self.tp_rank,
+                                                 bias=False,
+                                                 quant_config=quant_config,
+                                                 reduce_results=False,
+                                                 prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn_obj = SiluAndMul()
         self.quant_symbol = True if quant_config else False
         self.device_count = get_npu_device_count()
-        self.node_rank = get_world_group().rank_in_group // get_npu_device_count()
-        self.which_half = get_world_group().rank_in_group // (get_world_group().world_size // 2)
+        self.node_rank = get_world_group(
+        ).rank_in_group // get_npu_device_count()
+        self.which_half = get_world_group().rank_in_group // (
+            get_world_group().world_size // 2)
 
     def act_fn(self, x, quant_symbol):
         if quant_symbol and isinstance(x, tuple):
@@ -122,9 +125,15 @@ class ParallelDeepseekMLP(nn.Module):
             x['out_scale'] = self.gate_up_proj.weight_scale
         return self.act_fn_obj(x, quant_symbol)
 
-    def forward(self, x, residual, attn_metadata, pertoken_scale=None, no_communication=False):
+    def forward(self,
+                x,
+                residual,
+                attn_metadata,
+                pertoken_scale=None,
+                no_communication=False):
         if self.tp_parallel == "no_tp" or no_communication:
-            return self.forward_no_tp(x, residual, attn_metadata, pertoken_scale)
+            return self.forward_no_tp(x, residual, attn_metadata,
+                                      pertoken_scale)
 
         if self.tp_parallel == "local":
             return self.forward_local_tp(x, residual, attn_metadata)
@@ -136,8 +145,7 @@ class ParallelDeepseekMLP(nn.Module):
         if pertoken_scale is None:
             x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
 
-        x = {'x_int8': x,
-             'pertoken_scale': pertoken_scale}
+        x = {'x_int8': x, 'pertoken_scale': pertoken_scale}
         gate_up, _ = self.gate_up_proj.forward(x)
         x = self.act_fn(gate_up, self.quant_symbol)
         x, _ = self.down_proj.forward(x)
@@ -149,21 +157,22 @@ class ParallelDeepseekMLP(nn.Module):
         is_prefill = (attn_metadata is None or attn_metadata.prefill)
         if is_prefill and model_extra_config.parall_config.dp_size > 1:
             local_length = x.shape[0]
-            reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
-            dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+            reduce_length = torch.tensor(x.shape[0],
+                                         dtype=torch.int64,
+                                         device="npu")
+            dist.all_reduce(reduce_length,
+                            op=dist.ReduceOp.MAX,
+                            async_op=False)
             global_max_length = reduce_length.item()
             pad_size = global_max_length - x.shape[0]
 
-            x = torch.nn.functional.pad(
-                x, (0, 0, 0, pad_size)
-            )
+            x = torch.nn.functional.pad(x, (0, 0, 0, pad_size))
 
         x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
         x = all_gather_local(x, idx=0, dim=0)
         pertoken_scale = all_gather_local(pertoken_scale, idx=1, dim=0)
 
-        x = {'x_int8': x,
-             'pertoken_scale': pertoken_scale}
+        x = {'x_int8': x, 'pertoken_scale': pertoken_scale}
         gate_up, _ = self.gate_up_proj.forward(x)
         x = self.act_fn(gate_up, self.quant_symbol)
         x, _ = self.down_proj.forward(x)
@@ -178,11 +187,20 @@ class ParallelDeepseekMLP(nn.Module):
         is_prefill = (attn_metadata is None or attn_metadata.prefill)
         if not is_prefill:
             x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
-            global_pertoken_scale = all_gather_two_stage(pertoken_scale, idx=1, dim=0, reverse=True)
+            global_pertoken_scale = all_gather_two_stage(pertoken_scale,
+                                                         idx=1,
+                                                         dim=0,
+                                                         reverse=True)
             if model_extra_config.operator_opt_config.enable_round_pipeline_comm:
-                x = all_gather_round_pipeline(x, idx=0, node_rank=self.node_rank, dim=0)
+                x = all_gather_round_pipeline(x,
+                                              idx=0,
+                                              node_rank=self.node_rank,
+                                              dim=0)
             elif model_extra_config.operator_opt_config.enable_pipeline_comm:
-                x = all_gather_pipeline(x, idx=0, which_half=self.which_half, dim=0)
+                x = all_gather_pipeline(x,
+                                        idx=0,
+                                        which_half=self.which_half,
+                                        dim=0)
                 global_pertoken_scale = global_pertoken_scale.view(2, -1, self.device_count, pertoken_scale.shape[0]) \
                     .transpose(1, 2).reshape(-1)
             else:
@@ -193,30 +211,37 @@ class ParallelDeepseekMLP(nn.Module):
             pad_size = 0
             if model_extra_config.parall_config.dp_size > 1:
                 local_length = x.shape[0]
-                reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
-                dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+                reduce_length = torch.tensor(x.shape[0],
+                                             dtype=torch.int64,
+                                             device="npu")
+                dist.all_reduce(reduce_length,
+                                op=dist.ReduceOp.MAX,
+                                async_op=False)
                 global_max_length = reduce_length.item()
                 pad_size = global_max_length - x.shape[0]
 
-                x = torch.nn.functional.pad(
-                    x, (0, 0, 0, pad_size)
-                )
+                x = torch.nn.functional.pad(x, (0, 0, 0, pad_size))
 
             x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
             x = all_gather_two_stage(x, idx=0, dim=0)
-            global_pertoken_scale = all_gather_two_stage(pertoken_scale, idx=1, dim=0)
+            global_pertoken_scale = all_gather_two_stage(pertoken_scale,
+                                                         idx=1,
+                                                         dim=0)
 
-        x = {'x_int8': x,
-             'pertoken_scale': global_pertoken_scale}
+        x = {'x_int8': x, 'pertoken_scale': global_pertoken_scale}
         gate_up, _ = self.gate_up_proj.forward(x)
         x = self.act_fn(gate_up, self.quant_symbol)
         x, _ = self.down_proj.forward(x)
 
         if not is_prefill:
             if model_extra_config.operator_opt_config.enable_round_pipeline_comm:
-                x = reduce_scatter_round_pipeline(x, idx=0, node_rank=self.node_rank)
+                x = reduce_scatter_round_pipeline(x,
+                                                  idx=0,
+                                                  node_rank=self.node_rank)
             elif model_extra_config.operator_opt_config.enable_pipeline_comm:
-                x = reduce_scatter_pipeline(x, idx=0, which_half=self.which_half)
+                x = reduce_scatter_pipeline(x,
+                                            idx=0,
+                                            which_half=self.which_half)
             else:
                 x = reduce_scatter_two_stage(x, idx=0)
         else:
@@ -230,11 +255,11 @@ class ParallelDeepseekMLP(nn.Module):
 class DeepseekDecoderLayer(nn.Module):
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            prefix: str,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        prefix: str,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.layer_name = f"{prefix}.self_attn.attn"
@@ -303,16 +328,14 @@ class DeepseekDecoderLayer(nn.Module):
             self.dp_size = None
             self.dp_group = None
 
-    def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
-            residual: Optional[torch.Tensor],
-            layer_id: Optional[int] = None,
-            kv_prefetch: torch.Tensor = None
-    ) -> torch.Tensor:
+    def forward(self,
+                positions: torch.Tensor,
+                hidden_states: torch.Tensor,
+                kv_cache: torch.Tensor,
+                attn_metadata: AttentionMetadata,
+                residual: Optional[torch.Tensor],
+                layer_id: Optional[int] = None,
+                kv_prefetch: torch.Tensor = None) -> torch.Tensor:
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
         if residual is None:
@@ -321,50 +344,60 @@ class DeepseekDecoderLayer(nn.Module):
         else:
             # hidden_states, residual = self.input_layernorm(
             #     hidden_states, residual, quant_symbol=True)
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual, quant_symbol=True)
+            hidden_states, residual = self.input_layernorm(hidden_states,
+                                                           residual,
+                                                           quant_symbol=True)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata
-        )
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
 
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        is_prefill = (attn_metadata is None or attn_metadata.prefill is not None)
-        if (model_extra_config.operator_opt_config.prefill_moe_all_to_all or model_extra_config.parall_config.dp_size > 1) and is_prefill:
-            reduce_length = torch.tensor(hidden_states.shape[0], dtype=torch.int64, device="npu")
+        is_prefill = (attn_metadata is None
+                      or attn_metadata.prefill is not None)
+        if (model_extra_config.operator_opt_config.prefill_moe_all_to_all or
+                model_extra_config.parall_config.dp_size > 1) and is_prefill:
+            reduce_length = torch.tensor(hidden_states.shape[0],
+                                         dtype=torch.int64,
+                                         device="npu")
             local_length = hidden_states.shape[0]
-            dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+            dist.all_reduce(reduce_length,
+                            op=dist.ReduceOp.MAX,
+                            async_op=False)
             global_max_length = reduce_length.item()
             pad_size = global_max_length - hidden_states.shape[0]
 
-            hidden_states = torch.nn.functional.pad(
-                hidden_states, (0, 0, 0, pad_size)
-            )
-            residual = torch.nn.functional.pad(
-                residual, (0, 0, 0, pad_size)
-            )
-            hidden_states_list = hidden_states.split(SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER)
+            hidden_states = torch.nn.functional.pad(hidden_states,
+                                                    (0, 0, 0, pad_size))
+            residual = torch.nn.functional.pad(residual, (0, 0, 0, pad_size))
+            hidden_states_list = hidden_states.split(
+                SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER)
             residual_list = residual.split(SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER)
             hidden_state_out = []
             residual_out = []
             for i in range(len(hidden_states_list)):
                 if self.is_moe == True:
-                    hidden_states, residual = self.mlp(hidden_states_list[i], residual_list[i], attn_metadata, layer_id)
+                    hidden_states, residual = self.mlp(hidden_states_list[i],
+                                                       residual_list[i],
+                                                       attn_metadata, layer_id)
                 else:
-                    hidden_states, residual = self.mlp(hidden_states_list[i], residual_list[i], attn_metadata)
+                    hidden_states, residual = self.mlp(hidden_states_list[i],
+                                                       residual_list[i],
+                                                       attn_metadata)
                 hidden_state_out.append(hidden_states)
                 residual_out.append(residual)
             hidden_states = torch.cat(hidden_state_out)[:local_length]
             residual = torch.cat(residual_out)[:local_length]
         else:
             if self.is_moe == True:
-                hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata, layer_id, kv_prefetch)
+                hidden_states, residual = self.mlp(hidden_states, residual,
+                                                   attn_metadata, layer_id,
+                                                   kv_prefetch)
             else:
-                hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata)
+                hidden_states, residual = self.mlp(hidden_states, residual,
+                                                   attn_metadata)
 
         return hidden_states, residual
 
@@ -374,8 +407,8 @@ class DeepseekDecoderLayer(nn.Module):
         if DeepseekDecoderLayer.CACHED_GATHERED_BUFFER is None \
                 or DeepseekDecoderLayer.CACHED_GATHERED_BUFFER.shape[0] != token_nums \
                 or DeepseekDecoderLayer.CACHED_GATHERED_BUFFER.dtype != dtype:
-            DeepseekDecoderLayer.CACHED_GATHERED_BUFFER = torch.zeros((token_nums, self.hidden_size), dtype=dtype,
-                                                                      device='npu')
+            DeepseekDecoderLayer.CACHED_GATHERED_BUFFER = torch.zeros(
+                (token_nums, self.hidden_size), dtype=dtype, device='npu')
         return DeepseekDecoderLayer.CACHED_GATHERED_BUFFER
 
 
@@ -391,7 +424,8 @@ class DeepseekV3Model(nn.Module):
 
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
 
         qk_rope_head_dim = config.qk_rope_head_dim
         rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -449,12 +483,12 @@ class DeepseekV3Model(nn.Module):
         return self.embed_tokens(input_ids, reduce=1)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
-            intermediate_tensors: Optional[IntermediateTensors],
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             hidden_states = self.get_input_embeddings(input_ids)
@@ -467,9 +501,9 @@ class DeepseekV3Model(nn.Module):
             prefetch_start_layer = self.start_layer if self.start_layer > self.first_k_dense_replace else self.first_k_dense_replace
             prefetch_end_layer = self.end_layer if self.end_layer < self.num_hidden_layers - 1 else self.num_hidden_layers - 1
             for layer_id in range(prefetch_start_layer, prefetch_end_layer):
-                self.layers[layer_id].mlp.attn_prefetch = self.layers[layer_id + 1].self_attn
+                self.layers[layer_id].mlp.attn_prefetch = self.layers[
+                    layer_id + 1].self_attn
             self.is_init = True
-
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
@@ -478,10 +512,11 @@ class DeepseekV3Model(nn.Module):
                 kv_prefetch = kv_caches[i + 1 - self.start_layer]
             else:
                 kv_prefetch = None
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer] if kv_caches is not None else None,
-                                            attn_metadata, residual, layer_id,
-                                            kv_prefetch)
+            hidden_states, residual = layer(
+                positions, hidden_states,
+                kv_caches[i -
+                          self.start_layer] if kv_caches is not None else None,
+                attn_metadata, residual, layer_id, kv_prefetch)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -492,13 +527,13 @@ class DeepseekV3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
 
         hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
-        
+
         return hidden_states
 
 
 @support_torch_compile
 class DeepseekV3ForCausalLM(nn.Module):
-    
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
@@ -510,10 +545,11 @@ class DeepseekV3ForCausalLM(nn.Module):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = DeepseekV3Model(vllm_config=vllm_config, prefix="model")
-        self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size,
-                                      quant_config=self.quant_config,
-                                      parallel_lmhead=(model_extra_config.parall_config.dp_size > 1))
+        self.lm_head = ParallelLMHead(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            quant_config=self.quant_config,
+            parallel_lmhead=(model_extra_config.parall_config.dp_size > 1))
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 logits_as_input=True)
         self.sampler = Sampler()
@@ -525,20 +561,18 @@ class DeepseekV3ForCausalLM(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor] = None,
-            attn_metadata: AttentionMetadata = None,
-            selected_indices: Optional[torch.Tensor] = None,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds = None,
-            **kwargs
-    ) -> Optional[torch.Tensor]:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor] = None,
+                attn_metadata: AttentionMetadata = None,
+                selected_indices: Optional[torch.Tensor] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds=None,
+                **kwargs) -> Optional[torch.Tensor]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors)
-        
+
         if attn_metadata is None:
             logits = self.compute_lmhead(hidden_states[-1:, ...], None)
         else:
@@ -550,10 +584,10 @@ class DeepseekV3ForCausalLM(nn.Module):
             return logits
 
     def compute_lmhead(
-            self,
-            hidden_states: torch.Tensor,
-            selected_indices: Optional[torch.Tensor] = None,
-            embedding_bias: Optional[torch.Tensor] = None,
+        self,
+        hidden_states: torch.Tensor,
+        selected_indices: Optional[torch.Tensor] = None,
+        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if selected_indices is not None:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -565,9 +599,9 @@ class DeepseekV3ForCausalLM(nn.Module):
         return logits
 
     def compute_logits(
-            self,
-            hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
@@ -577,9 +611,9 @@ class DeepseekV3ForCausalLM(nn.Module):
         return logits
 
     def sample(
-            self,
-            logits: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -589,17 +623,17 @@ class DeepseekV3ForCausalLM(nn.Module):
             device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
-                torch.zeros((batch_size, self.config.hidden_size),
-                            dtype=dtype,
-                            device=device),
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
             "residual":
-                torch.zeros((batch_size, self.config.hidden_size),
-                            dtype=dtype,
-                            device=device),
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
         })
 
     def load_weights(self, weights: Iterable[Tuple[str,
-    torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> Set[str]:
         if model_extra_config.operator_opt_config.merge_qkv:
             stacked_params_mapping = [
                 ("gate_up_proj", "gate_proj", 0),
@@ -625,7 +659,8 @@ class DeepseekV3ForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if self.config.architectures[0] == 'DeepseekV3ForCausalLM' and self.config.num_nextn_predict_layers > 0:
+            if self.config.architectures[
+                    0] == 'DeepseekV3ForCausalLM' and self.config.num_nextn_predict_layers > 0:
                 layer_idx = self.config.num_hidden_layers
                 if name.startswith(f"model.layers.{layer_idx}"):
                     continue
@@ -657,7 +692,7 @@ class DeepseekV3ForCausalLM(nn.Module):
 
                     if is_pp_missing_parameter(name, self):
                         continue
-                    
+
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
@@ -674,10 +709,10 @@ class DeepseekV3ForCausalLM(nn.Module):
 
                     if is_pp_missing_parameter(name, self):
                         continue
-                    
+
                     if name not in params_dict:
                         continue
-                
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
@@ -687,9 +722,10 @@ class DeepseekV3ForCausalLM(nn.Module):
 
     def should_use_eager_mode(self, *args, **kwargs):
         attn_metadata = kwargs.get('attn_metadata', None)
-        
+
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
 
         if attn_metadata is None:
             return True

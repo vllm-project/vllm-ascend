@@ -135,8 +135,9 @@ class LLMDataDistCMgrConnector(KVConnectorBase_V1):
     ############################################################
     def register_kv_caches(
             self,
-            kv_caches: dict[str,  # type: ignore[override]
-                            Tuple[torch.Tensor]]):
+            kv_caches: dict[
+                str,  # type: ignore[override]
+                Tuple[torch.Tensor]]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 

@@ -57,7 +57,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "MODEL_EXTRA_CFG_PATH":
     lambda: os.getenv("MODEL_EXTRA_CFG_PATH", ""),
     "TORCHAIR_CACHE_HOME":
-    lambda: os.getenv("TORCHAIR_CACHE_HOME", os.path.join(os.getcwd(), ".torchair_cache")),
+    lambda: os.getenv("TORCHAIR_CACHE_HOME",
+                      os.path.join(os.getcwd(), ".torchair_cache")),
     "HOST_RAM_AVAILABLE_BYTES":
     lambda: os.getenv("HOST_RAM_AVAILABLE_BYTES", '0')
 }

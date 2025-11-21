@@ -11,15 +11,18 @@ import zmq
 
 
 class RouterDealerClient:
+
     def __init__(self, server_address="tcp://localhost:5555"):
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.DEALER)
-        
+
         client_id = f"client_{uuid.uuid4().hex[:8]}".encode('utf-8')
         self.socket.setsockopt(zmq.IDENTITY, client_id)
-        
+
         self.socket.connect(server_address)
-        print(f"Connected to server at {server_address} with ID: {client_id.decode()}")
+        print(
+            f"Connected to server at {server_address} with ID: {client_id.decode()}"
+        )
 
     def send_request(self, request_id: str, id_list: List[int]) -> bool:
         try:
@@ -53,13 +56,13 @@ class RouterDealerClient:
 
 
 def main():
-    SERVER_ADDRESS = "tcp://localhost:5555"    
+    SERVER_ADDRESS = "tcp://localhost:5555"
     client = RouterDealerClient(SERVER_ADDRESS)
-        
+
     client.send_request("My-test", [0, 5, 10])
     response = client.receive_response(1000000)
     print(response["success"])
-       
+
 
 if __name__ == "__main__":
     main()

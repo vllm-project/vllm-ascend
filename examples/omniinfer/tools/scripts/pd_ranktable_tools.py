@@ -41,29 +41,54 @@ def load_json(load_path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="PD separate need generate ranktable.")
-    parser.add_argument('--mode', default='gen', choices=['gen', 'merge', 'merge-local', 'merge-all'],
-                        help="The mode of tools, `gen` for generating the global ranktable, "
-                             "`merge` for merging the global ranktable.")
+    parser = argparse.ArgumentParser(
+        description="PD separate need generate ranktable.")
+    parser.add_argument(
+        '--mode',
+        default='gen',
+        choices=['gen', 'merge', 'merge-local', 'merge-all'],
+        help="The mode of tools, `gen` for generating the global ranktable, "
+        "`merge` for merging the global ranktable.")
 
     # For gen mode.
-    parser.add_argument('--api-server', action='store_true',
+    parser.add_argument('--api-server',
+                        action='store_true',
                         help="Use API server for receiving the request.")
-    parser.add_argument('--prefill-server-list', nargs='*', default=[], type=str2list,
-                        help="List of prefill servers (default is an empty list).")
-    parser.add_argument('--decode-server-list', nargs='*', default=[], type=str2list,
-                        help="List of decode servers (default is an empty list).")
-    parser.add_argument('--save-dir', default='./', type=str,
+    parser.add_argument(
+        '--prefill-server-list',
+        nargs='*',
+        default=[],
+        type=str2list,
+        help="List of prefill servers (default is an empty list).")
+    parser.add_argument(
+        '--decode-server-list',
+        nargs='*',
+        default=[],
+        type=str2list,
+        help="List of decode servers (default is an empty list).")
+    parser.add_argument('--save-dir',
+                        default='./',
+                        type=str,
                         help="Directory to save files (default is './').")
-    parser.add_argument('--ip', default='', type=str,
-                        help="local ip.")
+    parser.add_argument('--ip', default='', type=str, help="local ip.")
 
     # For merge mode.
-    parser.add_argument('--global-ranktable-list', nargs='*', default=[], type=str,
-                        help="List of global rank tables (default is an empty list).")
-    parser.add_argument('--local-ranktable-list', nargs='*', default=[], type=str,
-                        help="List of local rank tables (default is an empty list).")
-    parser.add_argument('--api-server-list', nargs='*', default=[], type=str,
+    parser.add_argument(
+        '--global-ranktable-list',
+        nargs='*',
+        default=[],
+        type=str,
+        help="List of global rank tables (default is an empty list).")
+    parser.add_argument(
+        '--local-ranktable-list',
+        nargs='*',
+        default=[],
+        type=str,
+        help="List of local rank tables (default is an empty list).")
+    parser.add_argument('--api-server-list',
+                        nargs='*',
+                        default=[],
+                        type=str,
                         help="List of api server.")
 
     args = parser.parse_args()
@@ -74,23 +99,31 @@ def parse_args():
 def verify_server_args(args):
     # Tensor-parallel-size should be same.
     if args.prefill_server_list:
-        all_prefill_server_device_num = [len(server) for server in args.prefill_server_list]
+        all_prefill_server_device_num = [
+            len(server) for server in args.prefill_server_list
+        ]
     else:
         all_prefill_server_device_num = None
     if args.decode_server_list:
-        all_decode_server_device_num = [len(server) for server in args.prefill_server_list]
+        all_decode_server_device_num = [
+            len(server) for server in args.prefill_server_list
+        ]
     else:
         all_decode_server_device_num = None
 
     if all_prefill_server_device_num and \
             max(all_prefill_server_device_num) != min(all_prefill_server_device_num):
-        raise ValueError("All the tensor-parallel-size of the prefill server must be same.")
+        raise ValueError(
+            "All the tensor-parallel-size of the prefill server must be same.")
     if all_decode_server_device_num and \
             max(all_decode_server_device_num) != min(all_decode_server_device_num):
-        raise ValueError("All the tensor-parallel-size of the decode server must be same.")
+        raise ValueError(
+            "All the tensor-parallel-size of the decode server must be same.")
     if all_prefill_server_device_num and all_decode_server_device_num and \
             all_decode_server_device_num[0] != all_prefill_server_device_num[0]:
-        raise ValueError("The tensor-parallel-size of prefill server and decode server must be same.")
+        raise ValueError(
+            "The tensor-parallel-size of prefill server and decode server must be same."
+        )
 
     # Unique device_id.
     server_set = set()
@@ -104,7 +137,9 @@ def verify_server_args(args):
         device_count += len(server)
 
     if len(server_set) != device_count:
-        raise ValueError('A device_id can be used only once in prefill server and decode server.')
+        raise ValueError(
+            'A device_id can be used only once in prefill server and decode server.'
+        )
 
 
 def generate_global_ranktable(args):
@@ -114,14 +149,18 @@ def generate_global_ranktable(args):
         "server_group_list": []
     }
     if args.api_server:
-        global_ranktable["server_group_list"].append(generate_group(args, SCHEDULER_GROUP))
+        global_ranktable["server_group_list"].append(
+            generate_group(args, SCHEDULER_GROUP))
     if args.prefill_server_list:
-        global_ranktable["server_group_list"].append(generate_group(args, PREFILL_GROUP, args.prefill_server_list))
+        global_ranktable["server_group_list"].append(
+            generate_group(args, PREFILL_GROUP, args.prefill_server_list))
     if args.decode_server_list:
-        global_ranktable["server_group_list"].append(generate_group(args, DECODE_GROUP, args.decode_server_list))
+        global_ranktable["server_group_list"].append(
+            generate_group(args, DECODE_GROUP, args.decode_server_list))
 
     local_ip = args.ip if args.ip else get_host_ip()
-    dump_json(os.path.join(args.save_dir, f"global_ranktable_{local_ip}.json"), global_ranktable)
+    dump_json(os.path.join(args.save_dir, f"global_ranktable_{local_ip}.json"),
+              global_ranktable)
 
 
 def generate_local_ranktable(args):
@@ -131,24 +170,27 @@ def generate_local_ranktable(args):
         "status": "completed",
         "group_id": "0",
         "server_count": "1",
-        "server_list": [
-            {
-                "server_id": None,
-                "server_ip": None,
-            }
-        ]
+        "server_list": [{
+            "server_id": None,
+            "server_ip": None,
+        }]
     }
 
-    for device_list in args.prefill_server_list + args.decode_server_list + (['host'] if args.api_server else []):
+    for device_list in args.prefill_server_list + args.decode_server_list + (
+        ['host'] if args.api_server else []):
         local_ranktable = deepcopy(local_ranktable_base)
         local_ip = args.ip if args.ip else get_host_ip()
         local_ranktable['server_list'][0]["server_id"] = local_ip
         local_ranktable['server_list'][0]["server_ip"] = local_ip
         if device_list != 'host':
-            local_ranktable['server_list'][0]["device"] = get_device(device_list)
+            local_ranktable['server_list'][0]["device"] = get_device(
+                device_list)
 
-        dump_json(os.path.join(args.save_dir, f"local_ranktable_{local_ip}_{''.join(device_list)}.json"),
-                  local_ranktable)
+        dump_json(
+            os.path.join(
+                args.save_dir,
+                f"local_ranktable_{local_ip}_{''.join(device_list)}.json"),
+            local_ranktable)
 
 
 def generate_group(args, group_id, server_list=None):
@@ -175,7 +217,8 @@ def generate_group(args, group_id, server_list=None):
 
 def merge_global_ranktable(args):
     if len(args.global_ranktable_list) <= 1:
-        raise ValueError("Ensure that there are two global ranktable for merge mode.")
+        raise ValueError(
+            "Ensure that there are two global ranktable for merge mode.")
     whole_server_group = defaultdict(list)
     for ranktable_path in args.global_ranktable_list:
         ranktable = load_json(ranktable_path)
@@ -185,8 +228,10 @@ def merge_global_ranktable(args):
             if group_id and server_list:
                 whole_server_group[group_id].extend(server_list)
 
-    if not whole_server_group.get(SCHEDULER_GROUP) or len(whole_server_group.get(SCHEDULER_GROUP)) != 1:
-        raise ValueError("All global ranktable can contain only one group_id 0 field.")
+    if not whole_server_group.get(SCHEDULER_GROUP) or len(
+            whole_server_group.get(SCHEDULER_GROUP)) != 1:
+        raise ValueError(
+            "All global ranktable can contain only one group_id 0 field.")
 
     global_ranktable = {
         "version": "1.0",
@@ -203,12 +248,14 @@ def merge_global_ranktable(args):
             }
             global_ranktable["server_group_list"].append(group_info)
 
-    dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"), global_ranktable)
+    dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"),
+              global_ranktable)
 
 
 def merge_local_ranktable(args):
     if len(args.local_ranktable_list) <= 1:
-        raise ValueError("Ensure that there are two local ranktable for merge mode.")
+        raise ValueError(
+            "Ensure that there are two local ranktable for merge mode.")
 
     device_id = 0
     new_server_list = []
@@ -236,7 +283,8 @@ def merge_local_ranktable(args):
         "server_list": new_server_list
     }
 
-    dump_json(os.path.join(args.save_dir, f"local_ranktable_merge.json"), local_ranktable)
+    dump_json(os.path.join(args.save_dir, f"local_ranktable_merge.json"),
+              local_ranktable)
 
 
 def merge_all(args):
@@ -278,7 +326,8 @@ def merge_all(args):
 
             global_ranktable["server_group_list"].append(group_info)
 
-    dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"), global_ranktable)
+    dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"),
+              global_ranktable)
 
 
 def get_device(device_list):
@@ -294,7 +343,8 @@ def get_device(device_list):
 
 
 def get_device_ip(device_id):
-    return os.popen(f"hccn_tool -i {device_id} -ip -g").readlines()[0].split(":")[1].replace('\n', '')
+    return os.popen(f"hccn_tool -i {device_id} -ip -g").readlines()[0].split(
+        ":")[1].replace('\n', '')
 
 
 def get_host_ip():
@@ -315,19 +365,24 @@ def main():
     if args.mode == 'gen':
         generate_global_ranktable(args)
         local_ip = args.ip if args.ip else get_host_ip()
-        logging.info(f'Generate global ranktable successful, host ip is %s', local_ip)
+        logging.info(f'Generate global ranktable successful, host ip is %s',
+                     local_ip)
         generate_local_ranktable(args)
         logging.info(f'Generate local ranktable successful.')
     elif args.mode == 'merge':
         merge_global_ranktable(args)
-        logging.info(f'Merge %d global ranktable successful.', len(args.global_ranktable_list))
+        logging.info(f'Merge %d global ranktable successful.',
+                     len(args.global_ranktable_list))
     elif args.mode == 'merge-local':
         merge_local_ranktable(args)
-        logging.info(f'Merge %d local ranktable successful.', len(args.local_ranktable_list))
+        logging.info(f'Merge %d local ranktable successful.',
+                     len(args.local_ranktable_list))
     elif args.mode == 'merge-all':
         merge_all(args)
-        logging.info(f'Merge %d api server %d prefill server %d decode server successful.', len(args.api_server_list),
-                     len(args.prefill_server_list), len(args.decode_server_list))
+        logging.info(
+            f'Merge %d api server %d prefill server %d decode server successful.',
+            len(args.api_server_list), len(args.prefill_server_list),
+            len(args.decode_server_list))
 
 
 if __name__ == '__main__':

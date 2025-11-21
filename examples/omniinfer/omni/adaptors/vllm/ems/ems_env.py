@@ -10,6 +10,8 @@ class EmsEnv:
     model_id = os.environ.get("MODEL_ID", "cc_kvstore@_@ds_default_ns_001")
     access_id = os.environ.get("ACCELERATE_ID", "access_id")
     access_key = os.environ.get("ACCELERATE_KEY", "")
-    enable_write_rcache: bool = os.environ.get("ENABLE_WRITE_RCACHE", "1") == "1"
-    enable_read_local_only: bool = os.environ.get("ENABLE_READ_LOCAL_ONLY", "0") == "1"
+    enable_write_rcache: bool = os.environ.get("ENABLE_WRITE_RCACHE",
+                                               "1") == "1"
+    enable_read_local_only: bool = os.environ.get("ENABLE_READ_LOCAL_ONLY",
+                                                  "0") == "1"
     ems_store_local: bool = os.environ.get("EMS_STORE_LOCAL", "0") == "1"

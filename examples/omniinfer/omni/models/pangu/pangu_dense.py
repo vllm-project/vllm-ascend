@@ -462,6 +462,7 @@ class PanguEmbeddedModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+
 @support_torch_compile
 class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -558,8 +559,8 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     prefix: str = "",
                     layer_type: type[nn.Module] = PanguEmbeddedDecoderLayer):
         return PanguEmbeddedModel(vllm_config=vllm_config,
-                          prefix=prefix,
-                          layer_type=layer_type)
+                                  prefix=prefix,
+                                  layer_type=layer_type)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -595,11 +596,12 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-    
+
     def should_use_eager_mode(self, *args, **kwargs):
         attn_metadata = kwargs.get("attn_metadata", None)
         if not attn_metadata:
             return True
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

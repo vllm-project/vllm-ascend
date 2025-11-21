@@ -16,7 +16,12 @@ class ResDis_ExpertsBalancer(Optimizer):
     This optimizer is designed to balance tokens across experts based on a specified capacity factor.
     It initializes necessary mappings based on cluster status and determines the expert-per-device count.
     """
-    def __init__(self, cluster_status, rank = None, is_rand_op = False, max_count = 16):
+
+    def __init__(self,
+                 cluster_status,
+                 rank=None,
+                 is_rand_op=False,
+                 max_count=16):
         """
         Initializes the TokenBalance optimizer instance.
 
@@ -45,23 +50,18 @@ class ResDis_ExpertsBalancer(Optimizer):
         self.ep2pos_all = cluster_status.expert_mapping.local_expert_mapping
         self.count_all = cluster_status.expert_mapping.redundant_count_per_expert
 
-
         if is_rand_op:
             self.optimize = self._Rand_optimize
         else:
             self.optimize = self._MoD_optimize
 
-
-
     """Optimizes based solely on scores, ignoring loads."""
 
-    def _MoD_optimize(self,
-                layer_idx_moe: int,
-                tokens: torch.Tensor,
-                token_expert_id: torch.Tensor,
-                token_scores: torch.Tensor,
-                cluster_status: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    def _MoD_optimize(
+        self, layer_idx_moe: int, tokens: torch.Tensor,
+        token_expert_id: torch.Tensor, token_scores: torch.Tensor,
+        cluster_status: list
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Optimizes token distribution based on `expert_position` by directly mapping to global expert IDs.
 
@@ -86,7 +86,8 @@ class ResDis_ExpertsBalancer(Optimizer):
         """
 
         # ep2pos, ep_counts = self.dispatch_lis[layer_idx_moe]
-        ep2pos, ep_counts = self.ep2pos_all[layer_idx_moe],  self.count_all[layer_idx_moe] #[256,20], [256]
+        ep2pos, ep_counts = self.ep2pos_all[layer_idx_moe], self.count_all[
+            layer_idx_moe]  #[256,20], [256]
 
         # available_counts = ep_counts[token_expert_id]
         # # 生成与 token_expert_id 同形的一个全局索引,从 0 到 token_expert_id.numel()-1
@@ -98,23 +99,20 @@ class ResDis_ExpertsBalancer(Optimizer):
         # pos_ids = ep2pos[token_expert_id, rand_indices]
 
         # 可以合并操作减少中间变量
-        pos_ids = ep2pos[token_expert_id,
-                torch.arange(token_expert_id.numel(),
-                             device=ep_counts.device).reshape(token_expert_id.shape)
-                               % ep_counts[token_expert_id]]
+        pos_ids = ep2pos[
+            token_expert_id,
+            torch.arange(token_expert_id.numel(), device=ep_counts.device).
+            reshape(token_expert_id.shape) % ep_counts[token_expert_id]]
         # Return the updated token distribution
         return tokens, pos_ids, token_scores
 
-
     """Optimizes based solely on scores, ignoring loads."""
 
-    def _Rand_optimize(self,
-                layer_idx_moe: int,
-                tokens: torch.Tensor,
-                token_expert_id: torch.Tensor,
-                token_scores: torch.Tensor,
-                cluster_status: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    def _Rand_optimize(
+        self, layer_idx_moe: int, tokens: torch.Tensor,
+        token_expert_id: torch.Tensor, token_scores: torch.Tensor,
+        cluster_status: list
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Optimizes token distribution based on `expert_position` by directly mapping to global expert IDs.
 
@@ -140,11 +138,13 @@ class ResDis_ExpertsBalancer(Optimizer):
         torch.manual_seed(37)
 
         # ep2pos, ep_counts = self.dispatch_lis[layer_idx_moe]
-        ep2pos, ep_counts = self.ep2pos_all[layer_idx_moe],  self.count_all[layer_idx_moe]
+        ep2pos, ep_counts = self.ep2pos_all[layer_idx_moe], self.count_all[
+            layer_idx_moe]
 
         available_counts = ep_counts[token_expert_id]
         # 生成与 A 同形的随机数,乘以部署数,下取整得到随机索引
-        rand_vals = torch.rand(token_expert_id.shape,device=available_counts.device)
+        rand_vals = torch.rand(token_expert_id.shape,
+                               device=available_counts.device)
         rand_indices = (rand_vals * available_counts).long()
 
         # 从映射表 ep2pos 中采样对应的 posid
@@ -153,7 +153,6 @@ class ResDis_ExpertsBalancer(Optimizer):
         # Return the updated token distribution
         return tokens, pos_ids, token_scores
 
-
     def _initial_ep2pos_all(self):
 
         # num_moe_layers = self.placement_pattern.shape[1]
@@ -161,12 +160,12 @@ class ResDis_ExpertsBalancer(Optimizer):
         # for moe_layer_id in range(num_moe_layers):
         #     self.dispatch_lis.append(   self._build_ep2pos_mapping_( self.placement_pattern[:,moe_layer_id,:])  )
         for layer_idx_moe in range(self.num_layers):
-            ep2pos, count = self._build_ep2pos_mapping_( self.placement_pattern[:,layer_idx_moe,:])
+            ep2pos, count = self._build_ep2pos_mapping_(
+                self.placement_pattern[:, layer_idx_moe, :])
             self.ep2pos_all[layer_idx_moe] += ep2pos
             self.count_all[layer_idx_moe] += count
 
         return 0
-
 
     def _build_ep2pos_mapping_(self, placement_pattern):
         """
@@ -194,19 +193,24 @@ class ResDis_ExpertsBalancer(Optimizer):
         # 对每行做累加,遇到的第一个1编号为 0,第二个1为 1,依此类推
         local_cumsum = torch.cumsum(placement_pattern, dim=1) - 1
         # 对于非部署位置,将 local_cumsum 设为 -1（无效编号)
-        local_cumsum = local_cumsum * placement_pattern + (-1) * (1 - placement_pattern)
+        local_cumsum = local_cumsum * placement_pattern + (-1) * (
+            1 - placement_pattern)
 
         # 2. 计算每个设备的全局偏移量：
         # offset[d] = sum_{i=0}^{d-1} (number of ones in placement_pattern[i, :])
-        row_counts = torch.sum(placement_pattern, dim=1)  # 每个设备的部署数,形状 (num_device,)
-        offsets = torch.zeros(num_device, dtype=torch.int32, device=placement_pattern.device)
+        row_counts = torch.sum(placement_pattern,
+                               dim=1)  # 每个设备的部署数,形状 (num_device,)
+        offsets = torch.zeros(num_device,
+                              dtype=torch.int32,
+                              device=placement_pattern.device)
         if num_device > 0:
             offsets[1:] = torch.cumsum(row_counts, dim=0)[:-1]
 
         # 3. 计算 global_map = offset[device] + local编号
         global_map = local_cumsum + offsets.unsqueeze(1)
         # 保证对于无部署位置仍为 -1
-        global_map = global_map * placement_pattern + (-1) * (1 - placement_pattern)
+        global_map = global_map * placement_pattern + (-1) * (
+            1 - placement_pattern)
 
         # 4. 构造 ep2pos 映射：对于每个 ep（每一列),收集各设备上 global_map 中不为 -1 的值
         # 首先统计每个 ep 的部署数,用于确定映射表的第二个维度大小
@@ -214,7 +218,9 @@ class ResDis_ExpertsBalancer(Optimizer):
         # max_count = int(ep_counts.max().item()) if ep_counts.numel() > 0 else 0
         # ep2pos = -torch.ones((num_ep, max_count), dtype=torch.int32, device=placement_pattern.device)
 
-        ep2pos = -torch.ones((num_ep, self.max_count), dtype=torch.int32, device=placement_pattern.device)
+        ep2pos = -torch.ones((num_ep, self.max_count),
+                             dtype=torch.int32,
+                             device=placement_pattern.device)
 
         for ep in range(num_ep):
             pos_values = global_map[:, ep]  # shape (num_device,)
@@ -224,4 +230,3 @@ class ResDis_ExpertsBalancer(Optimizer):
                 # 按设备顺序有效的 global posid 已经过排序
                 ep2pos[ep, :valid_pos.numel()] = valid_pos
         return ep2pos, ep_counts
-

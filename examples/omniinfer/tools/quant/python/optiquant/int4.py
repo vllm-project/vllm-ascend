@@ -30,7 +30,8 @@ class QType:
     def __init__(self, desc: str):
         self.desc = desc
         if desc.lower()[:3] == 'ssz':
-            res = re.match(r'sszs([0-9]+)g([0-9]+)a([0-9]+)b([0-9]+)sym([0-9]+)$', desc)
+            res = re.match(
+                r'sszs([0-9]+)g([0-9]+)a([0-9]+)b([0-9]+)sym([0-9]+)$', desc)
             self.num_step = int(res.group(1))
             self.blk_size = int(res.group(2))
             self.is_act_integer = True if int(res.group(3)) > 0 else False
@@ -50,11 +51,13 @@ class QType:
         return deepcopy(self)
 
     def __repr__(self) -> str:
-        return str(f'QType: {self.desc}   Dim: {self.q_dim}   ExpOffset: {self.exp_offset}')
+        return str(
+            f'QType: {self.desc}   Dim: {self.q_dim}   ExpOffset: {self.exp_offset}'
+        )
 
 
 def get_qbits_minmax(numbits, is_sym):
-    BIT_MAX = 2 ** (numbits - 1) - 1
+    BIT_MAX = 2**(numbits - 1) - 1
     BIT_MIN = -BIT_MAX if is_sym else -BIT_MAX - 1
     return BIT_MIN, BIT_MAX
 
@@ -72,7 +75,8 @@ def get_scale_offset(x, qW_min, qW_max, is_sym, is_act_integer):
         xmax = x.max(dim=-1, keepdim=True)[0]
         xmin = x.min(dim=-1, keepdim=True)[0]
         compare = ((xmax - xmin) < 1e-5).to(torch.int32)
-        xmax = xmax * (1 - compare) + torch.max(torch.abs(xmax), torch.abs(xmin)) * compare
+        xmax = xmax * (1 - compare) + torch.max(torch.abs(xmax),
+                                                torch.abs(xmin)) * compare
         xmin = xmin * (1 - compare)
         scale = (xmax - xmin).clamp(min=1e-5) / (qW_max - qW_min)
         if is_act_integer:
@@ -100,18 +104,34 @@ def get_dequant(x_quant, qW_min, qW_max, scale, offset=None):
 L_mode = 2
 
 
-def get_mseloss(x, qW_min, qW_max, scale=None, offset=None, quant=None, dequant=None, mode=L_mode):
+def get_mseloss(x,
+                qW_min,
+                qW_max,
+                scale=None,
+                offset=None,
+                quant=None,
+                dequant=None,
+                mode=L_mode):
     if quant is None and dequant is None:
         quant = get_quant(x, qW_min, qW_max, scale, offset)
     if dequant is None:
         dequant = get_dequant(quant, qW_min, qW_max, scale, offset)
-    return torch.mean(torch.pow(torch.abs(x - dequant), mode), dim=-1, keepdim=True)
+    return torch.mean(torch.pow(torch.abs(x - dequant), mode),
+                      dim=-1,
+                      keepdim=True)
 
 
 loss_function = get_mseloss
 
 
-def quant_ssz(x: torch.Tensor, Q: QType, qdim: int, init_scale=None, init_offset=None, init_quant=None, w8=False, w4=False):
+def quant_ssz(x: torch.Tensor,
+              Q: QType,
+              qdim: int,
+              init_scale=None,
+              init_offset=None,
+              init_quant=None,
+              w8=False,
+              w4=False):
     num_step = Q.num_step
     groupsize = Q.blk_size
     is_act_integer = Q.is_act_integer
@@ -128,7 +148,11 @@ def quant_ssz(x: torch.Tensor, Q: QType, qdim: int, init_scale=None, init_offset
     if init_offset is not None and init_scale is not None and init_quant is not None:
         scale, offset, quant = init_scale, init_offset, init_quant
     else:
-        scale, offset = get_scale_offset(shaped_x, qW_min, qW_max, is_sym=is_ssz_sym, is_act_integer=is_act_integer)
+        scale, offset = get_scale_offset(shaped_x,
+                                         qW_min,
+                                         qW_max,
+                                         is_sym=is_ssz_sym,
+                                         is_act_integer=is_act_integer)
         scale = scale.clamp(min=1e-5)
         quant = get_quant(shaped_x, qW_min, qW_max, scale, offset=offset)
 
@@ -138,22 +162,41 @@ def quant_ssz(x: torch.Tensor, Q: QType, qdim: int, init_scale=None, init_offset
         offset = 0
     bestOffset = offset
     bestQuant = quant
-    bestMse = loss_function(shaped_x, qW_min, qW_max, scale=scale, offset=offset, quant=quant, dequant=dequant)
+    bestMse = loss_function(shaped_x,
+                            qW_min,
+                            qW_max,
+                            scale=scale,
+                            offset=offset,
+                            quant=quant,
+                            dequant=dequant)
     for i in range(num_step):
         a = quant - offset
         if is_act_integer:
-            scale = torch.round(torch.sum(a * shaped_x, dim=-1, keepdim=True) / torch.sum(a * a, dim=-1, keepdim=True)).clamp(min=1)
+            scale = torch.round(
+                torch.sum(a * shaped_x, dim=-1, keepdim=True) /
+                torch.sum(a * a, dim=-1, keepdim=True)).clamp(min=1)
         else:
-            scale = torch.sum(a * shaped_x, dim=-1, keepdim=True) / torch.sum(a * a, dim=-1, keepdim=True).clamp(min=1e-5)
-        offset = torch.round(torch.sum(quant * scale - shaped_x, dim=-1, keepdim=True) / groupsize / scale)
+            scale = torch.sum(a * shaped_x, dim=-1, keepdim=True) / torch.sum(
+                a * a, dim=-1, keepdim=True).clamp(min=1e-5)
+        offset = torch.round(
+            torch.sum(quant * scale - shaped_x, dim=-1, keepdim=True) /
+            groupsize / scale)
         if is_ssz_sym:
-            offset= 0
+            offset = 0
         quant = get_quant(shaped_x, qW_min, qW_max, scale, offset=offset)
         dequant = get_dequant(quant, qW_min, qW_max, scale, offset=offset)
-        currentMse = loss_function(shaped_x, qW_min, qW_max, scale=scale, offset=offset, quant=quant, dequant=dequant)
+        currentMse = loss_function(shaped_x,
+                                   qW_min,
+                                   qW_max,
+                                   scale=scale,
+                                   offset=offset,
+                                   quant=quant,
+                                   dequant=dequant)
         mask1 = (bestMse - currentMse) / bestMse.clamp(min=1e-4) < 1e-10
         mask2 = torch.abs(bestMse - currentMse) < 1e-10
-        if torch.sum(torch.logical_and(torch.logical_not(mask1), torch.logical_not(mask2))) == 0:
+        if torch.sum(
+                torch.logical_and(torch.logical_not(mask1),
+                                  torch.logical_not(mask2))) == 0:
             break
         mask = (currentMse < bestMse).to(torch.int32)
         bestMse = currentMse * mask + bestMse * (1 - mask)
@@ -168,10 +211,13 @@ def quant_ssz(x: torch.Tensor, Q: QType, qdim: int, init_scale=None, init_offset
 
     if w4:
         bestQuantInt4 = bestQuant.view(shape).to(torch.int8)
-        bestScale = bestScale.view(shape[0], -1).T.to(torch.float32).view(torch.int32)
-        bestScaleInt64 = torch.zeros(bestScale.shape, dtype=torch.int64).view(torch.int32).reshape(-1, 2)
+        bestScale = bestScale.view(shape[0],
+                                   -1).T.to(torch.float32).view(torch.int32)
+        bestScaleInt64 = torch.zeros(bestScale.shape, dtype=torch.int64).view(
+            torch.int32).reshape(-1, 2)
         bestScaleInt64[:, 0] = bestScale.reshape(-1)
-        bestScaleInt64 = bestScaleInt64.view(torch.int64).reshape(bestScale.shape)
+        bestScaleInt64 = bestScaleInt64.view(torch.int64).reshape(
+            bestScale.shape)
         bias = (8 * recovered.to(torch.float32)).sum(dim=-1)
         return bestQuantInt4, bestScaleInt64, bias
     return recovered
@@ -201,13 +247,19 @@ def pack_4bit(x):
     return y.T.contiguous()
 
 
-def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai/DeepSeek-R1"):
+def main(args,
+         bf16_path,
+         output_path,
+         next,
+         pangu_mode,
+         model_name="deepseek-ai/DeepSeek-R1"):
     quant_prefix = "quant_model_weight_w4a8_dynamic"
     disable_names = []
     for i in range(62):
         disable_names.append(f"model.layers.{i}.self_attn.kv_b_proj.weight")
         disable_names.append(f"model.layers.{i}.mlp.gate.weight")
-        disable_names.append(f"model.layers.{i}.mlp.gate.e_score_correction_bias")
+        disable_names.append(
+            f"model.layers.{i}.mlp.gate.e_score_correction_bias")
 
     disable_names.append("lm_head")
     disable_names.append("model.embed_tokens.weight")
@@ -215,22 +267,22 @@ def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai
     w4_type = QType(args.qtype)
     torch.set_default_dtype(torch.bfloat16)
     os.makedirs(output_path, exist_ok=True)
-    model_index_file = os.path.join(output_path, "model.safetensors.index.json")
+    model_index_file = os.path.join(output_path,
+                                    "model.safetensors.index.json")
     config_file = os.path.join(output_path, "config.json")
 
     if not os.path.exists(model_index_file) or not os.path.exists(config_file):
-        snapshot_download(
-            repo_id=model_name,
-            ignore_patterns=["*.safetensors"],
-            local_dir=output_path,
-            local_dir_use_symlinks=False
-        )
+        snapshot_download(repo_id=model_name,
+                          ignore_patterns=["*.safetensors"],
+                          local_dir=output_path,
+                          local_dir_use_symlinks=False)
         print(f"model index file and config file download to {output_path}")
 
     with open(model_index_file, "r") as f:
         model_index = json.load(f)
     weight_map = model_index["weight_map"]
-    scale_count = len([key for key in weight_map.keys() if key.endswith("_scale_inv")])
+    scale_count = len(
+        [key for key in weight_map.keys() if key.endswith("_scale_inv")])
 
     safetensor_files = list(glob(os.path.join(bf16_path, "*.safetensors")))
     safetensor_files.sort()
@@ -275,10 +327,14 @@ def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai
                 quant_count += 1
                 if weight_is_w4(weight_name):
                     print(weight_name, "int4")
-                    int4_weight, int4_scale, bias = quant_ssz(weight, w4_type, -1, w4=True)
+                    int4_weight, int4_scale, bias = quant_ssz(weight,
+                                                              w4_type,
+                                                              -1,
+                                                              w4=True)
 
                     new_state_dict[weight_name] = pack_4bit(int4_weight)
-                    new_scale_int4 = scale_inv_name.replace("_scale_inv", "_int4_scale")
+                    new_scale_int4 = scale_inv_name.replace(
+                        "_scale_inv", "_int4_scale")
                     new_bias = scale_inv_name.replace("_scale_inv", "_bias")
 
                     new_state_dict[new_scale_int4] = int4_scale
@@ -291,7 +347,8 @@ def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai
                     print(weight_name, "int8")
                     int8_weight, scale_inv = weight_quant(weight)
                     new_state_dict[weight_name] = int8_weight
-                    new_scale_name = scale_inv_name.replace("_scale_inv", "_scale")
+                    new_scale_name = scale_inv_name.replace(
+                        "_scale_inv", "_scale")
                     new_state_dict[new_scale_name] = scale_inv
 
                     new_weight_map[weight_name] = file_name
@@ -311,5 +368,6 @@ def main(args, bf16_path, output_path, next, pangu_mode, model_name="deepseek-ai
     model_index["weight_map"] = new_weight_map
     with open(model_index_file, "w", encoding="utf-8") as f:
         json.dump(model_index, f, indent=2, ensure_ascii=False, sort_keys=True)
-    print(f"model.safetensors.index.json modified and saved to {model_index_file}")
-
+    print(
+        f"model.safetensors.index.json modified and saved to {model_index_file}"
+    )

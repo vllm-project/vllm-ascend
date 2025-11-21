@@ -55,6 +55,7 @@ origin_pg_init = ProcessGroup.__init__
 origin_destroy_model_parallel = None
 origin_stateless_init_dp_group = None
 
+
 def ascend_destroy_model_parallel():
     """Set the groups to none and destroy them."""
 
@@ -63,12 +64,15 @@ def ascend_destroy_model_parallel():
         destory_ascend_model_parallel
     destory_ascend_model_parallel()
 
+
 def pg_patched_init(self, *args, **kwargs):
     options = ProcessGroup.Options(backend="gloo")
     origin_pg_init(self, *args, options)
 
+
 def noops(*args):
     pass
+
 
 def init_dp_group(self) -> ProcessGroup:
     from vllm.config import ParallelConfig
@@ -77,6 +81,7 @@ def init_dp_group(self) -> ProcessGroup:
     pg = origin_stateless_init_dp_group(self)
     ProcessGroup.__init__ = origin_pg_init
     return pg
+
 
 def update_parallel_state():
     global origin_destroy_model_parallel
@@ -131,8 +136,9 @@ def enable_overwrite_request_id():
     from fastapi import Request
     from vllm.entrypoints.openai.serving_engine import OpenAIServing
     from vllm.utils import random_uuid
+
     @staticmethod
-    def _base_request_id(raw_request: Optional[Request], 
+    def _base_request_id(raw_request: Optional[Request],
                          default: Optional[str] = None) -> Optional[str]:
         return default or random_uuid()
 
@@ -141,39 +147,38 @@ def enable_overwrite_request_id():
 
 
 def apply_constant_list_patch():
-      import vllm.v1.utils as vllm_utils
-      cls = vllm_utils.ConstantList
-      def __hash__(self):
-            return hash(self._x)
-      def __eq__(self, other):
-            return isinstance(other, cls) and self._x == other._x
-      cls.__hash__ = __hash__
-      cls.__eq__ = __eq__
-      cls._is_patched = True
+    import vllm.v1.utils as vllm_utils
+    cls = vllm_utils.ConstantList
+
+    def __hash__(self):
+        return hash(self._x)
+
+    def __eq__(self, other):
+        return isinstance(other, cls) and self._x == other._x
+
+    cls.__hash__ = __hash__
+    cls.__eq__ = __eq__
+    cls._is_patched = True
 
 
 def apply_kv_cache_patch():
     import vllm.v1.core.kv_cache_utils as kv_cache_utils
     from vllm.v1.core.kv_cache_utils import BlockHashType
     logger.info("apply_kv_cache_hash_patch")
-    NONE_HASH = kv_cache_utils.NONE_HASH               
-    def patched(hash_function,
-                    parent_block_hash,
-                    curr_block_token_ids,
-                    extra_keys):
+    NONE_HASH = kv_cache_utils.NONE_HASH
+
+    def patched(hash_function, parent_block_hash, curr_block_token_ids,
+                extra_keys):
         if not parent_block_hash:
-                parent_block_hash = NONE_HASH             
+            parent_block_hash = NONE_HASH
         curr_block_token_ids_tuple = tuple(curr_block_token_ids)
         h = hash_function((parent_block_hash, curr_block_token_ids_tuple, 0))
-        return BlockHashType(
-                h,                                                      
-                curr_block_token_ids_tuple,
-                extra_keys
-        )
+        return BlockHashType(h, curr_block_token_ids_tuple, extra_keys)
+
     kv_cache_utils.hash_block_tokens = patched
     patched.is_patched = True
 
-    
+
 def register() -> str:
     """Register the NPU platform for vLLM.
 
@@ -205,7 +210,8 @@ class EnvironmentSetup:
                 os.environ["ASCEND_RT_VISIBLE_DEVICES_BK"] = visible_devices
             else:
                 num_devices = torch.npu.device_count()
-                os.environ["ASCEND_RT_VISIBLE_DEVICES_BK"] = ",".join(str(i) for i in range(num_devices))
+                os.environ["ASCEND_RT_VISIBLE_DEVICES_BK"] = ",".join(
+                    str(i) for i in range(num_devices))
 
 
 class ConfigUpdater:
@@ -233,9 +239,12 @@ class ConfigUpdater:
         additional_config = vllm_config.additional_config
         vllm_config.npu_compilation_config = NPUCompilationConfig()
         if additional_config:
-            graph_model_compile_config = additional_config.get("graph_model_compile_config", {})
-            vllm_config.npu_compilation_config.build_from_cli(graph_model_compile_config, vllm_config)
-            logger.debug(f"Graph model compile config: {graph_model_compile_config}")
+            graph_model_compile_config = additional_config.get(
+                "graph_model_compile_config", {})
+            vllm_config.npu_compilation_config.build_from_cli(
+                graph_model_compile_config, vllm_config)
+            logger.debug(
+                f"Graph model compile config: {graph_model_compile_config}")
             cls._handle_graph_mode(vllm_config)
 
         cls._update_parallel_config(vllm_config)
@@ -247,19 +256,24 @@ class ConfigUpdater:
     def _handle_graph_mode(vllm_config: 'VllmConfig') -> None:
         from vllm.config import CompilationLevel
         """Handle graph mode configuration for NPU."""
-        enable_graph_mode = (vllm_config.npu_compilation_config.level != CompilationLevel.NO_COMPILATION)
+        enable_graph_mode = (vllm_config.npu_compilation_config.level
+                             != CompilationLevel.NO_COMPILATION)
         if not enable_graph_mode:
             return
 
         if not supports_dynamo():
-            logger.warning("Graph mode unsupported due to low torch version. Disabling.")
+            logger.warning(
+                "Graph mode unsupported due to low torch version. Disabling.")
             vllm_config.npu_compilation_config.level = CompilationLevel.NO_COMPILATION
         if envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
-            logger.warning("Graph mode not supported for V1 without MLA. Disabling.")
+            logger.warning(
+                "Graph mode not supported for V1 without MLA. Disabling.")
             vllm_config.npu_compilation_config.level = CompilationLevel.NO_COMPILATION
-        if int(os.getenv("RANDOM_MODE", default='0')) or int(os.getenv("CAPTURE_MODE", default='0')) or int(
-                os.getenv("REPLAY_MODE", default='0')):
-            logger.warning("Graph mode not supported for MOCK mode. Disabling.")
+        if int(os.getenv("RANDOM_MODE", default='0')) or int(
+                os.getenv("CAPTURE_MODE", default='0')) or int(
+                    os.getenv("REPLAY_MODE", default='0')):
+            logger.warning(
+                "Graph mode not supported for MOCK mode. Disabling.")
             vllm_config.npu_compilation_config.level = CompilationLevel.NO_COMPILATION
 
     @staticmethod
@@ -278,7 +292,9 @@ class ConfigUpdater:
         if cache_config.block_size is None:
             cache_config.block_size = 128
         if cache_config.enable_prefix_caching and cache_config.block_size != 128:
-            logger.warning("Prefix caching requires block size 128. Setting block size to 128.")
+            logger.warning(
+                "Prefix caching requires block size 128. Setting block size to 128."
+            )
             cache_config.block_size = 128
 
     @staticmethod
@@ -291,11 +307,15 @@ class ConfigUpdater:
             return
         from omni.accelerators.cache import (apply_omni_attn_patch,
                                              check_omni_attn_cmd_arg)
-        enable_omni_attn = check_omni_attn_cmd_arg(vllm_config.additional_config)
+        enable_omni_attn = check_omni_attn_cmd_arg(
+            vllm_config.additional_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         is_kv_consumer = kv_transfer_config is None or kv_transfer_config.kv_role == 'kv_consumer'
-        omni_attn_config = vllm_config.additional_config.get("omni_attn_config", None)
-        apply_omni_attn_patch(enable=enable_omni_attn, is_kv_consumer=is_kv_consumer, config=omni_attn_config)
+        omni_attn_config = vllm_config.additional_config.get(
+            "omni_attn_config", None)
+        apply_omni_attn_patch(enable=enable_omni_attn,
+                              is_kv_consumer=is_kv_consumer,
+                              config=omni_attn_config)
 
 
 class NPUPlatform(Platform):
@@ -330,7 +350,9 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
-    def pre_register_and_update(cls, parser: Optional[FlexibleArgumentParser] = None) -> None:
+    def pre_register_and_update(cls,
+                                parser: Optional[FlexibleArgumentParser] = None
+                                ) -> None:
         """Perform pre-registration tasks and update parser.
 
         Args:
@@ -431,19 +453,21 @@ class NPUPlatform(Platform):
             vllm_config: The vLLM configuration to update.
         """
         additional_config = vllm_config.additional_config
-        if additional_config and vllm_config.additional_config.get("enable_hybrid_graph_mode", False):
+        if additional_config and vllm_config.additional_config.get(
+                "enable_hybrid_graph_mode", False):
             from omni.adaptors.vllm.worker.npu_schedule import \
                 HybridSchedulerConfig
             ascend_scheduler_config = HybridSchedulerConfig.initialize_from_config(
                 vllm_config.scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
             logger.info("--------enbale hybrid graph mode----------------")
-            
+
         ConfigUpdater.update_vllm_config(vllm_config)
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: str, head_size: int, dtype: torch.dtype,
-                             kv_cache_dtype: torch.dtype, block_size: int, use_v1: bool,
+    def get_attn_backend_cls(cls, selected_backend: str, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: torch.dtype,
+                             block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
         """Get the attention backend class for the NPU.
 
@@ -460,8 +484,11 @@ class NPUPlatform(Platform):
             str: The module path to the attention backend class.
         """
         ensure_v1_engine()
-        return ("omni.models.common.layers.attention.backend.mla.AscendMLABackend" if use_mla
-                else "omni.models.common.layers.attention.backend.attention.AscendAttentionBackend")
+        return (
+            "omni.models.common.layers.attention.backend.mla.AscendMLABackend"
+            if use_mla else
+            "omni.models.common.layers.attention.backend.attention.AscendAttentionBackend"
+        )
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -473,7 +500,9 @@ class NPUPlatform(Platform):
         return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
 
     @classmethod
-    def get_current_memory_usage(cls, device: Optional[torch.types.Device] = None) -> float:
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
         """Get the current memory usage for the specified NPU.
 
         Args:

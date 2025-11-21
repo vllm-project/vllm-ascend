@@ -8,7 +8,12 @@ from .optimizers import Optimizer
 
 
 class AdaRouter(Optimizer):
-    def __init__(self, cluster_status: ClusterStatus, threshold: float = 0.9, entropy_bound: float = 0.5, method: str = 'threshold'):
+
+    def __init__(self,
+                 cluster_status: ClusterStatus,
+                 threshold: float = 0.9,
+                 entropy_bound: float = 0.5,
+                 method: str = 'threshold'):
         """
         Token-based adaptive selection of experts.
 
@@ -24,7 +29,8 @@ class AdaRouter(Optimizer):
         self._entropy_bound = entropy_bound
         self._method = method
 
-    def optimize(self, layer_id_moe, token, token_expert_ids, token_scores, cluster_status):
+    def optimize(self, layer_id_moe, token, token_expert_ids, token_scores,
+                 cluster_status):
         """
         Select a subset of top-k experts for each token based on threshold.
 
@@ -41,7 +47,8 @@ class AdaRouter(Optimizer):
             topk_weights (torch.Tensor): the same as topk_ids, but with weights, shape [bs * sl, top_k]
         """
         if self._method == 'threshold':
-            topk_weights, topk_ids = self._select_experts_by_threshold(token_expert_ids, token_scores)
+            topk_weights, topk_ids = self._select_experts_by_threshold(
+                token_expert_ids, token_scores)
             return token, topk_ids, topk_weights
         else:
             return token, token_expert_ids, token_scores
@@ -59,8 +66,11 @@ class AdaRouter(Optimizer):
             topk_weights (torch.Tensor): shape [bs * sl, top_k], rescaled to equal sum, padded with 0 for non-selected ones
         """
         mask = token_scores > self._threshold  # shape [batch_size * seq_len, top_k], bool
-        token_scores = token_scores * mask.to(token_scores.dtype) # masking weights
-        token_expert_ids0 = token_expert_ids * mask + (~mask) * -1  # pad with -1
+        token_scores = token_scores * mask.to(
+            token_scores.dtype)  # masking weights
+        token_expert_ids0 = token_expert_ids * mask + (
+            ~mask) * -1  # pad with -1
         token_expert_ids = token_expert_ids0.to(token_expert_ids.dtype)
-        token_scores = token_scores / (torch.sum(token_scores, dim=-1, keepdim=True) + 1e-12)
+        token_scores = token_scores / (
+            torch.sum(token_scores, dim=-1, keepdim=True) + 1e-12)
         return token_scores, token_expert_ids

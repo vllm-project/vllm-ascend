@@ -6,7 +6,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 class OmniBackend:
+
     def __init__(self, vllm_config):
         self.vllm_config = vllm_config
 

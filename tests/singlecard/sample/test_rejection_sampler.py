@@ -406,8 +406,8 @@ def test_rejection_sampling_approximates_target_distribution():
         distance_wrt_reference)
 
     expected_improvement_multiplier = 20
-    assert (relative_change_in_distance_wrt_target >
-            relative_change_in_distance_wrt_reference *
+    assert (relative_change_in_distance_wrt_target
+            > relative_change_in_distance_wrt_reference *
             expected_improvement_multiplier)
 
 

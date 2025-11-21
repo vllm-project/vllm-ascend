@@ -66,8 +66,8 @@ def test_basic_lifecycle():
 
     # ... but should have (uncached) blocks allocated to it.
     block_pool = scheduler.kv_cache_manager.block_pool
-    assert (block_pool.free_block_queue.num_free_blocks <
-            START_FREE_BLOCK_QUEUE_SIZE)
+    assert (block_pool.free_block_queue.num_free_blocks
+            < START_FREE_BLOCK_QUEUE_SIZE)
     assert len(block_pool.cached_block_hash_to_block) == 0
     blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
         0].req_to_blocks[request_id]

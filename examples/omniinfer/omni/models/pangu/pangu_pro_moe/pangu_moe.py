@@ -70,11 +70,13 @@ logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
 
+
 def use_h2p():
     # only use H2P when dp_size > 1.
     if get_dp_group().world_size > 1:
         return True
     return False
+
 
 # This class is adapted from vllm.model_executor.layers.linear.MergedColumnParallelLinear.
 # It is used to customize parallelism of certain linear(e.g., shared experts with all-rank tp).
@@ -356,7 +358,7 @@ def topk_wrapper(num_voted_experts):
         topk_group: int = 0,
         global_num_experts: int = 0,
     ):
-        
+
         scores = F.softmax(gating_output, dim=1)
         num_tokens = scores.shape[0]
         router_scale = _ROUTER_SCALE.squeeze(  # type: ignore
@@ -581,13 +583,13 @@ class PanguProMoEAttention(nn.Module):
         )
 
         if use_h2p():
-            self.o_proj = PanguProMoERowParallelLinear(self.total_num_heads *
-                                                  self.head_dim,
-                                                  hidden_size,
-                                                  bias=True,
-                                                  quant_config=quant_config,
-                                                  prefix=f"{prefix}.o_proj",
-                                                  group=get_tp_group())
+            self.o_proj = PanguProMoERowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj",
+                group=get_tp_group())
         else:
             self.o_proj = RowParallelLinear(
                 self.total_num_heads * self.head_dim,
@@ -625,11 +627,11 @@ class PanguProMoEAttention(nn.Module):
 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k, self.attn.layer_name)
-        
+
         attn_output = self.attn(q, k, v)
-        
+
         output, _ = self.o_proj(attn_output)
-        
+
         return output
 
 
@@ -684,7 +686,7 @@ class PanguProMoEDecoderLayer(nn.Module):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-        self.layer_id = layer_idx    # for debug
+        self.layer_id = layer_idx  # for debug
         self.layer_name = f"{prefix}.self_attn.attn"
 
     def forward(
@@ -698,7 +700,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         h2p_pad_idx: Optional[torch.Tensor] = None,
         is_start_layer: Optional[bool] = False,
     ) -> torch.Tensor:
-        
+
         need_h2p_pad = h2p_unpad_idx is not None and h2p_pad_idx is not None \
             and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]
         tp_size = get_tp_group().world_size
@@ -908,20 +910,23 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
             quantizer.AscendQuantConfig = AscendQuantConfig_Pangu_Pro_Moe
             from omni.adaptors.vllm.utils import ASCEND_QUATIZATION_METHOD
 
-            _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[ASCEND_QUATIZATION_METHOD] = AscendQuantConfig_Pangu_Pro_Moe
+            _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[
+                ASCEND_QUATIZATION_METHOD] = AscendQuantConfig_Pangu_Pro_Moe
 
             from vllm.model_executor.model_loader.weight_utils import \
                 get_quant_config
-            quant_config = get_quant_config(vllm_config.model_config, vllm_config.load_config)
+            quant_config = get_quant_config(vllm_config.model_config,
+                                            vllm_config.load_config)
             quant_config.quant_description = vllm_config.quant_config.quant_description
             quant_config.packed_modules_mapping = vllm_config.quant_config.packed_modules_mapping
-            
+
             vllm_config.quant_config = quant_config
 
-            logger.info("quant_config is replaced by AscendQuantConfig_Pangu_Pro_Moe.")
+            logger.info(
+                "quant_config is replaced by AscendQuantConfig_Pangu_Pro_Moe.")
 
         super().__init__()
-        
+
         logger.info("===== Model initialization Config =====")
         logger.info(f"vllm_config {vllm_config}")
         config = vllm_config.model_config.hf_config
@@ -930,8 +935,10 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
 
         # Initialize expert parallel states
         init_ascend_model_parallel(
-            expert_parallel_size = vllm_config.additional_config['expert_parallel_size'],
-            expert_tensor_parallel_size = vllm_config.additional_config['expert_tensor_parallel_size'],
+            expert_parallel_size=vllm_config.
+            additional_config['expert_parallel_size'],
+            expert_tensor_parallel_size=vllm_config.
+            additional_config['expert_tensor_parallel_size'],
         )
 
         quant_config = vllm_config.quant_config
@@ -955,16 +962,15 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        *args, **kwargs
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: Optional[List[torch.Tensor]] = None,
+                attn_metadata: Optional[AttentionMetadata] = None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                *args,
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)
@@ -1159,5 +1165,6 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
         if not attn_metadata:
             return True
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+            attn_metadata = attn_metadata[self.model.layers[
+                self.model.start_layer].layer_name]
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

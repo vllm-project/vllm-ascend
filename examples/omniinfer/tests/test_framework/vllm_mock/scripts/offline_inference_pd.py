@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-
 """
 This file demonstrates the example usage of disaggregated prefilling We will
 launch 2 vllm instances (NPU 0,1,3,4 for prefill and NPU 5,6,7,8 for decode),
@@ -13,9 +12,8 @@ from multiprocessing import Event, Process, Queue
 from typing import List, Literal
 
 
-def get_kv_transfer_config(
-    role: Literal["kv_producer", "kv_consumer"], local_server_id: str
-):
+def get_kv_transfer_config(role: Literal["kv_producer", "kv_consumer"],
+                           local_server_id: str):
     kv_rank = 0 if role == "kv_producer" else 1
     return f"""{{
         "kv_connector": "AscendHcclConnectorV1",
@@ -80,7 +78,9 @@ def run_prefill(
     for output in result:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"[Prefill] Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(
+            f"[Prefill] Prompt: {prompt!r}, Generated text: {generated_text!r}"
+        )
         prompt_q.put(prompt + generated_text)
     prompt_q.close()
 
@@ -145,7 +145,8 @@ def run_decode(
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"[Decode] Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(
+            f"[Decode] Prompt: {prompt!r}, Generated text: {generated_text!r}")
     print("[Decode] DONE.")
 
     # Must delete the llm instance, otherwise the process will not exit
@@ -159,8 +160,7 @@ if __name__ == "__main__":
     model = "/home/kc/models/DeepSeek-V2-Lite"
 
     os.environ["GLOBAL_RANKTABLE"] = (
-        "/home/kc/save_dir/global_ranktable_7.150.15.29.json"
-    )
+        "/home/kc/save_dir/global_ranktable_7.150.15.29.json")
 
     os.environ["VLLM_USE_V1"] = "1"
 

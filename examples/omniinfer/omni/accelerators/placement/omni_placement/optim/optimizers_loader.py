@@ -32,6 +32,7 @@ def create_optimizer_by_name(name: str, cluster_params, **kwargs):
     except KeyError:
         raise ValueError(f"Unsupported optimizer: {name}")
 
+
 def _create_optimizers(optimizer_config, cluster_params):
     """
     根据配置文件创建优化器列表。
@@ -43,7 +44,8 @@ def _create_optimizers(optimizer_config, cluster_params):
     for optimizer_info in optimizer_config:
         opt_name = list(optimizer_info.keys())[0]
         opt_param = optimizer_info[opt_name]
-        
-        optimizer = create_optimizer_by_name(opt_name, cluster_params, **opt_param)
+
+        optimizer = create_optimizer_by_name(opt_name, cluster_params,
+                                             **opt_param)
         optimizers.append(optimizer)
-    return optimizers        
+    return optimizers
