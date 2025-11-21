@@ -35,69 +35,9 @@ defaults:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11"]
-        vllm_version: [v0.9.1]
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-lint.txt
-      - name: Run codespell check
-        run: |
-          CODESPELL_EXCLUDES=('--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**')
-          CODESPELL_IGNORE_WORDS=('-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ND,assertIn,THW,tbe')
-
-          codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
-      - name: Analysing the code with ruff
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/ruff.json"
-          ruff check --output-format github .
-      - name: Run isort
-        run: |
-          isort . --check-only
-      - name: Running yapf
-        run: |
-          python -m pip install --upgrade pip
-          pip install toml
-          pip install yapf==0.32.0
-          yapf --diff --recursive .
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ matrix.vllm_version }}
-          path: vllm-empty
-
-      - name: Actionlint Check
-        env:
-          SHELLCHECK_OPTS: --exclude=SC2046,SC2006,SC2086
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-          tools/actionlint.sh -color
-
-      - name: Install vllm-project/vllm from source
-        working-directory: vllm-empty
-        run: |
-          pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-          VLLM_TARGET_DEVICE=empty pip install .
-
-      - name: Mypy Check
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/mypy.json"
-          tools/mypy.sh 1 ${{ matrix.python-version }} --exclude 'setup\.py$'
+    uses: ./.github/workflows/_pre-commit.yaml
+    with:
+      vllm: v0.9.1
 
   e2e:
     needs: [lint]

@@ -40,10 +40,10 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series
 - OS: Linux
 - Software:
-  * Python >= 3.9, < 3.12
-  * CANN >= 8.2.RC1
-  * PyTorch >= 2.5.1, torch-npu == 2.5.1.post1
-  * vLLM (the same version as vllm-ascend)
+  - Python >= 3.9, < 3.12
+  - CANN >= 8.2.RC1
+  - PyTorch >= 2.5.1, torch-npu == 2.5.1.post1
+  - vLLM (the same version as vllm-ascend)
 
 ## Getting Started
 

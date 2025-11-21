@@ -1,6 +1,7 @@
 # Multi-NPU (QwQ 32B W8A8)
 
 ## Run docker container
+
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image

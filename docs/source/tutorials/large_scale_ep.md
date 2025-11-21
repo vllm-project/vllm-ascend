@@ -5,7 +5,6 @@
 vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large scale **Expert  Parallelism (EP)** scenario. To achieve better performance，the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
 Take the deepseek model as an example, use 8 Atlas 800T A3 servers to deploy the model. Assume the ip of the servers start from 192.0.0.1, and end by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes deployed as master node independently, the decoder nodes set 192.0.0.5 node to be the master node.
 
-
 ## Verify Multi-Node Communication Environment
 
 ### Physical Layer Requirements:
@@ -24,7 +23,7 @@ Execute the following commands on each node in sequence. The results must all be
 
 ```bash
  # Check the remote switch ports
- for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+ for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
  # Get the link status of the Ethernet ports (UP or DOWN)
  for i in {0..15}; do hccn_tool -i $i -link -g ; done
  # Check the network health status
@@ -37,19 +36,19 @@ Execute the following commands on each node in sequence. The results must all be
  cat /etc/hccn.conf
 ```
 
-2. Get NPU IP Addresses
+1. Get NPU IP Addresses
 
 ```bash
 for i in {0..15}; do hccn_tool -i $i -vnic -g;done
 ```
 
-3. Get superpodid and SDID
+1. Get superpodid and SDID
 
 ```bash
 for i in {0..7}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
 ```
 
-4. Cross-Node PING Test
+1. Cross-Node PING Test
 
 ```bash
 # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
@@ -79,13 +78,13 @@ for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
 cat /etc/hccn.conf
 ```
 
-2. Get NPU IP Addresses
+1. Get NPU IP Addresses
 
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g;done
 ```
 
-3. Cross-Node PING Test
+1. Cross-Node PING Test
 
 ```bash
 # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
@@ -164,7 +163,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
 
-# enable the distributed DP server 
+# enable the distributed DP server
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
@@ -233,7 +232,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
 
-# enable the distributed DP server 
+# enable the distributed DP server
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
@@ -392,7 +391,6 @@ python load_balance_proxy_server_example.py \
 | --decoder-ports | Ports of decoder nodes |
 | --decoder-ports-inc | Number of increments for decoder node ports |
 
-
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
 
 ## Benchmark
@@ -448,10 +446,9 @@ ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf
 
 - For more details for commands and parameters for aisbench, refer to  [aisbench](https://gitee.com/aisbench/benchmark)
 
-
 ## Prefill & Decode Configuration Details
 
-In the PD separation scenario, we provide a optimized configuration. 
+In the PD separation scenario, we provide a optimized configuration.
 
 - **prefiller node**
 
@@ -471,7 +468,7 @@ In the PD separation scenario, we provide a optimized configuration.
     }'
 ```
 
-4. Take '--additional-config' as follow
+1. Take '--additional-config' as follow
 
 ```shell
 --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":false},"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
@@ -494,12 +491,11 @@ In the PD separation scenario, we provide a optimized configuration.
     }'
 ```
 
-3. Take '--additional-config' as follow
+1. Take '--additional-config' as follow
 
 ```shell
 --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"enable_multistream_moe":true,"graph_batch_sizes":[28], "enable_super_kernel":true, "use_cached_graph":true},"enable_weight_nz_layout":true}'
 ```
-
 
 ### Parameters Description
 
@@ -540,7 +536,6 @@ For example，if the average input length is 3.5k, and the output length is 1.1k
 :::{note}
 Note that these configurations are not related to optimization. You need to adjust these parameters based on actual scenarios.
 :::
-
 
 ## FAQ
 

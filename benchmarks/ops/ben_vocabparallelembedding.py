@@ -12,12 +12,12 @@ import vllm_ascend.platform  # noqa: F401
 def benchmark_npu(fn, num_iterations=100, num_warmup_iterations=50):
     """
     Benchmark function for NPU operations
-    
+
     Args:
         fn: Function to benchmark
         num_iterations: Number of timing iterations
         num_warmup_iterations: Number of warmup iterations
-    
+
     Returns:
         float: Minimum elapsed time in seconds
     """
@@ -41,19 +41,26 @@ def benchmark_npu(fn, num_iterations=100, num_warmup_iterations=50):
 
 
 def get_masked_input_and_mask_ref(
-        input_: torch.Tensor, org_vocab_start_index: int,
-        org_vocab_end_index: int, num_org_vocab_padding: int,
-        added_vocab_start_index: int,
-        added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    input_: torch.Tensor,
+    org_vocab_start_index: int,
+    org_vocab_end_index: int,
+    num_org_vocab_padding: int,
+    added_vocab_start_index: int,
+    added_vocab_end_index: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Reference implementation for verification"""
-    org_vocab_mask = (input_ >= org_vocab_start_index) & (
-        input_ < org_vocab_end_index)
+    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ < org_vocab_end_index)
     added_vocab_mask = (input_ >= added_vocab_start_index) & (
-        input_ < added_vocab_end_index)
-    added_offset = added_vocab_start_index - (
-        org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
-    valid_offset = (org_vocab_start_index *
-                    org_vocab_mask) + (added_offset * added_vocab_mask)
+        input_ < added_vocab_end_index
+    )
+    added_offset = (
+        added_vocab_start_index
+        - (org_vocab_end_index - org_vocab_start_index)
+        - num_org_vocab_padding
+    )
+    valid_offset = (org_vocab_start_index * org_vocab_mask) + (
+        added_offset * added_vocab_mask
+    )
     vocab_mask = org_vocab_mask | added_vocab_mask
     masked_input = vocab_mask * (input_ - valid_offset)
     return masked_input, ~vocab_mask
@@ -94,21 +101,25 @@ def test_get_masked_input_and_mask(
 
     # Define reference function
     def ref_fn():
-        return get_masked_input_and_mask_ref(input_tensor,
-                                             test_case["org_start"],
-                                             test_case["org_end"],
-                                             test_case["padding"],
-                                             test_case["added_start"],
-                                             test_case["added_end"])
+        return get_masked_input_and_mask_ref(
+            input_tensor,
+            test_case["org_start"],
+            test_case["org_end"],
+            test_case["padding"],
+            test_case["added_start"],
+            test_case["added_end"],
+        )
 
     # Define custom function
     def custom_fn():
-        return torch.ops._C.get_masked_input_and_mask(input_tensor,
-                                                      test_case["org_start"],
-                                                      test_case["org_end"],
-                                                      test_case["padding"],
-                                                      test_case["added_start"],
-                                                      test_case["added_end"])
+        return torch.ops._C.get_masked_input_and_mask(
+            input_tensor,
+            test_case["org_start"],
+            test_case["org_end"],
+            test_case["padding"],
+            test_case["added_start"],
+            test_case["added_end"],
+        )
 
     # Get results for correctness testing
     ref_masked_input, ref_mask = ref_fn()
@@ -120,9 +131,9 @@ def test_get_masked_input_and_mask(
 
     # Print performance results
     print("\nPerformance Results:")
-    print(f"Reference implementation: {ref_time*1000:.3f} ms")
-    print(f"Custom implementation: {custom_time*1000:.3f} ms")
-    print(f"Speedup: {ref_time/custom_time:.2f}x")
+    print(f"Reference implementation: {ref_time * 1000:.3f} ms")
+    print(f"Custom implementation: {custom_time * 1000:.3f} ms")
+    print(f"Speedup: {ref_time / custom_time:.2f}x")
 
     # Compare results for correctness
     ref_masked_input = ref_masked_input.to(dtype)
@@ -136,9 +147,12 @@ def test_get_masked_input_and_mask(
         ref_masked_input,
         rtol=1e-5,
         atol=1e-5,
-        msg=f"Masked input mismatch for case: {test_case}")
-    torch.testing.assert_close(custom_mask,
-                               ref_mask,
-                               rtol=1e-5,
-                               atol=1e-5,
-                               msg=f"Mask mismatch for case: {test_case}")
+        msg=f"Masked input mismatch for case: {test_case}",
+    )
+    torch.testing.assert_close(
+        custom_mask,
+        ref_mask,
+        rtol=1e-5,
+        atol=1e-5,
+        msg=f"Mask mismatch for case: {test_case}",
+    )
