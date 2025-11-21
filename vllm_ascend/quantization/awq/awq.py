@@ -5,10 +5,12 @@ import torch
 from torch.nn.modules import Module
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig, FusedMoEQuantConfig,
+                                                         int4_w4a16_moe_quant_config,
+                                                         int8_w8a16_moe_quant_config,)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import \
@@ -76,7 +78,6 @@ def npu_fused_experts(
     )
     expert_tokens = expert_tokens.to(torch.int64)
     # gmm1: gate_up_proj
-    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
     if not use_wna16:
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
         scale_args13 = {
@@ -92,8 +93,6 @@ def npu_fused_experts(
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w13],
-        scale=[w13_scale.to(scale_dtype)],
-        per_token_scale=[pertoken_scale],
         **scale_args13,
         split_item=2,
         group_list_type=0,
@@ -103,7 +102,6 @@ def npu_fused_experts(
     )[0]
     # act_fn: swiglu
     hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
     if not use_wna16:
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
@@ -117,8 +115,6 @@ def npu_fused_experts(
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w2],
-        scale=[w2_scale.to(scale_dtype)],
-        per_token_scale=[pertoken_scale],
         **scale_args2,
         split_item=2,
         group_list_type=0,
@@ -126,6 +122,7 @@ def npu_fused_experts(
         group_list=expert_tokens,
         output_dtype=original_dtype,
     )[0]
+
     final_hidden_states = torch_npu.npu_moe_finalize_routing(
         hidden_states,
         skip1=None,
@@ -270,91 +267,86 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        self.moe = layer
-        layer.quant_config = self.quant_config
-        bit8_pack_factor = self.quant_config.pack_factor
-        group_size = self.quant_config.group_size
-        group_size_div_factor = 1
+        extra_weight_attrs.update(
+            {
+                "is_transposed": True,
+                "quant_method": FusedMoeWeightScaleSupported.GROUP.value,
+            }
+        )
 
-        # make intermediate_size and hidden_size divisible by group_size
-        # we reduce the group size to ensure that
-        # and we would repeat the loaded_weight later
-        while intermediate_size_per_partition % group_size or \
-                hidden_size % group_size:
-            group_size = group_size // 2
-            group_size_div_factor *= 2
-            assert group_size >= 32
-        layer.group_size = group_size
-        layer.group_size_div_factor = group_size_div_factor
-
-        strategy = FusedMoeWeightScaleSupported.GROUP.value
-        extra_weight_attrs.update({
-            "quant_method": strategy,
-            "is_transposed": False
-        })
-
-        assert 'weight_loader' in extra_weight_attrs
-        weight_loader = extra_weight_attrs['weight_loader']
-        wrapped_weight_loader = MoeWNA16Method.get_weight_loader(
-            layer, weight_loader)
-        extra_weight_attrs['weight_loader'] = wrapped_weight_loader
-
-        # Fused gate_up_proj (column parallel)
-        w13_qweight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size // bit8_pack_factor,
-            dtype=torch.uint8),
-                                         requires_grad=False)
+        w13_qweight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
         layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(w13_qweight, extra_weight_attrs)
 
-        # down_proj (row parallel)
-        w2_qweight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition // bit8_pack_factor,
-            dtype=torch.uint8),
-                                        requires_grad=False)
+        w2_qweight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                intermediate_size_per_partition,
+                hidden_size // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
         layer.register_parameter("w2_qweight", w2_qweight)
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
-        w13_scales = torch.nn.Parameter(torch.zeros(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size // group_size,
-            dtype=params_dtype),
-                                        requires_grad=False)
+        num_groups_w13 = hidden_size // self.quant_config.group_size
+        num_groups_w2 = intermediate_size_per_partition // self.quant_config.group_size
+
+        # WEIGHT_SCALES
+        # Allocate 2 scales for w1 and w3 respectively.
+        w13_scales = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                num_groups_w13,
+                intermediate_size_per_partition * 2,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
         layer.register_parameter("w13_scales", w13_scales)
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
-        w2_scales = torch.nn.Parameter(torch.zeros(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition // group_size,
-            dtype=params_dtype),
-                                       requires_grad=False)
+        w2_scales = torch.nn.Parameter(
+            torch.empty(num_experts, num_groups_w2, hidden_size, dtype=params_dtype),
+            requires_grad=False,
+        )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
 
-        if self.quant_config.zero_point:
-            w13_qzeros = torch.nn.Parameter(torch.zeros(
+        # WEIGHT_ZERO_POINT
+        # Allocate 2 zero points for w1 and w3 respectively.
+        w13_qzeros = torch.nn.Parameter(
+            torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition // bit8_pack_factor,
-                hidden_size // group_size,
-                dtype=torch.uint8),
-                                            requires_grad=False)
-            layer.register_parameter("w13_qzeros", w13_qzeros)
-            set_weight_attrs(w13_qzeros, extra_weight_attrs)
+                num_groups_w13,
+                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_qzeros", w13_qzeros)
+        set_weight_attrs(w13_qzeros, extra_weight_attrs)
 
-            w2_qzeros = torch.nn.Parameter(torch.zeros(
+        w2_qzeros = torch.nn.Parameter(
+            torch.empty(
                 num_experts,
-                hidden_size // bit8_pack_factor,
-                intermediate_size_per_partition // group_size,
-                dtype=torch.uint8),
-                                           requires_grad=False)
-            layer.register_parameter("w2_qzeros", w2_qzeros)
-            set_weight_attrs(w2_qzeros, extra_weight_attrs)
+                num_groups_w2,
+                hidden_size // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_qzeros", w2_qzeros)
+        set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         w13_qweight_tmp = torch.zeros_like(layer.w13_qweight.data)
@@ -406,6 +398,11 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
             "w2_qweight", torch.nn.Parameter(w2_qweight_tmp, requires_grad=False)
         )
 
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -428,6 +425,7 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         assert self.fused_experts is None
 
