@@ -57,9 +57,9 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
-_ENABLE_NZ = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
@@ -129,14 +129,8 @@ def is_310p():
     return _IS_310P
 
 
-def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
-    global _ENABLE_NZ
-    if _ENABLE_NZ is None:
-        if not vllm_config:
-            raise ValueError(
-                "vllm_config must be provided when _ENABLE_NZ is None")
-        _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
-    return _ENABLE_NZ
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -411,6 +405,75 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
         )
     vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
     vllm_config.compilation_config.post_init_cudagraph_sizes()
+
+
+def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
+    """
+    Check whether it is vLLM default capture sizes.
+    """
+
+    if vllm_version_is("0.11.0"):
+        cuda_graph_sizes = vllm_config.scheduler_config.cuda_graph_sizes
+        if len(cuda_graph_sizes) == 1:
+            cudagraph_capture_sizes = [1, 2, 4] + [
+                i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+            ]
+    else:
+        max_cudagraph_capture_size = \
+            vllm_config.compilation_config.max_cudagraph_capture_size
+        cudagraph_capture_sizes = [
+            i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+        ]
+        if max_cudagraph_capture_size >= 8:
+            # Step size 8 for small batch sizes, up to 256(not included)
+            cudagraph_capture_sizes += list(
+                range(8, min(max_cudagraph_capture_size + 1, 256), 8))
+        if max_cudagraph_capture_size >= 256:
+            # Step size 16 for larger batch sizes
+            cudagraph_capture_sizes += list(
+                range(256, max_cudagraph_capture_size + 1, 16))
+
+    if sorted(cudagraph_capture_sizes, reverse=True) == \
+            vllm_config.compilation_config.cudagraph_capture_sizes:
+        return True
+
+    return False
+
+
+def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
+    """
+    Update ACL graph default capture sizes, so that new sizes
+    are more friendly to ascend ops && hardware.
+    """
+
+    if vllm_config.model_config is None or \
+        vllm_config.model_config.enforce_eager or \
+        not _is_default_capture_sizes(vllm_config):
+        return
+
+    # modify the default capture_sizes for Qwen3-MoE models on dp settings.
+    # this is mainly because performance of _npu_paged_attention might degrades
+    # on special shapes.
+    # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
+    # replaced by npu_fused_infer_attention_score which does not contain such bugs.
+    if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
+        and vllm_config.parallel_config.tensor_parallel_size == 1 \
+        and vllm_config.parallel_config.data_parallel_size > 1 :
+        if vllm_version_is("0.11.0"):
+            max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
+        else:
+            max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
+            i for i in range(24, max_capture_size + 1, 8)
+        ]
+
+        if vllm_version_is("0.11.0"):
+            vllm_config.compilation_config.cudagraph_capture_sizes = new_cudagraph_capture_sizes
+            vllm_config.compilation_config.init_with_cudagraph_sizes(
+                new_cudagraph_capture_sizes)
+        else:
+            update_cudagraph_capture_sizes(vllm_config,
+                                           new_cudagraph_capture_sizes)
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
@@ -765,6 +828,15 @@ def _is_contain_expert(config: Any):
             if _is_contain_expert(v):
                 return True
     return False
+
+
+def is_vl_model(vllm_config: VllmConfig):
+    """Checks if the model is a VL model by config"""
+    global _IS_VL_MODEL
+    if _IS_VL_MODEL is None:
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+    return _IS_VL_MODEL
 
 
 def weak_ref_tensor(tensor: Any) -> Any:

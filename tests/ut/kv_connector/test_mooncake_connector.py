@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 import zmq
+from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -88,13 +89,14 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
         kv_caches: Dict[str, Any] = {}
         self.common_args = {
             'tp_rank': 1,
-            'decode_tp_size': 4,
+            'prefill_tp_size': 4,
             'local_engine_id': 'engine_1',
             'side_channel_host': 'localhost',
             'side_channel_port': 5555,
             'metadata': MagicMock(),
             'ready_event': threading.Event(),
-            'kv_caches': kv_caches
+            'kv_caches': kv_caches,
+            'pcp_rank': 0
         }
         self.threads = []
 
@@ -131,7 +133,7 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
         kv_caches: Dict[str, Any] = {}
         self.common_args = {
             'tp_rank': 1,
-            'decode_tp_size': 4,
+            'prefill_tp_size': 4,
             'local_engine_id': 'engine_1',
             'side_channel_host': 'localhost',
             'side_channel_port': 5555,
@@ -139,7 +141,8 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
                 "test": "metadata"
             },
             'ready_event': threading.Event(),
-            'kv_caches': kv_caches
+            'kv_caches': kv_caches,
+            'pcp_rank': 0
         }
         self.thread = KVCacheSendingThread(**self.common_args)
 
@@ -168,13 +171,14 @@ class TestKVCacheSendingThread(unittest.TestCase):
             free_port = s.getsockname()[1]
 
         thread = KVCacheSendingThread(tp_rank=0,
-                                      decode_tp_size=1,
+                                      prefill_tp_size=1,
                                       local_engine_id="engine1",
                                       side_channel_host=host,
                                       side_channel_port=free_port,
                                       metadata=metadata,
                                       ready_event=ready_event,
-                                      kv_caches={})
+                                      kv_caches={},
+                                      pcp_rank=0)
         thread.start()
         self.assertTrue(ready_event.wait(timeout=3),
                         "Server thread startup timeout")
@@ -233,7 +237,8 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             "remote_host": "localhost",
             "remote_handshake_port": 6666,
             "offset": 0,
-            "num_need_pulls": 2
+            "num_need_pulls": 2,
+            "all_task_done": False
         }
         self.thread.add_request(
             request_id=test_req["request_id"],
@@ -243,7 +248,8 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             remote_host=test_req["remote_host"],
             remote_handshake_port=test_req["remote_handshake_port"],
             offset=test_req["offset"],
-            num_need_pulls=test_req["num_need_pulls"])
+            num_need_pulls=test_req["num_need_pulls"],
+            all_task_done=test_req["all_task_done"])
         queued = self.thread.request_queue.get_nowait()
         self.assertEqual(queued["request_id"], "req1")
         self.assertEqual(queued["remote_host"], "localhost")
@@ -337,7 +343,8 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_transfer_port": 7777,
             "offset": 0,
-            "num_need_pulls": 2
+            "num_need_pulls": 2,
+            "all_task_done": False
         }
         self.thread.task_tracker = MagicMock()
         self.engine.batch_transfer_sync_read.return_value = 0
@@ -481,7 +488,8 @@ class TestMainThreadLoop(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_transfer_port": 7777,
             "offset": 0,
-            "num_need_pulls": 2
+            "num_need_pulls": 2,
+            "all_task_done": False
         }
 
         self.thread.request_queue.put(test_request)
@@ -617,7 +625,9 @@ class TestMooncakeConnectorMetadata(unittest.TestCase):
                              "remote_block_ids": [4, 5, 6],
                              "remote_engine_id": "remote_engine",
                              "remote_host": "localhost",
-                             "remote_port": 5000
+                             "remote_port": 5000,
+                             "remote_pcp_size": 1,
+                             "remote_dcp_size": 1
                          })
 
         self.assertEqual(len(meta.requests), 1)
@@ -663,7 +673,9 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
             "remote_block_ids": [1, 2, 3],
             "remote_engine_id": "remote",
             "remote_host": "localhost",
-            "remote_port": 5000
+            "remote_port": 5000,
+            "remote_pcp_size": 1,
+            "remote_dcp_size": 1
         }
 
         meta = self.scheduler.build_connector_meta(MagicMock())
@@ -1018,6 +1030,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.mock_transfer_engine.get_rpc_port.return_value = 9090
         self.mock_transfer_engine.initialize.return_value = 0
         self.mock_transfer_engine.register_memory.return_value = 0
+        self.mock_dcp_group = MagicMock(spec=GroupCoordinator)
+        self.mock_dcp_group.rank_in_group = 0
+        self.mock_dcp_group.world_size = 1
+        self.mock_dcp_group.device_group = MagicMock()
+        self.mock_dcp = MagicMock()
+        self.mock_dcp.world_size = 1
 
         self.patches = [
             patch(
@@ -1051,6 +1069,13 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                   MagicMock()),
             patch('vllm_ascend.distributed.mooncake_connector.threading.Event',
                   MagicMock()),
+            patch('vllm.distributed.parallel_state.get_dcp_group',
+                  return_value=self.mock_dcp_group),
+            patch('vllm.distributed.parallel_state._DCP',
+                  return_value=self.mock_dcp),
+            patch(
+                'vllm.distributed.get_decode_context_model_parallel_world_size',
+                return_value=1)
         ]
 
         for p in self.patches:

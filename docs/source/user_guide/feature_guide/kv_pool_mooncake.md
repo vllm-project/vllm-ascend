@@ -266,11 +266,14 @@ python3 -m vllm.entrypoints.openai.api_server \
     "kv_connector": "MooncakeConnectorStoreV1",
     "kv_role": "kv_both",
     "kv_connector_extra_config": {
+        "register_buffer": true,
         "use_layerwise": false,
         "mooncake_rpc_port":"0"
     }
 }' > mix.log 2>&1
 ```
+
+`register_buffer` is set to `false` by default and need to be set to `true` only in PD-mixed scenario.
 
 ### 2. Run Inference
 

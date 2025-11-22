@@ -9,39 +9,6 @@ from vllm_ascend.eplb.core import eplb_utils
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 
 
-def test_determine_default_expert_map_single_world():
-    count, expert_map = eplb_utils.determine_default_expert_map(
-        global_expert_num=4,
-        world_size=1,
-        rank_id=0,
-        global_redundant_expert_num=0)
-    assert count == 4
-    assert torch.equal(expert_map, torch.arange(4, dtype=torch.int32))
-
-
-def test_determine_default_expert_map_multiple_worlds_no_redundant():
-    count, expert_map = eplb_utils.determine_default_expert_map(
-        global_expert_num=8,
-        world_size=2,
-        rank_id=0,
-        global_redundant_expert_num=0)
-
-    assert count == 4
-    assert torch.all(expert_map[:4] >= 0)
-    assert torch.all(expert_map[4:] == -1)
-
-
-def test_determine_default_expert_map_multiple_worlds_with_redundant():
-    count, expert_map = eplb_utils.determine_default_expert_map(
-        global_expert_num=5,
-        world_size=2,
-        rank_id=0,
-        global_redundant_expert_num=1)
-
-    assert count == 2
-    assert torch.all(expert_map[0:2] >= 0)
-
-
 def test_generate_log2phy_map_single_rank_holding():
 
     expert_map = torch.tensor([[0, -1], [-1, 0]], dtype=torch.int32)
@@ -64,21 +31,17 @@ def test_generate_log2phy_map_multiple_rank_holding(monkeypatch):
 
 
 def test_determine_default_log2phy_map_world_size_1():
-    log2phy = eplb_utils.determine_default_log2phy_map(
-        global_expert_num=3,
-        world_size=1,
-        rank_id=0,
-        global_redundant_expert_num=0)
+    log2phy = eplb_utils.determine_default_log2phy_map(global_expert_num=3,
+                                                       world_size=1,
+                                                       rank_id=0)
     assert log2phy.shape == (3, )
     assert (log2phy >= 0).all()
 
 
 def test_determine_default_log2phy_map_world_size_multiple():
-    log2phy = eplb_utils.determine_default_log2phy_map(
-        global_expert_num=6,
-        world_size=2,
-        rank_id=1,
-        global_redundant_expert_num=1)
+    log2phy = eplb_utils.determine_default_log2phy_map(global_expert_num=6,
+                                                       world_size=2,
+                                                       rank_id=1)
     assert log2phy.shape == (6, )
     assert (log2phy >= 0).all()
 
@@ -128,7 +91,7 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
         ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
@@ -136,7 +99,7 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
         ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
@@ -144,12 +107,18 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
         ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
     def test_check_dynamic_eplb_valid_with_env_set(self, monkeypatch):
         monkeypatch.setenv("DYNAMIC_EPLB", "true")
+        EPLBParamUtils.check_dynamic_eplb(True)
+
+        monkeypatch.setenv("DYNAMIC_EPLB", "True")
+        EPLBParamUtils.check_dynamic_eplb(True)
+
+        monkeypatch.setenv("DYNAMIC_EPLB", "1")
         EPLBParamUtils.check_dynamic_eplb(True)
 
     def test_check_expert_map_path_none(self):
