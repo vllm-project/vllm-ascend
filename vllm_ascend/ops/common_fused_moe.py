@@ -634,6 +634,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             connector_name: Optional[str] = "",
         ):
         #TODO(yxj):move to p2p
+        # hidden_states是dispatch之后的，shape第一维是group_list[-1],self.max_num_token*8*2
         shared_out = self._shared_experts(hidden_states)
         from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
         if connector_name == "m2nconnector":
