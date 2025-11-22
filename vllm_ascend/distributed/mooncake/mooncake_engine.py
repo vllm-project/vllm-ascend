@@ -625,7 +625,7 @@ class MooncakeEngine:
                     keys.append(key.to_string())
                     starts.append(start)
                 multi_tp_keys = keys[:]
-                for i in range(1, self.tp_size):
+                for i in range(1, self.save_nums):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
                             "@0", f"@{i}", 1)
@@ -636,7 +636,7 @@ class MooncakeEngine:
                 multi_tp_values = [
                     res[i * num_block:(i + 1) *
                         num_block]  # type: ignore[index]
-                    for i in range(self.tp_size)
+                    for i in range(self.save_nums)
                 ]
                 index = self.find_min_first_non_one_index(multi_tp_values)
                 if index != -1:

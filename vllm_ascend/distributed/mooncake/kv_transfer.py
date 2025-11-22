@@ -30,11 +30,13 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
 
-        if self.use_mla:
+        self.group_num = self.tp_size // self.token_database.save_nums
+        if self.use_mla and self.token_database.save_nums == 1:
             self.start_rank = self.tp_rank
+        elif self.token_database.save_nums < self.tp_size:
+            self.start_rank = self.tp_rank % self.group_num
         else:
             self.start_rank = 0
-        self.group_num = self.tp_size // self.token_database.save_nums
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
