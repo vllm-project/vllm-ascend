@@ -149,7 +149,7 @@ Refer to [Using AISBench for performance evaluation](../developer_guide/evaluati
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `wen3-235B-A22B-w8a8` as an example.
+Run performance evaluation of `Qwen3-235B-A22B-w8a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
