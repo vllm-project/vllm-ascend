@@ -109,7 +109,7 @@ def _run_worker_process(
         llm = LLM(
             model=model_path,
             quantization="ascend" if "W8A8" in model_path else None,
-            # enable_expert_parallel=True if "DeepSeek" in model_path else False,
+            enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
         )
 
