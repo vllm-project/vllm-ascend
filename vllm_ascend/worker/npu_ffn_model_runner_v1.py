@@ -79,6 +79,9 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             get_world_group().local_rank, self.vllm_config)
         
         self.connector.init_afd_connector()
+        self.attn_size = self.connector.attn_size
+        self.ffn_size = self.connector.ffn_size
+        print(f'attn_size = {self.attn_size},ffn_size = {self.ffn_size}')
         if getattr(self.model_config.hf_config, "text_config",
                    None) is not None:
             self.num_layers = (
@@ -142,7 +145,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 m2n_afdconnector_data.k = 8
                 m2n_afdconnector_data.expert_token_nums_type = 0
                 m2n_afdconnector_data.aiv_num = 48
-                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * 2
+                # self.max_num_tokens * topk * attn_size
+                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * self.attn_size
                 # [64,2048]
                 hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
                 print(f'recv_attn_output success ,layer id is {current_layer_idx}')
@@ -159,6 +163,13 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 topk_weights = simulateExpertScales
             elif self.connector_name == "p2pconnector":
                 hidden_states,router_logits,topk_weights, topk_ids, row_idx, afdConnectorMetadata = self.connector.recv_attn_output()
+                if afdConnectorMetadata is not None and afdConnectorMetadata.recv_handle_list is not None:
+                    for work in afdConnectorMetadata.recv_handle_list:
+                        work.wait()
+                print(f'router_logits shape is {router_logits.shape},dtype is {router_logits.dtype}')
+                print(f'topk_weights shape is {topk_weights.shape},dtype is {topk_weights.dtype}')
+                print(f'topk_ids shape is {topk_ids.shape},dtype is {topk_ids.dtype}')
+                print(f'row_idx shape is {row_idx.shape},dtype is {row_idx.dtype}')
                 print(f'recv_attn_output success ,layer id is {current_layer_idx}')
 
                 
@@ -227,12 +238,12 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 with set_ascend_forward_context(
                         attn_metadata=None,
                         vllm_config=self.vllm_config,
-                        # num_tokens=num_input_tokens,
-                        # with_prefill=with_prefill,
+                        num_tokens=num_input_tokens,
+                        with_prefill=with_prefill,
                         reserved_mc2_mask=self.reserved_mc2_mask,
-                        # moe_comm_type=moe_comm_type,
+                        moe_comm_type=moe_comm_type,
                         prefetch_stream=self.prefetch_stream,
-                        # num_actual_tokens=total_num_scheduled_tokens,
+                        num_actual_tokens=total_num_scheduled_tokens,
                         model_instance=self.model):
                     if self.connector_name == "m2nconnector":
                         # 未combine hidden
@@ -268,6 +279,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
                 print(f'send_ffn_output success ,layer id is {current_layer_idx}')
             else :
+                afdConnectorMetadata.recv_handle_list = None
                 self.connector.send_ffn_output(rank_ffn_output, afdConnectorMetadata)
                 print(f'send_ffn_output success ,layer id is {current_layer_idx}')
         except Exception as e:

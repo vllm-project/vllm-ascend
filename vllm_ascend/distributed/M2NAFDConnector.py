@@ -88,6 +88,7 @@ class M2NAFDConnector(AFDConnectorBase):
         self.rank = world_rank
         logger.info(
             f"world_size = {self.ffn_size + self.attn_size}, world_rank = {world_rank}")
+        print(f"world_size = {self.ffn_size + self.attn_size}, world_rank = {world_rank}")
         # TODO : get backend to replace hardcode
         self.afd_pg = init_afd_process_group(
             backend="hccl",
@@ -114,6 +115,9 @@ class M2NAFDConnector(AFDConnectorBase):
                                                  backend="hccl",
                                                  group_name="ae")
 
+        import math
+        # 节点的卡数,最好取一个公约数,比如a侧8卡f侧4卡，那可以取2或者4
+        self.server_rank_size = math.gcd(self.attn_size, self.ffn_size)
         logger.info("m2n connector initialized")
 
         self._initialized = True
@@ -151,7 +155,6 @@ class M2NAFDConnector(AFDConnectorBase):
         recv_counts = torch_npu.npu_m2n_distribute_send(x=hidden_states,
                                                         expert_ids=topk_ids,
                                                         expert_scales=topk_weights,
-                                                        # group_ep=self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank),
                                                         group_ep=self.hccl_comm_name,
                                                         world_size=self.attn_size + self.ffn_size,
                                                         moe_world_size=self.ffn_size,
@@ -159,7 +162,7 @@ class M2NAFDConnector(AFDConnectorBase):
                                                         moe_expert_num=moe_expert_num,
                                                         quant_mode=quant_mode,
                                                         aiv_num=aiv_num,
-                                                        server_rank_size = 2,
+                                                        server_rank_size = self.server_rank_size,
                                                         dynamic_scales=dynamic_scales)
         
         
@@ -181,7 +184,7 @@ class M2NAFDConnector(AFDConnectorBase):
                                                 moe_world_size=self.ffn_size,
                                                 ep_rank_id=self.rank,
                                                 moe_expert_num=moe_expert_num,
-                                                server_rank_size = 2,
+                                                server_rank_size = self.server_rank_size,
                                                 aiv_num=aiv_num)
         return xOut
     
@@ -206,7 +209,7 @@ class M2NAFDConnector(AFDConnectorBase):
                                         moe_expert_num=moe_expert_num,# config
                                         batch_size=batch_size,# config
                                         k=k,# config
-                                        server_rank_size = 2,
+                                        server_rank_size = self.server_rank_size,
                                         aiv_num=aiv_num)# config 未分核48 
         # print(f'send_ffn_output success')
         return
@@ -245,7 +248,7 @@ class M2NAFDConnector(AFDConnectorBase):
                                                                                 h=h,
                                                                                 k=k,
                                                                                 expert_token_nums_type=expert_token_nums_type,
-                                                                                server_rank_size = 2,
+                                                                                server_rank_size = self.server_rank_size,
                                                                                 aiv_num=aiv_num)
         
         # recv_counts 返程路由
