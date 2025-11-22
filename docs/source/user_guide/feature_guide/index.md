@@ -8,7 +8,6 @@ This section provides a detailed usage guide of vLLM Ascend features.
 graph_mode
 quantization
 sleep_mode
-structured_output
 lora
 eplb_swift_balancer
 netloader
