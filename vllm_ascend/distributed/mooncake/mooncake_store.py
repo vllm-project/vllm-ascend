@@ -18,7 +18,6 @@ if vllm_version_is("0.11.0"):
 else:
     from vllm.utils.network_utils import get_ip
 
-
 METADATA_BYTES_LEN = 24
 BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
 
