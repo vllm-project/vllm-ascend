@@ -298,6 +298,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         self,
         input_,
         is_prefill: bool = True,
+        is_force_scatter: bool = False,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
