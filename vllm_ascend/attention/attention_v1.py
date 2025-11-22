@@ -63,13 +63,17 @@ if prefill_context_parallel_enable():
 
 # isort: on
 
+from vllm.attention.backends.registry import (AttentionBackendEnum,
+                                              register_backend)
 
+
+@register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:

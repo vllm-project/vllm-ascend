@@ -18,7 +18,8 @@
 #
 
 import copy
-from typing import Optional, Union
+from types import NoneType
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -35,7 +36,7 @@ from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
@@ -213,6 +214,14 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
+
+        visible_device_count = (torch.npu.device_count()
+                                if torch.npu.is_available() else 0)
+        assert self.parallel_config.local_world_size <= visible_device_count, (
+            f"local_world_size ({self.parallel_config.local_world_size}) must be "
+            f"less than or equal to the number of visible devices "
+            f"({visible_device_count}).")
+
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
@@ -273,7 +282,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -285,10 +294,16 @@ class NPUWorker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        output = self.model_runner.execute_model(scheduler_output,
-                                                 intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
-            return output
+        if vllm_version_is("0.11.0"):
+            output = self.model_runner.execute_model_0_11_0(
+                scheduler_output, intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+                return output
+        else:
+            output = self.model_runner.execute_model(scheduler_output,
+                                                     intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, NoneType)):
+                return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
@@ -310,6 +325,12 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    @torch.inference_mode()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:

@@ -180,7 +180,10 @@ else:
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
-    from vllm.v1.core.sched.output import SchedulerOutput
+    if vllm_version_is("0.11.0"):
+        from vllm.v1.core.sched.output import SchedulerOutput
+    else:
+        from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -271,13 +274,30 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensor once the copy has completed
         del self._sampled_token_ids
 
-        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        valid_sampled_token_ids: list[np.ndarray] = [
+            row for row in self._sampled_token_ids_cpu.numpy()
+        ]
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         return output
+
+
+class ExecuteModelState(NamedTuple):
+    """Ephemeral cached state transferred between execute_model() and
+    sample_tokens(), after execute_model() returns None."""
+
+    scheduler_output: "SchedulerOutput"
+    logits: torch.Tensor
+    spec_decode_metadata: SpecDecodeMetadata | None
+    hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor
+    aux_hidden_states: list[torch.Tensor] | None
+    kv_connector_output: KVConnectorOutput | None
+    attn_metadata: dict[str, Any]
+    positions: torch.Tensor
 
 
 class NPUModelRunner(LoRAModelRunnerMixin):
@@ -620,6 +640,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: EVS Support (Video tokens pruning) (see vllm#22980)
         self.is_multimodal_pruning_enabled = False
 
+        # Ephemeral state transferred between execute_model() and sample_tokens().
+        self.execute_model_state: ExecuteModelState | None = None
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -914,6 +937,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if mm_input.get("use_audio_in_video") is True:
                 use_audio_in_video = True
 
+        # TODO(leo-pony): when 0.11.0 deleted, the variables parsed from mm_feature should been deleted
         if vllm_version_is("0.11.0"):
             req_state.mrope_positions, req_state.mrope_position_delta = \
                 MRotaryEmbedding.get_input_positions_tensor(
@@ -930,12 +954,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_state.mrope_positions, req_state.mrope_position_delta = \
                     self.model.get_mrope_input_positions(
                         req_state.prompt_token_ids,
-                        hf_config=self.model_config.hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
+                        req_state.mm_features,
                     )
 
     def _sync_metadata_across_dp(
@@ -1131,8 +1150,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
-                **mm_kwargs_group)
+            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -1741,7 +1759,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds, is_mm_embed = self._gather_mm_embeddings(
                     scheduler_output)
 
-                inputs_embeds = self.model.get_input_embeddings(
+                inputs_embeds = self.model.embed_input_ids(
                     input_ids,
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
@@ -1771,7 +1789,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Some tokens ids may need to become embeds
             if token_ids_idx.numel() > 0:
                 token_ids = self.input_ids[token_ids_idx]
-                tokens_to_embeds = self.model.get_input_embeddings(
+                tokens_to_embeds = self.model.embed_input_ids(
                     input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
@@ -2188,7 +2206,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
         return metadata
 
-    def apply_grammar_bitmask(
+    def apply_grammar_bitmask_0_11_0(
         self,
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
@@ -2238,6 +2256,86 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 cumulative_index += 1 + num_spec_tokens
         else:
             for req_id in scheduler_output.structured_output_request_ids:
+                num_spec_tokens = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, []))
+                if req_id in struct_out_req_batch_indices:
+                    logit_index = struct_out_req_batch_indices[req_id]
+                    for i in range(1 + num_spec_tokens):
+                        sorted_bitmask[logit_index +
+                                       i] = grammar_bitmask[cumulative_index +
+                                                            i]
+                        out_indices.append(logit_index + i)
+                cumulative_index += 1 + num_spec_tokens
+        grammar_bitmask = sorted_bitmask
+
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+
+        # NOTE:
+        # 1. XGrammar bitmask applying only supports CPU and GPU.
+        # 2. The logits and bitmask should be on the same device.
+        # 3. XGrammar logits on CPU only supports float32 dtype.
+        logits_dtype = logits.dtype
+        logits = logits.to("cpu").float()
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask,
+            indices=out_indices,
+        )
+        return logits.to(self.device).to(logits_dtype)
+
+    def apply_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        grammar_output: "GrammarOutput",
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        grammar_bitmask = grammar_output.grammar_bitmask
+
+        # We receive the structured output bitmask from the scheduler,
+        # compacted to contain bitmasks only for structured output requests.
+        # The order of the requests in the bitmask is not guaranteed to be the
+        # same as the order of the requests in the gpu runner's batch. We need
+        # to sort the bitmask to match the order of the requests used here.
+
+        # Get the batch indices of the structured output requests.
+        # Keep track of the number of speculative tokens scheduled for every
+        # request in the batch, as the logit indices are offset by this amount.
+        struct_out_req_batch_indices: dict[str, int] = {}
+        cumulative_offset = 0
+        seq = sorted(self.input_batch.req_id_to_index.items(),
+                     key=lambda x: x[1])
+        for req_id, batch_index in seq:
+            logit_index = batch_index + cumulative_offset
+            cumulative_offset += len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            if req_id in grammar_output.structured_output_request_ids:
+                struct_out_req_batch_indices[req_id] = logit_index
+
+        out_indices = []
+
+        # Reorder the bitmask to match the order of the requests in the batch.
+        sorted_bitmask = np.zeros_like(grammar_bitmask,
+                                       shape=(logits.shape[0],
+                                              grammar_bitmask.shape[1]))
+        cumulative_index = 0
+        if vllm_version_is("0.11.0"):
+            seq = sorted(grammar_output.structured_output_request_ids.items(),
+                         key=lambda x: x[1])
+            for req_id, _ in seq:
+                logit_index = struct_out_req_batch_indices[req_id]
+                num_spec_tokens = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, []))
+                for i in range(1 + num_spec_tokens):
+                    sorted_bitmask[logit_index + i] = \
+                        grammar_bitmask[cumulative_index + i]
+                    out_indices.append(logit_index + i)
+                cumulative_index += 1 + num_spec_tokens
+        else:
+            for req_id in grammar_output.structured_output_request_ids:
                 num_spec_tokens = len(
                     scheduler_output.scheduled_spec_decode_tokens.get(
                         req_id, []))
@@ -2405,7 +2503,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return moe_comm_type
 
     @torch.inference_mode()
-    def execute_model(
+    def execute_model_0_11_0(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -2518,14 +2616,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits = model_output_broadcast_data["logits"]
 
             # Apply structured output bitmasks if present
-            if vllm_version_is("0.11.0"):
-                if scheduler_output.grammar_bitmask is not None:
-                    logits = self.apply_grammar_bitmask(
-                        scheduler_output, logits)
-            else:
-                if scheduler_output.structured_output_request_ids:
-                    logits = self.apply_grammar_bitmask(
-                        scheduler_output, logits)
+            if scheduler_output.grammar_bitmask is not None:
+                logits = self.apply_grammar_bitmask_0_11_0(
+                    scheduler_output, logits)
 
         with ProfileExecuteDuration().capture_async("Sample"):
             # Sample the next token and get logprobs if needed.
@@ -2698,6 +2791,374 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
+            **extra_args,
+        )
+
+        durations = ProfileExecuteDuration().pop_captured_sync()
+        if durations:
+            dr_str = [
+                f"[{tag}]:{duration:.2f}ms"
+                for tag, duration in durations.items()
+            ]
+            captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
+            logger.info("Profile execute duration [%s]:%s", captured_name,
+                        " ".join(dr_str))
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
+        if not self.use_async_scheduling:
+            return model_runner_output
+
+        return AsyncNPUModelRunnerOutput(
+            model_runner_output=model_runner_output,
+            sampled_token_ids=sampled_token_ids,
+            invalid_req_indices=invalid_req_indices,
+            async_output_copy_stream=self.async_output_copy_stream,
+        )
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Union[ModelRunnerOutput, IntermediateTensors] | None:
+        if self.execute_model_state is not None:
+            raise RuntimeError("State error: sample_tokens() must be called "
+                               "after execute_model() returns None.")
+
+        with ProfileExecuteDuration().capture_async("prepare input"):
+            self._update_states(scheduler_output)
+            if not scheduler_output.total_num_scheduled_tokens:
+                if not has_kv_transfer_group():
+                    logger.debug(
+                        "skip this step for we receive the data from remote disaggregate prefill node"
+                    )
+                    # Return empty ModelRunnerOuptut if there's no work to do.
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                return self.kv_connector_no_forward(scheduler_output)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+
+            (attn_metadata, positions, num_scheduled_tokens_np,
+             num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
+             logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
+             intermediate_tensors,
+             max_query_len) = (self._prepare_inputs(scheduler_output,
+                                                    intermediate_tensors))
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+
+        moe_comm_type = self._select_moe_comm_method(num_input_tokens,
+                                                     self.with_prefill)
+
+        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+            scheduler_output.total_num_scheduled_tokens
+            == self.input_batch.num_reqs * max_query_len)
+        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                           uniform_decode=uniform_decode)
+        aclgraph_runtime_mode, batch_descriptor = \
+            self.aclgraph_dispatcher.dispatch(batch_descriptor)
+
+        # Run forward pass
+        with ProfileExecuteDuration().capture_async("forward"):
+            with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    with_prefill=self.with_prefill,
+                    reserved_mc2_mask=self.reserved_mc2_mask,
+                    moe_comm_type=moe_comm_type,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
+                    num_actual_tokens=scheduler_output.
+                    total_num_scheduled_tokens,
+                    prefetch_stream=self.prefetch_stream,
+                    model_instance=self.model,
+                    weight_prefetch_method=self.weight_prefetch_method):
+                self.maybe_setup_kv_connector(scheduler_output)
+
+                hidden_states = self._generate_process_reqs_hidden_states(
+                    attn_metadata, self.with_prefill, maybe_padded_num_tokens,
+                    input_ids, positions, intermediate_tensors, inputs_embeds)
+
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = self.get_finished_kv_transfer(
+                scheduler_output)
+
+            aux_hidden_states = None
+            if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
+                hidden_states, aux_hidden_states = hidden_states
+
+        kv_connector_output = KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
+        finished_sending = None
+        finished_recving = None
+        with ProfileExecuteDuration().capture_async("post process"):
+            # Broadcast PP output for external_launcher (torchrun)
+            # to make sure we are synced across pp ranks
+            # TODO: Support overlapping mirco-batches
+            # https://github.com/vllm-project/vllm/issues/18019
+            broadcast_pp_output = \
+                self.parallel_config.distributed_executor_backend \
+                == "external_launcher" and len(get_pp_group().ranks) > 0
+            if not get_pp_group().is_last_rank:
+                # For mid-pipeline stages, return the hidden states.
+                if not broadcast_pp_output:
+                    hidden_states.kv_connector_output = kv_connector_output
+                    return hidden_states
+                assert isinstance(hidden_states, IntermediateTensors)
+                get_pp_group().send_tensor_dict(
+                    hidden_states.tensors, all_gather_group=get_tp_group())
+                logits = None
+            else:
+                if self.input_batch.pooling_params:
+                    return self._pool(
+                        hidden_states,
+                        scheduler_output.total_num_scheduled_tokens,
+                        num_scheduled_tokens_np, finished_sending,
+                        finished_recving, kv_connector_output)
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states)
+            if broadcast_pp_output:
+                model_output_broadcast_data = {
+                    "logits": logits.contiguous(),
+                } if logits is not None else {}
+                model_output_broadcast_data = get_pp_group(
+                ).broadcast_tensor_dict(model_output_broadcast_data,
+                                        src=len(get_pp_group().ranks) - 1)
+                assert model_output_broadcast_data is not None
+                logits = model_output_broadcast_data["logits"]
+
+            # Apply structured output bitmasks if present
+            if vllm_version_is("0.11.0"):
+                if scheduler_output.grammar_bitmask is not None:
+                    logits = self.apply_grammar_bitmask_0_11_0(
+                        scheduler_output, logits)
+            else:
+                self.execute_model_state = ExecuteModelState(
+                    scheduler_output,
+                    logits,
+                    spec_decode_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    kv_connector_output,
+                    attn_metadata,
+                    positions,
+                )
+        return None
+
+    @torch.inference_mode
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput | None"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if self.execute_model_state is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+
+        # Unpack ephemeral state.
+        (
+            scheduler_output,
+            logits,
+            spec_decode_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+            attn_metadata,
+            positions,
+        ) = self.execute_model_state
+        # Clear ephemeral state.
+        self.execute_model_state = None
+
+        # Apply structured output bitmasks if present.
+        if grammar_output is not None:
+            logits = self.apply_grammar_bitmask(scheduler_output,
+                                                grammar_output, logits)
+
+        with ProfileExecuteDuration().capture_async("Sample"):
+            # Sample the next token and get logprobs if needed.
+            sampling_metadata = self.input_batch.sampling_metadata
+            if spec_decode_metadata is None:
+                if lmhead_tp_enable() and logits is not None:
+                    logits = logits[:self.input_batch.num_reqs]
+                sampler_output = self.sampler(
+                    logits=logits,
+                    sampling_metadata=sampling_metadata,
+                )
+            else:
+                if lmhead_tp_enable() and logits is not None:
+                    logits = logits[:len(spec_decode_metadata.logits_indices)]
+                # When indexing with a tensor (bonus_logits_indices), PyTorch
+                # creates a new tensor with separate storage from the original
+                # logits tensor. This means any in-place operations on bonus_logits
+                # won't affect the original logits tensor.
+                assert logits is not None
+                bonus_logits = logits[
+                    spec_decode_metadata.bonus_logits_indices]
+                sampler_output = self.sampler(
+                    logits=bonus_logits,
+                    sampling_metadata=sampling_metadata,
+                )
+                bonus_token_ids = sampler_output.sampled_token_ids
+
+                # Just like `bonus_logits`, `target_logits` is a new tensor with
+                # separate storage from the original `logits` tensor. Therefore,
+                # it is safe to update `target_logits` in place.
+                target_logits = logits[
+                    spec_decode_metadata.target_logits_indices]
+                output_token_ids = self.rejection_sampler(
+                    spec_decode_metadata,
+                    None,  # draft_probs
+                    target_logits,
+                    bonus_token_ids,
+                    sampling_metadata,
+                )
+                sampler_output.sampled_token_ids = output_token_ids
+                if self.need_accepted_tokens:
+                    self._update_states_after_model_execute(output_token_ids)
+
+            discard_sampled_tokens_req_indices = \
+                self.discard_request_indices.np[:self.num_discarded_requests]
+            for i in discard_sampled_tokens_req_indices:
+                generator = self.input_batch.generators.get(int(i))
+                if generator is not None:
+                    generator.set_offset(generator.get_offset() - 4)
+
+            # Copy some objects so they don't get modified after returning.
+            # This is important when using async scheduling.
+            req_ids_output_copy = self.input_batch.req_ids.copy()
+            req_id_to_index_output_copy = \
+                self.input_batch.req_id_to_index.copy()
+
+            # NOTE: NPU -> CPU Sync happens here.
+            # Move as many CPU operations as possible before this sync point.
+            logprobs_tensors = sampler_output.logprobs_tensors
+            logprobs_lists = logprobs_tensors.tolists() \
+                if logprobs_tensors is not None else None
+
+            # Compute prompt logprobs if needed.
+            prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+                hidden_states[:scheduler_output.total_num_scheduled_tokens],
+                scheduler_output,
+            )
+
+            num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
+            sampled_token_ids = sampler_output.sampled_token_ids
+            if not self.use_async_scheduling:
+                # Get the valid generated tokens.
+                max_gen_len = sampled_token_ids.shape[-1]
+                if max_gen_len == 1:
+                    # No spec decode tokens.
+                    valid_sampled_token_ids = sampled_token_ids.tolist()
+                else:
+                    # Includes spec decode tokens.
+                    valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                        sampled_token_ids,
+                        self.input_batch.vocab_size,
+                    )
+                # Mask out the sampled tokens that should not be sampled.
+                for i in discard_sampled_tokens_req_indices:
+                    valid_sampled_token_ids[int(i)].clear()
+            else:
+                valid_sampled_token_ids = []
+                invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
+                )
+                invalid_req_indices_set = set(invalid_req_indices)
+                assert sampled_token_ids.shape[-1] == 1
+
+                # Cache the sampled tokens on the NPU and avoid CPU sync.
+                # These will be copied into input_ids in the next step
+                # when preparing inputs.
+                self.input_batch.prev_sampled_token_ids = \
+                    sampled_token_ids
+                self.input_batch.prev_sampled_token_ids_invalid_indices = \
+                    invalid_req_indices_set
+                self.input_batch.prev_req_id_to_index = {
+                    req_id: i
+                    for i, req_id in enumerate(self.input_batch.req_ids)
+                    if i not in invalid_req_indices_set
+                }
+            # Cache the sampled tokens in the model runner, so that the scheduler
+            # doesn't need to send them back.
+            # NOTE(woosuk): As an exception, when using PP, the scheduler sends
+            # the sampled tokens back, because there's no direct communication
+            # between the first-stage worker and the last-stage worker.
+            for req_idx in range(num_sampled_tokens):
+                if self.use_async_scheduling:
+                    sampled_ids = [-1] * 1 if \
+                        req_idx not in invalid_req_indices_set else None
+                else:
+                    sampled_ids = valid_sampled_token_ids[req_idx]
+                if not sampled_ids:
+                    continue
+
+                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + len(sampled_ids)
+                assert end_idx <= self.model_config.max_model_len, (
+                    "Sampled token IDs exceed the max model length. "
+                    f"Total number of tokens: {end_idx} > max_model_len: "
+                    f"{self.model_config.max_model_len}")
+
+                self.input_batch.token_ids_cpu[req_idx,
+                                               start_idx:end_idx] = sampled_ids
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx] = True
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
+                req_id = self.input_batch.req_ids[req_idx]
+                req_state = self.requests[req_id]
+                req_state.output_token_ids.extend(sampled_ids)
+
+        def propose_draft_token_ids(sampled_token_ids):
+            assert self.spec_decode_common_attn_metadata is not None
+            self._draft_token_ids = self.propose_draft_token_ids(
+                sampled_token_ids,
+                sampling_metadata,
+                scheduler_output,
+                spec_decode_metadata,
+                positions,
+                scheduler_output.total_num_scheduled_tokens,
+                hidden_states,
+                attn_metadata,
+                aux_hidden_states,
+            )
+
+        with ProfileExecuteDuration().capture_async("Draft"):
+            if self.speculative_config:
+                use_padded_batch_for_eagle = self.speculative_config and \
+                    self.speculative_config.method in ("deepseek_mtp", "qwen3_next_mtp") and \
+                    not self.speculative_config.disable_padded_drafter_batch
+                if use_padded_batch_for_eagle:
+                    # EAGLE speculative decoding can use the GPU sampled tokens
+                    # as inputs, and does not need to wait for bookkeeping to finish.
+                    propose_draft_token_ids(sampler_output.sampled_token_ids)
+                if self.speculative_config and not use_padded_batch_for_eagle:
+                    # ngram and other speculative decoding methods use the sampled
+                    # tokens on the CPU, so they are run after bookkeeping.
+                    propose_draft_token_ids(valid_sampled_token_ids)
+
+            if has_kv_transfer_group():
+                get_kv_transfer_group().clear_connector_metadata()
+
+        extra_args = ({"kv_connector_output": kv_connector_output})
+
+        # TODO(leo-pony): remove translate operations.
+        valid_sampled_token_ids = torch.as_tensor(
+            valid_sampled_token_ids).cpu()
+        sampled_token_ids_torch: list[np.ndarray] = [
+            row for row in valid_sampled_token_ids.numpy()
+        ]
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids_output_copy,
+            req_id_to_index=req_id_to_index_output_copy,
+            sampled_token_ids=sampled_token_ids_torch,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
@@ -3016,12 +3477,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+        num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens):
+                                            num_scheduled_tokens,
+                                            num_sampled_tokens):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
@@ -3777,9 +4240,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in attn_backend_layers.items()
             }
 
-        def create_attn_groups(
-            attn_backends_map: dict[AttentionBackend, list[str]],
-        ) -> list[AttentionGroup]:
+        def create_attn_groups(attn_backends_map: dict[AttentionBackend,
+                                                       list[str]],
+                               kv_cache_group_id: int) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for (attn_backend,
                  kv_cache_spec), layer_names in attn_backends_map.items():
@@ -3790,16 +4253,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     self.device,
                 ))
-                attn_group = AttentionGroup(attn_backend,
-                                            attn_metadata_builders,
-                                            layer_names, kv_cache_spec)
+                attn_group = AttentionGroup(attn_backend, layer_names,
+                                            kv_cache_spec, kv_cache_group_id,
+                                            attn_metadata_builders)
                 attn_groups.append(attn_group)
             return attn_groups
 
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group_spec in enumerate(
+                kv_cache_config.kv_cache_groups):
             attn_backends = get_attn_backends_for_group(  # type: ignore
                 kv_cache_group_spec)
-            self.attn_groups.append(create_attn_groups(attn_backends))
+            self.attn_groups.append(create_attn_groups(attn_backends, i))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
