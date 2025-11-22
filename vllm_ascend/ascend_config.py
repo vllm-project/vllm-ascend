@@ -27,6 +27,12 @@ def _check_torchair_supported(model_type: str):
     return False
 
 
+class PDScenarioState:
+    NotPdScenario = 0
+    PNode = 1
+    DNode = 2
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -82,6 +88,12 @@ class AscendConfig:
                 raise AssertionError(
                     "lmhead_tensor_parallel_size is only supported in the pure DP scenario"
                 )
+        if vllm_config.kv_transfer_config is None:
+            self.pd_scenario_state = PDScenarioState.NotPdScenario
+        elif vllm_config.kv_transfer_config.is_kv_consumer:
+            self.pd_scenario_state = PDScenarioState.DNode
+        else:
+            self.pd_scenario_state = PDScenarioState.PNode
         self.oproj_tensor_parallel_size = additional_config.get(
             "oproj_tensor_parallel_size", None)
         if self.oproj_tensor_parallel_size is not None:
