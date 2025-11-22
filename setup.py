@@ -65,25 +65,60 @@ def check_or_set_default_env(cmake_args,
     return cmake_args
 
 
+def get_value_from_lines(lines: List[str], key: str) -> str:
+    for line in lines:
+        line = ' '.join(line.split())
+        if key in line:
+            return line.split(':')[-1]
+    raise KeyError(f"can not find key: {key}")
+
+
+def get_chip_info() -> str:
+    try:
+        npu_info_lines = subprocess.check_output(['npu-smi', 'info', '-l']).decode().strip().split('\n')
+        npu_id = get_value_from_lines(npu_info_lines, 'NPU ID')
+        chip_count = get_value_from_lines(npu_info_lines, 'Chip Count')
+        chip_info_lines = subprocess.check_output(['npu-smi', 'info', '-t', 'board', '-i', str(npu_id), '-c', '0']).decode().strip().split('\n')
+        chip_name = get_value_from_lines(chip_info_lines, 'Chip Name')
+
+        if "310" in chip_name:
+            # 310P case
+            return "ascend310p"
+        elif "910" in chip_name:
+            # A2 and A3 case
+            return "ascend910b" if chip_count == 1 else "ascend910_93"
+        else:
+            # TODO(zzzzwwjj): Currently, A5's chip name has not determined yet.
+            raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Get chip info failed: {e}")
+
+
 envs = load_module_from_path("envs",
                              os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
+
+if not envs.SOC_VERSION:
+    envs.SOC_VERSION = get_chip_info()
 
 
 def gen_build_info():
     soc_version = envs.SOC_VERSION
-    if not soc_version:
-        raise ValueError(
-            "SOC version is not set. Please set SOC_VERSION environment variable."
-        )
     if "310" in soc_version and not envs.COMPILE_CUSTOM_KERNELS:
         raise ValueError(
             "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
         )
+    
+    # TODO(zzzzwwjj): Add A5 case
+    soc_version_dict = {
+        "ascend310p": "310P",
+        "ascend910b": "A2",
+        "ascend910_93": "A3",
+    }
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
     with open(package_dir, "w+") as f:
         f.write('# Auto-generated file\n')
-        f.write(f"__soc_version__ = '{soc_version}'\n")
+        f.write(f"__soc_version__ = '{soc_version_dict[soc_version]}'\n")
         f.write(f"__sleep_mode_enabled__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
     logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
 

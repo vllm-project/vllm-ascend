@@ -145,7 +145,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               enable_sp, get_ascend_soc_version, is_310p,
+                               enable_sp, get_ascend_soc_version, AscendSocVersion,
                                is_enable_nz, is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable,
                                vllm_version_is)
@@ -189,7 +189,7 @@ import torch_npu
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
-if is_310p():
+if get_ascend_soc_version() == AscendSocVersion._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
     ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
 else:
@@ -3260,7 +3260,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
-            if is_310p():
+            if get_ascend_soc_version() == AscendSocVersion._310P:
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
                     RowParallelLinear)

@@ -52,7 +52,7 @@ from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_ascend_soc_version, is_310p,
+                               get_ascend_soc_version, AscendSocVersion,
                                is_hierarchical_communication_enabled,
                                vllm_version_is)
 
@@ -468,7 +468,7 @@ def torchair_fused_experts_moge(
         group_list=group_list,
     )[0]
 
-    if is_310p():
+    if get_ascend_soc_version() == AscendSocVersion._310P:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:

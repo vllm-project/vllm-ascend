@@ -27,7 +27,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_custom_op, is_310p
+from vllm_ascend.utils import enable_custom_op, get_ascend_soc_version, AscendSocVersion
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -50,7 +50,7 @@ def _rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(query, is_neox_style,
-                                        self.head_size) and not is_310p():
+                                        self.head_size) and get_ascend_soc_version() != AscendSocVersion._310P:
         query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,

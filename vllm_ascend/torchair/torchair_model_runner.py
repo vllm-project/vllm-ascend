@@ -42,7 +42,7 @@ from vllm_ascend.torchair.utils import (
     register_torchair_model, torchair_ops_patch,
     torchair_quant_method_register, write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_310p, get_ascend_soc_version,
+                               get_ascend_soc_version, AscendSocVersion,
                                AscendSocVersion)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -207,7 +207,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
         if with_prefill or self.enable_shared_expert_dp:
-            if is_310p():
+            if get_ascend_soc_version() == AscendSocVersion._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
             hidden_states = super()._generate_dummy_run_hidden_states(
                 with_prefill, is_torchair_compile, input_ids, positions,
@@ -230,7 +230,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     assert isinstance(kv, tuple), "kv_cache must be a tuple"
                     torch._dynamo.mark_static(kv[0])
                     torch._dynamo.mark_static(kv[1])
-            if is_310p():
+            if get_ascend_soc_version() == AscendSocVersion._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_NZ)
 
             compiled_model = self._get_torchair_lazy_compiled_model(num_tokens)
@@ -371,7 +371,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             "attn_metadata": attn_metadata
         }
         if not with_prefill:
-            if is_310p():
+            if get_ascend_soc_version() == AscendSocVersion._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_NZ)
             compiled_model = self._get_torchair_lazy_compiled_model(
                 padded_num_tokens_across_dp)
@@ -384,7 +384,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             )
         else:
             assert self.model is not None
-            if is_310p():
+            if get_ascend_soc_version() == AscendSocVersion._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
 
             hidden_states = self.model(
@@ -414,7 +414,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         patch_for_hcom()
 
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             # on 300I Duo platform, we need to patch broadcast. however, this patch will be
             # overwritten by patch_for_hcom in torchair. so we need to re-patch it here.
             from vllm_ascend.patch.platform.patch_distributed import \
@@ -428,7 +428,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         self.ascend_config.torchair_graph_config.enable_frozen_parameter
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
-        config.experimental_config.tiling_schedule_optimize = not is_310p()
+        config.experimental_config.tiling_schedule_optimize = get_ascend_soc_version() != AscendSocVersion._310P
         config.experimental_config.enable_view_optimize = \
         self.ascend_config.torchair_graph_config.enable_view_optimize
         torch.npu.set_compile_mode(jit_compile=False)
