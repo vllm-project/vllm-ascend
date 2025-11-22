@@ -18,7 +18,7 @@
 #
 
 import copy
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -310,6 +310,12 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
+
+    def reload_weights(self) -> None:
+        self.model_runner.reload_weights()
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
