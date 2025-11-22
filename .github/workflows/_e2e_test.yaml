@@ -92,11 +92,8 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
-          pytest -sv tests/e2e/singlecard/test_bge_model.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_chunked.py
-          pytest -sv tests/e2e/singlecard/test_embedding.py
-          # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
@@ -113,6 +110,7 @@ jobs:
 
           # TODO: Move ops test to nightly test
           #pytest -sv tests/e2e/singlecard/ops/
+          pytest -sv tests/e2e/singlecard/pooling/
 
   e2e-2-cards:
     name: multicard-2

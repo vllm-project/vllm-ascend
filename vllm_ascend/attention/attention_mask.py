@@ -31,22 +31,18 @@ def _generate_attn_mask(max_seq_len, dtype):
 
 class AttentionMaskBuilder:
 
-    def __init__(
-        self,
-        max_seq_len: int,
-        dtype: torch.dtype,
-        device: torch.device = None,
-    ):
+    def __init__(self,
+                 max_seq_len: int,
+                 dtype: torch.dtype,
+                 device: torch.device = None):
         # NOTE: The device argument specifies the target NPU
         # to be used for the newly added FIA operator.
         # Only pass this parameter when using the new FIA operator.
-
         attn_mask = _generate_attn_mask(max_seq_len, dtype)
 
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
-        self.pooling_mask = None
         assigned_mask_dim = 2048
         self.chunked_prefill_attn_mask = torch.triu(
             torch.ones(assigned_mask_dim, assigned_mask_dim),
@@ -72,14 +68,6 @@ class AttentionMaskBuilder:
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(device, non_blocking=True)
-
-    def get_pooling_mask(self, device):
-        if self.pooling_mask is None:
-            # the compressed attention mask for npu_fusion_attention sparse mode 4
-            self.pooling_mask = torch.triu(torch.ones(
-                2048, 2048), diagonal=1).to(torch.bool).to(device,
-                                                           non_blocking=True)
-        return self.pooling_mask
 
     def get_splitfuse_attn_mask(
         self,

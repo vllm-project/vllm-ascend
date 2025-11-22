@@ -237,6 +237,9 @@ class AscendMetadata:
 
     decode_meta: Optional[AscendMetadataForDecode] = None
 
+    # Used to guide the attention computation for pooling models.
+    is_causal_pooling: Optional[bool] = None
+
 
 class AscendAttentionMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
@@ -477,6 +480,11 @@ class AscendAttentionMetadataBuilder:
                                                            shape[0]],
                     block_tables=block_table[:num_decodes])
 
+        is_causal_pooling = None
+        if self.model_config.pooler_config:
+            is_causal_pooling = common_attn_metadata.causal if hasattr(
+                common_attn_metadata, 'causal') else True
+
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -496,7 +504,8 @@ class AscendAttentionMetadataBuilder:
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             prefill=prefill_metadata,
-            decode_meta=decode_metadata)
+            decode_meta=decode_metadata,
+            is_causal_pooling=is_causal_pooling)
         return attn_metadata
 
     def _get_chunked_req_mask(self, local_context_lens_allranks) -> List[bool]:
@@ -1263,6 +1272,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
                    num_decode_tokens] = attn_output_prefill
         return output
 
+    def _forward_pooling(self, query: torch.Tensor, key: torch.Tensor,
+                         value: torch.Tensor, attn_metadata: AscendMetadata,
+                         _: torch.Tensor) -> torch.Tensor:
+        assert attn_metadata is not None
+        assert attn_metadata.is_causal_pooling is not None
+        if attn_metadata.is_causal_pooling:
+            return torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                head_num=self.num_heads,
+                atten_mask=attn_metadata.attn_mask,
+                input_layout="TND",
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+                scale=self.scale,
+                sparse_mode=3)[0]
+        else:
+            return torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                head_num=self.num_heads,
+                input_layout="TND",
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+                scale=self.scale)[0]
+
     def _process_chunk_prefill(self, current_attn_output_prefill,
                                current_attn_lse_prefill, kv_cache,
                                prefill_query, attn_metadata):
@@ -1510,9 +1547,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         attn_type = self.attn_type
-        if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
-            raise NotImplementedError("Encoder/decoder cross-attention "
-                                      "are not implemented for "
+        if attn_type not in [
+                AttentionType.DECODER, AttentionType.ENCODER_ONLY
+        ]:
+            raise NotImplementedError("Encoder/Decoder cross-attention "
+                                      "is not implemented for "
                                       "PallasAttentionBackendImpl")
 
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -1563,23 +1602,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.pcp_size * self.dcp_size > 1:
                 intermediate_output = self._forward_pcp_dcp(
                     query, key, value, kv_cache, attn_metadata, output)
-            elif attn_type == AttentionType.ENCODER_ONLY:
-                # TODO(zzzwwjj): Deal with this `cum_seq_len` more elegantly.
-                cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
-                intermediate_output = torch_npu.npu_fusion_attention(
-                    query,
-                    key,
-                    value,
-                    head_num=self.num_heads,
-                    input_layout="TND",
-                    scale=self.scale,
-                    sparse_mode=4,
-                    atten_mask=attn_metadata.attn_mask,
-                    pre_tockens=attn_metadata.max_query_len,
-                    next_tockens=attn_metadata.max_query_len,
-                    actual_seq_qlen=cum_seq_len,
-                    actual_seq_kvlen=cum_seq_len,
-                )[0]
+            # pooling model branch
+            elif isinstance(attn_metadata.is_causal_pooling, bool):
+                intermediate_output = self._forward_pooling(
+                    query, key, value, attn_metadata, output)
             # V0-Style scheduler situation.
             elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 intermediate_output = self._forward_prefill_no_cache(
