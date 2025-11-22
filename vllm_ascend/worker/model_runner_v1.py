@@ -2923,20 +2923,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # FIXME: Try using `auto_dispatch_capture=True`
                     update_mla_attn_dcp_pcp_params(self.update_stream,
                                                    forward_context,
-                                                   positions.shape[0])
+                                                   num_tokens)
                 else:
                     # FIXME: Try using `auto_dispatch_capture=True`
                     update_mla_attn_params(self.update_stream, forward_context,
-                                           positions.shape[0],
+                                           num_tokens,
                                            self.speculative_config)
             else:
                 if self.pcp_size * self.dcp_size > 1:
                     update_attn_dcp_pcp_params(self.update_stream,
                                                forward_context,
-                                               positions.shape[0])
+                                               num_tokens)
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       positions.shape[0])
+                                       num_tokens)
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
