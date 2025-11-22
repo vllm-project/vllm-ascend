@@ -3,7 +3,7 @@ import torch_npu
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import get_ascend_soc_version, AscendSocVersion
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -25,7 +25,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         p: torch.Tensor,
     ) -> torch.Tensor:
         # npu_top_k_top_p uses the operator aclnnApplyTopKTopP, but aclnnApplyTopKTopP currently does not support 310P
-        if not is_310p() and p is not None and k is not None and 1 <= int(
+        if get_ascend_soc_version() != AscendSocVersion._310P and p is not None and k is not None and 1 <= int(
                 k.max()) <= 1024:
             # npu_top_k_top_p's parameter order is (logits, p, k), not (logits, k, p)
             return torch_npu.npu_top_k_top_p(logits, p, k)

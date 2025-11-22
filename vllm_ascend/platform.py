@@ -30,7 +30,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, get_ascend_soc_version, AscendSocVersion,
                                is_vl_model, prefill_context_parallel_enable,
                                update_aclgraph_sizes,
                                update_cudagraph_capture_sizes,
@@ -344,7 +344,7 @@ class NPUPlatform(Platform):
                     cache_config.block_size = origin_block_size
 
         # Activate custom ops for v1, except on 310P
-        if not is_310p():
+        if get_ascend_soc_version() != AscendSocVersion._310P:
             compilation_config.custom_ops = ["all"]
 
         # If ascend_scheduler_config is enabled,

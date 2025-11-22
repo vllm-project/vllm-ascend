@@ -48,7 +48,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
@@ -119,14 +118,6 @@ def _unregister_print_streams_on_exit():
 
 
 atexit.register(_unregister_print_streams_on_exit)
-
-
-def is_310p():
-    global _IS_310P
-    if _IS_310P is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
-    return _IS_310P
 
 
 def is_enable_nz():
@@ -732,31 +723,29 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
-# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
-# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
-    UNDEFINED = 2
+    _310P = 2
+    A5 = 3
 
 
 _ascend_soc_version = None
 
-
-def init_ascend_soc_version():
-    soc_version = torch_npu.npu.get_soc_version()
-    global _ascend_soc_version
-    if 220 <= soc_version <= 225:
-        _ascend_soc_version = AscendSocVersion.A2
-    elif 250 <= soc_version <= 255:
-        _ascend_soc_version = AscendSocVersion.A3
-    else:
-        _ascend_soc_version = AscendSocVersion.UNDEFINED
+soc_version_dict = {
+    "310P": AscendSocVersion._310P,
+    "A2": AscendSocVersion.A2,
+    "A3": AscendSocVersion.A3,
+    "A5": AscendSocVersion.A5,
+}
 
 
 def get_ascend_soc_version():
     global _ascend_soc_version
-    assert _ascend_soc_version is not None
+    if _ascend_soc_version is None:
+        from vllm_ascend import _build_info  # type: ignore
+        assert _build_info.__soc_version__ in soc_version_dict
+        _ascend_soc_version = soc_version_dict[_build_info.__soc_version__]
     return _ascend_soc_version
 
 

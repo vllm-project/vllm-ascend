@@ -49,7 +49,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, get_ascend_soc_version, AscendSocVersion,
                                nd_to_nz_2d, nd_to_nz_spec,
                                prefill_context_parallel_enable,
                                weak_ref_tensors)
@@ -86,7 +86,7 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             return (2, num_blocks, num_kv_heads * head_size // 16, block_size,
                     16)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -354,7 +354,7 @@ class AscendAttentionMetadataBuilder:
         query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
 
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             if attn_state == AscendAttentionState.PrefillNoCache:
                 mask_nz = nd_to_nz_2d(attn_mask)
                 attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
@@ -705,7 +705,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         mask = attn_metadata.attn_mask
 
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             # align q k v output tensors
             query = aligned_16(query)
             key = aligned_16(key)
@@ -786,7 +786,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             # seq_lens_tensor needs to be transferred to the device for 310P.
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
@@ -860,7 +860,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert attn_metadata is not None
         assert attn_metadata.attn_mask is not None
 
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             # Do reformat in case of broadcasted tensors.
             attn_metadata.attn_mask = \
                 torch_npu.npu_format_cast(attn_metadata.attn_mask.contiguous(),

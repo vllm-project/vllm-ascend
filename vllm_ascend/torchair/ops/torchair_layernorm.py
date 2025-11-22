@@ -57,9 +57,9 @@ def torchair_rmsnorm_forward_oot(
 
     import torch_npu
 
-    from vllm_ascend.utils import is_310p
+    from vllm_ascend.utils import get_ascend_soc_version, AscendSocVersion
     if residual is not None:
-        if is_310p():
+        if get_ascend_soc_version() == AscendSocVersion._310P:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)

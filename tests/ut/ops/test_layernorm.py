@@ -7,6 +7,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 from tests.ut.base import PytestBase
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.utils import AscendSocVersion
 
 
 def mock_rms_norm(x, weight, eps):
@@ -60,8 +61,8 @@ class TestAscendRMSNorm(PytestBase):
 
     # Test case for addrmsnorm + w8a8 quant fusion
     def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
-        mock_is_310p = mocker.patch("vllm_ascend.utils.is_310p")
-        mock_is_310p.return_value = False
+        mock_soc_version = mocker.patch("vllm_ascend.utils.get_ascend_soc_version")
+        mock_soc_version.return_value = AscendSocVersion.A3
         mock_get_forward_context = mocker.patch(
             "vllm_ascend.ops.layernorm.get_forward_context")
 
