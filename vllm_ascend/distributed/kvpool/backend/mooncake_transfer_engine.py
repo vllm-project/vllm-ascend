@@ -1,3 +1,4 @@
+import ipaddress
 import threading
 from typing import Optional
 
@@ -13,6 +14,14 @@ class GlobalTE():
         self.register_buffer_lock = threading.Lock()
 
     def get_transfer_engine(self, hostname: str, device_name: Optional[str]):
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if isinstance(ip, ipaddress.IPv6Address):
+                raise RuntimeError(
+                    "The backend of mooncake's Ascend Direct Xfer Library currently does not support IPv6."
+                )
+        except ValueError:
+            pass
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
