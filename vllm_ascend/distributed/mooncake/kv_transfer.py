@@ -30,6 +30,14 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
 
+        self.group_num = self.tp_size // self.token_database.save_nums
+        if self.use_mla and self.token_database.save_nums == 1:
+            self.start_rank = self.tp_rank
+        elif self.token_database.save_nums < self.tp_size:
+            self.start_rank = self.tp_rank % self.group_num
+        else:
+            self.start_rank = 0
+
         self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
@@ -156,7 +164,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 size_list.append(size)
                 blockIds.append(block_id)
             torch.npu.current_stream().synchronize()
-            self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
+            self.m_store.put_batch(self.choose_and_shuffle(key_list),
+                                   self.choose_and_shuffle(addr_list),
+                                   self.choose_and_shuffle(size_list),
+                                   blockIds)
         else:
             torch.npu.current_stream().synchronize()
             for start, end, key in self.token_database.process_tokens(
@@ -166,6 +177,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if is_last_chunk:
             self.set_finished_request(req_id)
         self.request_queue.task_done()
+
+    def choose_and_shuffle(self, keys: list):
+        selected_keys = []
+        for i in range(self.start_rank, len(keys), self.group_num):
+            selected_keys.append(keys[i])
+        return selected_keys[self.tp_rank:] + selected_keys[:self.tp_rank]
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):
