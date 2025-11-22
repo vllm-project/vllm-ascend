@@ -292,14 +292,11 @@ class RequestTracker:
 
     def update(
         self,
-        new_token_ids: list[int],
         new_block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
-
-        self.token_ids.extend(new_token_ids)
 
         if len(new_block_ids) == 0:
             new_block_ids = []
@@ -338,6 +335,7 @@ class ReqMeta:
         skip_save: Optional[bool] = False,
         is_last_chunk: Optional[bool] = None,
         discard_partial_chunks: bool = True,
+        first_scheduled: bool = False,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -354,6 +352,7 @@ class ReqMeta:
         """
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
+        is_consumer = skip_save
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -366,9 +365,20 @@ class ReqMeta:
         num_tokens_to_save = ((input_token_len // block_size * block_size)
                               if discard_partial_chunks else input_token_len)
 
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
-        if skip_save and load_spec is None:
-            return None
+        if is_consumer:
+            if first_scheduled:
+                # If prefill generates the first token, it may be need
+                # to save the last block during PD separation.
+                prefill_saved_tokens = input_token_len - 1
+                skip_leading_tokens = prefill_saved_tokens // block_size * block_size
+                tracker.num_saved_tokens = skip_leading_tokens
+            if num_tokens_to_save <= skip_leading_tokens:
+                return None
+            skip_save = False
+        else:
+            skip_save = is_consumer or num_tokens_to_save < chunk_boundary
+            if skip_save and load_spec is None:
+                return None
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -398,7 +408,7 @@ class ReqMeta:
             block_ids=tracker.allocated_block_ids,
             save_spec=save_spec,
             load_spec=load_spec,
-            is_last_chunk=is_last_chunk,
+            is_last_chunk=is_last_chunk if not is_consumer else None,
         )
 
 
