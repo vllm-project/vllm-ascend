@@ -8,14 +8,20 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import ForwardContext
-from vllm.utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
+from vllm_ascend.distributed.kvpool.pool_scheduler import (
+    KVPoolScheduler, get_zmq_rpc_path_lookup)
 from vllm_ascend.distributed.kvpool.pool_worker import KVPoolWorker
-from vllm_ascend.distributed.kvpool.pool_scheduler import KVPoolScheduler, get_zmq_rpc_path_lookup
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import make_zmq_socket
+else:
+    from vllm.utils.network_utils import make_zmq_socket
 
 
 class AscendStoreConnector(KVConnectorBase_V1):
@@ -34,8 +40,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(
-                vllm_config, self.use_layerwise)
+            self.connector_scheduler = KVPoolScheduler(vllm_config,
+                                                       self.use_layerwise)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
@@ -44,8 +50,9 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
             assert self.connector_worker is not None
             if vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(
-                    self.connector_worker, vllm_config, self.use_layerwise)
+                self.lookup_server = LookupKeyServer(self.connector_worker,
+                                                     vllm_config,
+                                                     self.use_layerwise)
 
     ############################################################
     # Scheduler Side Methods
@@ -113,7 +120,6 @@ class AscendStoreConnector(KVConnectorBase_V1):
             return
 
         if self.use_layerwise:
-        #     self.connector_worker.wait_layer_transfer_finish()
             return
 
         self.connector_worker.wait_for_save(self._get_connector_metadata())
@@ -146,7 +152,8 @@ class LookupKeyServer:
         vllm_config: "VllmConfig",
         use_layerwise: bool,
     ):
-        self.decoder = MsgpackDecoder(torch.Tensor)
+        self.decoder = MsgpackDecoder()
+        self.decoder_tensor = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -158,13 +165,16 @@ class LookupKeyServer:
 
         self.pool_worker = pool_worker
         self.running = True
+        self.use_layerwise = use_layerwise
 
         def process_request():
             while self.running:
-                frames = self.socket.recv_multipart(copy=False)
-                token_ids = self.decoder.decode(frames)
+                all_frames = self.socket.recv_multipart(copy=False)
+                token_len = int.from_bytes(all_frames[0], byteorder="big")
+                hash_frames = all_frames[1:]
+                hashes_str = self.decoder.decode(hash_frames)
                 result = self.pool_worker.lookup_scheduler(
-                    token_ids, use_layerwise)
+                    token_len, hashes_str, self.use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 
