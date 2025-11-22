@@ -83,7 +83,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.95 \
 --rope-scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \
 --additional-config '{"ascend_scheduler_config":{"enabled":false}}' \
---compilation-config '{"cudagraph_capture_sizes":[1,4,8],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_capture_sizes":[1,4],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
 ```
 
