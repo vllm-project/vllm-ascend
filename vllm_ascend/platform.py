@@ -36,6 +36,27 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes, vllm_version_is)
 
+# set custom ops path
+CUR_DIR = os.path.dirname(os.path.realpath(__file__))
+CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "vllm_ascend", "_cann_ops_custom",
+                               "vendors", "customize")
+CUSTOM_LIB_PATH = os.path.join(CUSTOM_OPP_PATH, "op_api", "lib")
+
+if os.path.exists(CUSTOM_OPP_PATH):
+    current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
+    if current_cust_opp_path:
+        os.environ[
+            "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
+    else:
+        os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+
+if os.path.exists(CUSTOM_LIB_PATH):
+    current_lib_path = os.environ.get("LD_LIBRARY_PATH", "")
+    if current_lib_path:
+        os.environ["LD_LIBRARY_PATH"] = f"{CUSTOM_LIB_PATH}:{current_lib_path}"
+    else:
+        os.environ["LD_LIBRARY_PATH"] = CUSTOM_LIB_PATH
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
