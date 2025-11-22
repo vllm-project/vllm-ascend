@@ -437,6 +437,7 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
         target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes,
                                                 reverse=True)
     else:
+        # in newer version, vVLLM use ascending order of cudagraph_capture_sizes.
         target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
     if target_cudagraph_capture_sizes == \
             vllm_config.compilation_config.cudagraph_capture_sizes:
