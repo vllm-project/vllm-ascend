@@ -1,19 +1,19 @@
-
 from typing import Any, Optional
 
-import torch
 import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+    KVConnectorMetadata
 from vllm.utils import logger, make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kvpool.config_data import (
-    LoadSpec, AscendConnectorMetadata, ReqMeta, RequestTracker)
+    AscendConnectorMetadata, LoadSpec, ReqMeta, RequestTracker)
 
 
 class KVPoolScheduler:
@@ -59,14 +59,13 @@ class KVPoolScheduler:
             return 0, False
 
         if self._discard_partial_chunks:
-            token_block_end = len(request.prompt_token_ids
-                                  ) // self._block_size * self._block_size
-            token_ids = torch.tensor(
-                request.prompt_token_ids[:token_block_end])
+            token_len = len(request.prompt_token_ids
+                            ) // self._block_size * self._block_size
         else:
-            token_ids = torch.tensor(request.prompt_token_ids)
+            token_len = len(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(token_ids)
+        num_external_hit_tokens = self.client.lookup(token_len,
+                                                     request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -104,9 +103,7 @@ class KVPoolScheduler:
         local_block_ids = []
         if num_external_tokens > 0:
             local_block_ids = blocks.get_block_ids()[0]
-        
-        logger.info(f"request:{request.request_id},hash:{request.block_hashes}")
-        logger.info(f"blocks:{local_block_ids},hash:{[block._block_hash for block in blocks[0]]}")    
+
         self._unfinished_requests[request.request_id] = (request,
                                                          local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -164,12 +161,15 @@ class KVPoolScheduler:
                                       self._block_size * self._block_size)
                                      if self._discard_partial_chunks else len(
                                          request.prompt_token_ids))
+            request_tuple = self._unfinished_requests.get(request.req_id)
+            request_real = request_tuple[0]
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 load_spec=load_spec,
                 skip_save=force_skip_save,
-                is_last_chunk=len(request_tracker.token_ids)
+                block_hashes=request_real.block_hashes,
+                is_last_chunk=request_tracker.token_len
                 >= last_chunk_tokens_num,
                 discard_partial_chunks=self._discard_partial_chunks,
             )
@@ -178,6 +178,7 @@ class KVPoolScheduler:
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if isinstance(cached_reqs, list) and not force_skip_save:
+            #合并一下
             for i, req in enumerate(cached_reqs):
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
@@ -185,12 +186,15 @@ class KVPoolScheduler:
                                           self._block_size * self._block_size)
                                          if self._discard_partial_chunks else
                                          len(req.prompt_token_ids))
+                req_tuple = self._unfinished_requests.get(req_id)
+                request = req_tuple[0]
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     load_spec=None,
                     skip_save=force_skip_save,
-                    is_last_chunk=len(request_tracker.token_ids)
+                    block_hashes=request.block_hashes,
+                    is_last_chunk=request_tracker.token_len
                     >= last_chunk_tokens_num,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
@@ -203,7 +207,7 @@ class KVPoolScheduler:
                 req_tuple = self._unfinished_requests.get(req_id)
                 if req_tuple:
                     request = req_tuple[0]
-                    num_current_tokens = len(request_tracker.token_ids)
+                    num_current_tokens = request_tracker.token_len
                     new_token_ids = request.all_token_ids[
                         num_current_tokens:num_current_tokens + num_new_tokens]
                 else:
@@ -215,8 +219,7 @@ class KVPoolScheduler:
                     continue
                 request_tracker.update(new_token_ids, new_block_ids)
                 # decode not save
-                if len(request_tracker.token_ids) > len(
-                        request.prompt_token_ids):
+                if request_tracker.token_len > len(request.prompt_token_ids):
                     continue
 
                 last_chunk_tokens_num = ((len(request.prompt_token_ids) //
@@ -228,7 +231,8 @@ class KVPoolScheduler:
                     self._block_size,
                     load_spec=None,
                     skip_save=force_skip_save,
-                    is_last_chunk=len(request_tracker.token_ids)
+                    block_hashes=request.block_hashes,
+                    is_last_chunk=request_tracker.token_len
                     >= last_chunk_tokens_num,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
@@ -251,8 +255,7 @@ class KVPoolScheduler:
                     num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
                     req_id=request_id,
-                    token_ids=request.prompt_token_ids[:num_tokens_to_compute].
-                    copy(),
+                    token_len=num_tokens_to_compute,
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
                 )
@@ -264,6 +267,7 @@ class KVPoolScheduler:
                     self._block_size,
                     load_spec=load_spec,
                     skip_save=None,
+                    block_hashes=request.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -304,9 +308,12 @@ class LookupKeyClient:
             bind=False,
         )
 
-    def lookup(self, token_ids: torch.Tensor) -> int:
-        request = self.encoder.encode(token_ids)
-        self.socket.send_multipart(request, copy=False)
+    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+        hash_strs = [h.hex() for h in block_hashes]
+        hash_frames = self.encoder.encode(hash_strs)
+        token_len = token_len.to_bytes(4, byteorder="big")
+        all_frames = [token_len] + list(hash_frames)
+        self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
