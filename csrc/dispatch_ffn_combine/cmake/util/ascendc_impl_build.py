@@ -13,6 +13,9 @@ import const_var
 import opdesc_parser
 
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
+CATLASS_INCLUDE_DIR = os.path.realpath(
+    os.path.join(PYF_PATH, "..", "..", "..", "third_party", "catlass",
+                 "include"))
 
 IMPL_HEAD = '''#!/usr/bin/env python
 # -*- coding: UTF-8 -*-
@@ -167,6 +170,13 @@ def {}({}, kernel_name="{}", impl_mode=""):
     options.append("-I" + os.path.join(tikcpp_path, "tikcfw", "impl"))
     options.append("-I" + os.path.join(tikcpp_path, "tikcfw", "interface"))
     options.append("-I" + os.path.join(PYF_PATH, "..", "ascendc", "common"))
+    catlass_include_dir = "{}"
+    if os.path.isdir(catlass_include_dir):
+        options.append("-I" + catlass_include_dir)
+    else:
+        CommonUtility.print_compile_log(
+            "", "catlass include dir not found: " + catlass_include_dir,
+            AscendCLogLevel.LOG_INFO)
     if impl_mode == "high_performance":
         options.append("-DHIGH_PERFORMANCE=1")
     elif impl_mode == "high_precision":
@@ -590,6 +600,7 @@ class AdpBuilder(opdesc_parser.OpDesc):
                 kern_name,
                 virt_exprs,
                 argsval,
+                CATLASS_INCLUDE_DIR,
                 self.custom_compile_options,
                 self.custom_all_compile_options,
                 self.op_intf,
