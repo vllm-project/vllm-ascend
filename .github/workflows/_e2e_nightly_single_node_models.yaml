@@ -59,7 +59,7 @@ jobs:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       env:
         VLLM_USE_MODELSCOPE: True
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
