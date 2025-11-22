@@ -20,6 +20,7 @@
 import copy
 from typing import Optional, Union
 
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 import torch
 import torch.nn as nn
 import torch_npu
@@ -299,16 +300,21 @@ class NPUWorker(WorkerBase):
                                         all_gather_group=get_tp_group())
 
         kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
+        ec_connector_output = getattr(output, "ec_connector_output", None)
+
+        if not kv_connector_output and not ec_connector_output:
             return None
 
         # In case of PP with kv transfer, we need to pass through the
         # kv_connector_output
         if (not kv_connector_output.finished_sending
-                and not kv_connector_output.finished_recving):
+                and not kv_connector_output.finished_recving
+                and not ec_connector_output.finished_sending
+                and not ec_connector_output.finished_recving):
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        output.ec_connector_output = ec_connector_output
         return output
 
     def load_model(self) -> None:
@@ -413,6 +419,9 @@ class NPUWorker(WorkerBase):
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
 
+        # Init ec connector here before KV caches caches init
+        # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
+        ensure_ec_transfer_initialized(self.vllm_config)
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
