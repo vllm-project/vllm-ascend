@@ -134,6 +134,9 @@ jobs:
           - name: deepseek3_2-exp-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
+          - name: glm-4-5
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_glm4_5.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.11.0
