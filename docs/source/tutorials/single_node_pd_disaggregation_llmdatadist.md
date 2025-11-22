@@ -6,7 +6,7 @@ vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide takes on
 
 Using the Qwen2.5-VL-7B-Instruct model as an example, use vllm-ascend v0.11.0rc1 (with vLLM v0.11.0) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture. Assume the IP address is 192.0.0.1.
 
-## Verify Multi-Node Communication Environment
+## Verify Communication Environment
 
 ### Verification Process
 
@@ -166,7 +166,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
                 {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
                 {"type": "text", "text": "What is the text in the illustrate?"}
             ]}
-            ]
+            ],
         "max_tokens": 100,
         "temperature": 0
     }'
