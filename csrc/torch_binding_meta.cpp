@@ -69,6 +69,31 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(const at::Tensor &x, const at::Tensor &expert_ids,
+                                            const at::Tensor &gmm1_permuted_weight,
+                                            const at::Tensor &gmm1_permuted_weight_scale,
+                                            const at::Tensor &gmm2_weight, const at::Tensor &gmm2_weight_scale,
+                                            const at::Tensor &expert_smooth_scales_optional,
+                                            const at::Tensor &expert_scales_optional,
+                                            c10::string_view hcom_ep_name,
+                                            int64_t num_ranks, int64_t rank, int64_t moe_expert_num,
+                                            int64_t shared_expert_num, int64_t shared_expert_rank_num,
+                                            int64_t quant_mode, int64_t global_bs)
+{
+    auto x_shape = x.sizes();
+    auto experts_shape = expert_ids.sizes();
+    int h = x_shape[1];
+    int bs = experts_shape[0];
+
+    at::Tensor output = at::empty({bs, h}, x.options().device(at::kMeta));
+
+    bool is_shared_expert = (rank < shared_expert_rank_num);
+    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (num_ranks - shared_expert_rank_num);
+    at::Tensor ep_recv_count = at::empty({num_local_experts * num_ranks}, expert_ids.options().device(at::kMeta));
+
+    return {output, ep_recv_count};
+}
+
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                        int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -132,5 +157,7 @@ namespace {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    // Masked dispatch_gmm_combine_decode_meta meta implementation
+    ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
 }
 }
