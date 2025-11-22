@@ -21,6 +21,7 @@ Run `pytest tests/ops/test_fused_moe.py`.
 """
 
 import gc
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -86,6 +87,27 @@ def torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map):
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
             topk_weights.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+
+
+def check_npu_moe_gating_top_k(hidden_states: torch.Tensor, top_k: int,
+                               topk_group: Optional[int],
+                               num_expert_group: Optional[int],
+                               custom_routing: bool):
+    if custom_routing:
+        return False
+    topk_group = topk_group if topk_group is not None else 1
+    num_expert_group = num_expert_group if num_expert_group is not None else 1
+    if top_k < 1 or \
+        top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
+        return False
+    if topk_group < 1 or topk_group > num_expert_group:
+        return False
+    if topk_group * hidden_states.shape[-1] / num_expert_group < top_k:
+        return False
+    if not (num_expert_group > 0 and hidden_states.shape[-1] % num_expert_group
+            == 0 and hidden_states.shape[-1] // num_expert_group > 2):
+        return False
+    return True
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
@@ -303,7 +325,9 @@ def test_select_experts(
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        if use_grouped_topk:
+        call_moe_gatingtopk = check_npu_moe_gating_top_k(
+            hidden_states, topk, topk_group, num_expert_group, custom_routing)
+        if not call_moe_gatingtopk and use_grouped_topk:
             mock_native_grouped_topk.assert_called_once()
         else:
             mock_native_grouped_topk.assert_not_called()
