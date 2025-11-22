@@ -284,8 +284,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_flash_attention')
-    def test_forward_prefill_no_cache(self, mock_flash_attention,
-                                      mock_reshape_cache,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_prefill_no_cache(self, mock_is_ascend950,
+                                      mock_flash_attention, mock_reshape_cache,
                                       mock_get_forward_context):
         """Test forward pass in PrefillNoCache state"""
         query = torch.randn(10, 8 * 64)
@@ -316,7 +318,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_prefill_cache_hit(self, mock_get_forward_context,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_prefill_cache_hit(self, mock_is_ascend950,
+                                       mock_get_forward_context,
                                        mock_npu_fused_infer_attention_score,
                                        mock_npu_reshape_and_cache):
         """Test forward pass in PrefillCacheHit state"""
@@ -352,7 +357,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_decode_only(self, mock_get_forward_context,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_decode_only(self, mock_is_ascend950,
+                                 mock_get_forward_context,
                                  mock_npu_reshape_and_cache,
                                  mock_paged_attention):
         """Test forward pass in DecodeOnly state"""
@@ -383,7 +391,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('torch_npu._npu_reshape_and_cache')
-    def test_forward_decode_only_swa(self, mock_npu_reshape_and_cache,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_decode_only_swa(self, mock_is_ascend950,
+                                     mock_npu_reshape_and_cache,
                                      mock_fused_infer_attention_score,
                                      mock_get_forward_context):
         """Test forward pass in DecodeOnly state"""
@@ -416,9 +427,12 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('torch_npu._npu_reshape_and_cache')
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
     def test_forward_decode_only_swa_seq_len_mismatch(
-            self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score,
-            mock_paged_attention, mock_get_forward_context):
+            self, mock_is_ascend950, mock_npu_reshape_and_cache,
+            mock_fused_infer_attention_score, mock_paged_attention,
+            mock_get_forward_context):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
@@ -453,7 +467,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.vanilla_chunked_prefill')
-    def test_forward_head_size_192(self, mock_vanilla_prefill,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_head_size_192(self, mock_is_ascend950,
+                                   mock_vanilla_prefill,
                                    mock_npu_reshape_and_cache, mock_is_310p,
                                    mock_get_forward_context):
         """Test forward pass when head_size is 192"""
@@ -488,7 +505,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('torch_npu._npu_reshape_and_cache')
-    def test_forward_normal_v1_situation(self, mock_npu_reshape_and_cache,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_normal_v1_situation(self, mock_is_ascend950,
+                                         mock_npu_reshape_and_cache,
                                          mock_npu_fused_infer_attention_score,
                                          mock_get_forward_context):
         """Test forward pass in normal V1 situation"""
@@ -524,7 +544,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_310p_device(self, mock_get_forward_context, mock_is_310p,
+    @patch('vllm_ascend.attention.attention_v1.is_Ascend950',
+           return_value=False)
+    def test_forward_310p_device(self, mock_is_ascend950,
+                                 mock_get_forward_context, mock_is_310p,
                                  mock_npu_fused_infer_attention_score,
                                  mock_npu_reshape_and_cache,
                                  mock_npu_format_cast):

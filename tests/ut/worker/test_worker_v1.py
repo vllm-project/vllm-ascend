@@ -1075,7 +1075,9 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker_v1.logger")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._warm_up_atb")
-    def test_compile_or_warm_up_model_with_eager_mode(self, mock_warm_up_atb,
+    @patch('vllm_ascend.worker.worker_v1.is_Ascend950', return_value=False)
+    def test_compile_or_warm_up_model_with_eager_mode(self, mock_is_ascend950,
+                                                      mock_warm_up_atb,
                                                       mock_logger,
                                                       mock_seed_everything):
         """Test compile_or_warm_up_model method - eager mode"""
@@ -1124,8 +1126,10 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker_v1.logger")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._warm_up_atb")
+    @patch('vllm_ascend.worker.worker_v1.is_Ascend950', return_value=False)
     def test_compile_or_warm_up_model_with_graph_capture(
-            self, mock_warm_up_atb, mock_logger, mock_seed_everything):
+            self, mock_is_ascend950, mock_warm_up_atb, mock_logger,
+            mock_seed_everything):
         """Test compile_or_warm_up_model method - with graph capture enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 

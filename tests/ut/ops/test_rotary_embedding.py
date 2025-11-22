@@ -430,7 +430,9 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
-    def test_forward_oot_1d_positions(self, mock_cpu_arc, mock_npu_mrope):
+    @patch('vllm_ascend.ops.rotary_embedding.is_Ascend950', return_value=False)
+    def test_forward_oot_1d_positions(self, mock_is_ascend950, mock_cpu_arc,
+                                      mock_npu_mrope):
         mock_cpu_arc.return_value = CpuArchEnum.ARM
 
         mock_npu_mrope.return_value = (torch.zeros_like(self.query),
@@ -452,7 +454,9 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
-    def test_forward_oot_2d_positions(self, mock_cpu_arc, mock_npu_mrope):
+    @patch('vllm_ascend.ops.rotary_embedding.is_Ascend950', return_value=False)
+    def test_forward_oot_2d_positions(self, mock_is_ascend950, mock_cpu_arc,
+                                      mock_npu_mrope):
         mock_cpu_arc.return_value = CpuArchEnum.ARM
 
         mock_npu_mrope.return_value = (torch.zeros_like(self.query),

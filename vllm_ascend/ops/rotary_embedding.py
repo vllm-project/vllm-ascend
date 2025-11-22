@@ -27,7 +27,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_custom_op, is_310p
+from vllm_ascend.utils import enable_custom_op, is_310p, is_Ascend950
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -409,7 +409,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         # TODO: This judgment will be removed once the mrope precision issue is fixed
         if self.mrope_section != [
                 16, 24, 24
-        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86:
+        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86 or \
+            is_Ascend950():
             return super().forward_oot(positions, query, key)
 
         import torch_npu
