@@ -1,7 +1,7 @@
 # Standard
 from enum import Enum
-import torch
 
+import torch
 from vllm.config import ParallelConfig
 from vllm.utils import logger
 
@@ -16,9 +16,8 @@ class MmcDirect(Enum):
 
 
 class MemcacheBackend(Backend):
-    def __init__(
-        self, parallel_config: ParallelConfig
-    ):
+
+    def __init__(self, parallel_config: ParallelConfig):
         try:
             # from pymmc import DistributedObjectStore
             from memcache import DistributedObjectStore
@@ -29,12 +28,9 @@ class MemcacheBackend(Backend):
                 "to run vLLM with MemcacheConnector.") from e
         try:
             self.rank = parallel_config.rank
-            self.dp_rank = parallel_config.data_parallel_rank
-            self.dp_size = parallel_config.data_parallel_size
-            self.local_rank = self.dp_rank * self.dp_size + self.rank
             self.store = DistributedObjectStore()
             res = self.store.init(self.rank)
-            assert res==0
+            assert res == 0
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise
@@ -42,7 +38,7 @@ class MemcacheBackend(Backend):
             logger.error(
                 "An error occurred while loading the configuration: %s", exc)
             raise
-   
+
     def set_device(self):
         device = torch.device(f"npu:{self.rank}")
         torch.npu.set_device(device)
@@ -53,29 +49,27 @@ class MemcacheBackend(Backend):
             if ret_value != 0:
                 raise RuntimeError("Memcache memory registration failed.")
 
-    def exists(self, keys:list[str]) -> list[bool]:
+    def exists(self, keys: list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
 
-    def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def get(self, key: list[str], addr: list[list[int]],
+            size: list[list[int]]):
         try:
-            res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
+            res = self.store.batch_get_into_layers(key, addr, size,
+                                                   MmcDirect.COPY_G2L.value)
             for value in res:
                 if value != 0:
-                    logger.error(
-                        f"Failed to get key {key},res:{res}"
-                    )
+                    logger.error(f"Failed to get key {key},res:{res}")
         except Exception as e:
             logger.error(f"Failed to get key {key}. {e}")
 
-    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+    def put(self, key: list[str], addr: list[list[int]],
+            size: list[list[int]]):
         try:
-            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
+            res = self.store.batch_put_from_layers(key, addr, size,
+                                                   MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
-                    logger.error(
-                        f"Failed to get key {key},res:{res}"
-                    )
+                    logger.error(f"Failed to get key {key},res:{res}")
         except Exception as e:
-            logger.error(
-                f"Failed to put key {key},error:{e}"
-            )
+            logger.error(f"Failed to put key {key},error:{e}")
