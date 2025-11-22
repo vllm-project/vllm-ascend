@@ -747,6 +747,8 @@ class MtpProposer(Proposer):
                         input_ids=self.input_ids[:num_input_tokens],
                         positions=self.positions[:num_input_tokens],
                         hidden_states=self.hidden_states[:num_input_tokens])
+                    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        hidden_states.contiguous(), True)
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                         if self.vllm_config.model_config.use_mla:
