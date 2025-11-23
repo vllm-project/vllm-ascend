@@ -68,29 +68,29 @@ jobs:
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
 
-  # single-node-tests:
-  #   name: single-node
-  #   if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-  #   needs: multi-node-tests
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       test_config:
-  #         - name: qwen3-32b
-  #           os: linux-aarch64-a2-4
-  #           tests: tests/e2e/nightly/models/test_qwen3_32b.py
-  #         - name: qwen3-32b-in8-a2
-  #           os: linux-aarch64-a2-4
-  #           tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
-  #         - name: test_custom_op
-  #           os: linux-aarch64-a2-1
-  #           tests: tests/e2e/nightly/ops
-  #   uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-  #   with:
-  #     vllm: v0.11.0
-  #     runner: ${{ matrix.test_config.os }}
-  #     tests: ${{ matrix.test_config.tests }}
-  #     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+  single-node-tests:
+    name: single-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: multi-node-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: qwen3-32b
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/models/test_qwen3_32b.py
+          - name: qwen3-32b-in8-a2
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
+          - name: test_custom_op
+            os: linux-aarch64-a2-1
+            tests: tests/e2e/nightly/ops
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.test_config.os }}
+      tests: ${{ matrix.test_config.tests }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
 
   single-node-accuracy-tests:
     if: >-
