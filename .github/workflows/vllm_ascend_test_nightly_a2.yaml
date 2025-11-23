@@ -44,8 +44,7 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    if: always()
-    #if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
