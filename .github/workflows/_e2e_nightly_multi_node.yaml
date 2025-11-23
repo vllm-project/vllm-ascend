@@ -197,8 +197,6 @@ jobs:
           run: |
             POD_PREFIX="${POD_PREFIX:-vllm-0}"
             SIZE="${{ inputs.size }}"
-            SLEEP_FOLLOWER=2
-            SLEEP_LEADER=2
             TIMEOUT=1200  # default timeout 20 minutes
 
             echo "Waiting for Pods in namespace [$NAMESPACE] to become Running and Ready (timeout ${TIMEOUT}s)..."
