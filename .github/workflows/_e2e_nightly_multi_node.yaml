@@ -116,9 +116,39 @@ jobs:
 
         - name: Clear resources
           run: |
-            # pre clear the crd resources created by lws
-            kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
-            sleep 10
+            set -euo pipefail
+
+            CRD_NAME="${CRD_NAME:-vllm}"
+            TIMEOUT=${TIMEOUT:-120}
+            SLEEP_INTERVAL=2
+
+            echo "Deleting leaderworkerset [$CRD_NAME] in namespace [$NAMESPACE]..."
+            kubectl delete leaderworkerset "$CRD_NAME" -n "$NAMESPACE" --ignore-not-found
+
+            echo "Waiting for all pods starting with 'vllm' to be deleted..."
+            START_TIME=$(date +%s)
+
+            while true; do
+              NOW=$(date +%s)
+              ELAPSED=$((NOW - START_TIME))
+
+              if [[ $ELAPSED -ge $TIMEOUT ]]; then
+                echo "Timeout reached ($TIMEOUT seconds), some pods still exist:"
+                kubectl get pods -n "$NAMESPACE" | grep '^vllm' || true
+                exit 1
+              fi
+
+              PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep '^vllm' || true)
+
+              if [[ -z "$PODS_EXIST" ]]; then
+                echo "All vllm pods deleted."
+                break
+              else
+                echo "Waiting for pods to be deleted: $PODS_EXIST"
+                sleep $SLEEP_INTERVAL
+              fi
+            done
+
         - name: Launch cluster
           id: launcher
           run: |
