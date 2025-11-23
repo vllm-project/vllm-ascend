@@ -118,6 +118,7 @@ jobs:
           run: |
             # pre clear the crd resources created by lws
             kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
+            sleep 10
         - name: Launch cluster
           id: launcher
           run: |
