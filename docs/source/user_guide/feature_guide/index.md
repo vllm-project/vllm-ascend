@@ -14,4 +14,5 @@ eplb_swift_balancer
 netloader
 dynamic_batch
 kv_pool_mooncake
+external_dp
 :::
