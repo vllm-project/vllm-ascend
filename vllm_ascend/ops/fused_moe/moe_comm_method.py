@@ -284,7 +284,7 @@ class FusedMC2CommImpl(MoECommMethod):
             scale2=w2_scale,
             probs=topk_weights.to(torch.float32),
             group=self.token_dispatcher.moe_all_to_all_group_name,
-            max_output_size=512,
+            max_output_size=4096,
             out=out,
         )
         return out
@@ -370,7 +370,7 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             scale2=w2_scale,
             probs=topk_weights.to(torch.float32),
             group=self.token_dispatcher.moe_all_to_all_group_name,
-            max_output_size=512,
+            max_output_size=65536,
             out=out,
         )
         return out
