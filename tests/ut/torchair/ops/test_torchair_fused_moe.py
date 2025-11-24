@@ -23,7 +23,7 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 import vllm_ascend
-from vllm_ascend.ascend_forward_context import _get_fused_moe_state
+from vllm_ascend.ascend_forward_context import get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
@@ -360,7 +360,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         global_redundant_expert_num = vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_config(
         ).init_redundancy_expert
         is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
-        forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
+        forward_context = MagicMock(fused_moe_state=get_fused_moe_state(
             ep_size, is_prefill, is_deepseek_v3_r1))
         with patch(
                 "vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context",
@@ -396,7 +396,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         ep_size = others_param
         is_prefill = False
         forward_context = MagicMock(
-            fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
+            fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
         with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
              patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3):
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])

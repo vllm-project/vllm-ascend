@@ -81,8 +81,7 @@ class TorchairMtpProposer(MtpProposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None) -> None:
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if not with_prefill:
             skip_attn = False
@@ -342,8 +341,7 @@ class TorchairMtpProposer(MtpProposer):
         num_tokens_across_dp = self.runner.num_tokens_across_dp
         with_prefill = self.runner.with_prefill
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
