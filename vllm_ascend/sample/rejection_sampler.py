@@ -16,6 +16,8 @@ if vllm_version_is("0.11.0"):
 else:
     from vllm.v1.sample.rejection_sampler import apply_sampling_constraints
 
+import triton.language as tl
+
 PLACEHOLDER_TOKEN_ID = -1
 GREEDY_TEMPERATURE = -1
 # Maximum number of speculative draft tokens allowed per request in a single
