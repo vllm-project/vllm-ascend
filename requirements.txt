@@ -31,4 +31,7 @@ numba
 torch-npu==2.8.0
 
 transformers<=4.57.1
+
+# Install triton-ascend
+triton-ascend @ https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'
 fastapi<0.124.0
