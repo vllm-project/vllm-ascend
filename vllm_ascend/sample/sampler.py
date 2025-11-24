@@ -17,16 +17,17 @@ def random_sample(
     We use this function instead of torch.multinomial because torch.multinomial
     causes CPU-GPU synchronization.
     """
-    q = torch.empty_like(probs)
     # NOTE(woosuk): To batch-process the requests without their own seeds,
     # which is the common case, we first assume that every request does
     # not have its own seed. Then, we overwrite the values for the requests
     # that have their own seeds.
     if len(generators) != probs.shape[0]:
         with npu_stream_switch(global_stream()):
+            q = torch.empty_like(probs)
             q.exponential_()
         torch.npu.current_stream().wait_stream(global_stream())
     if generators:
+        q = torch.empty_like(probs)
         # TODO(woosuk): This can be slow because we handle each request
         # one by one. Optimize this.
         for i, generator in generators.items():
