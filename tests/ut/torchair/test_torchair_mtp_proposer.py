@@ -7,7 +7,6 @@ from vllm.config import CacheConfig, VllmConfig
 
 from tests.ut.base import PytestBase
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestTorchairMtpProposer(PytestBase):
@@ -40,14 +39,8 @@ class TestTorchairMtpProposer(PytestBase):
         mocker.patch(
             "vllm_ascend.torchair.torchair_mtp_proposer.MtpProposer.__init__",
             return_value=None)
-
-        if vllm_version_is("0.11.0"):
-            mock_set_default_dtype = mocker.patch(
-                'vllm.model_executor.model_loader.utils.set_default_torch_dtype'
-            )
-        else:
-            mock_set_default_dtype = mocker.patch(
-                'vllm.utils.torch_utils.set_default_torch_dtype')
+        mock_set_default_dtype = mocker.patch(
+            'vllm.utils.torch_utils.set_default_torch_dtype')
         mock_set_default_dtype.return_value.__enter__.return_value = None
 
         mock_model_loader = MagicMock()

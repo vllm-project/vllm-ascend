@@ -5,13 +5,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -22,14 +24,6 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.config import CompilationLevel
-    from vllm.utils import is_pin_memory_available
-else:
-    from vllm.config import CompilationMode
-    from vllm.utils.platform_utils import is_pin_memory_available
 
 PADDING_SLOT_ID = -1
 
@@ -52,16 +46,9 @@ class EagleProposer(Proposer):
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size(
         )
 
-        if vllm_version_is("0.11.0"):
-            self.use_cuda_graph = (
-                self.vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE
-                and not self.vllm_config.model_config.enforce_eager)
-        else:
-            self.use_cuda_graph = (
-                self.vllm_config.compilation_config.mode
-                == CompilationMode.VLLM_COMPILE
-                and not self.vllm_config.model_config.enforce_eager)
+        self.use_cuda_graph = (self.vllm_config.compilation_config.mode
+                               == CompilationMode.VLLM_COMPILE and
+                               not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
             reversed(
