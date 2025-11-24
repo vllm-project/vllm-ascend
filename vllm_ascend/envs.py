@@ -176,6 +176,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable xlite for better performance.
+    "VLLM_ASCEND_ENABLE_XLITE":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_XLITE", '0')),
 }
 
 # end-env-vars-definition

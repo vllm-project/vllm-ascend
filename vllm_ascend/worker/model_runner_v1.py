@@ -140,7 +140,7 @@ from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable,
+                               is_enable_xlite, is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
@@ -939,6 +939,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
         if isinstance(self.model, ACLGraphWrapper):
+            return self.model.unwrap()
+        if is_enable_xlite():
             return self.model.unwrap()
         return self.model
 
@@ -3213,6 +3215,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
+        if is_enable_xlite():
+            from vllm_ascend.xlite.xlite import XliteWrapper
+            self.model = XliteWrapper(self.model, self.vllm_config)
 
     def _convert_torch_format(self, tensor):
         if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
@@ -3245,6 +3250,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+
+        if is_enable_xlite():
+            self.model.register_kv_caches(self.kv_caches)
 
     def _align_memory(self, tensor: torch.Tensor,
                       alignment: int) -> torch.Tensor:

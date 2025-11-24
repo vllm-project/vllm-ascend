@@ -62,6 +62,7 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
+_ENABLE_XLITE = None
 
 
 def _print_callback_on_stream(*args):
@@ -1000,3 +1001,25 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+
+def is_enable_xlite(rank: int = 0,
+                    vllm_config: Optional[VllmConfig] = None) -> bool:
+    global _ENABLE_XLITE
+    if _ENABLE_XLITE is None:
+        if not vllm_config:
+            raise ValueError(
+                "vllm_config must be provided when _ENABLE_XLITE is None")
+        _ENABLE_XLITE = ((envs_ascend.VLLM_ASCEND_ENABLE_XLITE != 0)
+                         and not bool(vllm_config.speculative_config)
+                         and vllm_config.parallel_config.pipeline_parallel_size
+                         == 1 and vllm_config.cache_config.block_size == 128)
+
+        if not _ENABLE_XLITE:
+            return _ENABLE_XLITE
+
+        if rank == 0:
+            logger.info(
+                "Enable Euler Xlite. See: https://gitee.com/openeuler/GVirt/tree/master/xlite"
+            )
+    return _ENABLE_XLITE
