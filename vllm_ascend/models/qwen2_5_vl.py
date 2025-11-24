@@ -31,7 +31,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
 
-
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen2_5_VLMultiModalProcessor,
     info=Qwen2_5_VLProcessingInfo,
