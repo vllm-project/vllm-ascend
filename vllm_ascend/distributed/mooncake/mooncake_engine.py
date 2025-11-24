@@ -1,10 +1,12 @@
 # Standard
 import math
+import random
 import threading
 import time
 from typing import Generator, List, Optional, Union
 
 # Third Party
+import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.utils import logger
@@ -16,6 +18,7 @@ from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
 from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
+from vllm_ascend.distributed.mooncake_connector import string_to_int64_hash
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
@@ -47,6 +50,8 @@ class MooncakeEngine:
             "load_async", False)
         self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "register_buffer", False)
+        self.no_redundancy = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "no_redundancy", False)
         self.block_size = vllm_config.cache_config.block_size
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
@@ -73,7 +78,27 @@ class MooncakeEngine:
             self.use_mla,
         )
 
-        self.token_database = ChunkedTokenDatabase(self.metadata)
+        self.use_mla = vllm_config.model_config.is_deepseek_mla
+        if not self.no_redundancy:
+            self.need_saves = self.tp_size
+            self.saves_group = [[i] for i in range(self.tp_size)]
+        elif self.use_mla:
+            self.need_saves = 1
+            self.saves_group = [list(range(self.tp_size))]
+        else:
+            self.num_key_value_heads = vllm_config.model_config.hf_config.num_key_value_heads
+            if self.num_key_value_heads >= self.tp_size:
+                self.need_saves = self.tp_size
+                self.saves_group = [[i] for i in range(self.tp_size)]
+            else:
+                self.need_saves = self.num_key_value_heads
+                self.saves_group = np.arange(self.tp_size).reshape(
+                    -1, self.tp_size // self.num_key_value_heads).tolist()
+
+        self.save_num = self.tp_rank // (self.tp_size // self.need_saves)
+        self.token_database = ChunkedTokenDatabase(self.metadata,
+                                                   self.need_saves,
+                                                   self.save_num)
 
         self.m_store = Mooncakestore(parallel_config)
 
@@ -320,8 +345,13 @@ class MooncakeEngine:
             if save_spec is None or not save_spec.can_save:
                 continue
 
-            token_ids = request.token_ids
             req_id = request.req_id
+            if self.kv_role == "kv_producer" and self.tp_rank not in self.get_save_tp_ranks(
+                    req_id):
+                self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
+                    req_id)
+                continue
+            token_ids = request.token_ids
             assert isinstance(token_ids, torch.Tensor)
             assert token_ids.is_cpu
 
@@ -593,7 +623,7 @@ class MooncakeEngine:
                     keys.append(key.to_string())
                     starts.append(start)
                 multi_tp_keys = keys[:]
-                for i in range(1, self.tp_size):
+                for i in range(1, self.need_saves):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
                             "@0", f"@{i}", 1)
@@ -604,7 +634,7 @@ class MooncakeEngine:
                 multi_tp_values = [
                     res[i * num_block:(i + 1) *
                         num_block]  # type: ignore[index]
-                    for i in range(self.tp_size)
+                    for i in range(self.need_saves)
                 ]
                 index = self.find_min_first_non_one_index(multi_tp_values)
                 if index != -1:
@@ -621,6 +651,12 @@ class MooncakeEngine:
                        if val != 1)
         except ValueError:
             return -1
+
+    def get_save_tp_ranks(self, req_id) -> List[int]:
+        seed = string_to_int64_hash(req_id)
+        rand = random.Random(seed)
+        result = [rand.choice(group) for group in self.saves_group]
+        return result
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
