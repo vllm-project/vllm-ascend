@@ -8,11 +8,7 @@ single_npu_multimodal
 single_npu_audio
 single_npu_qwen3_embedding
 single_npu_qwen3_quantization
-<<<<<<< HEAD
-=======
-single_npu_qwen3_w4a4
 single_node_pd_disaggregation_llmdatadist
->>>>>>> ab51fcea ([Doc]Add single node PD disaggregation instructions (#4337))
 multi_npu_qwen3_next
 multi_npu
 multi_npu_moge
