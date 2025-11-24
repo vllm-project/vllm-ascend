@@ -158,11 +158,10 @@ if prefill_context_parallel_enable():
         get_prefill_context_model_parallel_world_size)
 
 if vllm_version_is("0.11.0"):
-    from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                            get_dtype_size)
+    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler
 else:
     from vllm.utils.mem_utils import DeviceMemoryProfiler
-    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 # yapf: enable
 
@@ -173,7 +172,6 @@ if vllm_version_is("0.11.0"):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 else:
-    from vllm.attention.layer import MLAAttention
     from vllm.config import CompilationMode
     from vllm.utils.import_utils import LazyLoader
     from vllm.utils.platform_utils import is_pin_memory_available
@@ -3375,105 +3373,98 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # llmdatadist need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # TODO: REFACTOR ME to sharing hybrid cache
+            if self.use_hybrid_blocks:
+                # NOTE: when sharing kvcache between linear_attn and self_attn,
+                # we should use an unified buffer of kv, which requires more
+                # address align operations in connector in pd Disaggregation scenario.
+                # The sizes of k cache and conv cache (v cache and ssm cache)
+                # could not be aligned, thus we should use an unified buffer of kv
+                # for sharing cache tensor in hybrid attention scenario
+                # |------ k cache ------|------ v cache ------|
+                # | conv cache |----- ssm cache ------|- pad -|
+                kv_cache_size = kv_cache_tensor.size if self.vllm_config.kv_transfer_config is None else kv_cache_tensor.size + alignment
+                tensor = torch.zeros(kv_cache_size,
+                                     dtype=torch.int8,
+                                     device=self.device)
+                if self.vllm_config.kv_transfer_config is not None:
+                    tensor = self._align_memory(
+                        tensor, alignment)[:kv_cache_tensor.size]
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_cache_raw_tensors[layer_name] = tensor
+                continue
+
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
-                ):
-                    # for mamba linear attention
-                    if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size,
-                                             dtype=torch.int8,
-                                             device=self.device)
-                    else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
-                        tensor = torch.zeros(cache_size_aligned,
-                                             dtype=torch.int8,
-                                             device=self.device)
-                        tensor = self._align_memory(
-                            tensor, alignment)[:kv_cache_tensor.size]
+                # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
+                # v cache tensor (rope cache tensor in mla) separately to support llmdatadist,
+                # as it only support the 0-dim of kv_cache is `num_blocks`.
+                # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
+                # and rope head dim.
+                if self.model_config.is_deepseek_mla:
+                    head_size = self.model_config.hf_text_config.qk_rope_head_dim + \
+                        self.model_config.hf_text_config.kv_lora_rank
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if "linear_attn" in layer_name_inner:
-                            kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
-                ):
-                    # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
-                    # v cache tensor (rope cache tensor in mla) separately to support llmdatadist,
-                    # as it only support the 0-dim of kv_cache is `num_blocks`.
-                    # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
-                    # and rope head dim.
-                    if self.model_config.is_deepseek_mla:
-                        head_size = self.model_config.hf_text_config.qk_rope_head_dim + \
-                            self.model_config.hf_text_config.kv_lora_rank
+                dsa_k_cache_factor = None
+                dsa_k_cache_size = None
+                if not self.model_config.is_deepseek_mla:
+                    # for non-mla model, use FullAttentionSpec
+                    k_tensor_split_factor = 2
+                    v_tensor_split_factor = 2
+                elif self.use_sparse:
+                    # for deepseek v3.2, DSA use FullAttentionSpec
+                    # FullAttentionSpec allocate 2 * mla page size bytes,
+                    # and we use half of that for k cache in DSA
+                    dsa_k_cache_factor = 2
+                    k_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.kv_lora_rank
+                    v_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.qk_rope_head_dim
+                    dsa_k_cache_size = int(kv_cache_tensor.size //
+                                           dsa_k_cache_factor)
+                else:
+                    # for other deepseek models, use MLAAttentionSpec
+                    k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
+                    v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
 
-                    dsa_k_cache_factor = None
-                    dsa_k_cache_size = None
-                    if not self.model_config.is_deepseek_mla:
-                        # for non-mla model, use FullAttentionSpec
-                        k_tensor_split_factor = 2
-                        v_tensor_split_factor = 2
-                    elif self.use_sparse:
-                        # for deepseek v3.2, DSA use FullAttentionSpec
-                        # FullAttentionSpec allocate 2 * mla page size bytes,
-                        # and we use half of that for k cache in DSA
-                        dsa_k_cache_factor = 2
-                        k_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.kv_lora_rank
-                        v_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.qk_rope_head_dim
-                        dsa_k_cache_size = int(kv_cache_tensor.size //
-                                               dsa_k_cache_factor)
-                    else:
-                        # for other deepseek models, use MLAAttentionSpec
-                        k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
-                        v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
+                k_tensor_size = int(kv_cache_tensor.size //
+                                    k_tensor_split_factor)
+                v_tensor_size = int(kv_cache_tensor.size //
+                                    v_tensor_split_factor)
 
-                    k_tensor_size = int(kv_cache_tensor.size //
-                                        k_tensor_split_factor)
-                    v_tensor_size = int(kv_cache_tensor.size //
-                                        v_tensor_split_factor)
+                # for other attentions, e.g., self_attn, sliding window attn
+                if self.vllm_config.kv_transfer_config is None:
+                    k_tensor = torch.zeros(k_tensor_size,
+                                           dtype=torch.int8,
+                                           device=self.device)
+                    v_tensor = torch.zeros(v_tensor_size,
+                                           dtype=torch.int8,
+                                           device=self.device)
+                    #### k cache: for deepseek sparse attention
+                    if dsa_k_cache_factor is not None:
+                        dsa_k_cache_tensor = torch.zeros(dsa_k_cache_size,
+                                                         dtype=torch.int8,
+                                                         device=self.device)
+                else:
+                    k_tensor = torch.zeros(k_tensor_size + alignment,
+                                           dtype=torch.int8,
+                                           device=self.device)
+                    v_tensor = torch.zeros(v_tensor_size + alignment,
+                                           dtype=torch.int8,
+                                           device=self.device)
+                    k_tensor = self._align_memory(k_tensor,
+                                                  alignment)[:k_tensor_size]
+                    v_tensor = self._align_memory(v_tensor,
+                                                  alignment)[:v_tensor_size]
+                    #### k cache: for deepseek sparse attention
+                    if dsa_k_cache_factor is not None and dsa_k_cache_size is not None:
+                        dsa_k_cache_tensor = torch.zeros(dsa_k_cache_size +
+                                                         alignment,
+                                                         dtype=torch.int8,
+                                                         device=self.device)
+                        dsa_k_cache_tensor = self._align_memory(
+                            dsa_k_cache_tensor, alignment)[:dsa_k_cache_size]
 
-                    # for other attentions, e.g., self_attn, sliding window attn
-                    if self.vllm_config.kv_transfer_config is None:
-                        k_tensor = torch.zeros(k_tensor_size,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        #### k cache: for deepseek sparse attention
-                        if dsa_k_cache_factor is not None:
-                            dsa_k_cache_tensor = torch.zeros(
-                                dsa_k_cache_size,
-                                dtype=torch.int8,
-                                device=self.device)
-                    else:
-                        k_tensor = torch.zeros(k_tensor_size + alignment,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size + alignment,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        k_tensor = self._align_memory(
-                            k_tensor, alignment)[:k_tensor_size]
-                        v_tensor = self._align_memory(
-                            v_tensor, alignment)[:v_tensor_size]
-                        #### k cache: for deepseek sparse attention
-                        if dsa_k_cache_factor is not None and dsa_k_cache_size is not None:
-                            dsa_k_cache_tensor = torch.zeros(
-                                dsa_k_cache_size + alignment,
-                                dtype=torch.int8,
-                                device=self.device)
-                            dsa_k_cache_tensor = self._align_memory(
-                                dsa_k_cache_tensor,
-                                alignment)[:dsa_k_cache_size]
-
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if ("attn" in layer_name_inner
-                                and "linear_attn" not in layer_name_inner):
-                            kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor) if \
-                                not self.use_sparse else (k_tensor, v_tensor, dsa_k_cache_tensor)
+                # shared the kvcache between the self_attn specs in the same group
+                kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor) if \
+                    not self.use_sparse else (k_tensor, v_tensor, dsa_k_cache_tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -3514,19 +3505,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     raw_dsa_k_tensor = None
-                    if self.use_sparse:
-                        raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
-                            layer_name]
-                        assert raw_dsa_k_tensor is not None
-                        sum_page_size_bytes = raw_k_tensor.numel(
-                        ) + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
+                    if self.use_hybrid_blocks:
+                        raw_kv_tensor = kv_cache_raw_tensors[layer_name]
+                        sum_page_size_bytes = raw_kv_tensor.numel()
                     else:
-                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
-                            layer_name]
-                        sum_page_size_bytes = raw_k_tensor.numel(
-                        ) + raw_v_tensor.numel()
-                    assert raw_k_tensor is not None
-                    assert raw_v_tensor is not None
+                        if self.use_sparse:
+                            raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
+                                layer_name]
+                            assert raw_dsa_k_tensor is not None
+                            sum_page_size_bytes = raw_k_tensor.numel(
+                            ) + raw_v_tensor.numel() + raw_dsa_k_tensor.numel(
+                            )
+                        else:
+                            raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
+                                layer_name]
+                            sum_page_size_bytes = raw_k_tensor.numel(
+                            ) + raw_v_tensor.numel()
+                        assert raw_k_tensor is not None
+                        assert raw_v_tensor is not None
                     assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
                     num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
 
@@ -3560,6 +3556,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
+
+                    # NOTE: In hybrid attention model, we use an unified kv cache tensor
+                    if self.use_hybrid_blocks:
+                        k_cache = raw_kv_tensor[:int(sum_page_size_bytes //
+                                                     2)].view(dtype).view(
+                                                         kv_cache_shape[1:])
+                        k_cache = self._convert_torch_format(k_cache)
+                        v_cache = raw_kv_tensor[int(sum_page_size_bytes //
+                                                    2):].view(dtype).view(
+                                                        kv_cache_shape[1:])
+                        v_cache = self._convert_torch_format(v_cache)
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                        continue
+
                     if not self.model_config.is_deepseek_mla:
                         k_shape = kv_cache_shape[1:]
                         v_shape = k_shape
@@ -3589,6 +3599,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
+
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
@@ -3607,24 +3618,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
-                    storage_offset_bytes = 0
-                    for (shape, dtype) in zip(kv_cache_spec.shapes,
-                                              kv_cache_spec.dtypes):
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size)
+                    target_idx = 0
+                    start_idx = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes,
+                                            kv_cache_spec.dtypes):
+                        # normally, there is conv state and ssm state in this loop. And there is only
+                        # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
-                        tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
-                        )
+
+                        target_idx += torch.prod(
+                            torch.tensor(target_shape)).item()
+                        tensor = raw_tensor.view(
+                            dtype)[start_idx:target_idx].view(target_shape)
+                        start_idx = target_idx
                         state_tensors.append(tensor)
-                        storage_offset_bytes += stride[0] * dtype_size
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")
@@ -3937,89 +3944,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if vllm_version_is("0.11.0"):
             return self.get_kv_cache_spec_v0110()
 
-        block_size = self.vllm_config.cache_config.block_size
-        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                   AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
-            if isinstance(attn_module, Attention):
-                if (kv_tgt_layer :=
-                        attn_module.kv_sharing_target_layer_name) is not None:
-                    # The layer doesn't need its own KV cache and will use that of
-                    # the target layer. We skip creating a KVCacheSpec for it, so
-                    # that KV cache management logic will act as this layer does
-                    # not exist, and doesn't allocate KV cache for the layer. This
-                    # enables the memory saving of cross-layer kv sharing, allowing
-                    # a given amount of memory to accommodate longer context lengths
-                    # or enable more requests to be processed simultaneously.
-                    self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
-                    continue
-
-                # TODO: Support other attention modules, e.g., cross-attention
-                # TODO(lucas): move the attention specs into the model layers like
-                # the attention backends
-                if attn_module.attn_type == AttentionType.DECODER:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype)
-                elif attn_module.attn_type in (AttentionType.ENCODER,
-                                               AttentionType.ENCODER_ONLY):
-                    # encoder-only attention does not need KV cache.
-                    continue
-                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                    raise NotImplementedError
-                else:
-                    raise ValueError(
-                        f"Unknown attention type: {attn_module.attn_type}")
-
-            elif isinstance(attn_module, MLAAttention):
-                if use_mla and not self.use_sparse:
-                    kv_cache_spec[layer_name] = MLAAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=1,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        cache_dtype_str=self.cache_config.cache_dtype)
-                else:
-                    # TODO(cmq): This is a hack way to fix deepseek kvcache when
-                    # using DSA. Fix the spec in vLLM is a finnal way.
-                    kv_cache_spec[layer_name] = FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=1,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype)
-
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
-        if len(mamba_layers) > 0:
-            if (self.vllm_config.speculative_config is not None
-                    and self.vllm_config.model_config.hf_config.model_type
-                    not in ["qwen3_next"]):
-                raise NotImplementedError(
-                    "Mamba with speculative decoding is not supported yet.")
-            if self.vllm_config.cache_config.enable_prefix_caching:
-                raise NotImplementedError(
-                    "Prefix caching is not supported for Mamba yet.")
-            max_model_len = self.vllm_config.model_config.max_model_len
-
-            page_size_padded = (
-                self.vllm_config.cache_config.mamba_page_size_padded)
-
-            # Set block_size to max_model_len, so that mamba model will always
-            # have only one block in the KV cache.
-            for layer_name, mamba_module in mamba_layers.items():
-                kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
-                    dtypes=mamba_module.get_state_dtype(),
-                    block_size=max_model_len,
-                    page_size_padded=page_size_padded,
-                    mamba_type=mamba_module.mamba_type,
-                    num_speculative_blocks=(
-                        self.speculative_config.num_speculative_tokens
-                        if self.speculative_config else 0),
-                )
+            if isinstance(attn_module, Attention) and (
+                    kv_tgt_layer := attn_module.kv_sharing_target_layer_name):
+                # The layer doesn't need its own KV cache and will use that of
+                # the target layer. We skip creating a KVCacheSpec for it, so
+                # that KV cache management logic will act as this layer does
+                # not exist, and doesn't allocate KV cache for the layer. This
+                # enables the memory saving of cross-layer kv sharing, allowing
+                # a given amount of memory to accommodate longer context lengths
+                # or enable more requests to be processed simultaneously.
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+            # Skip modules that don't need KV cache (eg encoder-only attention)
+            if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
 
