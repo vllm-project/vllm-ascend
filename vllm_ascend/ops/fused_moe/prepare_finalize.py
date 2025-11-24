@@ -45,7 +45,7 @@ class PrepareAndFinalize(ABC):
     """
     Abstract base class for MoE (Mixture-of-Experts) tensor preparation and finalization
     in distributed environments. Subclasses implement specific communication strategies
-    (e.g., AllGather, All2All, MC2, Naive Multicast) to handle tensor padding, slicing,
+    (e.g., AllGather, All2All, MC2) to handle tensor padding, slicing,
     broadcasting, and reduction across TP/DP/EP groups.
 
     Attributes:
@@ -449,118 +449,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(hidden_states,
                                                            dim=0)
-        if reduce_results and (self.moe_config.tp_size > 1
-                               or self.moe_config.ep_size > 1):
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-
-        return hidden_states
-
-
-class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
-    """
-    MoE communication strategy using Naive Multicast (point-to-point broadcast).
-    Will be used in prefill when using allgather in decode. Each DP rank broadcasts its slice to all others.
-    Uses `cu_tokens_across_dp_cpu` (cumulative tokens) to locate slice boundaries.
-    """
-
-    def _naive_multicast(self, x: torch.Tensor,
-                         cu_tokens_across_dp_cpu: torch.Tensor):
-        """
-        Naive multicast implementation:
-          1. Create global buffer sized by total tokens across DP.
-          2. Current rank copies its slice into its designated buffer region.
-          3. Each rank broadcasts its slice to all others via P2P.
-
-        Args:
-            x (torch.Tensor): Local tensor [local_tokens, hidden_size]
-            cu_tokens_across_dp_cpu (torch.Tensor): Cumulative token counts per DP rank
-
-        Returns:
-            torch.Tensor: Global tensor [total_tokens, hidden_size]
-        """
-        assert len(x.shape) == 2, "Input must be 2D [tokens, features]"
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-
-        # Copy local slice into buffer
-        start = 0 if self.moe_config.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.moe_config.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.moe_config.dp_rank]
-        buffer[start:end, :].copy_(x)
-
-        # Broadcast each slice to all ranks
-        for idx in range(self.moe_config.dp_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-        return buffer
-
-    def prepare(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        quant_type=QuantType.NONE
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
-        """
-        Preparation steps:
-          1. Fetch cumulative token boundaries from forward context.
-          2. Multicast hidden_states and router_logits to form global tensors.
-
-        Returns:
-            Tuple of (global_hidden_states, global_router_logits, None, None)
-        """
-        self.enable_shared_expert_dp = enable_shared_expert_dp
-
-        if self.moe_config.dp_size > 1:
-            self.cu_tokens_across_dp_cpu = get_forward_context(
-            ).dp_metadata.cu_tokens_across_sp(1)
-            hidden_states = self._naive_multicast(hidden_states,
-                                                  self.cu_tokens_across_dp_cpu)
-            router_logits = self._naive_multicast(router_logits,
-                                                  self.cu_tokens_across_dp_cpu)
-
-        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
-
-        return hidden_states, router_logits, None, None
-
-    def finalize(self,
-                 hidden_states: torch.Tensor,
-                 reduce_results: bool,
-                 context_metadata: Optional[dict] = None) -> torch.Tensor:
-        """
-        Finalization steps:
-          1. If DP > 1 and not shared expert:
-               - All-reduce across DP
-               - Slice to current rank's token range using cu_tokens_across_dp_cpu
-          2. If `reduce_results=True` and TP/EP > 1, apply tensor_model_parallel_all_reduce.
-
-        Returns:
-            Tensor with shape [local_num_tokens, hidden_size]
-        """
-        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
-            start = 0 if self.moe_config.dp_rank == 0 else self.cu_tokens_across_dp_cpu[
-                self.moe_config.dp_rank - 1]
-            end = self.cu_tokens_across_dp_cpu[self.moe_config.dp_rank]
-            hidden_states = get_dp_group().all_reduce(
-                hidden_states)  # Sum across DP
-            hidden_states = hidden_states[start:end, :]
-
-        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(hidden_states,
-                                                           dim=0)
-
         if reduce_results and (self.moe_config.tp_size > 1
                                or self.moe_config.ep_size > 1):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)

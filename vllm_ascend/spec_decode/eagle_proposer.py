@@ -124,8 +124,7 @@ class EagleProposer(Proposer):
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None):
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
                                         moe_comm_type=moe_comm_type,
@@ -460,11 +459,7 @@ class EagleProposer(Proposer):
         else:
             num_input_tokens = num_tokens
 
-        with_prefill = attn_metadata.attn_state not in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
@@ -504,8 +499,7 @@ class EagleProposer(Proposer):
         else:
             input_batch_size = batch_size
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            input_batch_size, False)
+        moe_comm_type = self.runner._select_moe_comm_method(input_batch_size)
 
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
