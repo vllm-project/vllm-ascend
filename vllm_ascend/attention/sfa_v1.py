@@ -505,7 +505,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         k = self.k_norm(k_proj).unsqueeze(1)
         k = k.view(-1, 1, self.head_dim)
 
-        q, k = rope_forward_triton(q, k, cos, sin, is_neox_style=False)
+        q, k = rope_forward_triton(q,
+                                   k,
+                                   cos,
+                                   sin,
+                                   rope_dim=self.qk_rope_head_dim,
+                                   is_neox_style=True)
 
         if kv_cache is not None:
             torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, k.shape[-1]),

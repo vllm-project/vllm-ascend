@@ -112,19 +112,16 @@ def _triton_rope(
         first_half_k_offsets = tl.arange(0,
                                          pad_n_kh)[:, None] * hd + tl.arange(
                                              0, pad_rope_dim // 2)[None, :]
-        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
-            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
-        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
-            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
     else:
         first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (
             2 * tl.arange(0, pad_rope_dim // 2)[None, :])
         first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (
             2 * tl.arange(0, pad_rope_dim // 2)[None, :])
-        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
-            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
-        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
-            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+
+    first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
+        0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+    first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
+        0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
     q_tile_1 = tl.load(q_ptr + first_half_q_offsets,
                        mask=first_q_mask,
                        other=0).to(sin_row.dtype)
@@ -160,7 +157,12 @@ def _triton_rope(
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
-def rope_forward_triton(q, k, cos, sin, is_neox_style: bool = True):
+def rope_forward_triton(q,
+                        k,
+                        cos,
+                        sin,
+                        rope_dim: int = -1,
+                        is_neox_style: bool = True):
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
@@ -170,7 +172,10 @@ def rope_forward_triton(q, k, cos, sin, is_neox_style: bool = True):
     n_kv_head = k.shape[1]
     cos = cos.view(num_tokens, -1)
     sin = sin.view(num_tokens, -1)
-    rope_dim = cos.shape[-1] * 2
+    if rope_dim == -1:
+        # If rope_dim is not specified, we assume that input cos/sin is not
+        # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
+        rope_dim = cos.shape[-1] * 2
     assert rope_dim <= head_dim
     pad_rope_dim = triton.next_power_of_2(rope_dim)
     pad_n_q_head = triton.next_power_of_2(n_q_head)
