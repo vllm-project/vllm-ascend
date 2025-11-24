@@ -86,7 +86,7 @@ jobs:
             tests: tests/e2e/nightly/ops
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: 2918c1b49c88c29783c86f78d2c4221cb9622379
+      vllm: v0.11.2
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
@@ -125,7 +125,7 @@ jobs:
               - Qwen3-Next-80B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: 2918c1b49c88c29783c86f78d2c4221cb9622379
+      vllm: v0.11.2
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
