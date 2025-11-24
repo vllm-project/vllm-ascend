@@ -30,11 +30,6 @@ class Mooncakestore():
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         all_device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
-        kv_connector_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        self.preferred_segment = kv_connector_extra_config.get(
-            "preferred_segment", False)
-        self.prefer_alloc_in_same_node = kv_connector_extra_config.get(
-            "prefer_alloc_in_same_node", False)
         if not all_device_ids:
             device_ids_list = list(
                 range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
@@ -43,6 +38,8 @@ class Mooncakestore():
         assert len(device_ids_list) > tp_rank
         device_id = device_ids_list[tp_rank]
         self.config = MooncakeStoreConfig.load_from_env()
+        self.preferred_segment = self.config.preferred_segment
+        self.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
         self.store = MooncakeDistributedStore()
         if self.config.protocol == "ascend" and not self.config.use_ascend_direct:
             local_hostname = get_ip() + ":" + str(BASE_PORT + int(device_id)) + \
