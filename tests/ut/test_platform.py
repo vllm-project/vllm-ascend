@@ -3,18 +3,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.config.compilation import CompilationLevel
-else:
-    from vllm.config.compilation import CompilationMode
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
 class TestNPUPlatform(TestBase):
@@ -313,16 +308,10 @@ class TestNPUPlatform(TestBase):
         self.assertTrue("Compilation disabled, using eager mode by default" in
                         cm.output[0])
 
-        if vllm_version_is("0.11.0"):
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
-            )
-        else:
-            self.assertEqual(
-                vllm_config.compilation_config.mode,
-                CompilationMode.NONE,
-            )
+        self.assertEqual(
+            vllm_config.compilation_config.mode,
+            CompilationMode.NONE,
+        )
 
         self.assertEqual(
             vllm_config.compilation_config.cudagraph_mode,
@@ -348,10 +337,7 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        if vllm_version_is("0.11.0"):
-            vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
-        else:
-            vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+        vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -359,16 +345,11 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
             self.assertTrue("NPU does not support" in cm.output[0])
-            if vllm_version_is("0.11.0"):
-                self.assertEqual(
-                    vllm_config.compilation_config.level,
-                    CompilationLevel.NO_COMPILATION,
-                )
-            else:
-                self.assertEqual(
-                    vllm_config.compilation_config.mode,
-                    CompilationMode.NONE,
-                )
+
+            self.assertEqual(
+                vllm_config.compilation_config.mode,
+                CompilationMode.NONE,
+            )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
@@ -396,16 +377,10 @@ class TestNPUPlatform(TestBase):
                 "cudagraph_mode is not support on NPU. falling back to NONE" in
                 cm.output[0])
 
-            if vllm_version_is("0.11.0"):
-                self.assertEqual(
-                    vllm_config.compilation_config.level,
-                    CompilationLevel.NO_COMPILATION,
-                )
-            else:
-                self.assertEqual(
-                    vllm_config.compilation_config.mode,
-                    CompilationMode.NONE,
-                )
+            self.assertEqual(
+                vllm_config.compilation_config.mode,
+                CompilationMode.NONE,
+            )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
@@ -431,10 +406,7 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        if vllm_version_is("0.11.0"):
-            vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
-        else:
-            vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -443,16 +415,10 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
         self.assertTrue("Torchair compilation enabled" in cm.output[0])
 
-        if vllm_version_is("0.11.0"):
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
-            )
-        else:
-            self.assertEqual(
-                vllm_config.compilation_config.mode,
-                CompilationMode.NONE,
-            )
+        self.assertEqual(
+            vllm_config.compilation_config.mode,
+            CompilationMode.NONE,
+        )
         self.assertEqual(
             vllm_config.compilation_config.cudagraph_mode,
             CUDAGraphMode.NONE,
@@ -658,12 +624,9 @@ class TestNPUPlatform(TestBase):
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()
-        if vllm_version_is("0.11.0"):
-            self.assertEqual(
-                result, "vllm_ascend.lora.punica_npu.PunicaWrapperNPU0110")
-        else:
-            self.assertEqual(result,
-                             "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
+
+        self.assertEqual(result,
+                         "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.max_memory_allocated")
@@ -742,16 +705,11 @@ class TestNPUPlatform(TestBase):
             self.assertTrue(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode" in cm.output[0])
-            if vllm_version_is("0.11.0"):
-                self.assertEqual(
-                    VllmConfig.compilation_config.level,
-                    CompilationLevel.PIECEWISE,
-                )
-            else:
-                self.assertEqual(
-                    VllmConfig.compilation_config.mode,
-                    CompilationMode.VLLM_COMPILE,
-                )
+
+            self.assertEqual(
+                VllmConfig.compilation_config.mode,
+                CompilationMode.VLLM_COMPILE,
+            )
             self.assertEqual(
                 VllmConfig.compilation_config.cudagraph_mode,
                 CUDAGraphMode.PIECEWISE,

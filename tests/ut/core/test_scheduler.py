@@ -9,6 +9,7 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -21,12 +22,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from tests.ut.base import TestBase
 from vllm_ascend.core.scheduler import AscendScheduler
 from vllm_ascend.core.scheduler_dynamic_batch import SchedulerDynamicBatch
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import sha256
-else:
-    from vllm.utils.hashing import sha256
 
 EOS_TOKEN_ID = 50256
 MODEL = "Qwen3-0.6B"
@@ -181,23 +176,13 @@ class TestAscendScheduler(TestBase):
         )
         cache_config.num_gpu_blocks = 10000
 
-        if vllm_version_is("0.11.0"):
-            scheduler = AscendScheduler(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-                log_stats=True,
-                structured_output_manager=MagicMock(
-                    spec=StructuredOutputManager),
-            )
-        else:
-            scheduler = AscendScheduler(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-                log_stats=True,
-                block_size=block_size,
-                structured_output_manager=MagicMock(
-                    spec=StructuredOutputManager),
-            )
+        scheduler = AscendScheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            block_size=block_size,
+            structured_output_manager=MagicMock(spec=StructuredOutputManager),
+        )
 
         should_advance = MagicMock()
         should_advance.return_value = False

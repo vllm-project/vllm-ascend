@@ -55,8 +55,6 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import ConstantList
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class RecomputeScheduler(SchedulerInterface):
     """This Scheduler extends vllm's original v1 scheduler of version 0.11
@@ -587,14 +585,9 @@ class RecomputeScheduler(SchedulerInterface):
             self.kv_cache_config.kv_cache_groups)
         if self.running:
             any_request = self.running[0]
-            if vllm_version_is("0.11.0"):
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(
-                        any_request, len(self.running)))
-            else:
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(
-                        any_request.request_id))
+            num_common_prefix_blocks = (
+                self.kv_cache_manager.get_num_common_prefix_blocks(
+                    any_request.request_id))
 
         # Construct the scheduler output.
         new_reqs_data = [

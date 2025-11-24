@@ -19,20 +19,14 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
-                               vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.config import CompilationLevel
-else:
-    from vllm.config import CompilationMode
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -129,18 +123,10 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        if vllm_version_is("0.11.0"):
-            self.use_aclgraph = (
-                vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE
-                and not vllm_config.model_config.enforce_eager
-                and not ascend_config.torchair_graph_config.enabled)
-        else:
-            self.use_aclgraph = (
-                vllm_config.compilation_config.mode
-                == CompilationMode.VLLM_COMPILE
-                and not vllm_config.model_config.enforce_eager
-                and not ascend_config.torchair_graph_config.enabled)
+        self.use_aclgraph = (
+            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not vllm_config.model_config.enforce_eager
+            and not ascend_config.torchair_graph_config.enabled)
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
