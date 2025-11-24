@@ -2927,8 +2927,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # FIXME: Try using `auto_dispatch_capture=True`
                     update_mla_attn_params(self.update_stream, forward_context,
-                                           num_tokens,
-                                           self.speculative_config)
+                                           num_tokens, self.speculative_config)
             else:
                 if self.pcp_size * self.dcp_size > 1:
                     update_attn_dcp_pcp_params(self.update_stream,
