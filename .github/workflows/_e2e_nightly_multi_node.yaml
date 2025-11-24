@@ -216,7 +216,7 @@ jobs:
 
               # 1) check follower pods
               ALL_FOLLOWERS_READY=true
-              for ((i=1; i<${SIZE}; i++)); do
+              for ((i=1; i<SIZE; i++)); do
                 POD="${POD_PREFIX}-${i}"
                 PHASE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
                 READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
