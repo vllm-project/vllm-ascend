@@ -1,0 +1,646 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2025-11-21 10:19+0800\n"
+"PO-Revision-Date: 2025-11-21 10:31\n"
+"Last-Translator: Codex <codex@example.com>\n"
+"Language-Team: Chinese (Simplified) <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../developer_guide/performance_and_performance_and_debug/msprobe_guide.md
+msgid "MSProbe Debugging Guide"
+msgstr "MSProbe 调试指南"
+
+#: ../../developer_guide/performance_and_performance_and_debug/msprobe_guide.md
+msgid ""
+"During inference or training runs we often encounter accuracy anomalies such"
+" as outputs drifting away from the expectation, unstable numerical behavior "
+"(NaN/Inf), or predictions that no longer match the labels. To pinpoint the "
+"root cause we have to monitor and capture intermediate data produced while "
+"the model executes—feature maps, weights, activations, and layer outputs. By"
+" capturing key tensors at specific stages, logging I/O pairs for the core "
+"layers, and retaining contextual metadata (prompts, tensor dtypes, hardware "
+"configuration, etc.), we can systematically trace where the accuracy "
+"degradation or numerical error started. This guide describes the end-to-end "
+"workflow for diagnosing accuracy issues for AI models (with a focus on vllm-"
+"ascend services): preparation, data capture, and analysis & verification."
+msgstr ""
+"在推理或训练过程中，我们经常会遇到输出偏离预期、出现 NaN/Inf "
+"等数值不稳定现象，或者模型预测与标签不一致等精度异常。要定位根因，就必须监控并采集模型执行过程中的中间数据——例如特征图、权重、激活值及各层输出。通过在关键阶段捕获核心张量、记录核心层的输入输出对，并保留提示词、张量"
+" dtype、硬件配置等上下文元数据，我们可以系统追踪精度退化或数值错误的源头。本指南聚焦 vllm-ascend 服务，介绍 AI "
+"模型精度问题排查的完整流程：准备、数据采集以及分析与验证。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "0. Background Concepts"
+msgstr "0. 前置概念"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`msprobe` supports three accuracy levels:"
+msgstr "`msprobe` 支持三种精度级别："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"**L0**: dumps tensors at the module level and generates `construct.json` so "
+"that visualization tools can rebuild the network structure. A model or "
+"submodule handle must be passed in."
+msgstr "**L0**：在`nn.Module`级别保存`tensor`，并生成 `construct.json` 以便可视化工具还原网络结构，需要传入模型或子模块句柄。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"**L1**: collects operator-level statistics only, which is suitable for "
+"lightweight troubleshooting."
+msgstr "**L1**：仅采集算子级统计信息，适合轻量排查。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"**mix**: captures both structural information and operator statistics, which"
+" is useful when you need both graph reconstruction and numerical "
+"comparisons."
+msgstr "**mix**：同时获取结构信息与算子统计，适用于既要构图又要进行数值对比的场景。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "1. Prerequisites"
+msgstr "1. 前提条件"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "1.1 Install `msprobe`"
+msgstr "1.1 安装 `msprobe`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Install msprobe with pip:"
+msgstr "使用 pip 安装 msprobe："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "1.2 Visualization dependencies (optional)"
+msgstr "1.2 可视化依赖（可选）"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Install additional dependencies if you need to visualize the captured data."
+msgstr "如需对采集的数据进行可视化，请安装以下依赖。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Install `tb_graph_ascend`:"
+msgstr "安装 `tb_graph_ascend`："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "2. Collecting Data with `msprobe`"
+msgstr "2. 使用 `msprobe` 采集数据"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"We generally follow a coarse-to-fine strategy when capturing data. First "
+"identify the token where the issue shows up, and then decide which range "
+"needs to be sampled around that token. The typical workflow is described "
+"below."
+msgstr "采集通常遵循由粗到细的策略：先确定问题出现的 token，再围绕该 token 决定采样范围，常规流程如下。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "2.1 Prepare the dump configuration file"
+msgstr "2.1 准备 dump 配置文件"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Create a `config.json` that can be parsed by `PrecisionDebugger` and place "
+"it in an accessible path. Common fields are:"
+msgstr "创建可被 `PrecisionDebugger` 解析的 `config.json` 并放置在可访问路径，常见字段如下："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Field"
+msgstr "字段"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Description"
+msgstr "说明"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Required"
+msgstr "必填"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`task`"
+msgstr "`task`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Type of dump task. Common PyTorch values include `\"statistics\"` and "
+"`\"tensor\"`. A statistics task collects tensor statistics (mean, variance, "
+"max, min, etc.) while a tensor task captures arbitrary tensors."
+msgstr ""
+"dump 任务类型。PyTorch 常见取值包括 `\"statistics\"` 和 `\"tensor\"`：statistics "
+"任务采集张量统计量（均值、方差、最大值、最小值等），tensor 任务可采集任意张量。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Yes"
+msgstr "是"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`dump_path`"
+msgstr "`dump_path`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Directory where dump results are stored. When omitted, `msprobe` uses its "
+"default path."
+msgstr "dump 结果保存目录，未配置时使用 `msprobe` 默认路径。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "No"
+msgstr "否"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`rank`"
+msgstr "`rank`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Ranks to sample. An empty list collects every rank. For single-card tasks "
+"you must set this field to `[]`."
+msgstr "指定需要采集的设备 rank，空列表表示全部 rank；单卡任务必须配置为 `[]`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`step`"
+msgstr "`step`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Token iteration(s) to sample. An empty list means every iteration."
+msgstr "指定采集的 token 轮次，空列表表示全部迭代。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`level`"
+msgstr "`level`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Dump level string (`\"L0\"`, `\"L1\"`, or `\"mix\"`). `L0` targets "
+"`nn.Module`, `L1` targets `torch.api`, and `mix` collects both."
+msgstr ""
+"dump 级别字符串（`\"L0\"`、`\"L1\"`、`\"mix\"`），L0 面向 `nn.Module`，L1 面向 "
+"`torch.api`，mix 同时采集两者。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`async_dump`"
+msgstr "`async_dump`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Whether to enable asynchronous dump (supported for PyTorch "
+"`statistics`/`tensor` tasks). Defaults to `false`."
+msgstr "是否启用异步 dump（PyTorch `statistics`/`tensor` 任务可用），默认 `false`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`scope`"
+msgstr "`scope`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Module range to sample. An empty list collects every module."
+msgstr "指定需要采集的模块范围，空列表表示全部模块。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`list`"
+msgstr "`list`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Operator range to sample. An empty list collects every operator."
+msgstr "指定需要采集的算子范围，空列表表示全部算子。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"To restrict the operators that are captured, configure the `list` block:"
+msgstr "如需进一步限定算子范围，请配置 `list`："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`scope` (list[str]): In PyTorch pynative scenarios this field restricts the "
+"dump range. Provide two module or API names that follow the tool's naming "
+"convention to lock a range; only data between the two names will be dumped. "
+"Examples:"
+msgstr ""
+"`scope`（list[str]）：在 PyTorch 动态图场景下用于限定 dump 区间。按照工具命名格式提供两个模块或 API 名称，只会 "
+"dump 这一区间内的数据。示例："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"The `level` setting determines what can be provided—modules when `level=L0`,"
+" APIs when `level=L1`, and either modules or APIs when `level=mix`."
+msgstr ""
+"`level` 的取值决定可配置内容：`level=L0` 填模块名，`level=L1` 填 API 名，`level=mix` 则二者皆可。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`list` (list[str]): Custom operator list. Options include:"
+msgstr "`list`（list[str]）：用于自定义采集的算子范围，常见方式包括："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Supply the full names of specific APIs in PyTorch pynative scenarios to only"
+" dump those APIs. Example: `\"list\": [\"Tensor.permute.1.forward\", "
+"\"Tensor.transpose.2.forward\", \"Torch.relu.3.backward\"]`."
+msgstr ""
+"在 PyTorch 动态图场景中配置 API 全称，仅 dump 这些 API，例如 `\"list\": "
+"[\"Tensor.permute.1.forward\", \"Tensor.transpose.2.forward\", "
+"\"Torch.relu.3.backward\"]`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"When `level=mix`, you can provide module names so that the dump expands to "
+"everything produced while the module is running. Example: `\"list\": "
+"[\"Module.module.language_model.encoder.layers.0.mlp.ParallelMlp.forward.0\"]`."
+msgstr ""
+"当 `level=mix` 时可以填写模块名称，工具会在该模块执行期间展开并 dump 所有数据，例如 `\"list\": "
+"[\"Module.module.language_model.encoder.layers.0.mlp.ParallelMlp.forward.0\"]`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Provide a substring such as `\"list\": [\"relu\"]` to dump every API whose "
+"name contains the substring. When `level=mix`, modules whose names contain "
+"the substring are also expanded."
+msgstr ""
+"也可以仅提供子串（如 `\"list\": [\"relu\"]`），会 dump 名称包含该字符串的 API，且 `level=mix` "
+"时会展开名称包含该字符串的模块。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Example configuration:"
+msgstr "示例配置："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "2. Enable `msprobe` in vllm-ascend"
+msgstr "2. 在 vllm-ascend 中启用 `msprobe`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Start vLLM in eager mode by adding `--enforce-eager` (static-graph scenarios"
+" are not supported yet) and pass the config path through `--additional-"
+"config`:"
+msgstr ""
+"通过添加 `--enforce-eager` 以 eager 模式启动 vLLM（静态图暂不支持），并通过 `--additional-config` "
+"传入配置路径："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "3. Send requests and collect dumps"
+msgstr "3. 发送请求并采集 dump"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Send inference requests as usual, for example:"
+msgstr "按常规方式发送推理请求，例如："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Each request drives the sequence `msprobe: start -> forward/backward -> stop"
+" -> step`. The runner invokes `step()` on every code path, so you always get"
+" a complete dataset even if inference returns early."
+msgstr ""
+"每个请求都会执行 `msprobe: start -> forward/backward -> stop -> step`，Runner "
+"在所有路径都会调用 `step()`，即使推理提前结束也能拿到完整数据。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Dump files are written into `dump_path`. They usually contain:"
+msgstr "dump 文件写入 `dump_path`，通常包含："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Tensor files grouped by operator/module."
+msgstr "按算子或模块划分的张量文件。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`dump.json`, which records metadata such as dtype, shape, min/max, and "
+"`requires_grad`."
+msgstr "描述 dtype、shape、最小/最大值以及 `requires_grad` 等信息的 `dump.json`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`construct.json`, which is generated when `level` is `L0` or `mix` (required"
+" for visualization)."
+msgstr "当级别为 `L0` 或 `mix` 时生成的 `construct.json`（可视化必需）。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Example directory layout:"
+msgstr "目录结构示例："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+#, python-brace-format
+msgid ""
+"`rank`: Device ID. Each card writes its data to the corresponding `rank{ID}`"
+" directory. In non-distributed scenarios the directory is simply named "
+"`rank`."
+msgstr "`rank`：设备 ID。每张卡写入对应的 `rank{ID}` 目录，非分布式场景目录名称为 `rank`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`dump_tensor_data`: Tensor payloads that were collected."
+msgstr "`dump_tensor_data`：采集到的张量数据。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`dump.json`: Statistics for the forward/backward data of each API or module,"
+" including names, dtype, shape, max, min, mean, L2 norm (square root of the "
+"L2 variance), and CRC-32 when `summary_mode=\"md5\"`. See [dump.json file "
+"description](#dumpjson-file-description) for details."
+msgstr ""
+"`dump.json`：保存各 API 或模块前/反向数据统计，包含名称、dtype、shape、max、min、mean、L2 "
+"norm（平方根）以及在 `summary_mode=\"md5\"` 下的 CRC-32。详见 [dump.json file "
+"description](#dumpjson-file-description)。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`dump_error_info.log`: Present only when the dump tool encountered an error "
+"and records the failure log."
+msgstr "`dump_error_info.log`：仅在 dump 工具报错时生成，记录错误日志。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`stack.json`: Call stacks for APIs/modules."
+msgstr "`stack.json`：API/Module 的调用栈信息。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`construct.json`: Hierarchical structure description. Empty when `level=L1`."
+msgstr "`construct.json`：分层结构描述，`level=L1` 时为空。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "4. Analyze the results"
+msgstr "4. 分析结果"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "4.1 Prerequisites"
+msgstr "4.1 前置条件"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"You typically need two dump datasets: one from the \"problem side\" (the run"
+" that exposes the accuracy or numerical error) and another from the "
+"\"benchmark side\" (a good baseline). These datasets do not have to be "
+"identical—they can come from different branches, framework versions, or even"
+" alternative implementations (operator substitutions, different graph-"
+"optimization switches, etc.). As long as they use the same or similar "
+"inputs, hardware topology, and sampling points (step/token), `msprobe` can "
+"compare them and locate the divergent nodes. If you cannot find a perfectly "
+"clean benchmark, start by capturing the problem-side data, craft the "
+"smallest reproducible case by hand, and perform a self-comparison. Below we "
+"assume the problem dump is `problem_dump` and the benchmark dump is "
+"`bench_dump`."
+msgstr ""
+"通常需要准备两份 dump "
+"数据：一份来自出现精度或数值异常的“问题侧”，另一份来自表现正常的“标杆侧”。两份数据无需完全一致，可以来自不同分支、不同框架版本，甚至不同实现（算子替换、图优化开关差异等）。只要输入、硬件拓扑和采样点（step/token）保持一致或相近，msprobe"
+" 就能对比并定位差异节点。若无法找到足够干净的标杆，可先采集问题侧数据，手动构造最小复现用例并进行自对比。下文默认问题侧目录为 "
+"`problem_dump`，标杆侧为 `bench_dump`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "4.2 Visualization"
+msgstr "4.2 可视化"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Use `msprobe graph_visualize` to generate results that can be opened inside "
+"`tb_graph_ascend`."
+msgstr "使用 `msprobe graph_visualize` 生成结果，并在 `tb_graph_ascend` 中查看。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Ensure the dump contains `construct.json` (i.e., `level = L0` or `level = "
+"mix`)."
+msgstr "确保 dump 中包含 `construct.json`（即 `level=L0` 或 `level=mix`）。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Prepare a comparison file such as `compare.json`. Its format and generation "
+"flow are described in section 3.1.3 of `msprobe_visualization.md`. Example "
+"(minimal runnable snippet):"
+msgstr ""
+"准备 `compare.json` 等对比文件，其格式与生成方式见 `msprobe_visualization.md` 3.1.3 节。示例："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Replace the paths with your dump directories before invoking `msprobe "
+"graph_visualize`. **If you only need to build a single graph**, omit "
+"`bench_path` to visualize one dump.   Multi-rank scenarios (single rank, "
+"multi-rank, or multi-step multi-rank) are also supported. `npu_path` or "
+"`bench_path` must contain folders named `rank+number`, and every rank folder"
+" must contain a non-empty `construct.json` together with `dump.json` and "
+"`stack.json`. If any `construct.json` is empty, verify that the dump level "
+"includes `L0` or `mix`. When comparing graphs, both `npu_path` and "
+"`bench_path` must contain the same set of rank folders so they can be paired"
+" one-to-one."
+msgstr ""
+"在执行 `msprobe graph_visualize` 前，将路径替换为实际 dump 目录。**若只需构建单图**，可省略 "
+"`bench_path`。单 rank、多 rank 以及多 step 多 rank 场景均受支持：`npu_path` 或 `bench_path` "
+"下必须只有名为 `rank+数字` 的文件夹，并且每个 rank 目录都包含非空的 `construct.json`、`dump.json` 与 "
+"`stack.json`。若某个 `construct.json` 为空，请确认 dump 级别包含 L0 或 mix。做图比较时，两侧的 rank "
+"目录数量和名称必须一一对应。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Run:"
+msgstr "执行："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"After the comparison finishes, a `*.vis.db` file is created under "
+"`graph_output`."
+msgstr "对比完成后会在 `graph_output` 下生成 `*.vis.db` 文件。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+#, python-brace-format
+msgid "Graph build: `build_{timestamp}.vis.db`"
+msgstr "图构建：`build_{timestamp}.vis.db`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+#, python-brace-format
+msgid "Graph comparison: `compare_{timestamp}.vis.db`"
+msgstr "图对比：`compare_{timestamp}.vis.db`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Launch `tensorboard` and load the output directory to inspect structural "
+"differences, numerical comparisons, overflow detection results, cross-device"
+" communication nodes, and filters/search. Pass the directory containing the "
+"`.vis.db` files to `--logdir`:"
+msgstr ""
+"启动 `tensorboard` 并加载输出目录，可查看结构差异、精度对比、溢出检测、跨卡通信节点以及多级目录搜索/筛选。将包含 `.vis.db` "
+"的目录传给 `--logdir`："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Inspect the visualization. The UI usually displays the overall model "
+"structure with operators, parameters, and tensor I/O. Click any node to "
+"expand its children."
+msgstr "在可视化界面中可查看模型整体结构（算子、参数、张量 I/O），点击节点可展开其子结构。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"**Difference visualization**: Comparison results highlight divergent nodes "
+"with different colors (the larger the difference, the redder the node). "
+"Click a node to view its detailed information including tensor "
+"inputs/outputs, parameters, and operator type. Analyze the data difference "
+"and the surrounding connections to pinpoint the exact divergence."
+msgstr ""
+"**差异可视化**：对比结果会使用不同颜色突出显示差异节点（差异越大颜色越红）。点击节点可查看输入输出张量、参数以及算子类型，据此结合上下游关系定位具体差异点。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "**Helper features**:"
+msgstr "**辅助功能**："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Switch rank/step: Quickly check difference nodes on different ranks and "
+"steps."
+msgstr "切换 rank/step：快速查看不同 rank 和 step 下的差异节点。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Search/filter: Use the search box to filter nodes by operator name, etc."
+msgstr "搜索/筛选：可根据算子名称等快速过滤节点。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Manual mapping: Automatic mapping cannot cover every case, so the tool lets "
+"you manually map nodes between the problem and benchmark graphs before "
+"generating comparison results."
+msgstr "手动映射：当自动映射无法覆盖所有情况时，可手动匹配问题侧与标杆侧节点后再生成对比结果。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "5. Troubleshooting"
+msgstr "5. 故障排查"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`RuntimeError: Please enforce eager mode`: Restart vLLM and add the "
+"`--enforce-eager` flag."
+msgstr ""
+"`RuntimeError: Please enforce eager mode`：重启 vLLM 并加上 `--enforce-eager` 参数。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"No dump files: Confirm that the JSON path is correct and every node has "
+"write permission. In distributed scenarios set `keep_all_ranks` so that "
+"every rank writes its own dump."
+msgstr ""
+"缺少 dump 文件：检查 JSON 路径是否正确、各节点是否具有写权限；分布式场景可启用 `keep_all_ranks` 让每个 rank "
+"单独写入。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"Dumps are too large: Start with a `statistics` task to locate abnormal "
+"tensors, then narrow the scope with `scope`/`list`/`tensor_list`, `filters`,"
+" `token_range`, etc."
+msgstr ""
+"dump 体积过大：建议先运行 `statistics` 任务定位异常张量，再通过 "
+"`scope`/`list`/`tensor_list`、`filters`、`token_range` 等方式缩小范围。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "Appendix"
+msgstr "附录"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "dump.json file description"
+msgstr "dump.json 文件说明"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "L0 level"
+msgstr "L0 级别"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"An L0 `dump.json` contains forward/backward I/O for modules together with "
+"parameters and parameter gradients. Using PyTorch's `Conv2d` as an example, "
+"the network code looks like:"
+msgstr ""
+"L0 级别的 `dump.json` 包含模块的前/反向输入输出以及参数与参数梯度。以下以 PyTorch 的 `Conv2d` 为例，网络代码如下："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`output = self.conv2(input)  # self.conv2 = torch.nn.Conv2d(64, 128, 5, "
+"padding=2, bias=True)`"
+msgstr ""
+"`output = self.conv2(input)  # self.conv2 = torch.nn.Conv2d(64, 128, 5, "
+"padding=2, bias=True)`"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "`dump.json` contains the following entries:"
+msgstr "`dump.json` 包含以下条目："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`Module.conv2.Conv2d.forward.0`: Forward data of the module. `input_args` "
+"represents positional inputs, `input_kwargs` represents keyword inputs, "
+"`output` stores forward outputs, and `parameters` stores weights/biases."
+msgstr ""
+"`Module.conv2.Conv2d.forward.0`：模块的前向数据，`input_args` 为位置参数，`input_kwargs` "
+"为关键字参数，`output` 存放前向输出，`parameters` 存放权重和偏置。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`Module.conv2.Conv2d.parameters_grad`: Parameter gradients (weight and "
+"bias)."
+msgstr "`Module.conv2.Conv2d.parameters_grad`：模块参数的梯度（weight 与 bias）。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`Module.conv2.Conv2d.backward.0`: Backward data of the module. `input` "
+"represents gradients that flow into the module (gradients of the forward "
+"outputs) and `output` represents gradients that flow out (gradients of the "
+"module inputs)."
+msgstr ""
+"`Module.conv2.Conv2d.backward.0`：模块的反向数据，`input` 表示流入模块的梯度（对应前向输出），`output` "
+"表示流出的梯度（对应模块输入）。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+#, python-brace-format
+msgid ""
+"**Note**: When the `model` parameter passed to the dump API is "
+"`List[torch.nn.Module]` or `Tuple[torch.nn.Module]`, module-level names "
+"include the index inside the list (`{Module}.{index}.*`). Example: "
+"`Module.0.conv1.Conv2d.forward.0`."
+msgstr ""
+"**说明**：当 dump API 的 `model` 参数为 `List[torch.nn.Module]` 或 "
+"`Tuple[torch.nn.Module]` 时，模块级名称会包含其在列表中的索引（`{Module}.{index}.*`），例如 "
+"`Module.0.conv1.Conv2d.forward.0`。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "L1 level"
+msgstr "L1 级别"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"An L1 `dump.json` records forward/backward I/O for APIs. Using PyTorch's "
+"`relu` function as an example (`output = torch.nn.functional.relu(input)`), "
+"the file contains:"
+msgstr ""
+"L1 级别的 `dump.json` 记录 API 的前/反向输入输出。以下以 PyTorch 的 `relu` 函数（`output = "
+"torch.nn.functional.relu(input)`）为例："
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`Functional.relu.0.forward`: Forward data of the API. `input_args` are "
+"positional inputs, `input_kwargs` are keyword inputs, and `output` stores "
+"the forward outputs."
+msgstr ""
+"`Functional.relu.0.forward`：API 的前向数据，`input_args` 为位置输入，`input_kwargs` "
+"为关键字输入，`output` 存放前向输出。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"`Functional.relu.0.backward`: Backward data of the API. `input` represents "
+"the gradients of the forward outputs, and `output` represents the gradients "
+"that flow back to the forward inputs."
+msgstr ""
+"`Functional.relu.0.backward`：API 的反向数据，`input` 表示前向输出的梯度，`output` "
+"表示回传到前向输入的梯度。"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid "mix level"
+msgstr "mix 级别"
+
+#: ../../developer_guide/performance_and_debug/msprobe_guide.md
+msgid ""
+"A `mix` dump.json contains both L0 and L1 level data; the file format is the"
+" same as the examples above."
+msgstr "`mix` 级别的 dump.json 同时包含 L0 与 L1 数据，文件格式与上述示例相同。"
