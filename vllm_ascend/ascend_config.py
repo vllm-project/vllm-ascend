@@ -44,6 +44,10 @@ class AscendConfig:
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
 
+        # Dump / PrecisionDebugger configuration
+        dump_config_path = additional_config.get("dump_config", None)
+        self.dump_config = DumpConfig(dump_config_path)
+
         weight_prefetch_config = additional_config.get(
             "weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(
@@ -228,6 +232,18 @@ class AscendSchedulerConfig:
         for k, v in ascend_scheduler_config.items():
             if not hasattr(self, k):
                 setattr(self, k, v)
+
+
+class DumpConfig:
+    """
+    Configuration object for dump/PrecisionDebugger settings.
+    """
+
+    def __init__(self, dump_config_path: Optional[str] = None):
+        # enable_dump is True when dump_cfg exists and config_path is not empty
+        self.enable_dump: bool = bool(dump_config_path)
+        # Path to msprobe config json; may be None.
+        self.config_path: Optional[str] = dump_config_path
 
 
 class WeightPrefetchConfig:
