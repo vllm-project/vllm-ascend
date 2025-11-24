@@ -223,8 +223,7 @@ class MtpProposer(Proposer):
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if skip_attn:
             attn_metadata = None
@@ -672,8 +671,7 @@ class MtpProposer(Proposer):
          with_prefill) = self.runner._sync_metadata_across_dp(
              num_input_tokens, self.runner.with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         if scheduler_output:
             max_query_len = common_attn_metadata.max_query_len
