@@ -1,8 +1,8 @@
 import threading
 import weakref
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from collections.abc import Callable
 from multiprocessing.synchronize import Lock as LockType
-from typing import Optional
 
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
@@ -14,12 +14,11 @@ from vllm.utils.network_utils import (get_distributed_init_method,
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.executor.abstract import FailureCallback
 from vllm.v1.executor.multiproc_executor import (
-    MultiprocExecutor, UnreadyWorkerProcHandle, WorkerProc,
+    FutureWrapper, MultiprocExecutor, UnreadyWorkerProcHandle, WorkerProc,
     set_multiprocessing_worker_envs)
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
-    supports_pp: bool = True
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -27,8 +26,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
-        self.failure_callback: Optional[FailureCallback] = None
-        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
+        self.failure_callback: FailureCallback | None = None
 
         self.world_size = self.parallel_config.world_size
         assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
@@ -51,7 +49,6 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         # get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port())
-
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -67,7 +64,6 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 connect_ip=self.parallel_config.master_addr,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
-
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
@@ -90,8 +86,9 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
+
             # Wait for all local workers to be ready.
-            self.workers = WorkerProc.wait_for_ready(unready_workers)
+            self.workers = AscendWorkerProc.wait_for_ready(unready_workers)
 
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:
@@ -114,13 +111,13 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
+
             # Wait for all input mqs to be ready.
             if self.rpc_broadcast_mq is not None:
                 self.rpc_broadcast_mq.wait_until_ready()
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
-
             success = True
         finally:
             if not success:
@@ -132,17 +129,9 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 self._ensure_worker_termination(
                     [uw.proc for uw in unready_workers])
 
-        # For pipeline parallel, we use a thread pool for asynchronous
-        # execute_model.
-        if self.max_concurrent_batches > 1:
-            # Note: must use only 1 IO thread to keep dequeue sequence
-            # from the response queue
-            # _async_aggregate_workers_output also assumes a single IO thread
-            self.io_thread_pool = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mp_exec_io")
+        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
-        self.has_connector = self.vllm_config.kv_transfer_config is not None
 
 
 class AscendWorkerProc(WorkerProc):
