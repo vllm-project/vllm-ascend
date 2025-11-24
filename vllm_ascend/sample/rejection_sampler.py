@@ -9,7 +9,7 @@ from vllm.v1.sample.rejection_sampler import (RejectionSampler,
                                               generate_uniform_probs)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import vllm_version_is, npu_stream_switch, global_stream
 
 if vllm_version_is("0.11.0"):
     from vllm.v1.sample.rejection_sampler import compute_probs
@@ -287,7 +287,9 @@ def sample_recovered_tokens(
         dtype=torch.float32,
         device=device,
     )
-    q.exponential_()
+    with npu_stream_switch(global_stream()):
+        q.exponential_()
+    torch.npu.current_stream().wait_stream(global_stream())
     for i, generator in sampling_metadata.generators.items():
         # Do not generate random numbers for requests with no draft tokens.
         # This can be important for reproducibility.
