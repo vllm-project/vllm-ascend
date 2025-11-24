@@ -2,6 +2,7 @@
 # Should be mirrored in requirements.txt
 requires = [
     "cmake>=3.26",
+    "arctic-inference == 0.1.0",
     "decorator",
     "einops",
     "numpy<2.0.0",

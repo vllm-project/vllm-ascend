@@ -136,6 +136,7 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
+from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
@@ -596,7 +597,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     TorchairMtpProposer]] = None
+                                     TorchairMtpProposer,
+                                     SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -987,6 +989,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.attn_mask_builder.get_attn_mask(
                 2048, self.dtype, self.device)
         # Decode-only situation.
+        elif attn_state == AscendAttentionState.SpecDecoding:
+            return self.attn_mask_builder.get_splitfuse_attn_mask(
+                                seq_lens, position, self.dtype, self.device)
         else:
             return None
 
@@ -2963,8 +2968,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor)
                 if need_dummy_logits:
-                    self.drafter.model.compute_logits(
-                        hidden_states[dummy_indices])
+                    if isinstance(self.drafter, NgramProposer) or isinstance(
+                            self.drafter, SuffixDecodingProposer):
+                        dummy_compute_logits(hidden_states)
+                    else:
+                        self.drafter.model.compute_logits(
+                            hidden_states[dummy_indices])
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
