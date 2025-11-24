@@ -164,9 +164,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 size_list.append(size)
                 blockIds.append(block_id)
             torch.npu.current_stream().synchronize()
-            self.m_store.put_batch(self.choose_and_shuffle(key_list),
-                                   self.choose_and_shuffle(addr_list),
-                                   self.choose_and_shuffle(size_list),
+            self.m_store.put_batch(key_list[self.start_rank::self.group_num],
+                                   addr_list[self.start_rank::self.group_num],
+                                   size_list[self.start_rank::self.group_num],
                                    blockIds)
         else:
             torch.npu.current_stream().synchronize()
@@ -177,12 +177,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if is_last_chunk:
             self.set_finished_request(req_id)
         self.request_queue.task_done()
-
-    def choose_and_shuffle(self, keys: list):
-        selected_keys = []
-        for i in range(self.start_rank, len(keys), self.group_num):
-            selected_keys.append(keys[i])
-        return selected_keys[self.tp_rank:] + selected_keys[:self.tp_rank]
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):
@@ -219,7 +213,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
                 blockIds.append(block_id)
-            self.m_store.get_batch(key_list, addr_list, size_list, blockIds)
+            self.m_store.get_batch(
+                key_list[:self.tp_rank] + key_list[self.tp_rank:],
+                addr_list[:self.tp_rank] + addr_list[self.tp_rank:],
+                size_list[:self.tp_rank] + size_list[self.tp_rank:], blockIds)
         else:
             for start, end, key in self.token_database.process_tokens(
                     tokens, mask):
