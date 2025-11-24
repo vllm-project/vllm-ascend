@@ -60,7 +60,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}
   cancel-in-progress: true
 
 jobs:
@@ -115,8 +115,39 @@ jobs:
 
         - name: Clear resources
           run: |
-            # pre clear the crd resources created by lws
-            kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
+            set -euo pipefail
+
+            CRD_NAME="${CRD_NAME:-vllm}"
+            TIMEOUT=${TIMEOUT:-120}
+            SLEEP_INTERVAL=2
+
+            echo "Deleting leaderworkerset [$CRD_NAME] in namespace [$NAMESPACE]..."
+            kubectl delete leaderworkerset "$CRD_NAME" -n "$NAMESPACE" --ignore-not-found
+
+            echo "Waiting for all pods starting with 'vllm' to be deleted..."
+            START_TIME=$(date +%s)
+
+            while true; do
+              NOW=$(date +%s)
+              ELAPSED=$((NOW - START_TIME))
+
+              if [[ $ELAPSED -ge $TIMEOUT ]]; then
+                echo "Timeout reached ($TIMEOUT seconds), some pods still exist:"
+                kubectl get pods -n "$NAMESPACE" | grep '^vllm' || true
+                exit 1
+              fi
+
+              PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep '^vllm' || true)
+
+              if [[ -z "$PODS_EXIST" ]]; then
+                echo "All vllm pods deleted."
+                break
+              else
+                echo "Waiting for pods to be deleted: $PODS_EXIST"
+                sleep $SLEEP_INTERVAL
+              fi
+            done
+
         - name: Launch cluster
           id: launcher
           run: |
@@ -164,19 +195,58 @@ jobs:
 
         - name: Waiting for pod ready
           run: |
-            echo "waiting for Pod [$LEADER_POD] in namespace [$NAMESPACE] to Ready..."
+            POD_PREFIX="${POD_PREFIX:-vllm-0}"
+            SIZE="${{ inputs.size }}"
+            TIMEOUT=1200  # default timeout 20 minutes
+
+            echo "Waiting for Pods in namespace [$NAMESPACE] to become Running and Ready (timeout ${TIMEOUT}s)..."
+
+            START_TIME=$(date +%s)
 
             while true; do
-              # get pod status
-              READY_STATUS=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}')
-
-              if [[ "$READY_STATUS" == "true" ]]; then
-                echo "Pod [$LEADER_POD] is Ready!"
-                break
-              else
-                echo "Pod [$LEADER_POD] not ready, waiting..."
-                sleep 3
+              NOW=$(date +%s)
+              ELAPSED=$((NOW - START_TIME))
+              if [[ $ELAPSED -ge $TIMEOUT ]]; then
+                echo "Timeout reached after ${ELAPSED}s"
+                echo "Dumping pod status for debugging:"
+                kubectl get pods -n "$NAMESPACE"
+                kubectl describe pod "$LEADER_POD" -n "$NAMESPACE"
+                exit 1
               fi
+
+              # 1) check follower pods
+              ALL_FOLLOWERS_READY=true
+              for ((i=1; i<${SIZE}; i++)); do
+                POD="${POD_PREFIX}-${i}"
+                PHASE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
+
+                echo "Follower [$POD] phase=$PHASE ready=$READY"
+
+                if [[ "$PHASE" != "Running" || "$READY" != "true" ]]; then
+                  echo "Follower [$POD] not Ready yet..."
+                  ALL_FOLLOWERS_READY=false
+                  break
+                fi
+              done
+
+              # 2) check leader pod
+              LEADER_PHASE=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+              LEADER_READY=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
+
+              echo "Leader [$LEADER_POD] phase=$LEADER_PHASE ready=$LEADER_READY"
+
+              if [[ "$LEADER_PHASE" != "Running" || "$LEADER_READY" != "true" ]]; then
+                echo "Leader not Ready yet..."
+                ALL_FOLLOWERS_READY=false
+              fi
+
+              if [[ "$ALL_FOLLOWERS_READY" == "true" ]]; then
+                echo "All follower pods and leader pod are Running and Ready — continuing."
+                break
+              fi
+
+              sleep 2
             done
 
         - name: Stream logs
