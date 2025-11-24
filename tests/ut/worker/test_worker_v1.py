@@ -6,10 +6,8 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.utils import vllm_version_is
 
-init_cached_hf_modules_path = "vllm.utils.init_cached_hf_modules" if vllm_version_is(
-    "0.11.0") else "vllm.utils.import_utils.init_cached_hf_modules"
+init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
 
 class TestNPUWorker(TestBase):
@@ -189,26 +187,15 @@ class TestNPUWorker(TestBase):
         # Create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
-        if vllm_version_is("0.11.0"):
-            with patch("vllm.utils.STR_DTYPE_TO_TORCH_DTYPE",
-                       {"float32": torch.float32}):
-                worker = NPUWorker(
-                    vllm_config=self.vllm_config_mock,
-                    local_rank=self.local_rank,
-                    rank=self.rank,
-                    distributed_init_method=self.distributed_init_method,
-                    is_driver_worker=self.is_driver_worker,
-                )
-        else:
-            with patch("vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE",
-                       {"float32": torch.float32}):
-                worker = NPUWorker(
-                    vllm_config=self.vllm_config_mock,
-                    local_rank=self.local_rank,
-                    rank=self.rank,
-                    distributed_init_method=self.distributed_init_method,
-                    is_driver_worker=self.is_driver_worker,
-                )
+        with patch("vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE",
+                   {"float32": torch.float32}):
+            worker = NPUWorker(
+                vllm_config=self.vllm_config_mock,
+                local_rank=self.local_rank,
+                rank=self.rank,
+                distributed_init_method=self.distributed_init_method,
+                is_driver_worker=self.is_driver_worker,
+            )
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)

@@ -22,7 +22,6 @@ import torch
 from torch import nn
 
 from vllm_ascend.model_loader.netloader.netloader import ModelNetLoaderElastic
-from vllm_ascend.utils import vllm_version_is
 
 
 class DummyDeviceConfig:
@@ -174,11 +173,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
         "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading",
         lambda *a, **k: None)
     # patch get_ip
-    if vllm_version_is("0.11.0"):
-        monkeypatch.setattr("vllm.utils.get_ip", lambda: "127.0.0.1")
-    else:
-        monkeypatch.setattr("vllm.utils.network_utils.get_ip",
-                            lambda: "127.0.0.1")
+    monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
     # patch find_free_port
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.find_free_port",
