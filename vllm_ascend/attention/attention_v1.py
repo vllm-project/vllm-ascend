@@ -554,6 +554,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         device="npu")
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -1515,41 +1516,43 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if len(kv_cache) > 1:
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is None:
+                if has_decode:
+                    slot_mapping = attn_metadata.slot_mapping[:num_decode_tokens * self.pcp_size: self.pcp_size] \
+                        if self.pcp_size * self.dcp_size > 1 else attn_metadata.slot_mapping[:num_decode_tokens]
+                    torch_npu._npu_reshape_and_cache(
+                        key=key[:num_decode_tokens],
+                        value=value[:num_decode_tokens],
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        slot_indices=slot_mapping)
 
-            if has_decode:
-                slot_mapping = attn_metadata.slot_mapping[:num_decode_tokens * self.pcp_size: self.pcp_size] \
-                    if self.pcp_size * self.dcp_size > 1 else attn_metadata.slot_mapping[:num_decode_tokens]
-                torch_npu._npu_reshape_and_cache(
-                    key=key[:num_decode_tokens],
-                    value=value[:num_decode_tokens],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=slot_mapping)
+                if has_prefill:
+                    if self.pcp_size > 1:
+                        kv = torch.cat([key, value], dim=-1)
+                        num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
+                        all_kv = get_pcp_group().all_gather(
+                            kv[:num_actual_tokens_pcp_padded].contiguous(),
+                            dim=0)
+                        pcp_allgather_restore_idx = attn_metadata.prefill.pcp_allgather_restore_idx if attn_metadata.prefill else None
+                        all_kv = torch.index_select(all_kv, 0,
+                                                    pcp_allgather_restore_idx)
+                        key, value = all_kv.split(
+                            [self.head_size, self.head_size], dim=-1)
 
-            if has_prefill:
-                if self.pcp_size > 1:
-                    kv = torch.cat([key, value], dim=-1)
-                    num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-                    all_kv = get_pcp_group().all_gather(
-                        kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
-                    pcp_allgather_restore_idx = attn_metadata.prefill.pcp_allgather_restore_idx if attn_metadata.prefill else None
-                    all_kv = torch.index_select(all_kv, 0,
-                                                pcp_allgather_restore_idx)
-                    key, value = all_kv.split([self.head_size, self.head_size],
-                                              dim=-1)
-
-                torch_npu._npu_reshape_and_cache(
-                    key=key[self.pcp_size * num_decode_tokens:attn_metadata.
-                            num_actual_tokens_pcp_padded],
-                    value=value[self.pcp_size *
+                    torch_npu._npu_reshape_and_cache(
+                        key=key[self.pcp_size *
                                 num_decode_tokens:attn_metadata.
                                 num_actual_tokens_pcp_padded],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=attn_metadata.
-                    slot_mapping[self.pcp_size *
-                                 num_decode_tokens:attn_metadata.
-                                 num_actual_tokens_pcp_padded])
+                        value=value[self.pcp_size *
+                                    num_decode_tokens:attn_metadata.
+                                    num_actual_tokens_pcp_padded],
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        slot_indices=attn_metadata.
+                        slot_mapping[self.pcp_size *
+                                     num_decode_tokens:attn_metadata.
+                                     num_actual_tokens_pcp_padded])
 
         forward_context: ForwardContext = get_forward_context()
         if not forward_context.capturing:
