@@ -9,7 +9,6 @@ from vllm.model_executor.layers.mla import MLAModules
 from tests.ut.base import TestBase
 from vllm_ascend.models.layers.mla import (AscendMultiHeadLatentAttention,
                                            IndexerWrapper)
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestIndexerWrapper(TestBase):
@@ -85,68 +84,35 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         "vllm_ascend.models.layers.mla.get_tensor_model_parallel_world_size")
     def test_initialization(self, mock_tp_size, mock_ascend_config,
                             mock_get_vllm_config):
-        if vllm_version_is("0.11.0"):
-            with patch("vllm_ascend.models.layers.mla.Attention",
-                       return_value=True):
-                mock_tp_size.return_value = 1
-                mock_ascend_config.return_value.enable_shared_expert_dp = False
-                mock_vllm_config = MagicMock(spec=VllmConfig)
-                mock_vllm_config.model_config.hf_config = MagicMock(
-                    num_hidden_layers=32, first_k_dense_replace=False)
-                mock_get_vllm_config.return_value = mock_vllm_config
-                mock_vllm_config.compilation_config = CompilationConfig()
 
-                attn = AscendMultiHeadLatentAttention(
-                    hidden_size=self.hidden_size,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    qk_nope_head_dim=self.qk_nope_head_dim,
-                    qk_rope_head_dim=self.qk_rope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    q_lora_rank=self.q_lora_rank,
-                    kv_lora_rank=self.kv_lora_rank,
-                    mla_modules=self.mock_mla_modules,
-                    cache_config=self.mock_cache_config,
-                    quant_config=self.mock_quant_config,
-                    prefix=self.prefix,
-                )
+        with patch("vllm_ascend.models.layers.mla.MLAAttention",
+                   return_value=True):
+            mock_tp_size.return_value = 2
+            mock_ascend_config.return_value.enable_shared_expert_dp = True
+            mock_vllm_config = MagicMock(spec=VllmConfig)
+            mock_vllm_config.model_config.hf_config = MagicMock(
+                num_hidden_layers=32, first_k_dense_replace=True)
+            mock_get_vllm_config.return_value = mock_vllm_config
+            mock_vllm_config.compilation_config = CompilationConfig()
 
-                self.assertEqual(attn.hidden_size, self.hidden_size)
-                self.assertEqual(attn.kv_lora_rank, self.kv_lora_rank)
-                self.assertEqual(attn.debug_layer_idx, 0)
-                self.assertIsNotNone(attn.mla_attn)
-                self.assertIn(
-                    self.prefix,
-                    mock_vllm_config.compilation_config.static_forward_context)
-        else:
-            with patch("vllm_ascend.models.layers.mla.MLAAttention",
-                       return_value=True):
-                mock_tp_size.return_value = 2
-                mock_ascend_config.return_value.enable_shared_expert_dp = True
-                mock_vllm_config = MagicMock(spec=VllmConfig)
-                mock_vllm_config.model_config.hf_config = MagicMock(
-                    num_hidden_layers=32, first_k_dense_replace=True)
-                mock_get_vllm_config.return_value = mock_vllm_config
-                mock_vllm_config.compilation_config = CompilationConfig()
+            attn = AscendMultiHeadLatentAttention(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                mla_modules=self.mock_mla_modules,
+                cache_config=self.mock_cache_config,
+                quant_config=self.mock_quant_config,
+                prefix=self.prefix,
+            )
 
-                attn = AscendMultiHeadLatentAttention(
-                    hidden_size=self.hidden_size,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    qk_nope_head_dim=self.qk_nope_head_dim,
-                    qk_rope_head_dim=self.qk_rope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    q_lora_rank=self.q_lora_rank,
-                    kv_lora_rank=self.kv_lora_rank,
-                    mla_modules=self.mock_mla_modules,
-                    cache_config=self.mock_cache_config,
-                    quant_config=self.mock_quant_config,
-                    prefix=self.prefix,
-                )
-
-                self.assertEqual(attn.tp_size, 2)
-                self.assertTrue(attn.enable_shared_expert_dp)
-                self.assertIsNotNone(attn.mla_attn)
+            self.assertEqual(attn.tp_size, 2)
+            self.assertTrue(attn.enable_shared_expert_dp)
+            self.assertIsNotNone(attn.mla_attn)
 
     @patch("vllm_ascend.models.layers.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.models.layers.mla.get_current_vllm_config")
@@ -164,41 +130,22 @@ class TestAscendMultiHeadLatentAttention(TestBase):
             num_hidden_layers=32, first_k_dense_replace=False)
         mock_get_vllm_config.return_value = mock_vllm_config
         mock_vllm_config.compilation_config = CompilationConfig()
-
-        if vllm_version_is("0.11.0"):
-            with patch("vllm_ascend.models.layers.mla.Attention",
-                       return_value=True):
-                attn = AscendMultiHeadLatentAttention(
-                    hidden_size=self.hidden_size,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    qk_nope_head_dim=self.qk_nope_head_dim,
-                    qk_rope_head_dim=self.qk_rope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    q_lora_rank=self.q_lora_rank,
-                    kv_lora_rank=self.kv_lora_rank,
-                    mla_modules=self.mock_mla_modules,
-                    cache_config=self.mock_cache_config,
-                    quant_config=self.mock_quant_config,
-                    prefix=self.prefix,
-                )
-        else:
-            with patch("vllm_ascend.models.layers.mla.MLAAttention",
-                       return_value=True):
-                attn = AscendMultiHeadLatentAttention(
-                    hidden_size=self.hidden_size,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    qk_nope_head_dim=self.qk_nope_head_dim,
-                    qk_rope_head_dim=self.qk_rope_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    q_lora_rank=self.q_lora_rank,
-                    kv_lora_rank=self.kv_lora_rank,
-                    mla_modules=self.mock_mla_modules,
-                    cache_config=self.mock_cache_config,
-                    quant_config=self.mock_quant_config,
-                    prefix=self.prefix,
-                )
+        with patch("vllm_ascend.models.layers.mla.MLAAttention",
+                   return_value=True):
+            attn = AscendMultiHeadLatentAttention(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                mla_modules=self.mock_mla_modules,
+                cache_config=self.mock_cache_config,
+                quant_config=self.mock_quant_config,
+                prefix=self.prefix,
+            )
         positions = torch.tensor([0, 1, 2])
         hidden_states = torch.randn(3, self.hidden_size)
 

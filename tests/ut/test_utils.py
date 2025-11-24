@@ -274,46 +274,8 @@ class TestUtils(TestBase):
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
 
-        if utils.vllm_version_is("0.11.0"):
-            self.assertEqual(
-                137,
-                len(test_vllm_config.compilation_config.cudagraph_capture_sizes
-                    ))
-        else:
-            self.assertEqual(
-                0,
-                len(test_vllm_config.compilation_config.cudagraph_capture_sizes
-                    ))
-            return
-
-        test_vllm_config.speculative_config = mock.MagicMock()
-        test_vllm_config.speculative_config.num_speculative_tokens = 2
-        test_vllm_config.speculative_config.draft_model_config = mock.MagicMock(
-        )
-        test_vllm_config.speculative_config.draft_model_config.hf_config = mock.MagicMock(
-        )
-        test_vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers = 2
-        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
-        utils.update_aclgraph_sizes(test_vllm_config)
-        del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
-            111,
-            len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
-
-        # max_num_batch_sizes >= len(original_sizes)
-        test_compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=[1, 2, 3])
-        test_vllm_config = VllmConfig(
-            model_config=test_model_config,
-            compilation_config=test_compilation_config,
-            parallel_config=test_parallel_config,
-        )
-        utils.update_aclgraph_sizes(test_vllm_config)
-        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
-        utils.update_aclgraph_sizes(test_vllm_config)
-        del os.environ['HCCL_OP_EXPANSION_MODE']
-        self.assertEqual(
-            3,
+            0,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
