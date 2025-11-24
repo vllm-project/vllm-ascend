@@ -2322,11 +2322,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.model_config.use_mla:
                 # FIXME: Try using `auto_dispatch_capture=True`
                 update_mla_attn_params(self.update_stream, forward_context,
-                                       positions.shape[0],
-                                       self.speculative_config)
+                                       num_tokens, self.speculative_config)
             else:
                 update_attn_params(self.update_stream, forward_context,
-                                   positions.shape[0])
+                                   num_tokens)
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
