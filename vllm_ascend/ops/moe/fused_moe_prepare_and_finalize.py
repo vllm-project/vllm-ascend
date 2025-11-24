@@ -21,7 +21,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
-    get_dp_group, get_tensor_model_parallel_rank,
+    get_dp_group, get_tensor_model_parallel_rank, set_substitute_tp,
     get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
@@ -113,8 +113,12 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         vLLM flattens TP and DP into a single dimension; this method recovers
         the true TP world size and rank for correct tensor slicing.
         """
+
+        # TODO(lxf) temperory solution for ffn support dp
+        set_substitute_tp(1)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        set_substitute_tp(0)
 
     def prepare(self,
                 hidden_states: torch.Tensor,
@@ -138,6 +142,7 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         self.enable_shared_expert_dp = enable_shared_expert_dp
         forward_context = get_forward_context()
         mc2_mask = forward_context.mc2_mask
+
         if self.tp_size > 1:
             # Also slice mc2_mask
             split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)

@@ -558,9 +558,10 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         shared_out = self._shared_experts(hidden_states)
 
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-        moe_comm_type = forward_context.moe_comm_type
-        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
+        if tp_size > 1:
+            moe_comm_type = forward_context.moe_comm_type
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
             
         num_tokens, _ = hidden_states.shape
         target_pad_length = forward_context.padded_num_tokens
@@ -574,6 +575,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                                                 (0, 0, 0, pad_size))
             row_idx = nn.functional.pad(row_idx,
                                                 (0, 0, 0, pad_size))
+                                                
         if tp_size > 1:
             split_topk_weights = torch.tensor_split(topk_weights,
                                                     tp_size,

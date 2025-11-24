@@ -32,7 +32,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank, set_substitute_tp,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               get_ep_group,
@@ -702,6 +702,10 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            set_substitute_tp(0)
+            if "shared_experts" in name:
+                # TODO(lxf) temperory solution for ffn support dp
+                set_substitute_tp(1)
             if self.role and 'mlp.gate.' in name:
                 name = name.replace("mlp.gate.", "gate.")
             if "rotary_emb.inv_freq" in name:
@@ -788,7 +792,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                     weight_loader(param, loaded_weight)
                     # load share expert down,attn q\k\v\o\layernorm,mlp.gate
             loaded_params.add(name)
-
+        set_substitute_tp(0)
         return loaded_params
 
     def is_moe_weight(self,name):

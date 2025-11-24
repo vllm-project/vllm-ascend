@@ -1942,6 +1942,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             moe_comm_type = (MoECommType.MC2
                              if num_tokens <= self.mc2_tokens_capacity else
                              MoECommType.ALLTOALL)
+            if self.parallel_config.tensor_parallel_size == 1 and self.parallel_config.data_parallel_size == 1:
+                moe_comm_type = MoECommType.ALLTOALL
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
