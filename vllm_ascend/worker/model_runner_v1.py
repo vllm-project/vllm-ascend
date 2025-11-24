@@ -899,9 +899,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens.max().item(), 0)
-            return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask()
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
             return self.attn_mask_builder.get_attn_mask(
