@@ -42,11 +42,6 @@ function help_info() {
     echo "-c|--compute-unit    Specifies the chip type. If there are multiple values, separate them with semicolons and use quotation marks. The default is ascend910b."
     echo "                     For example: -c \"ascend910b\" or -c \"ascend910b;ascend310p\""
     echo
-    echo "--tiling_key         Sets the tiling key list for operators. If there are multiple values, separate them with semicolons and use quotation marks. The default is all."
-    echo "                     For example: --tiling_key \"1\" or --tiling_key \"1;2;3;4\""
-    echo
-    echo "--asan               Compiles with AddressSanitizer, only supported in UTest."
-    echo
     echo "--cov                Compiles with cov."
     echo
     echo "--verbose            Displays more compilation information."
@@ -75,13 +70,6 @@ function clean()
     if [ -n "${BUILD_DIR}" ];then
         rm -rf ${BUILD_DIR}
     fi
-
-    if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
-        if [ -n "${OUTPUT_DIR}" ];then
-            rm -rf ${OUTPUT_DIR}
-        fi
-    fi
-
     mkdir -p ${BUILD_DIR} ${OUTPUT_DIR}
 }
 
@@ -152,96 +140,6 @@ while [[ $# -gt 0 ]]; do
         ascend_compute_unit="$2"
         shift 2
         ;;
-    --ccache)
-        CCACHE_PROGRAM="$2"
-        shift 2
-        ;;
-    -p|--package-path)
-        ascend_package_path="$2"
-        shift 2
-        ;;
-    -b|--build)
-        BUILD="$2"
-        shift 2
-        ;;
-    -t|--test)
-        shift
-        if [ -n "$1" ];then
-            _parameter=$1
-            first_char=${_parameter:0:1}
-            if [ "${first_char}" == "-" ];then
-                TEST="all"
-            else
-                TEST="${_parameter}"
-                shift
-            fi
-        else
-            TEST="all"
-        fi
-        BUILD=ops_test_utest
-        ;;
-    -e|--example)
-        shift
-        if [ -n "$1" ];then
-            _parameter=$1
-            first_char=${_parameter:0:1}
-            if [ "${first_char}" == "-" ];then
-                EXAMPLE="all"
-            else
-                EXAMPLE="${_parameter}"
-                shift
-            fi
-        else
-            EXAMPLE="all"
-        fi
-        BUILD=ops_test_example
-        ;;
-    -f|--changed_list)
-        filelist_path="$2"
-        shift 2
-        changed_list=$(python3 "$CURRENT_DIR"/cmake/scripts/parse_changed_files.py -c "$CURRENT_DIR"/classify_rule.yaml -f "$filelist_path" get_related_ut)
-        TESTS_UT_OPS_TEST_CI_PR="ON"
-        ;;
-    --parent_job)
-        PARENT_JOB="true"
-        shift
-        ;;
-    --disable-check-compatible|--disable-check-compatiable)
-        CHECK_COMPATIBLE="false"
-        shift
-        ;;
-    --op_build_tool)
-        op_build_tool="$2"
-        shift 2
-        ;;
-    --ascend_cmake_dir)
-        ascend_cmake_dir="$2"
-        shift 2
-        ;;
-    --verbose)
-        VERBOSE="true"
-        shift
-        ;;
-    --asan)
-        ASAN="true"
-        shift
-        ;;
-    --cov)
-        COV="true"
-        shift
-        ;;
-    --tiling-key|--tiling_key)
-        TILING_KEY="$2"
-        shift 2
-        ;;
-    --op_debug_config)
-        OP_DEBUG_CONFIG="$2"
-        shift 2
-        ;;
-    --ops-compile-options)
-        OPS_COMPILE_OPTIONS="$2"
-        shift 2
-        ;;
     *)
         help_info
         exit 1
@@ -257,52 +155,7 @@ if [ -n "${ascend_op_name}" ];then
     CUSTOM_OPTION="${CUSTOM_OPTION} -DASCEND_OP_NAME=${ascend_op_name}"
 fi
 
-if [ -n "${op_build_tool}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DOP_BUILD_TOOL=${op_build_tool}"
-fi
-
-if [ -n "${ascend_cmake_dir}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DASCEND_CMAKE_DIR=${ascend_cmake_dir}"
-fi
-
-if [ -n "${changed_list}" ];then
-    TEST=${changed_list}
-fi
-
-if [ -n "${TEST}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_UT_OPS_TEST=${TEST}"
-    if [ -n "${TEST}" ];then
-      CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_UT_OPS_TEST_CI_PR=${TESTS_UT_OPS_TEST_CI_PR}"
-    fi
-fi
-
-if [ "${ASAN}" == "true" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_ASAN=true"
-fi
-
-if [ "${COV}" == "true" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_GCOV=true"
-fi
-
-if [ -n "${EXAMPLE}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_EXAMPLE_OPS_TEST=${EXAMPLE}"
-fi
-
-if [ -n "${TILING_KEY}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DTILING_KEY=${TILING_KEY}"
-fi
-
-if [ -n "${OP_DEBUG_CONFIG}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DOP_DEBUG_CONFIG=${OP_DEBUG_CONFIG}"
-fi
-
-if [ -n "${OPS_COMPILE_OPTIONS}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DOPS_COMPILE_OPTIONS=${OPS_COMPILE_OPTIONS}"
-fi
-
-if [ -n "${ascend_package_path}" ];then
-    ASCEND_CANN_PACKAGE_PATH=${ascend_package_path}
-elif [ -n "${ASCEND_HOME_PATH}" ];then
+if [ -n "${ASCEND_HOME_PATH}" ];then
     ASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME_PATH}
 elif [ -n "${ASCEND_OPP_PATH}" ];then
     ASCEND_CANN_PACKAGE_PATH=$(dirname ${ASCEND_OPP_PATH})
@@ -323,39 +176,14 @@ fi
 CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
 
 set_env
-
 clean
 
-if [ -n "${CCACHE_PROGRAM}" ]; then
-    if [ "${CCACHE_PROGRAM}" == "false" ] || [ "${CCACHE_PROGRAM}" == "off" ]; then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=OFF"
-    elif [ -f "${CCACHE_PROGRAM}" ];then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${CCACHE_PROGRAM}"
-        gen_bisheng ${CCACHE_PROGRAM}
-    fi
-else
-    ccache_system=$(which ccache || true)
-    if [ -n "${ccache_system}" ];then
-        CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${ccache_system}"
-        gen_bisheng ${ccache_system}
-    fi
+ccache_system=$(which ccache || true)
+if [ -n "${ccache_system}" ];then
+    CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=${ccache_system}"
+    gen_bisheng ${ccache_system}
 fi
 
 cd ${BUILD_DIR}
-
-if [ "${BUILD}" == "host" ];then
-    cmake_config -DENABLE_OPS_KERNEL=OFF
-    build_host
-    rm -rf ${CURRENT_DIR}/output
-    mkdir -p ${CURRENT_DIR}/output
-    cp ${BUILD_DIR}/*.run ${CURRENT_DIR}/output
-elif [ "${BUILD}" == "kernel" ];then
-    cmake_config -DENABLE_OPS_HOST=OFF
-    build_kernel
-elif [ -n "${BUILD}" ];then
-    cmake_config
-    build ${BUILD}
-else
-    cmake_config
-    build_package
-fi
+cmake_config
+build_package

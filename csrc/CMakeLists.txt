@@ -225,12 +225,6 @@ if (BUILD_OPEN_PROJECT)
 endif ()
 
 add_subdirectory(utils)
-if (BUILD_OPEN_PROJECT)
-    # add_subdirectory(tests)
-    if (TESTS_EXAMPLE_OPS_TEST)
-        add_subdirectory(examples)
-    endif ()
-endif ()
 
 set(OP_LIST)
 set(OP_DIR_LIST)
