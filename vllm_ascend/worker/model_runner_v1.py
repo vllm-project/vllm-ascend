@@ -1035,8 +1035,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
-            return self.attn_mask_builder.get_attn_mask(
-                2048, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask().to(
+                torch.bool)
         # Decode-only situation.
         else:
             return None
