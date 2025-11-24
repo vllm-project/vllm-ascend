@@ -384,11 +384,11 @@ class MooncakeEngine:
             )
 
     def get_save_tp_ranks(self, tokens_num: int) -> List[int]:
-        if self.save_nums > 1:
+        if self.save_nums > 1 or not self.no_redundancy:
             return list(range(self.tp_size))
 
         block_num = tokens_num // self.block_size
-        if block_num >= self.tp_size or not self.no_redundancy:
+        if block_num >= self.tp_size:
             return list(range(self.tp_size))
         else:
             return list(range(block_num))
