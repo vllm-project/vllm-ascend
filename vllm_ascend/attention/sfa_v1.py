@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -491,10 +492,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos = attn_metadata.cos
         sin = attn_metadata.sin
 
-        # cos_q, sin_q = cos, sin
-        cos = cos.view(-1, self.qk_rope_head_dim)
-        sin = sin.view(-1, self.qk_rope_head_dim)
-
         # q process in new stream
         q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q = q.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
@@ -505,12 +502,40 @@ class AscendSFAImpl(MLAAttentionImpl):
         k = self.k_norm(k_proj).unsqueeze(1)
         k = k.view(-1, 1, self.head_dim)
 
-        q, k = rope_forward_triton(q,
-                                   k,
-                                   cos,
-                                   sin,
-                                   rope_dim=self.qk_rope_head_dim,
-                                   is_neox_style=True)
+        if HAS_TRITON:
+            cos = cos.view(-1, self.qk_rope_head_dim)
+            sin = sin.view(-1, self.qk_rope_head_dim)
+            q, k = rope_forward_triton(q,
+                                       k,
+                                       cos,
+                                       sin,
+                                       rope_dim=self.qk_rope_head_dim,
+                                       is_neox_style=True)
+        else:
+            cos_q, sin_q = cos, sin
+            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
+
+            q_pe, q_nope = torch.split(
+                q,
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                dim=-1)  # [b,s,64,64+64]
+
+            q_pe = q_pe.unsqueeze(2)
+            q_pe = torch_npu.npu_interleave_rope(q_pe, cos_q, sin_q)
+            q_pe = q_pe.squeeze(2)
+            q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
+
+            k_pe, k_nope = torch.split(
+                k,
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                dim=-1)  # [b,s,64+64]
+
+            k_pe = k_pe.unsqueeze(2)
+            k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
+            k_pe = k_pe.squeeze(2)
+
+            k = torch.cat([k_pe, k_nope], dim=-1)  # [b*s,128]
 
         if kv_cache is not None:
             torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, k.shape[-1]),
