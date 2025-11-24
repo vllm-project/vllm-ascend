@@ -69,7 +69,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: multi-node-tests
     strategy:
       fail-fast: false
