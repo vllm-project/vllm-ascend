@@ -886,7 +886,6 @@ class MtpProposer(Proposer):
                 attn_metadata_i.decode.max_seq_lens = min(
                     attn_metadata_i.decode.max_seq_lens,
                     self.runner.model_config.max_model_len)
-            torch.npu.synchronize()
 
         # mtp>1: [batch_size, k]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
