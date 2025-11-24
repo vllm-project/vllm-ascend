@@ -202,7 +202,7 @@ class AscendFusedMoE(FusedMoE):
                 self.local_num_experts, self.expert_map = (
                     self.expert_load_balancer.get_rank_placement_map(
                         self.moe_instance_id, self.ep_rank))
-                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
+                self.logical_to_physical_map = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
             except Exception as e:
                 logger.warning(
@@ -210,9 +210,9 @@ class AscendFusedMoE(FusedMoE):
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num)
-                self.log2phy = determine_default_log2phy_map(
+                self.logical_to_physical_map = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
+                    self.global_redundant_expert_num)
             if self.expert_map is not None and isinstance(
                     self.expert_map, torch.Tensor):
                 logger.info_once(
@@ -231,7 +231,7 @@ class AscendFusedMoE(FusedMoE):
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num)
-                self.log2phy = determine_default_log2phy_map(
+                self.logical_to_physical_map = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num).npu()
             if self.expert_map is not None and isinstance(
@@ -342,7 +342,7 @@ class AscendFusedMoE(FusedMoE):
             dynamic_scale_for_share=dynamic_scale_for_share,
             shared_experts=None,
             enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
+            log2phy=self.logical_to_physical_map,
             global_redundant_expert_num=self.global_redundant_expert_num)
 
         if isinstance(final_hidden_states, tuple):
