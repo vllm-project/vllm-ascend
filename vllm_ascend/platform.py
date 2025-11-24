@@ -24,7 +24,7 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
-os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "True"
+os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
@@ -346,6 +346,7 @@ class NPUPlatform(Platform):
         use_mla,
         has_sink=False,
         use_sparse=False,
+        attn_type: str | None = None,
     ):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
