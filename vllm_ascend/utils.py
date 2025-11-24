@@ -1037,8 +1037,9 @@ def is_first_k_dense(prefix: str) -> bool:
         )
     config = vllm_config.model_config.hf_config
 
-    n_routed_experts= getattr(config, 'n_routed_experts', 0)
-    first_k_dense_replace = getattr(config, 'first_k_dense_replace', float('inf'))
+    n_routed_experts = getattr(config, 'n_routed_experts', 0)
+    first_k_dense_replace = getattr(config, 'first_k_dense_replace',
+                                    float('inf'))
     moe_layer_freq = getattr(config, 'moe_layer_freq', 1)
 
     is_moe_layer = (n_routed_experts is not None
