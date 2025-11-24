@@ -30,9 +30,9 @@ def register_connector():
         "MooncakeConnector")
 
     KVConnectorFactory.register_connector(
-        "MooncakeConnectorStoreV1",
-        "vllm_ascend.distributed.mooncake.mooncake_store_connector_v1",
-        "MooncakeConnectorV1")
+        "AscendStoreConnector",
+        "vllm_ascend.distributed.kvpool.ascend_store_connector",
+        "AscendStoreConnector")
 
     KVConnectorFactory.register_connector(
         "MooncakeLayerwiseConnector",
