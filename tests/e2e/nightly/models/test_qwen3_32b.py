@@ -18,15 +18,10 @@ from typing import Any
 
 import openai
 import pytest
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_open_port
-else:
-    from vllm.utils.network_utils import get_open_port
 
 MODELS = [
     "Qwen/Qwen3-32B",

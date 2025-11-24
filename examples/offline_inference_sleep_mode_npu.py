@@ -20,11 +20,7 @@ import os
 
 import torch
 from vllm import LLM, SamplingParams
-from vllm_ascend.utils import vllm_version_is
-if vllm_version_is("0.11.0"):
-    from vllm.utils import GiB_bytes
-else:
-    from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
