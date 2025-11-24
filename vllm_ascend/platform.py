@@ -147,6 +147,8 @@ class NPUPlatform(Platform):
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
+            if compilation_config.splitting_ops is None:
+                compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
 
