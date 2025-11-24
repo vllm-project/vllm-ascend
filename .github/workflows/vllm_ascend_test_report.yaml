@@ -86,7 +86,7 @@ jobs:
       UPSTREAM_REPO: vllm-project/vllm-ascend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
