@@ -16,7 +16,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen3-Coder-30B-A3B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G × 16) nodes or 1 Atlas 800 A2 (64G/32G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-Coder-30B-A3B-Instruct)
+- `Qwen3-Coder-30B-A3B-Instruct`(BF16 version): requires 1 Atlas 800 A3 node (with 16x 64G NPUs) or 1 Atlas 800 A2 node (with 8x 64G/32G NPUs). [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-Coder-30B-A3B-Instruct)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 

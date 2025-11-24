@@ -14,7 +14,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | DeepSeek Distill (Qwen/Llama) | ✅        |                                                                      |||||||||||||||||||
 | Qwen3                         | ✅        |                                                                      |||||||||||||||||||
 | Qwen3-based                   | ✅        |                                                                      |||||||||||||||||||
-| Qwen3-Coder                   | ✅        |                                                                      |✅|✅||✅|✅|✅|||✅|✅|✅|✅||||||[Qwen3-Coder-30B-A3B tutorial](../../tutorials/Qwen3-Coder-30B-A3B.md)|
+| Qwen3-Coder                   | ✅        |                                                                      | A2/A3 |✅||✅|✅|✅|||✅|✅|✅|✅||||||[Qwen3-Coder-30B-A3B tutorial](../../tutorials/Qwen3-Coder-30B-A3B.md)|
 | Qwen3-Moe                     | ✅        |                                                                      |||||||||||||||||||
 | Qwen3-Next                    | ✅        |                                                                      |||||||||||||||||||
 | Qwen2.5                       | ✅        |                                                                      |||||||||||||||||||
