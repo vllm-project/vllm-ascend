@@ -20,18 +20,13 @@ import numpy as np
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import make_tensor_with_pad
-else:
-    from vllm.utils.torch_utils import make_tensor_with_pad
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
