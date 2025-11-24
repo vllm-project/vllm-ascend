@@ -53,7 +53,7 @@ class TestNPUPlatform(TestBase):
                          "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization,
-                         [ASCEND_QUANTIZATION_METHOD])
+                         [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
