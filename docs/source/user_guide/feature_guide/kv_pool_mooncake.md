@@ -26,7 +26,7 @@
 **load_async**:Whether to Enable Asynchronous Loading. The default value is false.  
 **register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
 
-## run mooncake master
+## Run Mooncake Master
 
 ### 1.Configure mooncake.json
 
