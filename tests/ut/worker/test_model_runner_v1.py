@@ -74,7 +74,7 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
 
         # Bind the real method to the mock object
         method = NPUModelRunner._select_moe_comm_method(
-            mock_runner, num_tokens, False)
+            mock_runner, num_tokens)
 
         # Assert the result
         assert method == expected_method
@@ -108,4 +108,4 @@ def test_select_moe_comm_method_unsupported_soc():
                   return_value=True), \
          pytest.raises(ValueError, match=f"Unsupported soc_version: {unsupported_soc}"):
 
-        NPUModelRunner._select_moe_comm_method(mock_runner, 100, False)
+        NPUModelRunner._select_moe_comm_method(mock_runner, 100)
