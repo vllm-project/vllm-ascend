@@ -412,28 +412,22 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
     Check whether it is vLLM default capture sizes.
     """
 
-    if vllm_version_is("0.11.0"):
-        cuda_graph_sizes = vllm_config.scheduler_config.cuda_graph_sizes
-        if len(cuda_graph_sizes) == 1:
-            cudagraph_capture_sizes = [1, 2, 4] + [
-                i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-            ]
-    else:
-        max_cudagraph_capture_size = \
-            vllm_config.compilation_config.max_cudagraph_capture_size
-        cudagraph_capture_sizes = [
-            i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-        ]
-        if max_cudagraph_capture_size >= 8:
-            # Step size 8 for small batch sizes, up to 256(not included)
-            cudagraph_capture_sizes += list(
-                range(8, min(max_cudagraph_capture_size + 1, 256), 8))
-        if max_cudagraph_capture_size >= 256:
-            # Step size 16 for larger batch sizes
-            cudagraph_capture_sizes += list(
-                range(256, max_cudagraph_capture_size + 1, 16))
-
-    if sorted(cudagraph_capture_sizes, reverse=True) == \
+    max_cudagraph_capture_size = \
+        vllm_config.compilation_config.max_cudagraph_capture_size
+    cudagraph_capture_sizes = [
+        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+    ]
+    if max_cudagraph_capture_size >= 8:
+        # Step size 8 for small batch sizes, up to 256(not included)
+        cudagraph_capture_sizes += list(
+            range(8, min(max_cudagraph_capture_size + 1, 256), 8))
+    if max_cudagraph_capture_size >= 256:
+        # Step size 16 for larger batch sizes
+        cudagraph_capture_sizes += list(
+            range(256, max_cudagraph_capture_size + 1, 16))
+    # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
+    target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
+    if target_cudagraph_capture_sizes == \
             vllm_config.compilation_config.cudagraph_capture_sizes:
         return True
 
@@ -459,21 +453,13 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
-        if vllm_version_is("0.11.0"):
-            max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
-        else:
-            max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+
+        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
         new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
             i for i in range(24, max_capture_size + 1, 8)
         ]
-
-        if vllm_version_is("0.11.0"):
-            vllm_config.compilation_config.cudagraph_capture_sizes = new_cudagraph_capture_sizes
-            vllm_config.compilation_config.init_with_cudagraph_sizes(
-                new_cudagraph_capture_sizes)
-        else:
-            update_cudagraph_capture_sizes(vllm_config,
-                                           new_cudagraph_capture_sizes)
+        update_cudagraph_capture_sizes(vllm_config,
+                                       new_cudagraph_capture_sizes)
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
@@ -567,10 +553,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         indices[0], indices[-1] = 0, len(original_sizes) - 1
 
         sampled_sizes = [original_sizes[i] for i in indices]
-        if vllm_version_is("0.11.0"):
-            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
-        else:
-            update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
+        update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -601,10 +584,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
             enlarged_sizes = [(num_speculative_tokens + 1) * size
                               for size in original_sizes]
-            if vllm_version_is("0.11.0"):
-                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
-            else:
-                update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
+            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
             logger.info(
                 "Adjusted ACL graphs: %s → %s for speculative decoding",
                 original_sizes, enlarged_sizes)
@@ -713,11 +693,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
+        "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
     }
-    mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
-        "0.11.0") else "MultiHeadLatentAttentionWrapper"
-    if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
-        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)

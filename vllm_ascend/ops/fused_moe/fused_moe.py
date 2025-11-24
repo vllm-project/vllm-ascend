@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
     get_compressed_expert_map)
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
+    SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -44,17 +46,7 @@ from vllm_ascend.quantization.w8a8_dynamic import \
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
-                               shared_experts_calculation_stream,
-                               vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.config import CompilationLevel
-
-    from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE  # type: ignore # isort:skip
-else:
-    from vllm.config import CompilationMode
-    from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
-        SharedFusedMoE
+                               shared_experts_calculation_stream)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -73,16 +65,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if ascend_config.torchair_graph_config.enabled:
             self.use_aclgraph = False
         else:
-            if vllm_version_is("0.11.0"):
-                self.use_aclgraph = (
-                    vllm_config.compilation_config.level
-                    == CompilationLevel.PIECEWISE
-                    and not vllm_config.model_config.enforce_eager)
-            else:
-                self.use_aclgraph = (
-                    vllm_config.compilation_config.mode
-                    == CompilationMode.VLLM_COMPILE
-                    and not vllm_config.model_config.enforce_eager)
+            self.use_aclgraph = (vllm_config.compilation_config.mode
+                                 == CompilationMode.VLLM_COMPILE and
+                                 not vllm_config.model_config.enforce_eager)
 
         self.transpose = True
 
@@ -209,12 +194,8 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe.
-        if vllm_version_is("0.11.0"):
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
-        else:
-            self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
+        self.local_num_experts, self.expert_map, _ = determine_expert_map(
+            self.ep_size, self.ep_rank, self.global_num_experts)
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -257,7 +238,8 @@ class AscendFusedMoE(FusedMoE):
                                         dtype=torch.int64).npu()
 
         eplb_enable = self.dynamic_eplb or (self.expert_map_path is not None)
-        if eplb_enable and (not isinstance(self.quant_method,
+        if eplb_enable and (not hasattr(self.quant_method, "quant_method") or
+                            not isinstance(self.quant_method.quant_method,
                                            AscendW8A8DynamicFusedMoEMethod)):
             raise ValueError("Eplb supports only w8a8_dynamic quantization.")
 

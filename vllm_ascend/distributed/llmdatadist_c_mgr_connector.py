@@ -33,17 +33,13 @@ from vllm.v1.request import Request, RequestStatus
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
-                               prefill_context_parallel_enable,
-                               vllm_version_is)
+                               prefill_context_parallel_enable)
 
 if prefill_context_parallel_enable():
     from vllm.distributed.parallel_state import \
         get_prefill_context_model_parallel_rank
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip
-else:
-    from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
