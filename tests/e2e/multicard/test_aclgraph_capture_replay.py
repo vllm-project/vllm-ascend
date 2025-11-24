@@ -23,13 +23,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_open_port
-else:
-    from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 MODELS = [
     "Qwen/Qwen3-0.6B",

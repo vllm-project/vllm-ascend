@@ -8,6 +8,7 @@ from typing import Generator, List, Optional, Union
 import torch
 from vllm.config import VllmConfig
 from vllm.utils import logger
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 from vllm_ascend.distributed.mooncake.config_data import (
     ChunkedTokenDatabase, LasyerMultiBlockReqMeta, MooncakeConnectorMetadata,
@@ -16,12 +17,6 @@ from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
 from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_kv_cache_torch_dtype
-else:
-    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 
 class MooncakeEngine:
