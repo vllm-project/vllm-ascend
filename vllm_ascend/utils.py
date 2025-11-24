@@ -57,6 +57,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
@@ -432,7 +433,13 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
             cudagraph_capture_sizes += list(
                 range(256, max_cudagraph_capture_size + 1, 16))
 
-    if sorted(cudagraph_capture_sizes, reverse=True) == \
+    if vllm_version_is("0.11.0"):
+        target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes,
+                                                reverse=True)
+    else:
+        # in newer version, vVLLM use ascending order of cudagraph_capture_sizes.
+        target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
+    if target_cudagraph_capture_sizes == \
             vllm_config.compilation_config.cudagraph_capture_sizes:
         return True
 
@@ -827,6 +834,15 @@ def _is_contain_expert(config: Any):
             if _is_contain_expert(v):
                 return True
     return False
+
+
+def is_vl_model(vllm_config: VllmConfig):
+    """Checks if the model is a VL model by config"""
+    global _IS_VL_MODEL
+    if _IS_VL_MODEL is None:
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+    return _IS_VL_MODEL
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
