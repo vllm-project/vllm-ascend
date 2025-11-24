@@ -22,7 +22,7 @@ requires = [
     "quart",
     "numba",
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
-    "compressed_tensors"
+    "compressed_tensors>=0.11.0"
 ]
 build-backend = "setuptools.build_meta"
 
