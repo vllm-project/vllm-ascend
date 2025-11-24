@@ -8,11 +8,17 @@ from typing import Union
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
-from vllm.utils import get_ip, logger
+from vllm.utils import logger
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
 from vllm_ascend.distributed.kvpool.backend.mooncake_transfer_engine import \
     global_te
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import get_ip
+else:
+    from vllm.utils.network_utils import get_ip
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
