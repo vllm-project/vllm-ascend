@@ -52,7 +52,7 @@ Install the Ascend BiSheng toolkit:
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/Ascend-BiSheng-toolkit_aarch64.run
 chmod a+x Ascend-BiSheng-toolkit_aarch64.run
 ./Ascend-BiSheng-toolkit_aarch64.run --install
-source /usr/local/Ascend/8.3.RC2/bisheng_toolkit/set_env.sh
+source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
 ```
 
 Install Triton Ascend:
@@ -76,7 +76,7 @@ Coming soon ...
 Please make sure you have already executed the command:
 
 ```bash
-source /usr/local/Ascend/8.3.RC2/bisheng_toolkit/set_env.sh
+source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
 ```
 
 :::::{tab-set}
