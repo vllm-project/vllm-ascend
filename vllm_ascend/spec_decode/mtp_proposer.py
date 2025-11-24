@@ -15,14 +15,7 @@ from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import cdiv
-else:
-    from vllm.utils.math_utils import cdiv
-
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -39,31 +32,21 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               prefill_context_parallel_enable,
-                               vllm_version_is)
+                               prefill_context_parallel_enable)
 
 if prefill_context_parallel_enable():
     from vllm.distributed import get_pcp_group
 
-if vllm_version_is("0.11.0"):
-    from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-    from vllm.utils import is_pin_memory_available
-else:
-    from vllm.utils.platform_utils import is_pin_memory_available
-    from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
-_deepseek_mtp_path = "vllm.model_executor.models.deepseek_mtp"
-_deepseek_mtp_model = "DeepSeekMTP"
-if vllm_version_is("0.11.0"):
-    _deepseek_mtp_path = "vllm_ascend.patch.worker.patch_deepseek_mtp"
-    _deepseek_mtp_model = "AscendDeepSeekMTP"
-
 _MTP_MODELS = {
-    "DeepseekV3ForCausalLM": (_deepseek_mtp_path, _deepseek_mtp_model),
+    "DeepseekV3ForCausalLM":
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "Qwen3NextForCausalLM":
     ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP")
 }
@@ -240,8 +223,7 @@ class MtpProposer(Proposer):
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if skip_attn:
             attn_metadata = None
@@ -689,8 +671,7 @@ class MtpProposer(Proposer):
          with_prefill) = self.runner._sync_metadata_across_dp(
              num_input_tokens, self.runner.with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         if scheduler_output:
             max_query_len = common_attn_metadata.max_query_len
@@ -886,7 +867,6 @@ class MtpProposer(Proposer):
                 attn_metadata_i.decode.max_seq_lens = min(
                     attn_metadata_i.decode.max_seq_lens,
                     self.runner.model_config.max_model_len)
-            torch.npu.synchronize()
 
         # mtp>1: [batch_size, k]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)

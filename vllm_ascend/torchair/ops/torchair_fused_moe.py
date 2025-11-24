@@ -43,8 +43,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
-                                              determine_default_log2phy_map)
+from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.sequence_parallel import MetadataForPadding
@@ -54,8 +53,7 @@ from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         super_kernel)
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_ascend_soc_version, is_310p,
-                               is_hierarchical_communication_enabled,
-                               vllm_version_is)
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_fused_experts_with_mc2(
@@ -1042,7 +1040,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.expert_map_path) and os.access(self.expert_map_path,
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
-                self.expert_map_path, self.global_num_experts)
+                self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
@@ -1052,15 +1050,14 @@ class TorchairAscendFusedMoE(FusedMoE):
                         self.moe_instance_id, self.ep_rank))
                 self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
+                self.global_num_experts = num_experts + self.global_redundant_expert_num
             except Exception as e:
                 logger.warning(
                     f"Init expert map of mtp/eagle when using sample.{e}")
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
             if self.expert_map is not None and isinstance(
                     self.expert_map, torch.Tensor):
                 logger.info_once(
@@ -1071,21 +1068,12 @@ class TorchairAscendFusedMoE(FusedMoE):
                     get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
-            if vllm_version_is("0.11.0"):
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
-            else:
-                self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
+            self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
-                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
             if self.expert_map is not None and isinstance(
                     self.expert_map, torch.Tensor):
                 logger.info_once(

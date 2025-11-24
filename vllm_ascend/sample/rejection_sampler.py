@@ -6,6 +6,7 @@ import torch.nn as nn
 import vllm.v1.sample.rejection_sampler as rs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (RejectionSampler,
+                                              apply_sampling_constraints,
                                               generate_uniform_probs)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -91,19 +92,12 @@ class AscendRejectionSampler(RejectionSampler, nn.Module):
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `compute_probs` function.
-        if vllm_version_is("0.11.0"):
-            target_probs = compute_probs(
-                target_logits,
-                metadata.cu_num_draft_tokens,
-                sampling_metadata,
-            )
-        else:
-            target_logits = apply_sampling_constraints(
-                target_logits,
-                metadata.cu_num_draft_tokens,
-                sampling_metadata,
-            )
-            target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+        target_logits = apply_sampling_constraints(
+            target_logits,
+            metadata.cu_num_draft_tokens,
+            sampling_metadata,
+        )
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
