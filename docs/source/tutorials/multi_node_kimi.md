@@ -88,8 +88,8 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 32768 \
---max-num-batched-tokens 4096 \
+--max-model-len 8192 \
+--max-num-batched-tokens 8192 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
@@ -130,9 +130,9 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --tensor-parallel-size 8 \
 --served-model-name kimi \
 --max-num-seqs 16 \
---max-model-len 32768 \
+--max-model-len 8192 \
 --quantization ascend \
---max-num-batched-tokens 4096 \
+--max-num-batched-tokens 8192 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
