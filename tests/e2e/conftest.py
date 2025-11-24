@@ -24,6 +24,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, List, Optional, Tuple, TypeVar, Union
 
@@ -41,6 +42,9 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
 from vllm.config.model import TaskOption, _get_and_verify_dtype
+from vllm.distributed.parallel_state import (  # noqa E402
+    destroy_distributed_environment, destroy_model_parallel,
+    init_distributed_environment, initialize_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -65,7 +69,8 @@ adapt_patch(True)
 adapt_patch(False)
 
 from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel)
+    destroy_distributed_environment, destroy_model_parallel,
+    init_distributed_environment, initialize_model_parallel)
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _M = TypeVar("_M")
@@ -77,6 +82,21 @@ PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 _TEST_DIR = os.path.dirname(__file__)
+
+
+@pytest.fixture
+def dist_init():
+    temp_file = tempfile.mkstemp()[1]
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend="hccl",
+    )
+    initialize_model_parallel(1, 1, 1)
+    yield
+    cleanup_dist_env_and_memory()
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
