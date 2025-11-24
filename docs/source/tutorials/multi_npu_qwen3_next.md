@@ -49,9 +49,6 @@ The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you
 Install the Ascend BiSheng toolkit:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/Ascend-BiSheng-toolkit_aarch64.run
-chmod a+x Ascend-BiSheng-toolkit_aarch64.run
-./Ascend-BiSheng-toolkit_aarch64.run --install
 source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
 ```
 
