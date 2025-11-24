@@ -10,12 +10,7 @@ from vllm.platforms import PlatformEnum
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD, vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.config.compilation import CompilationLevel
-else:
-    from vllm.config.compilation import CompilationMode
+                               COMPRESSED_TENSORS_METHOD)
 
 
 class TestNPUPlatform(TestBase):
