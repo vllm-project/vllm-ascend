@@ -4,7 +4,7 @@
 
 The newly released Qwen3-Coder-30B-A3B employs a sparse MoE architecture for efficient training and inference, delivering significant optimizations in agentic coding, extended context support of up to 1M tokens, and versatile function calling.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
 ## Supported Features
 
