@@ -78,7 +78,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -86,7 +86,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -132,7 +132,7 @@ jobs:
           echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm-ascend
           path: ./vllm-ascend
