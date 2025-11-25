@@ -259,10 +259,14 @@ for output in outputs:
 ```
 
 Then run:
-
 ```bash
-# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
-# to speed up download if huggingface is not reachable.
+python example.py
+```
+if the terminal show:We couldn't connect to 'https://huggingface.co' to load the files,and couldn't find them in the cached files.
+Run the following command:
+```bash
+export VLLM_USE_MODELSCOPE=true 
+pip install modelscope
 python example.py
 ```
 
