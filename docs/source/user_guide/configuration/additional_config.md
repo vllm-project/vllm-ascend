@@ -42,6 +42,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `num_wait_worker_iterations`        | int  | `30`    | The  forward iterations when the EPLB worker will finish CPU tasks. In our test default value 30 can cover most cases.                           |
 | `expert_map_record_path`            | str  | `None`  | When dynamic EPLB is completed, save the current expert load heatmap to the specified path.                                                   |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
+| `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
 
 The details of each configuration option are as follows:
 
