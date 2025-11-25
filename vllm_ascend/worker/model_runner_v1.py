@@ -3866,8 +3866,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 graph_support = builder.aclgraph_support.value
                 builder_aclgraph = builder.aclgraph_support
             else:
-                graph_support = builder.cudagraph_support.value
-                builder_aclgraph = builder.cudagraph_support
+                graph_support = builder._cudagraph_support.value
+                builder_aclgraph = builder._cudagraph_support
             if graph_support < min_ag_support.value:
                 min_ag_support = builder_aclgraph
                 min_ag_builder_name = builder.__class__.__name__
