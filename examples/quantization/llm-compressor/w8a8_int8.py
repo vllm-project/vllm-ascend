@@ -53,11 +53,11 @@ TOKENIZER_DICT = {
 
 def load_environment_variables():
     env_vars = {
-        'model_path': "Qwen3-32B",
+        'model_path': "Qwen/Qwen3-32B",
         'export_path': "/llm-compressor/export/GPTQ/W8A8_W_cha_A_ten_static_symmetric",
         'modifier': "GPTQ",
         'schemes': "W8A8_W_cha_A_ten_static_symmetric",
-        'calib_prompt_path': "dataset/ultrachat_200k"
+        'calib_prompt_path': "HuggingFaceH4/ultrachat_200k"
     }
 
     # verify export model path
