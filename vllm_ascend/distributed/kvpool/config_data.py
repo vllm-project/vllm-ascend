@@ -56,23 +56,6 @@ class PoolKey:
                 ))
         return keys
 
-    def to_dict(self):
-        # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
-        return {
-            "__type__": "CacheEngineKey",
-            "model_name": self.key_metadata.model_name,
-            "head_or_tp_rank": self.key_metadata.head_or_tp_rank,
-            "chunk_hash": self.chunk_hash,
-        }
-
-    @staticmethod
-    def from_dict(d):
-        return PoolKey(
-            model_name=d["model_name"],
-            head_or_tp_rank=d["head_or_tp_rank"],
-            chunk_hash=d["chunk_hash"],
-        )
-
 
 @dataclass(order=True)
 class LayerPoolKey(PoolKey):
@@ -183,7 +166,7 @@ class ChunkedTokenDatabase():
         if not block_hashes:
             return
         if not isinstance(block_hashes[0], str):
-            block_hashes = [h.hex() for h in block_hashes]
+            block_hashes = [h.hex() for h in block_hashes]  # type: ignore[union-attr]
         start_idx = 0
         for chunk_id, hash_val in enumerate(block_hashes):
             start_idx = chunk_id * self.block_size

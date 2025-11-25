@@ -19,8 +19,7 @@ class MemcacheBackend(Backend):
 
     def __init__(self, parallel_config: ParallelConfig):
         try:
-            # from pymmc import DistributedObjectStore
-            from memcache import DistributedObjectStore
+            from memcache import DistributedObjectStore  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "Please install memcache by following the instructions at "
@@ -49,7 +48,7 @@ class MemcacheBackend(Backend):
             if ret_value != 0:
                 raise RuntimeError("Memcache memory registration failed.")
 
-    def exists(self, keys: list[str]) -> list[bool]:
+    def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
 
     def get(self, key: list[str], addr: list[list[int]],
