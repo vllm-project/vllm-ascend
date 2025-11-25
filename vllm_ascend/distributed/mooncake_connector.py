@@ -374,8 +374,6 @@ class KVCacheRecvingThread(threading.Thread):
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
         all_task_done = req_meta["all_task_done"]
-        offset = req_meta["offset"]
-        tp_num_need_pulls = req_meta["tp_num_need_pulls"]
 
         try:
             logger.debug(
