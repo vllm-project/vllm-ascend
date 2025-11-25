@@ -62,6 +62,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
                                                    supports_transcription)
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -3129,9 +3130,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
-            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            mtp_instance: Optional[DeepSeekMTP] = None
+            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                assert isinstance(self.drafter, MtpProposer) and isinstance(self.drafter.model, DeepSeekMTP)
+                mtp_instance=self.drafter.model
+            self.eplb_adaptor = VllmEplbAdaptor(
+                model=self.model, 
+                mtp_instance=mtp_instance, 
+                num_mtp_layers=mtp_instance.model.num_mtp_layers
+                )
             self.eplb_loader.set_adator(self.eplb_adaptor)
-            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor, mtp_instance.model.num_mtp_layers)
             self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
@@ -3140,7 +3149,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
+                model_register(self.model, self.model_config)  
             if is_310p():
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
@@ -3154,6 +3163,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+                if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                    assert isinstance(self.drafter, MtpProposer) and isinstance(self.drafter.model, DeepSeekMTP)
+                    mtp_instance=self.drafter.model
+                model_register(mtp_instance.model, self.vllm_config)    
                 if self.drafter.name == SpecDcodeType.EAGLE3:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
