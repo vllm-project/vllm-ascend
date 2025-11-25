@@ -41,7 +41,7 @@ class NgramProposer(VllmNgramProposer, Proposer):
                            aux_hidden_states=None) -> list[list[int]]:
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(valid_sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
+            num_sampled_ids = sampled_ids.shape[0]
             if not num_sampled_ids:
                 continue
 

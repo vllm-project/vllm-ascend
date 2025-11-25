@@ -624,6 +624,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
 
+        self.transfer_event = torch.npu.Event()
+        self.sampled_token_ids_pinned_cpu = torch.empty(
+            (self.max_num_reqs, 1),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=self.pin_memory,
+        )
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -2130,7 +2138,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def propose_draft_token_ids(
         self,
-        valid_sampled_token_ids: Union[torch.Tensor, list[list[int]]],
+        valid_sampled_token_ids: torch.Tensor | list[np.ndarray],
         sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
         spec_decode_metadata: SpecDecodeMetadata,
@@ -2510,17 +2518,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Get the valid generated tokens.
                 max_gen_len = sampled_token_ids.shape[-1]
                 if max_gen_len == 1:
-                    # No spec decode tokens.
-                    valid_sampled_token_ids = sampled_token_ids.tolist()
+                    # No spec decode tokens. It's a tensor.
+                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
                 else:
-                    # Includes spec decode tokens.
+                    # Includes spec decode tokens. It's a numpy array
                     valid_sampled_token_ids = self.rejection_sampler.parse_output(
                         sampled_token_ids,
                         self.input_batch.vocab_size,
                     )
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)].clear()
+                    valid_sampled_token_ids[int(i)] = np.array([])
+
             else:
                 valid_sampled_token_ids = []
                 invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
@@ -2546,12 +2555,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # the sampled tokens back, because there's no direct communication
             # between the first-stage worker and the last-stage worker.
             for req_idx in range(num_sampled_tokens):
+                sampled_ids: np.ndarray | None
                 if self.use_async_scheduling:
-                    sampled_ids = [-1] * 1 if \
-                        req_idx not in invalid_req_indices_set else None
+                    sampled_ids = (np.array([-1]) if req_idx
+                                   not in invalid_req_indices_set else None)
                 else:
                     sampled_ids = valid_sampled_token_ids[req_idx]
-                if not sampled_ids:
+                num_sampled_ids: int = (sampled_ids.shape[0]
+                                        if sampled_ids is not None else 0)
+                if sampled_ids is None or num_sampled_ids == 0:
                     continue
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -2571,7 +2583,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_state = self.requests[req_id]
                 req_state.output_token_ids.extend(sampled_ids)
 
-        def propose_draft_token_ids(sampled_token_ids):
+        def propose_draft_token_ids(sampled_token_ids: torch.Tensor
+                                    | list[np.ndarray]):
             assert self.spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
@@ -2604,16 +2617,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         extra_args = ({"kv_connector_output": kv_connector_output})
 
-        # TODO(leo-pony): remove translate operations.
-        valid_sampled_token_ids = torch.as_tensor(
-            valid_sampled_token_ids).cpu()
-        sampled_token_ids_torch: list[np.ndarray] = [
-            row for row in valid_sampled_token_ids.numpy()
-        ]
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=sampled_token_ids_torch,
+            sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
@@ -4466,3 +4473,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
+
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[np.ndarray]:
+        # This is a short term mitigation for issue mentioned in
+        # https://github.com/vllm-project/vllm/issues/22754.
+        # `tolist` would trigger a cuda wise stream sync, which
+        # would block other copy ops from other cuda streams.
+        # A cuda event sync would avoid such a situation. Since
+        # this is in the critical path of every single model
+        # forward loop, this has caused perf issue for a disagg
+        # setup.
+        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
+        pinned.copy_(sampled_token_ids, non_blocking=True)
+        self.transfer_event.record()
+        self.transfer_event.synchronize()
+        return [row for row in pinned.numpy()]
