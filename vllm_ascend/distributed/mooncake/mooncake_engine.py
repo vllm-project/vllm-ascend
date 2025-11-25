@@ -314,7 +314,14 @@ class MooncakeEngine:
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
                 continue
-
+            torch.npu.synchronize()
+            break
+            
+        for request in connector_metadata.requests:
+            save_spec = request.save_spec
+            if save_spec is None or not save_spec.can_save:
+                continue
+                
             token_ids = request.token_ids
             req_id = request.req_id
             assert isinstance(token_ids, torch.Tensor)
