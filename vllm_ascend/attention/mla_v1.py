@@ -1515,9 +1515,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
         if self.fused_qkv_a_proj is not None:
-            maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
-                               dependency=hidden_states,
-                               enabled=self.enable_prefetch)
+            if hasattr(self.fused_qkv_a_proj, 'weight'):
+                maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
+                                dependency=hidden_states,
+                                enabled=self.enable_prefetch)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1728,11 +1729,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
-        maybe_npu_prefetch(inputs=self.o_proj.weight,
-                           dependency=o_proj_input,
-                           max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                           enabled=self.enable_prefetch)
-
+        if hasattr(self.o_proj, 'weight'):
+            maybe_npu_prefetch(inputs=self.o_proj.weight,
+                               dependency=o_proj_input,
+                               max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                               enabled=self.enable_prefetch)
         output[...] = self.o_proj(o_proj_input,
                                   is_prefill=prefill_preprocess_res
                                   is not None)[0]
