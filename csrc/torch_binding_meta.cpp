@@ -35,7 +35,7 @@
 
 namespace vllm_ascend {
 namespace meta {
-
+const int64_t INT4_NUMS_IN_INT32 = 8;
 std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
   at::Tensor &positions,
   at::Tensor &query,

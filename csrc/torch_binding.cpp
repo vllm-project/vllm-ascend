@@ -34,7 +34,7 @@
 #include <c10/util/Logging.h>
 
 namespace vllm_ascend {
-
+const int64_t INT4_NUMS_IN_INT32 = 8;
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping, aclrtStream stream) {
   torch::Device src_device = src.device();
