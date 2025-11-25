@@ -104,29 +104,7 @@
 #    Future Plan:
 #       Remove this patch when vllm merged them.
 #
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.sampler.Sampler.gather_logprobs`
-#    Why:
-#       We need to patch gather_logprobs to make sure call batched_count_greater_than
-#       with backend=current_platform.simple_compile_backend
-#    How：
-#       Patch gather_logprobs call new batched_count_greater_than
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm/pull/21591
-#    Future Plan:
-#       Revert it when vLLM merge #21591 and release new version
-# ** File: worker/patch_logits.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm._custom_ops.apply_repetition_penalties`
-#    Why:
-#       apply_repetition_penalties in vLLM use tensor.is_cuda to check if tensor is on cuda. But the value is always True
-#       on ascend, thus we need to patch apply_repetition_penalties.
-#    How：
-#       Remove the related cuda check in apply_repetition_penalties.
-#    Related PR (if no, explain why):
-#       - this is a bug by Ascend only. It can' be fixed in vLLM.
-#    Future Plan:
-#       Fix this bug in torch-npu, bump torch-npu version and remove this patch.
+# ** File: worker/patch_roberta.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.roberta.RobertaEmbedding.forward`
 #    Why:
