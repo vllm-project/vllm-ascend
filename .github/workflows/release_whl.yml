@@ -97,6 +97,7 @@ jobs:
           --exclude libc_sec.so \
           --exclude "libascend*.so" \
           --exclude "libtorch*.so" \
+          --exclude "libopapi.so" \
           --exclude "liberror_manager.so"
         done
         rm -f dist/*.whl

@@ -27,14 +27,13 @@
 #include "ops.h"
 #include "utils.h"
 #include "mla_preprocess/op_host/mla_preprocess.h"
-#include "aclnn/op_api_common.h"
+#include "aclnn_torch_adapter/op_api_common.h"
 
 #include <c10/core/Device.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
 
 namespace vllm_ascend {
-const int64_t INT4_NUMS_IN_INT32 = 8;
 
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping, aclrtStream stream) {

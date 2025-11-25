@@ -122,7 +122,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     int n = weight.sizes()[2];
     bool is_a8w4 = x.dtype() == at::kChar && weight.dtype() == at::kInt;
     if (is_a8w4) {
-        n *= 8;
+        n *= INT4_NUMS_IN_INT32;
     }
     at::Tensor output = at::empty({m, n/2}, x.options().dtype(c10::ScalarType::Char));
     at::Tensor output_scale = at::empty({m}, x.options().dtype(c10::ScalarType::Float));

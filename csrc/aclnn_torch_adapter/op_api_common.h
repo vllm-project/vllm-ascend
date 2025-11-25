@@ -234,17 +234,13 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
   c10::SmallVector<int64_t, 5> storageDims;
   // if acl_data_type is ACL_STRING, storageDims is empty.
   auto itemsize = at_tensor.itemsize();
-  if (itemsize == 0) {
-    AT_ERROR("When ConvertType, tensor item size of cannot be zero.");
-    return nullptr;
-  }
+  TORCH_CHECK(itemsize != 0, "When ConvertType, tensor item size cannot be zero.");
 
   const auto dimNum = at_tensor.sizes().size();
   aclFormat format = ACL_FORMAT_ND;
   if (!IsOpInputBaseFormat(at_tensor)) {
     format = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.npu_format_;
     if (acl_data_type != ACL_STRING) {
-          TORCH_CHECK(at_tensor.itemsize() > 0, "the itemsize of tensor must be greater than 0.");
           storageDims = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.storage_sizes_;
       }
   } else {

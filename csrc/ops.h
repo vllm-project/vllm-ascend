@@ -24,6 +24,7 @@
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {
+  const int64_t INT4_NUMS_IN_INT32 = 8;
   extern void rotary_embedding_impl(AscendType type, bool isNeox, void *stream, int64_t *positions, void *queryDst,
     void *keyDst, void *query, void *key, void *cosSinCache, const int rotDim,
     const int64_t queryStride, const int64_t keyStride, const int64_t dstQueryStride,

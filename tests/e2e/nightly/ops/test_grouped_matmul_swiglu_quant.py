@@ -44,8 +44,8 @@ def custom_mm(x: torch.Tensor, weight: torch.Tensor,
         x_grouped = x.view(-1, k_group, per_group_ele).transpose(0, 1)
         weight_grouped = weight.view(k_group, per_group_ele, n)
 
-        c_temp = np.bmm(x_grouped.to(torch.int32),
-                        weight_grouped.to(torch.int32)).to(torch.float16)
+        c_temp = torch.bmm(x_grouped.to(torch.int32),
+                           weight_grouped.to(torch.int32)).to(torch.float16)
         for k_idx in range(k_group):
             mm_out += (c_temp[k_idx] *
                        weight_scale[k_idx].view(1, -1).to(torch.float16)).to(
@@ -130,7 +130,7 @@ def generate_non_decreasing_sequence(length, upper_limit):
 
 
 @torch.inference_mode()
-def test_mla_preprocess_kernel():
+def test_grouped_matmul_swiglu_quant_kernel():
     E = 16
     M = 512
     K = 7168
