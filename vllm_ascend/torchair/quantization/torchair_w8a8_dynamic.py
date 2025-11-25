@@ -835,7 +835,7 @@ class TorchairAscendW8A8DynamicLinearMethod:
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format (29) for higher inference speed
-        if is_enable_nz():
+        if is_enable_nz(layer.weight.data.dtype):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, 29)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
