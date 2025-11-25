@@ -1459,12 +1459,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
-        # Prepare some information for building Attention-Metadata
-        # Compute and commit slot mapping
-        self.input_batch.block_table.compute_slot_mapping(
-            req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(
-            total_num_scheduled_tokens)
 
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
