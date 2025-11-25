@@ -413,3 +413,9 @@ class NPUPlatform(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def get_forward_context_manager(cls):
+        from vllm_ascend.ascend_forward_context import \
+            set_ascend_forward_context
+        return set_ascend_forward_context
