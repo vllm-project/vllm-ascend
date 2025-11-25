@@ -9,7 +9,7 @@ Qwen3 VL relies on the newest version of `transformers` (>4.56.2). Please instal
 Refer to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process).
 
 ## Run with Docker
-Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
+Assume you have Atlas 800I A3 (64G*16) nodes (or 2 * Atlas 800I A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
 
 ```{code-block} bash
    :substitutions:
