@@ -84,6 +84,7 @@ class AscendW8A8LinearMethod:
         params_dict["weight_offset"] = torch.empty(output_size,
                                                    1,
                                                    dtype=params_dtype)
+        params_dict["bias"] = torch.zeros(output_size, dtype=torch.float32)
         return params_dict
 
     def get_pergroup_param(self,
@@ -185,6 +186,7 @@ class AscendW8A8LinearMethod:
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
+        layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
 
 
 class AscendW8A8FusedMoEMethod:

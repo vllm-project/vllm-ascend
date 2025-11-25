@@ -66,6 +66,7 @@ class AscendW8A8DynamicLinearMethod:
         params_dict["weight_offset"] = torch.empty(output_size,
                                                    1,
                                                    dtype=params_dtype)
+        params_dict["bias"] = torch.zeros(output_size, dtype=torch.float32)
         return params_dict
 
     def get_pergroup_param(self,
@@ -116,7 +117,7 @@ class AscendW8A8DynamicLinearMethod:
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
-
+        layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
 
 class AscendW8A8DynamicFusedMoEMethod:
     """FusedMoe method for Ascend W8A8_DYNAMIC.
