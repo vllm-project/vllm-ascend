@@ -22,10 +22,53 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
 from einops import rearrange
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention
+from vllm.model_executor.models.qwen2_5_vl import (
+    Qwen2_5_VisionAttention, Qwen2_5_VLForConditionalGeneration)
+
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
+
+
+class AscendQwen2_5_VLForConditionalGeneration(nn.Module):
+
+    def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
+
+        grid_thw = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            with set_ascend_forward_context(None, self.vllm_config):
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+
+        # Split concatenated embeddings for each image item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        return image_embeds.split(sizes.tolist())
+
+    def _process_video_input(self, video_input) -> tuple[torch.Tensor, ...]:
+
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values_videos = video_input["pixel_values_videos"].type(
+                self.visual.dtype)
+            with set_ascend_forward_context(None, self.vllm_config):
+                video_embeds = self.visual(pixel_values_videos,
+                                           grid_thw=grid_thw)
+
+        # Split concatenated embeddings for each video item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        return video_embeds.split(sizes.tolist())
 
 
 @contextmanager
@@ -38,7 +81,8 @@ def _padding_manager(
     origin_shape: int,
     hidden_size_per_attention_head: int,
 ):
-    enable_pad = (hidden_size_per_attention_head > MIN_PAD_SIZE
+    enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
+                  and hidden_size_per_attention_head > MIN_PAD_SIZE
                   and hidden_size_per_attention_head < MAX_PAD_SIZE)
 
     if enable_pad:
@@ -145,3 +189,5 @@ class AscendQwen2_5_VisionAttention(nn.Module):
 
 
 Qwen2_5_VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
+Qwen2_5_VLForConditionalGeneration._process_image_input = AscendQwen2_5_VLForConditionalGeneration._process_image_input
+Qwen2_5_VLForConditionalGeneration._process_video_input = AscendQwen2_5_VLForConditionalGeneration._process_video_input
