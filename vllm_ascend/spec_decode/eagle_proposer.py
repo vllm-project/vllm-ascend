@@ -136,7 +136,7 @@ class EagleProposer(Proposer):
             )
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[list[int]],
+                           valid_sampled_token_ids: list[np.ndarray],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -149,7 +149,7 @@ class EagleProposer(Proposer):
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -181,7 +181,7 @@ class EagleProposer(Proposer):
         else:
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
