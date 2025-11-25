@@ -32,9 +32,10 @@ def _addrmsnorm_forward_oot(
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     import torch_npu
 
-    from vllm_ascend.utils import is_310p
+    from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-    if layer is not None and not is_310p():
+    if layer is not None and get_ascend_device_type(
+    ) != AscendDeviceType._310P:
         layer_cls_name = layer.__class__.__name__
         try:
             weight_prefetch_method = get_forward_context(
@@ -67,7 +68,7 @@ def _addrmsnorm_forward_oot(
             )
 
     else:
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)
@@ -195,9 +196,9 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)

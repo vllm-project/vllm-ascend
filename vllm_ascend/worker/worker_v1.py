@@ -49,7 +49,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
+from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
@@ -90,7 +90,7 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
-        init_ascend_soc_version()
+        check_ascend_device_type()
         use_sparse = False
         if vllm_config.model_config is not None:
             use_sparse = hasattr(vllm_config.model_config.hf_config,

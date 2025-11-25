@@ -138,9 +138,9 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               AscendSocVersion, ProfileExecuteDuration,
-                               enable_sp, get_ascend_soc_version, is_310p,
-                               is_enable_nz, is_moe_model, lmhead_tp_enable,
+                               AscendDeviceType, ProfileExecuteDuration,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
@@ -161,7 +161,7 @@ import torch_npu
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
-if is_310p():
+if get_ascend_device_type() == AscendDeviceType._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
     ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
 else:
@@ -2231,14 +2231,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if not is_moe_model(self.vllm_config):
             return None
 
-        soc_version = get_ascend_soc_version()
+        soc_version = get_ascend_device_type()
         quant_type = getattr(self.vllm_config.model_config.hf_config,
                              'moe_quantize', None)
         model_type = self.vllm_config.model_config.hf_config.model_type
 
         if not self.parallel_config.enable_expert_parallel:
             moe_comm_type = MoECommType.ALLGATHER
-        elif soc_version in {AscendSocVersion.A2}:
+        elif soc_version in {AscendDeviceType._910B}:
             if (num_tokens <= self.mc2_tokens_capacity
                     and self.parallel_config.world_size_across_dp >= 16):
                 moe_comm_type = MoECommType.MC2
@@ -2249,7 +2249,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     moe_comm_type = MoECommType.ALLGATHER
 
-        elif soc_version in {AscendSocVersion.A3}:
+        elif soc_version in {AscendDeviceType._910_93}:
             moe_comm_type = (MoECommType.MC2
                              if num_tokens <= self.mc2_tokens_capacity else
                              MoECommType.ALLTOALL)
@@ -3141,7 +3141,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
                     RowParallelLinear)
