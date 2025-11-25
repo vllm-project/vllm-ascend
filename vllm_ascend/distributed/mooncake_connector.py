@@ -44,7 +44,6 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import prefill_context_parallel_enable, vllm_version_is
-from typing import List
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -1308,21 +1307,22 @@ class MooncakeConnectorWorker:
                         self.kv_recv_thread.add_request(
                             request_id=req_id,
                             local_block_ids=local_block_ids_list[pcp_dcp_rank],
-                            remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
+                            remote_block_ids=remote_block_ids_list[
+                                pcp_dcp_rank],
                             remote_engine_id=meta.remote_engine_id,
                             remote_host=meta.remote_host,
                             remote_handshake_port=remote_handshake_port_list[
                                 pcp_dcp_rank][i],
                             offset=i,
                             tp_num_need_pulls=self.tp_num_need_pulls,
-                            all_task_done=(pcp_dcp_rank
-                                        == len(remote_handshake_port_list) - 1
-                                        and i == self.tp_num_need_pulls - 1 ))
-            else:   #TODO: support prefill context parallel and pipeline parallel open at the same time
+                            all_task_done=(
+                                pcp_dcp_rank
+                                == len(remote_handshake_port_list) - 1
+                                and i == self.tp_num_need_pulls - 1))
+            else:  #TODO: support prefill context parallel and pipeline parallel open at the same time
                 choosen_rank_list = self._get_remote_tp_rank(req_id)
-                remote_handshake_port_list = [
-                    [x + meta.remote_port] for x in choosen_rank_list
-                ]
+                remote_handshake_port_list = [[x + meta.remote_port]
+                                              for x in choosen_rank_list]
                 for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
                     self.kv_recv_thread.add_request(
@@ -1334,7 +1334,8 @@ class MooncakeConnectorWorker:
                         remote_handshake_port=remote_handshake_port_list[i][0],
                         offset=i,
                         tp_num_need_pulls=self.tp_num_need_pulls,
-                        all_task_done=(i == self.tp_num_need_pulls * self._prefill_pp_size - 1 ))
+                        all_task_done=(i == self.tp_num_need_pulls *
+                                       self._prefill_pp_size - 1))
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
