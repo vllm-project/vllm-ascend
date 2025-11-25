@@ -1392,7 +1392,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         return self.expert_map
 
     def get_log2phy_map(self):
-        return self.logical_to_physical_map
+        return self.log2phy
 
     def clear_moe_load(self):
         if self.moe_load is not None:
