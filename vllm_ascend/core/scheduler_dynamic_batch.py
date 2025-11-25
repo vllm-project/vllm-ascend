@@ -35,7 +35,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 
 class BudgetRefiner:
-    """This budget refiner can make dynamic adjustment to the token budget 
+    """This budget refiner can make dynamic adjustment to the token budget
     in the chunked prefill scheduling strategy."""
 
     def __init__(self, default_budget, slo_limit=-1) -> None:
@@ -416,8 +416,8 @@ class SchedulerDynamicBatch(Scheduler):
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_compute_budget
-                         ) = self._try_schedule_encoder_inputs(
+                         new_encoder_compute_budget,
+                         _) = self._try_schedule_encoder_inputs(
                              request, num_computed_tokens, num_new_tokens,
                              encoder_compute_budget)
                         if num_new_tokens == 0:
