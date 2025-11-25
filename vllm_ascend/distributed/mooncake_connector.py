@@ -31,7 +31,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
 from vllm.distributed.utils import get_pp_indices
-from vllm.utils import get_ip, logger, make_zmq_path, make_zmq_socket
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
