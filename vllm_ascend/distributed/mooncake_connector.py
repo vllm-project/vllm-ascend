@@ -1297,46 +1297,46 @@ class MooncakeConnectorWorker:
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
 
-        if prefill_context_parallel_enable():
-            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
-                req_id, meta)
+            if prefill_context_parallel_enable():
+                remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
+                    req_id, meta)
 
-            for pcp_dcp_rank in range(len(remote_handshake_port_list)):
-                if len(local_block_ids_list[pcp_dcp_rank]) + len(
-                        remote_block_ids_list[pcp_dcp_rank]) == 0:
-                    continue
-                for i in range(self.tp_num_need_pulls):
+                for pcp_dcp_rank in range(len(remote_handshake_port_list)):
+                    if len(local_block_ids_list[pcp_dcp_rank]) + len(
+                            remote_block_ids_list[pcp_dcp_rank]) == 0:
+                        continue
+                    for i in range(self.tp_num_need_pulls):
+                        assert self.kv_recv_thread is not None
+                        self.kv_recv_thread.add_request(
+                            request_id=req_id,
+                            local_block_ids=local_block_ids_list[pcp_dcp_rank],
+                            remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
+                            remote_engine_id=meta.remote_engine_id,
+                            remote_host=meta.remote_host,
+                            remote_handshake_port=remote_handshake_port_list[
+                                pcp_dcp_rank][i],
+                            offset=i,
+                            tp_num_need_pulls=self.tp_num_need_pulls,
+                            all_task_done=(pcp_dcp_rank
+                                        == len(remote_handshake_port_list) - 1
+                                        and i == self.tp_num_need_pulls - 1 ))
+            else:   #TODO: support prefill context parallel and pipeline parallel open at the same time
+                choosen_rank_list = self._get_remote_tp_rank(req_id)
+                remote_handshake_port_list = [
+                    x + meta.remote_port for x in choosen_rank_list
+                ]
+                for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
-                        local_block_ids=local_block_ids_list[pcp_dcp_rank],
-                        remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
+                        local_block_ids=meta.local_block_ids,
+                        remote_block_ids=meta.remote_block_ids,
                         remote_engine_id=meta.remote_engine_id,
                         remote_host=meta.remote_host,
-                        remote_handshake_port=remote_handshake_port_list[
-                            pcp_dcp_rank][i],
+                        remote_handshake_port=remote_handshake_port_list[i],
                         offset=i,
                         tp_num_need_pulls=self.tp_num_need_pulls,
-                        all_task_done=(pcp_dcp_rank
-                                       == len(remote_handshake_port_list) - 1
-                                       and i == self.tp_num_need_pulls - 1 ))
-        else:   #TODO: support prefill context parallel and pipeline parallel open at the same time
-            choosen_rank_list = self._get_remote_tp_rank(req_id)
-            remote_handshake_port_list = [
-                x + meta.remote_port for x in choosen_rank_list
-            ]
-            for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
-                assert self.kv_recv_thread is not None
-                self.kv_recv_thread.add_request(
-                    request_id=req_id,
-                    local_block_ids=meta.local_block_ids,
-                    remote_block_ids=meta.remote_block_ids,
-                    remote_engine_id=meta.remote_engine_id,
-                    remote_host=meta.remote_host,
-                    remote_handshake_port=remote_handshake_port_list[i],
-                    offset=i,
-                    tp_num_need_pulls=self.tp_num_need_pulls,
-                    all_task_done=(i == self.tp_num_need_pulls * self._prefill_pp_size - 1 ))
+                        all_task_done=(i == self.tp_num_need_pulls * self._prefill_pp_size - 1 ))
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
