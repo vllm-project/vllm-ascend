@@ -151,10 +151,6 @@ if __name__ == '__main__':
     )
     tokenizer = TOKENIZER_DICT[model_type].from_pretrained(env_vars['model_path'], trust_remote_code=True)
 
-    # Load the calibration dataset
-    if env_vars["calib_prompt_path"] is None:
-        env_vars["calib_prompt_path"] = "dataset/ultrachat_200k"
-
     ds = load_calibration_text_dataset(env_vars["calib_prompt_path"], tokenizer)
 
     # Quantize the model
