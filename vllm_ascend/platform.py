@@ -33,7 +33,7 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
 
 # isort: off
 from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AWQ_QUANTIZATION_METHOD, AscendDeviceType,
     enable_sp, get_ascend_device_type, is_vl_model,
     prefill_context_parallel_enable, update_aclgraph_sizes,
     update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
@@ -79,7 +79,7 @@ class NPUPlatform(Platform):
     dispatch_key: str = "PrivateUse1"
 
     supported_quantization: list[str] = [
-        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AWQ_QUANTIZATION_METHOD
     ]
 
     def is_sleep_mode_available(self) -> bool:
@@ -107,6 +107,8 @@ class NPUPlatform(Platform):
             AscendCompressedTensorsConfig  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
+        from vllm_ascend.quantization.awq.awq import \
+            AWQQuantConfig  # noqa: F401
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
