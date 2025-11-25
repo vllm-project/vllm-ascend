@@ -77,7 +77,7 @@ vllm serve /data/Qwen2.5-VL-32B-Instruct-w8a8 \
     --quantization ascend \
     --async-scheduling \
     --tensor-parallel-size 2 \
-    --max_model_len 15000 \
+    --max-model-len 15000 \
     --max-num-batched-tokens 30000 \
     --max-num-seqs 30 \
     --no-enable-prefix-caching \
