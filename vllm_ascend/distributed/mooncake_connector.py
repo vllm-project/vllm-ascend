@@ -1321,8 +1321,8 @@ class MooncakeConnectorWorker:
             else:   #TODO: support prefill context parallel and pipeline parallel open at the same time
                 choosen_rank_list = self._get_remote_tp_rank(req_id)
                 remote_handshake_port_list = [
-                    x + meta.remote_port for x in choosen_rank_list
-                ] # type: ignore[misc]
+                    [x + meta.remote_port] for x in choosen_rank_list
+                ]
                 for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
                     self.kv_recv_thread.add_request(
@@ -1331,7 +1331,7 @@ class MooncakeConnectorWorker:
                         remote_block_ids=meta.remote_block_ids,
                         remote_engine_id=meta.remote_engine_id,
                         remote_host=meta.remote_host,
-                        remote_handshake_port=remote_handshake_port_list[i],  # type: ignore[arg-type]
+                        remote_handshake_port=remote_handshake_port_list[i][0],
                         offset=i,
                         tp_num_need_pulls=self.tp_num_need_pulls,
                         all_task_done=(i == self.tp_num_need_pulls * self._prefill_pp_size - 1 ))
