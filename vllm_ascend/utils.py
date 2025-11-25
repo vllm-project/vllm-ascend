@@ -71,13 +71,15 @@ def is_310p():
     return _IS_310P
 
 
-def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
+def is_enable_nz(dtype: Optional[torch.dtype] = torch.int8, vllm_config: Optional[VllmConfig] = None) -> bool:
     global _ENABLE_NZ
     if _ENABLE_NZ is None:
         if not vllm_config:
             raise ValueError(
                 "vllm_config must be provided when _ENABLE_NZ is None")
         _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
+    if dtype in [torch.float16, torch.bfloat16]:
+        _ENABLE_NZ = 0
     return _ENABLE_NZ
 
 
