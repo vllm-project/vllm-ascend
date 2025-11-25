@@ -344,15 +344,11 @@ class NPUPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink=False,
         use_sparse=False,
         attn_type: str | None = None,
     ):
-        if not use_v1:
-            raise ValueError("vLLM Ascend does not support V0 engine.")
-
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:

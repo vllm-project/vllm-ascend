@@ -2416,7 +2416,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
-
+        need_dump = self.dump_enable and self.debugger is not None
         # Unpack ephemeral state.
         (
             scheduler_output,
