@@ -625,12 +625,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state: ExecuteModelState | None = None
 
         self.transfer_event = torch.npu.Event()
-        self.sampled_token_ids_pinned_cpu = torch.empty(
-            (self.max_num_reqs, 1),
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=self.pin_memory,
-        )
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -2519,7 +2513,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_gen_len = sampled_token_ids.shape[-1]
                 if max_gen_len == 1:
                     # No spec decode tokens. It's a tensor.
-                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                    valid_sampled_token_ids: list[np.ndarray] = [
+                        row for row in sampled_token_ids.cpu().numpy()
+                    ]
                 else:
                     # Includes spec decode tokens. It's a numpy array
                     valid_sampled_token_ids = self.rejection_sampler.parse_output(
