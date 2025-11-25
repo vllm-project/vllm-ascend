@@ -302,7 +302,8 @@ class MtpProposer(Proposer):
                 break
 
     def generate_token_ids(self,
-                           sampled_token_ids: list[list[int]],
+                           sampled_token_ids: Union[torch.Tensor,
+                                                    list[np.ndarray]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -895,7 +896,7 @@ class MtpProposer(Proposer):
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -910,7 +911,7 @@ class MtpProposer(Proposer):
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
