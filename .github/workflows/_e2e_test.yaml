@@ -182,6 +182,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv tests/e2e/multicard/test_quantization.py
           pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_full_graph_mode.py
@@ -207,7 +208,6 @@ jobs:
           pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
-          pytest -sv tests/e2e/multicard/test_quantization.py
 
   e2e-4-cards:
     name: multicard-4
