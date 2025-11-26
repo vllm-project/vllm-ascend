@@ -655,20 +655,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
 
-        # Pre-allocated tensor for copying valid sampled token counts to CPU,
-        # with dedicated stream for overlapping and event for coordination.
-        self.valid_sampled_token_count_event: torch.Event | None = None
-        self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
-        if self.use_async_scheduling and self.num_spec_tokens:
-            self.valid_sampled_token_count_event = torch.Event()
-            self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
-        self.valid_sampled_token_count_cpu = torch.empty(
-            self.max_num_reqs,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=self.pin_memory,
-        )
-
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.spec_attn_mask = None
