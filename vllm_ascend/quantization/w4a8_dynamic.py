@@ -371,7 +371,8 @@ class AscendW4A8DynamicFusedMoEMethod:
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+            topk_ids = torch.randint_like(
+                topk_ids, 0, global_num_experts - global_redundant_expert_num)
 
         topk_weights = topk_weights.to(x.dtype)
 
