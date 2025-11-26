@@ -12,6 +12,7 @@ from vllm.forward_context import ForwardContext
 from vllm.utils import logger, make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
@@ -22,8 +23,8 @@ from vllm_ascend.distributed.mooncake.mooncake_engine import MooncakeEngine
 
 class MooncakeConnectorV1(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig):
+        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
