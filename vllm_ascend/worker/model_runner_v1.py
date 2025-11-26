@@ -58,7 +58,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
                                                    supports_transcription)
@@ -3180,7 +3180,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
+            model_loader = get_model_loader(self.load_config)
+            self.model = model_loader.load_model(
+                vllm_config=self.vllm_config, model_config=self.vllm_config.model_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
             if get_ascend_device_type() == AscendDeviceType._310P:
@@ -4480,3 +4482,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return [row for row in pinned.numpy()]
+
+    def reload_weights(self) -> None:
+        assert getattr(self, "model", None) is not None, \
+            "Cannot reload weights before model is loaded."
+        model_loader = get_model_loader(self.load_config)
+        logger.info("Reloading weights inplace...")
+        model_loader.load_weights(self.model, model_config=self.model_config)
