@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import ForwardContext
 from vllm.utils import logger
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
@@ -17,12 +18,6 @@ from vllm.v1.serial_utils import MsgpackDecoder
 from vllm_ascend.distributed.kvpool.pool_scheduler import (
     KVPoolScheduler, get_zmq_rpc_path_lookup)
 from vllm_ascend.distributed.kvpool.pool_worker import KVPoolWorker
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import make_zmq_socket
-else:
-    from vllm.utils.network_utils import make_zmq_socket
 
 
 class AscendStoreConnector(KVConnectorBase_V1):
