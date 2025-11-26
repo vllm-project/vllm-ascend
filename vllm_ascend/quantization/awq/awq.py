@@ -165,7 +165,7 @@ class AWQQuantConfig(QuantizationConfig):
     
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.half, torch.bfloat16]
     
     @classmethod
     def get_min_capability(cls) -> int:
