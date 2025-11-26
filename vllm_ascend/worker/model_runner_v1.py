@@ -894,14 +894,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
-        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
+        if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
         # Prefill without cache situation and Prefill with cache hit.
-        elif attn_state == AscendAttentionState.PrefillNoCache or attn_state == AscendAttentionState.PrefillCacheHit:
+        if attn_state == AscendAttentionState.PrefillNoCache or attn_state == AscendAttentionState.PrefillCacheHit:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
         # Decode-only situation.
-        else:
-            return None
+        return None
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0

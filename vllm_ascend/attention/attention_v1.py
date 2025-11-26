@@ -36,9 +36,6 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
-                               nd_to_nz_2d, nd_to_nz_spec)
 
 from ..utils import weak_ref_tensors
 
@@ -317,13 +314,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.value_cache = None
 
     def _forward_prefill(self,
-                             query: torch.Tensor,
-                             key: torch.Tensor,
-                             value: torch.Tensor,
-                             kv_cache: Tuple[torch.Tensor],
-                             attn_metadata: AscendMetadata,
-                             output: torch.Tensor,
-                             num_tokens=0):
+                         query: torch.Tensor,
+                         key: torch.Tensor,
+                         value: torch.Tensor,
+                         attn_metadata: AscendMetadata):
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
@@ -474,7 +468,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     out=output)
         return output
 
-    def _forward_encode(self,
+    def _forward_encode(
+        self,
         query,
         key,
         value,
@@ -577,20 +572,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
             num_actual_tokens = attn_metadata.num_actual_tokens
-            torch_npu._npu_reshape_and_cache(
-                key=key[:num_actual_tokens],
-                value=value[:num_actual_tokens],
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_indices=slots)
+            torch_npu._npu_reshape_and_cache(key=key[:num_actual_tokens],
+                                             value=value[:num_actual_tokens],
+                                             key_cache=self.key_cache,
+                                             value_cache=self.value_cache,
+                                             slot_indices=slots)
 
         # V0-Style scheduler situation.
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            output = self._forward_decode_only(query, attn_metadata,
-                                               output)
+            output = self._forward_decode_only(query, attn_metadata, output)
         else:
-            output = self._forward_prefill(
-                query, key, value, kv_cache, attn_metadata, output)
+            output = self._forward_prefill(query, key, value, attn_metadata)
 
         ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
         return ori_output.view(num_tokens, self.hidden_size)
