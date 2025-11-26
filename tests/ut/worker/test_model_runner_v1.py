@@ -36,15 +36,16 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
         # Case 3: A2 SOC without w4a8_dynamic -> fallback to allgather
         (AscendSocVersion.A2, True, 8, 2, 100, 256, None, MoECommType.ALLGATHER),
         (AscendSocVersion.A2, True, 16, 2, 257, 256, None, MoECommType.ALLGATHER),
-        
+
         # Case 4: A3 SOC
         (AscendSocVersion.A3, True, 8, 2, 100, 256, None, MoECommType.MC2),
         (AscendSocVersion.A3, True, 8, 2 ,257, 256, None, MoECommType.ALLTOALL),
     ])
 # yapf: enable
 def test_select_moe_comm_method(soc_version, enable_expert_parallel,
-                                world_size, pipeline_size, num_tokens, mc2_tokens_capacity,
-                                quant_type, expected_method):
+                                world_size, pipeline_size, num_tokens,
+                                mc2_tokens_capacity, quant_type,
+                                expected_method):
     """
     Tests the _select_moe_comm_method with various configurations including quant_type.
     """

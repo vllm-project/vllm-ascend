@@ -22,10 +22,16 @@ sys.modules["mooncake.engine"] = fake_engine
 _mock_ascend_config = MagicMock(enable_kv_nz=False)
 _mock_pp_group = MagicMock(rank_in_group=0, world_size=1)
 _mock_tp_group = MagicMock(rank_in_group=0, world_size=4)
-patch('vllm_ascend.distributed.mooncake_connector.get_pp_group', return_value=_mock_pp_group).start()
-patch('vllm_ascend.distributed.mooncake_connector.get_tp_group', return_value=_mock_tp_group).start()
-patch('vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_world_size', return_value=4).start()
-patch('vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank', return_value=0).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_pp_group',
+      return_value=_mock_pp_group).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_tp_group',
+      return_value=_mock_tp_group).start()
+patch(
+    'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_world_size',
+    return_value=4).start()
+patch(
+    'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank',
+    return_value=0).start()
 
 from vllm_ascend.distributed.mooncake_connector import (  # noqa: E402
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
@@ -375,7 +381,9 @@ class TestCoreFunctionality(unittest.TestCase):
 
     @patch.object(KVCacheRecvingThread, '_get_remote_metadata')
     def test_transfer_kv_cache(self, mock_get_meta):
-        with patch('vllm_ascend.distributed.mooncake_connector.get_ascend_config') as mock_config:
+        with patch(
+                'vllm_ascend.distributed.mooncake_connector.get_ascend_config'
+        ) as mock_config:
             mock_config.return_value.enable_kv_nz = False
             self.thread.kv_caches_base_addr["remote_engine"] = {
                 6666: [0x3000, 0x4000]
@@ -526,7 +534,8 @@ class MockVllmConfig:
         self.parallel_config.data_parallel_size_local = 1
         self.parallel_config.pipeline_parallel_size = 1
         self.parallel_config.data_parallel_rank_local = 0
-        self.model_config.get_num_layers_by_block_type = MagicMock(return_value=32)
+        self.model_config.get_num_layers_by_block_type = MagicMock(
+            return_value=32)
         self.cache_config.block_size = 16
         self.kv_transfer_config.kv_port = 5000
         self.kv_transfer_config.kv_role = 'kv_producer'
@@ -1088,8 +1097,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 mock_get_tensor_model_parallel_rank),
             patch('vllm_ascend.distributed.mooncake_connector.get_tp_group',
                   mock_get_tp_group),
-            patch('vllm_ascend.distributed.mooncake_connector.get_pp_group', 
-                return_value=_mock_pp_group),
+            patch('vllm_ascend.distributed.mooncake_connector.get_pp_group',
+                  return_value=_mock_pp_group),
             patch('vllm_ascend.distributed.mooncake_connector.get_ip',
                   mock_get_ip),
             patch(
@@ -1167,7 +1176,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 config.parallel_config.pipeline_parallel_size = 1
                 config.parallel_config.data_parallel_rank_local = 0
                 config.model_config = MagicMock()
-                config.model_config.get_num_layers_by_block_type = MagicMock(return_value=32)
+                config.model_config.get_num_layers_by_block_type = MagicMock(
+                    return_value=32)
                 config.kv_transfer_config.kv_port = 8000
                 config.kv_transfer_config.kv_role = 'worker'
 
