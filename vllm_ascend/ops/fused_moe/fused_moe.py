@@ -444,6 +444,13 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def is_internal_router(self) -> bool:
         return False
 
+    @property
+    def use_dp_chunking(self) -> bool:
+        """This func routes to the chunked forward path using the FlashInfer Cutlass kernel
+        only when data parallelism (DP) is enabled. Thus just returning False in vllm-ascend
+        """
+        return False
+
     def forward(
         self,
         hidden_states: torch.Tensor,

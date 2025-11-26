@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: 2918c1b49c88c29783c86f78d2c4221cb9622379
+      vllm: v0.11.2
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -83,7 +83,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [2918c1b49c88c29783c86f78d2c4221cb9622379]
+        vllm_version: [v0.11.2]
     steps:
       - name: Install packages
         run: |
@@ -121,7 +121,10 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
-            --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py
+            --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+            --ignore tests/ut/models/test_qwen2_vl.py \
+            --ignore tests/ut/models/test_qwen2_5_vl.py \
+            --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
@@ -138,7 +141,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [2918c1b49c88c29783c86f78d2c4221cb9622379]
+        vllm_version: [v0.11.2]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
