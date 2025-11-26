@@ -53,12 +53,9 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, enable_sp,
-                               init_ascend_soc_version, is_enable_nz,
-                               prefill_context_parallel_enable,
-
+                               is_enable_nz, prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is,
-                               check_ascend_device_type)
+                               try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
