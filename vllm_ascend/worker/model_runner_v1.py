@@ -157,7 +157,6 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-
 import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -632,7 +631,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     TorchairMtpProposer, SuffixDecodingProposer]] = None
+                                     TorchairMtpProposer,
+                                     SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:

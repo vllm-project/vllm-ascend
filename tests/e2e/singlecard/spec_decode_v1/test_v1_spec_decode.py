@@ -147,6 +147,7 @@ def test_eagle_correctness(
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
 
+
 def test_suffix_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -180,7 +181,6 @@ def test_suffix_correctness(
     # Heuristic: expect at least 70% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
-
 
 
 def test_suffix_acceptance(
