@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import ForwardContext
+from vllm.utils import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
@@ -32,6 +33,12 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "use_layerwise", False)
+        
+        connector_name = vllm_config.kv_transfer_config.kv_connector
+        if connector_name == "MooncakeConnectorStoreV1":
+            logger.warning(
+                "It is recommended to use the AscendStoreConnector, as the MoonCakeStoreConnector will be removed in the future."
+                )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 

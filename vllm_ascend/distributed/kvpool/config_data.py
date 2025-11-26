@@ -166,8 +166,10 @@ class ChunkedTokenDatabase():
         if not block_hashes:
             return
         if not isinstance(block_hashes[0], str):
-            block_hashes = [h.hex()  # type: ignore[union-attr]
-                            for h in block_hashes]
+            block_hashes = [
+                h.hex()  # type: ignore[union-attr]
+                for h in block_hashes
+            ]
         start_idx = 0
         for chunk_id, hash_val in enumerate(block_hashes):
             start_idx = chunk_id * self.block_size

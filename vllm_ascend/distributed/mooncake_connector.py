@@ -35,8 +35,7 @@ from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.distributed.kvpool.backend.mooncake_transfer_engine import \
-    global_te
+from vllm_ascend.distributed.utils import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import prefill_context_parallel_enable
 

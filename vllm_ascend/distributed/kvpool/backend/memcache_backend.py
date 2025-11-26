@@ -23,7 +23,7 @@ class MemcacheBackend(Backend):
         except ImportError as e:
             raise ImportError(
                 "Please install memcache by following the instructions at "
-                "https://github.com/kvcache-ai/Memcache/blob/main/doc/en/build.md "  # noqa: E501
+                "https://gitee.com/ascend/memfabric_hybrid "  # noqa: E501
                 "to run vLLM with MemcacheConnector.") from e
         try:
             self.rank = parallel_config.rank

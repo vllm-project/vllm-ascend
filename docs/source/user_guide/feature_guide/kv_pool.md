@@ -1,4 +1,4 @@
-# Mooncacke Store Deployment Guide
+# Ascend Store Deployment Guide
 
 ## Environmental Dependencies
 
@@ -8,27 +8,31 @@
   * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
   * vLLM：main branch
   * vLLM-Ascend：main branch
-  * Mooncake：main branch
-
-    Installation and Compilation Guide：https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries
-  
-    Make sure to build with `-DUSE_ASCEND_DIRECT` to enable ADXL engine.
-  
-    An example command for compiling ADXL：
-
-    `rm -rf build && mkdir -p build && cd build \ && cmake .. -DCMAKE_INSTALL_PREFIX=/opt/transfer-engine/ -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND_DIRECT=ON -DBUILD_SHARED_LIBS=ON -DBUILD_UNIT_TESTS=OFF \ && make -j \ && make install`
-
-    Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
 
 ### KV Pooling Parameter Description
 **kv_connector_extra_config**:Additional Configurable Parameters for Pooling.  
-**mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
+**lookup_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
 **load_async**:Whether to Enable Asynchronous Loading. The default value is false.  
 **backend**:Set the storage backend for kvpool, with the default being mooncake.
 
-## Run Mooncake Master
 
-### 1.Configure mooncake.json
+## Example of using Mooncake as a KVCache pooling backend
+* Software:
+    * Mooncake：main branch
+
+        Installation and Compilation Guide：https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries
+    
+        Make sure to build with `-DUSE_ASCEND_DIRECT` to enable ADXL engine.
+    
+        An example command for compiling ADXL：
+
+        `rm -rf build && mkdir -p build && cd build \ && cmake .. -DCMAKE_INSTALL_PREFIX=/opt/transfer-engine/ -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND_DIRECT=ON -DBUILD_SHARED_LIBS=ON -DBUILD_UNIT_TESTS=OFF \ && make -j \ && make install`
+
+        Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
+
+### run mooncake master
+
+#### 1.Configure mooncake.json
 
 The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path where mooncake.json is located.
 
@@ -54,7 +58,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **master_server_address**: Configured with the IP and port of the master service.  
 **global_segment_size**: Expands the kvcache size registered by the PD node to the master.
 
-### 2. Start mooncake_master
+#### 2. Start mooncake_master
 
 Under the mooncake folder:
 
@@ -64,9 +68,9 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.95 --eviction_rat
 
 `eviction_high_watermark_ratio` determines the watermark where Mooncake Store will perform eviction，and `eviction_ratio` determines the portion of stored objects that would be evicted.
 
-## Pooling and Prefill Decode Disaggregate Scenario
+### Pooling and Prefill Decode Disaggregate Scenario
 
-### 1.Run `prefill` Node and `decode` Node
+#### 1.Run `prefill` Node and `decode` Node
 
 Using MultiConnector to simultaneously utilize both p2p connectors and pooled connectors. P2P performs kv_transfer, while pooling creates a larger prefix-cache.
 
@@ -123,9 +127,10 @@ python3 -m vllm.entrypoints.openai.api_server \
                 }
             },
                     {
-                "kv_connector": "MooncakeConnectorStoreV1",
+                "kv_connector": "AscendStoreConnector",
                 "kv_role": "kv_producer",
-                "mooncake_rpc_port":"0"
+                "lookup_rpc_port":"0",
+                "backend": "mooncake"
                     }  
         ]
     }
@@ -185,16 +190,17 @@ python3 -m vllm.entrypoints.openai.api_server \
                 }
             },
             {
-                "kv_connector": "MooncakeConnectorStoreV1",
+                "kv_connector": "AscendStoreConnector",
                 "kv_role": "kv_consumer",
-                "mooncake_rpc_port":"1"
+                "lookup_rpc_port":"1",
+                "backend": "mooncake"
             }
         ]
     }
     }' > d.log 2>&1
 ```
 
-### 2、Start proxy_server.
+#### 2、Start proxy_server.
 
 ```
 bash proxy.sh
@@ -212,7 +218,7 @@ python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_e
     --decoder-ports 8200 \
 ```
 
-### 3. Run Inference
+#### 3. Run Inference
 
 Configure the localhost, port, and model weight path in the command to your own settings.
 
@@ -228,9 +234,9 @@ Long question:
 curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{ "model": "/xxxxx/Qwen2.5-7B-Instruct", "prompt": "Given the accelerating impacts of climate change—including rising sea levels, increasing frequency of extreme weather events, loss of biodiversity, and adverse effects on agriculture and human health—there is an urgent need for a robust, globally coordinated response. However, international efforts are complicated by a range of factors: economic disparities between high-income and low-income countries, differing levels of industrialization, varying access to clean energy technologies, and divergent political systems that influence climate policy implementation. In this context, how can global agreements like the Paris Accord be redesigned or strengthened to not only encourage but effectively enforce emission reduction targets? Furthermore, what mechanisms can be introduced to promote fair and transparent technology transfer, provide adequate financial support for climate adaptation in vulnerable regions, and hold nations accountable without exacerbating existing geopolitical tensions or disproportionately burdening those with historically lower emissions?", "max_tokens": 256, "temperature":0.0 }'
 ```
 
-## Pooling and Mixed Deployment Scenario
+### Pooling and Mixed Deployment Scenario
 
-### 1、Run Mixed Department Script
+#### 1、Run Mixed Department Script
 
 The mixed script is essentially a pure pooling scenario for the P node.
 
@@ -263,19 +269,17 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-    "kv_connector": "MooncakeConnectorStoreV1",
+    "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
     "kv_connector_extra_config": {
-        "register_buffer": true,
         "use_layerwise": false,
-        "mooncake_rpc_port":"0"
+        "lookup_rpc_port":"1",
+        "backend": "mooncake"
     }
 }' > mix.log 2>&1
 ```
 
-`register_buffer` is set to `false` by default and need to be set to `true` only in PD-mixed scenario.
-
-### 2. Run Inference
+#### 2. Run Inference
 
 Configure the localhost, port, and model weight path in the command to your own settings. The requests sent will only go to the port where the mixed deployment script is located, and there is no need to start a separate proxy.
 

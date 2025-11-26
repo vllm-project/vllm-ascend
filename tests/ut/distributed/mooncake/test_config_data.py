@@ -1,6 +1,6 @@
 import unittest
 
-from vllm_ascend.distributed.mooncake.config_data import (
+from vllm_ascend.distributed.kvpool.config_data import (
     _convert_to_bytes, _parse_global_segment_size)
 
 
