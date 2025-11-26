@@ -793,13 +793,10 @@ class MooncakeConnectorScheduler:
         self.side_channel_host = get_ip()
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-<<<<<<< HEAD
-=======
         self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
                              vllm_config.parallel_config.data_parallel_size * \
                              self.pcp_size * \
                              vllm_config.parallel_config.pipeline_parallel_size
->>>>>>> b866e5c6 (mooncake support pp)
 
         # Handshake base port
         self.side_channel_port = (
@@ -958,13 +955,10 @@ class MooncakeConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
-<<<<<<< HEAD
-=======
         self.pp_rank = get_pp_group().rank_in_group
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
->>>>>>> b866e5c6 (mooncake support pp)
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
@@ -974,10 +968,7 @@ class MooncakeConnectorWorker:
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
 
-<<<<<<< HEAD
-=======
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
->>>>>>> b866e5c6 (mooncake support pp)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
 
@@ -991,8 +982,6 @@ class MooncakeConnectorWorker:
                         self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-<<<<<<< HEAD
-=======
 
         # get tp device id
         # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
@@ -1028,7 +1017,6 @@ class MooncakeConnectorWorker:
             hostname = self.side_channel_host
         else:
             hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
->>>>>>> b866e5c6 (mooncake support pp)
         logger.info("Initializing Mooncake work %s", engine_id)
         self.engine = global_te.get_transfer_engine(self.side_channel_host,
                                                     device_name=None)

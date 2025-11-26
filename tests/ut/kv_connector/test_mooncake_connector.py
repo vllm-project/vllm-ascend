@@ -19,6 +19,14 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
+_mock_ascend_config = MagicMock(enable_kv_nz=False)
+_mock_pp_group = MagicMock(rank_in_group=0, world_size=1)
+_mock_tp_group = MagicMock(rank_in_group=0, world_size=4)
+patch('vllm_ascend.distributed.mooncake_connector.get_pp_group', return_value=_mock_pp_group).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_tp_group', return_value=_mock_tp_group).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_world_size', return_value=4).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank', return_value=0).start()
+
 from vllm_ascend.distributed.mooncake_connector import (  # noqa: E402
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
     KVConnectorRole, MooncakeAgentMetadata, MooncakeConnector,
@@ -213,6 +221,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
@@ -231,7 +240,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             "remote_host": "localhost",
             "remote_handshake_port": 6666,
             "offset": 0,
-            "num_need_pulls": 2,
+            "tp_num_need_pulls": 2,
             "all_task_done": False
         }
         self.thread.add_request(
@@ -242,7 +251,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             remote_host=test_req["remote_host"],
             remote_handshake_port=test_req["remote_handshake_port"],
             offset=test_req["offset"],
-            num_need_pulls=test_req["num_need_pulls"],
+            tp_num_need_pulls=test_req["tp_num_need_pulls"],
             all_task_done=test_req["all_task_done"])
         queued = self.thread.request_queue.get_nowait()
         self.assertEqual(queued["request_id"], "req1")
@@ -265,6 +274,7 @@ class TestSocketManagement(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
@@ -315,10 +325,13 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {}
+        self.kv_caches: Dict[str, Any] = {
+            "layer_0": (MagicMock(), MagicMock())
+        }
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
@@ -337,7 +350,7 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_transfer_port": 7777,
             "offset": 0,
-            "num_need_pulls": 2,
+            "tp_num_need_pulls": 2,
             "all_task_done": False
         }
         self.thread.task_tracker = MagicMock()
@@ -362,12 +375,12 @@ class TestCoreFunctionality(unittest.TestCase):
 
     @patch.object(KVCacheRecvingThread, '_get_remote_metadata')
     def test_transfer_kv_cache(self, mock_get_meta):
-        self.thread.kv_caches_base_addr["remote_engine"] = {
-            6666: [0x3000, 0x4000]
-        }
-
-        self.thread._transfer_kv_cache(self.test_req)
-
+        with patch('vllm_ascend.distributed.mooncake_connector.get_ascend_config') as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.kv_caches_base_addr["remote_engine"] = {
+                6666: [0x3000, 0x4000]
+            }
+            self.thread._transfer_kv_cache(self.test_req)
         self.engine.batch_transfer_sync_read.assert_called_once()
         call_args, call_kwargs = self.engine.batch_transfer_sync_read.call_args
         self.assertEqual(call_args[0], "localhost:7777")
@@ -398,6 +411,7 @@ class TestMetadataHandling(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
@@ -461,6 +475,7 @@ class TestMainThreadLoop(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
@@ -482,7 +497,7 @@ class TestMainThreadLoop(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_transfer_port": 7777,
             "offset": 0,
-            "num_need_pulls": 2,
+            "tp_num_need_pulls": 2,
             "all_task_done": False
         }
 
@@ -509,6 +524,9 @@ class MockVllmConfig:
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
         self.parallel_config.data_parallel_size_local = 1
+        self.parallel_config.pipeline_parallel_size = 1
+        self.parallel_config.data_parallel_rank_local = 0
+        self.model_config.get_num_layers_by_block_type = MagicMock(return_value=32)
         self.cache_config.block_size = 16
         self.kv_transfer_config.kv_port = 5000
         self.kv_transfer_config.kv_role = 'kv_producer'
@@ -516,11 +534,13 @@ class MockVllmConfig:
         self.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
             "prefill": {
                 "tp_size": 2,
-                "dp_size": 1
+                "dp_size": 1,
+                "pp_size": 1
             },
             "decode": {
                 "tp_size": 2,
-                "dp_size": 1
+                "dp_size": 1,
+                "pp_size": 1
             }
         }.get(k, d)
         self.additional_config = {}
@@ -1068,6 +1088,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 mock_get_tensor_model_parallel_rank),
             patch('vllm_ascend.distributed.mooncake_connector.get_tp_group',
                   mock_get_tp_group),
+            patch('vllm_ascend.distributed.mooncake_connector.get_pp_group', 
+                return_value=_mock_pp_group),
             patch('vllm_ascend.distributed.mooncake_connector.get_ip',
                   mock_get_ip),
             patch(
@@ -1114,6 +1136,55 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+<<<<<<< HEAD
+=======
+    def test_worker_use_ascend_direct(self):
+        test_case = [True, False]
+
+        for use_ascend_direct in test_case:
+            with self.subTest(use_ascend_direct=use_ascend_direct):
+                config = MagicMock()
+                config.kv_transfer_config = MagicMock()
+                config.kv_transfer_config.get_from_extra_config.side_effect = (
+                    lambda k, d: {
+                        "prefill": {
+                            "tp_size": 2,
+                            "dp_size": 1,
+                            "pp_size": 1
+                        },
+                        "decode": {
+                            "tp_size": 2,
+                            "dp_size": 1,
+                            "pp_size": 1
+                        },
+                        "use_ascend_direct": use_ascend_direct,
+                    }.get(k, d))
+
+                config.parallel_config = MagicMock()
+                config.parallel_config.tensor_parallel_size = 2
+                config.parallel_config.data_parallel_rank = 0
+                config.parallel_config.data_parallel_size_local = 1
+                config.parallel_config.pipeline_parallel_size = 1
+                config.parallel_config.data_parallel_rank_local = 0
+                config.model_config = MagicMock()
+                config.model_config.get_num_layers_by_block_type = MagicMock(return_value=32)
+                config.kv_transfer_config.kv_port = 8000
+                config.kv_transfer_config.kv_role = 'worker'
+
+                with patch(
+                        "vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank",
+                        return_value=0):
+                    with patch(
+                            "vllm_ascend.distributed.mooncake_connector.get_tp_group",
+                            return_value=None):
+                        with patch(
+                                "vllm_ascend.distributed.mooncake_connector.get_ip",
+                                return_value="127.0.0.1"):
+                            worker = MooncakeConnectorWorker(
+                                config, self.engine_id)
+                            self.assertIsNotNone(worker)
+
+>>>>>>> dfa8adee (utfix)
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         worker.register_kv_caches(self.kv_caches)
