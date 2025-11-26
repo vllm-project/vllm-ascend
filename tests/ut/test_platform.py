@@ -549,7 +549,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=True,
         )
@@ -570,7 +569,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=True,
         )
@@ -592,7 +590,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=False,
         )
@@ -614,7 +611,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=False,
         )

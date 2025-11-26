@@ -24,7 +24,7 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
-os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "True"
+os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
@@ -147,6 +147,8 @@ class NPUPlatform(Platform):
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
+            if compilation_config.splitting_ops is None:
+                compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
 
@@ -342,14 +344,11 @@ class NPUPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink=False,
         use_sparse=False,
+        attn_type: str | None = None,
     ):
-        if not use_v1:
-            raise ValueError("vLLM Ascend does not support V0 engine.")
-
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
