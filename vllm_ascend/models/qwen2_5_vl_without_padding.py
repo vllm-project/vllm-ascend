@@ -465,12 +465,13 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
             )
             wpos_ids = wpos_ids.permute(0, 2, 1, 3)
             wpos_ids = wpos_ids.flatten()
-            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+            pos_ids.append(
+                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
-    
+
     def forward(
         self,
         x: torch.Tensor,
@@ -485,7 +486,7 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
         else:
             grid_thw_list = grid_thw.tolist()
             grid_thw = grid_thw.numpy()
-        
+
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw_list)
