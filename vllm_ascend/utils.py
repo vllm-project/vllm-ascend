@@ -48,7 +48,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
@@ -119,14 +118,6 @@ def _unregister_print_streams_on_exit():
 
 
 atexit.register(_unregister_print_streams_on_exit)
-
-
-def is_310p():
-    global _IS_310P
-    if _IS_310P is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
-    return _IS_310P
 
 
 def is_enable_nz():
@@ -703,32 +694,47 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
-# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
-# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
-class AscendSocVersion(Enum):
-    A2 = 0
-    A3 = 1
-    UNDEFINED = 2
+class AscendDeviceType(Enum):
+    _910B = 0  # A2
+    _910_93 = 1  # A3
+    _310P = 2
+    _910_95 = 3  # A5
 
 
-_ascend_soc_version = None
+_ascend_device_type = None
 
 
-def init_ascend_soc_version():
+def _init_ascend_device_type():
+    global _ascend_device_type
+    from vllm_ascend import _build_info  # type: ignore
+    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
+
+
+def check_ascend_device_type():
+    global _ascend_device_type
+    if _ascend_device_type is None:
+        _init_ascend_device_type()
+
     soc_version = torch_npu.npu.get_soc_version()
-    global _ascend_soc_version
     if 220 <= soc_version <= 225:
-        _ascend_soc_version = AscendSocVersion.A2
+        cur_device_type = AscendDeviceType._910B
     elif 250 <= soc_version <= 255:
-        _ascend_soc_version = AscendSocVersion.A3
+        cur_device_type = AscendDeviceType._910_93
+    elif 200 <= soc_version <= 205:
+        cur_device_type = AscendDeviceType._310P
+    elif soc_version == 260:
+        cur_device_type = AscendDeviceType._910_95
     else:
-        _ascend_soc_version = AscendSocVersion.UNDEFINED
+        raise RuntimeError(f"Can not support soc_version: {soc_version}.")
+
+    assert _ascend_device_type == cur_device_type, f"Current device type: {cur_device_type} does not match the installed version's device type: {_ascend_device_type}, please check your installation package."
 
 
-def get_ascend_soc_version():
-    global _ascend_soc_version
-    assert _ascend_soc_version is not None
-    return _ascend_soc_version
+def get_ascend_device_type():
+    global _ascend_device_type
+    if _ascend_device_type is None:
+        _init_ascend_device_type()
+    return _ascend_device_type
 
 
 def lmhead_tp_enable() -> bool:
@@ -810,7 +816,7 @@ def _is_contain_expert(config: Any):
 def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
-    if _IS_VL_MODEL is None:
+    if _IS_VL_MODEL is None and vllm_config.model_config:
         model_configs = vllm_config.model_config.hf_config.to_dict()
         _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
     return _IS_VL_MODEL

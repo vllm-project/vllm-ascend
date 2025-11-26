@@ -18,7 +18,8 @@
 #
 
 import copy
-from typing import Optional, Union
+from types import NoneType
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -37,7 +38,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
@@ -49,7 +50,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
+from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
@@ -90,7 +91,7 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
-        init_ascend_soc_version()
+        check_ascend_device_type()
         use_sparse = False
         if vllm_config.model_config is not None:
             use_sparse = hasattr(vllm_config.model_config.hf_config,
@@ -206,6 +207,14 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
+
+        visible_device_count = (torch.npu.device_count()
+                                if torch.npu.is_available() else 0)
+        assert self.parallel_config.local_world_size <= visible_device_count, (
+            f"local_world_size ({self.parallel_config.local_world_size}) must be "
+            f"less than or equal to the number of visible devices "
+            f"({visible_device_count}).")
+
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
@@ -266,7 +275,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -280,7 +289,7 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+        if isinstance(output, (ModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)
@@ -303,6 +312,12 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    @torch.inference_mode()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:

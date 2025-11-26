@@ -48,7 +48,7 @@ class TestAscendSchedulerConfig(TestBase):
                 enable_chunked_prefill=False,
                 policy="fcfs",
                 scheduler_cls="vllm_ascend.core.scheduler.AscendScheduler",
-                max_num_batched_tokens=2048,
+                max_num_batched_tokens=8192,
                 max_model_len=2048,
                 max_long_partial_prefills=1,
                 long_prefill_token_threshold=512,
@@ -58,8 +58,8 @@ class TestAscendSchedulerConfig(TestBase):
         self.assertEqual(ascend_config.policy, "fcfs")
         self.assertEqual(ascend_config.scheduler_cls,
                          "vllm_ascend.core.scheduler.AscendScheduler")
-        self.assertEqual(ascend_config.max_num_batched_tokens, 2048)
-        self.assertEqual(ascend_config.encoder_cache_size, 2048)
+        self.assertEqual(ascend_config.max_num_batched_tokens, 8192)
+        self.assertEqual(ascend_config.encoder_cache_size, 8192)
         self.assertEqual(ascend_config.max_long_partial_prefills, 1)
         self.assertEqual(ascend_config.long_prefill_token_threshold, 512)
 
@@ -69,7 +69,7 @@ class TestAscendSchedulerConfig(TestBase):
                 self.basic_scheduler_config,
                 AscendSchedulerConfig(
                     policy="custom_policy",
-                    max_num_batched_tokens=2048,
+                    max_num_batched_tokens=8192,
                     max_model_len=2048,
                 ),
             )
@@ -86,7 +86,8 @@ class TestAscendSchedulerConfig(TestBase):
 
     def test_valid_config_with_multimodal(self):
         config = AscendSchedulerConfig.initialize_from_config(
-            SchedulerConfig(is_multimodal_model=True), {})
+            SchedulerConfig(is_multimodal_model=True,
+                            max_num_batched_tokens=8192), {})
         self.assertTrue(config.is_multimodal_model)
 
     def test_valid_config_with_chunked_prefill(self):
@@ -94,12 +95,12 @@ class TestAscendSchedulerConfig(TestBase):
             self.basic_scheduler_config,
             AscendSchedulerConfig(
                 enable_chunked_prefill=True,
-                max_num_batched_tokens=2048,
-                max_model_len=4096,
+                max_num_batched_tokens=8192,
+                max_model_len=8192,
             ),
         )
-        self.assertEqual(ascend_config.max_num_batched_tokens, 2048)
-        self.assertEqual(ascend_config.max_model_len, 4096)
+        self.assertEqual(ascend_config.max_num_batched_tokens, 8192)
+        self.assertEqual(ascend_config.max_model_len, 8192)
         self.assertTrue(ascend_config.enable_chunked_prefill)
 
     def test_invalid_config_without_chunked_prefill(self):
@@ -109,7 +110,7 @@ class TestAscendSchedulerConfig(TestBase):
                 AscendSchedulerConfig(
                     enable_chunked_prefill=False,
                     max_num_batched_tokens=2048,
-                    max_model_len=4096,
+                    max_model_len=8192,
                 ),
             )
         self.assertIn(
@@ -117,7 +118,7 @@ class TestAscendSchedulerConfig(TestBase):
             str(context.exception),
         )
         self.assertIn("max_num_batched_tokens (2048)", str(context.exception))
-        self.assertIn("max_model_len (4096)", str(context.exception))
+        self.assertIn("max_model_len (8192)", str(context.exception))
 
     def test_initialize_from_config_with_pd_transfer(self):
         ascend_config = AscendSchedulerConfig.initialize_from_config(
@@ -125,7 +126,7 @@ class TestAscendSchedulerConfig(TestBase):
             AscendSchedulerConfig(
                 enable_pd_transfer=True,
                 decode_max_num_seqs=48,
-                max_num_batched_tokens=4096,
+                max_num_batched_tokens=8192,
                 max_model_len=4096,
             ),
         )

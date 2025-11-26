@@ -24,14 +24,15 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
-os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "True"
+os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
-                               is_vl_model, prefill_context_parallel_enable,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, AscendDeviceType,
+                               enable_sp, get_ascend_device_type, is_vl_model,
+                               prefill_context_parallel_enable,
                                update_aclgraph_sizes,
                                update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes)
@@ -147,6 +148,8 @@ class NPUPlatform(Platform):
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
+            if compilation_config.splitting_ops is None:
+                compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
 
@@ -279,7 +282,7 @@ class NPUPlatform(Platform):
                     cache_config.block_size = origin_block_size
 
         # Activate custom ops for v1, except on 310P
-        if not is_310p():
+        if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
         # If ascend_scheduler_config is enabled,
@@ -342,14 +345,11 @@ class NPUPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink=False,
         use_sparse=False,
+        attn_type: str | None = None,
     ):
-        if not use_v1:
-            raise ValueError("vLLM Ascend does not support V0 engine.")
-
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:

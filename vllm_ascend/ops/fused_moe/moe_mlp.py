@@ -22,7 +22,8 @@ from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import dispose_tensor, is_310p
+from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
+                               get_ascend_device_type)
 
 
 def cumsum_group_list(group_list: torch.Tensor,
@@ -210,7 +211,7 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         group_type=0,
         group_list=group_list,
     )[0]
-    if is_310p():
+    if get_ascend_device_type() == AscendDeviceType._310P:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:
