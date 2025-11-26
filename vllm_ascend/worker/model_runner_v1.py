@@ -655,10 +655,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
 
-
-        # Ephemeral state transferred between execute_model() and sample_tokens().
-        self.execute_model_state: ExecuteModelState | None = None
-
         # Pre-allocated tensor for copying valid sampled token counts to CPU,
         # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
