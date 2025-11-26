@@ -281,18 +281,18 @@ class AscendAttentionMetadataBuilder:
 class AscendAttentionBackendImpl(AttentionImpl):
 
     def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
-        kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
-        attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
-        **kwargs,
+            self,
+            num_heads: int,
+            head_size: int,
+            scale: float,
+            num_kv_heads: int,
+            alibi_slopes: Optional[List[float]],
+            sliding_window: Optional[int],
+            kv_cache_dtype: str,
+            logits_soft_cap: Optional[float],
+            attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
+            **kwargs,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -317,7 +317,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                          query: torch.Tensor,
                          key: torch.Tensor,
                          value: torch.Tensor,
-                         attn_metadata: AscendMetadata):
+                         attn_metadata: AscendMetadata, output):
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
@@ -348,7 +348,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # TODO: Refactor this to step-level instead of layer-level
 
         # Get workspace from cache or calculate it if not present.
-        output, _ = torch_npu.npu_fused_infer_attention_score(
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,
             value=value,
@@ -364,43 +364,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode=3,
         )
 
-        output = output.view(num_tokens, self.num_heads, self.head_size)
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
         return output
 
-    def _forward_prefill_no_cache(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
-        num_tokens=0,
-    ) -> torch.Tensor:
-        assert attn_metadata is not None
-        assert attn_metadata.attn_mask is not None
-
-        mask = attn_metadata.attn_mask
-
-        torch_npu._npu_flash_attention(query=query,
-                                       key=key,
-                                       value=value,
-                                       mask=mask,
-                                       seq_len=attn_metadata.seq_lens,
-                                       scale_value=self.scale,
-                                       num_heads=self.num_heads,
-                                       num_kv_heads=self.num_kv_heads,
-                                       out=output)
-        assert output is not None
-        return output[:num_tokens, :, :]
-
     def _forward_decode_only(
-        self,
-        query: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
+            self,
+            query: torch.Tensor,
+            attn_metadata: AscendMetadata,
+            output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
-                0] == query.size(0):
+            0] == query.size(0):
             batch_size = attn_metadata.seq_lens.shape[0]
             block_size = 128
             query = query.view(batch_size, 1, self.num_heads * self.head_size)
@@ -494,11 +469,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return output
 
     def _forward_encode(
-        self,
-        query,
-        key,
-        value,
-        attn_metadata
+            self,
+            query,
+            key,
+            value,
+            attn_metadata,
+            output,
     ) -> torch.Tensor:
         cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
         output = torch_npu.npu_fusion_attention(
@@ -517,17 +493,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )[0]
         return output
 
-
     def forward(
-        self,
-        layer: AttentionLayer,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor],
-        attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
-        trace_flag: bool = True,
+            self,
+            layer: AttentionLayer,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: Tuple[torch.Tensor],
+            attn_metadata: AscendMetadata,
+            output: Optional[torch.Tensor] = None,
+            trace_flag: bool = True,
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
@@ -559,8 +534,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                  self.head_size,
                                  dtype=query.dtype,
                                  device=query.device)
-        if attn_metadata is None:
-            return output.view(num_tokens, self.hidden_size).fill_(0)
         if trace_flag:
             torch.ops.vllm.unified_ascend_attention_with_output(
                 query=query,
@@ -570,15 +543,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 layer_name=layer.layer_name)
             return output.view(num_tokens, self.hidden_size)
 
-        ori_output = output
+        if attn_metadata is None:
+            return output.view(num_tokens, self.hidden_size).fill_(0)
+        # ori_output = output
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = layer.quant_method.apply(layer, query, key, value,
                                               kv_cache, attn_metadata,
                                               self.attn_type, self.scale,
                                               output)
-            output = output.view(num_tokens, self.num_heads, self.head_size)
             return output.view(num_tokens, self.hidden_size)
-
 
         # View q k v to BSH.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -588,6 +561,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value.contiguous()
 
         if self.attn_type == AttentionType.ENCODER_ONLY:
+            ori_output = output
             output = self._forward_encode(query, key, value, attn_metadata)
             ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
             return ori_output.view(num_tokens, self.hidden_size)
@@ -607,10 +581,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             output = self._forward_decode_only(query, attn_metadata, output)
         else:
-            output = self._forward_prefill(query, key, value, attn_metadata)
+            output = self._forward_prefill(query, key, value, attn_metadata, output)
 
-        ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
-        return ori_output.view(num_tokens, self.hidden_size)
+        return output.view(num_tokens, self.hidden_size)
 
 
 def unified_ascend_attention_with_output(
