@@ -53,6 +53,7 @@ _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_GLOBAL_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -310,6 +311,15 @@ def current_stream() -> torch.npu.Stream:
         # we return the default stream.
         _CURRENT_STREAM = torch.npu.current_stream()
     return _CURRENT_STREAM
+
+
+def global_stream() -> torch.npu.Stream:
+    global _GLOBAL_STREAM
+    if _GLOBAL_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _GLOBAL_STREAM = torch_npu.npu.Stream()
+    return _GLOBAL_STREAM
 
 
 def prefetch_stream() -> torch.npu.Stream:
