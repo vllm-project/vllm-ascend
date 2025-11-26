@@ -2,8 +2,8 @@ from typing import Any, Dict
 
 import torch
 import torch_npu
-
 from vllm.config import get_current_vllm_config
+
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 from .w8a8 import AscendW8A8LinearMethod
