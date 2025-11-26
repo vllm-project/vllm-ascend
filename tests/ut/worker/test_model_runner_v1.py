@@ -156,4 +156,3 @@ def test_update_config(model_runner):
     assert model_runner.load_config.load_format == "dummy"
     with pytest.raises(AssertionError):
         model_runner.update_config({"do_not_exist_config": "dummy"})
-        NPUModelRunner._select_moe_comm_method(mock_runner, 100)
