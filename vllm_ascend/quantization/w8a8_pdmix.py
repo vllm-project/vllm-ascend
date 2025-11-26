@@ -55,6 +55,7 @@ class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
 
+
 class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
 
     def __init__(self):

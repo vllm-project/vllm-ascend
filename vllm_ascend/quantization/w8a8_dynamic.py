@@ -119,6 +119,7 @@ class AscendW8A8DynamicLinearMethod:
         layer.weight_offset.data = layer.weight_offset.data.flatten()
         layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
 
+
 class AscendW8A8DynamicFusedMoEMethod:
     """FusedMoe method for Ascend W8A8_DYNAMIC.
     """
