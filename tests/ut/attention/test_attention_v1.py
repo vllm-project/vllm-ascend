@@ -14,7 +14,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 class TestAscendAttentionBackend(TestBase):
 
     def test_get_name(self):
-        self.assertEqual(AscendAttentionBackend.get_name(), "ASCEND")
+        self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
         self.assertEqual(AscendAttentionBackend.get_impl_cls(),
