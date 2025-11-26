@@ -310,9 +310,9 @@ def get_zmq_rpc_path_lookup(
         if "lookup_rpc_port" in extra_config:
             rpc_port = extra_config["lookup_rpc_port"]
         elif "mooncake_rpc_port" in extra_config:
-           rpc_port = extra_config["mooncake_rpc_port"]
-           logger.warning(
+            rpc_port = extra_config["mooncake_rpc_port"]
+            logger.warning(
                 "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
-                )
+            )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}"
