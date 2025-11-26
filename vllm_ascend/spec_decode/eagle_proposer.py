@@ -161,7 +161,7 @@ class EagleProposer(Proposer):
                            scheduler_output.num_scheduled_tokens[req_id])
 
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
+            next_token_ids.append(next_token_id.item())
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)

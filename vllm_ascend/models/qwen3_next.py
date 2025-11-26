@@ -16,7 +16,7 @@ from vllm.config import (CacheConfig, ModelConfig, SpeculativeConfig,
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops import chunk, chunk_gated_delta_rule
+from vllm.model_executor.layers.fla.ops import chunk
 from vllm.model_executor.layers.fla.ops.fused_recurrent import \
     fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -691,7 +691,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
                 (
                     cur_core_attn_out_non_spec,
                     cur_last_recurrent_state,
-                ) = chunk_gated_delta_rule(
+                ) = chunk.chunk_gated_delta_rule(
                     query=cur_q,
                     key=cur_k,
                     value=cur_v,
