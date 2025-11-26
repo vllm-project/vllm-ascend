@@ -211,7 +211,7 @@ class NPUWorker(WorkerBase):
             return
         if not self.model_config.enforce_eager:
             print("start to ffn profile_run  ")
-            # self.model_runner.profile_run()
+            self.model_runner.profile_run()
             # self.model_runner.initialize_afd_connector()
             print("finsh  ffn profile_run  ")
             print("start  ffn compile_or_warm_up_model  ")

@@ -545,7 +545,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     schedule=torch_npu.profiler.schedule(wait=5, warmup=2, active=20, repeat=1, skip_first=20),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
-        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof")
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/dl/y00889327/profile/prof")
         # )
         # self.prof.start()
 

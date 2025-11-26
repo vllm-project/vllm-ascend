@@ -69,8 +69,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         #     reversed(self.compilation_config.cudagraph_capture_sizes))
         
         # Storage for captured graphs
-        self._acl_graphs: dict[tuple[int, int], torch.npu.NPUGraph] = {
-        }  # {(layer_idx, num_tokens): ACLGraph}
+        self._acl_graphs_full: dict[int, torch.npu.NPUGraph] = {
+        }  # {num_tokens: ACLGraph}
         self.graph_pool = None
 
         assert self.afd_config.is_ffn_server
@@ -89,6 +89,11 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         else:
             self.num_layers = self.model_config.hf_config.num_hidden_layers
         self.dummy_run_call_cnt = 0
+        self.replay_cnt = 0
+        self.topk = self.model_config.hf_config.num_experts_per_tok
+        self.n_routed_experts = self.model_config.hf_config.n_routed_experts
+        self.hidden_size = self.model_config.hf_config.hidden_size
+        print(f'self.topk is {self.topk}')
         
         # self.profiler
         # import os
@@ -105,7 +110,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         #     schedule=torch_npu.profiler.schedule(wait=5, warmup=2, active=20, repeat=1, skip_first=20),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
-        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof_ffn")
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/dl/y00889327/profile/prof_ffn")
         # )
         # self.prof.start()
 
@@ -134,7 +139,15 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             # skip dense layer
             if current_layer_idx < self.first_k_dense_replace:
                 return
-            
+            torch.npu.synchronize()
+            if self.use_aclgraph:
+                # replay
+                acl_graph_info = self._acl_graphs_full.get(self.max_num_tokens * self.topk * self.attn_size)
+                graph = acl_graph_info['graph']
+                graph.replay()
+                self.replay_cnt += 1
+                print(f"ffn replay,replay_cnt is {self.replay_cnt}")
+                return
             if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
@@ -525,9 +538,53 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
         else:
             aclgraph_runtime_mode = _ag_mode
-            
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            # capture
+            # Create and capture the graph
+            aclgraph = torch.npu.NPUGraph()
+            with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                # compute_ffn_output
+                output = self._ffn_forward(batch_descriptor=batch_descriptor,
+                                  aclgraph_runtime_mode=aclgraph_runtime_mode)
+            print(f'output shape is {output.shape}')
+            # Store the captured graph with token count as key
+            self._acl_graphs_full[output.shape[0]] = {
+                'graph': aclgraph,
+                'input_hidden_states': output,
+                'output': output
+            }
+            print(f'self._acl_graphs_full is {self._acl_graphs_full}')
+        else:
+            self._ffn_forward(batch_descriptor=batch_descriptor,
+                                  aclgraph_runtime_mode=aclgraph_runtime_mode) 
+            print("finsh capture warm_up")
+        print(f'self.dummy_run_call_cnt is {self.dummy_run_call_cnt}')
+        self.dummy_run_call_cnt += 1
+    
+    def _ffn_forward(self,
+                     batch_descriptor,
+                     aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,):
         # mock self.model
         for layer_idx in range(self.first_k_dense_replace,self.num_layers):
+            # recv
+            if self.connector_name == "m2nconnector":
+                # TODO metadata
+                m2n_afdconnector_data = M2NAFDConnectorMetadata()
+                m2n_afdconnector_data.quant_mode = 0
+                m2n_afdconnector_data.expand_x_type = torch.bfloat16
+                m2n_afdconnector_data.moe_expert_num = 64
+                m2n_afdconnector_data.h = 2048
+                m2n_afdconnector_data.k = 8
+                m2n_afdconnector_data.expert_token_nums_type = 0
+                m2n_afdconnector_data.aiv_num = 48
+                # self.max_num_tokens * topk * attn_size
+                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * self.attn_size
+                # [64,2048]
+                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
+                # print(f'recv_attn_output success ,layer id is {layer_idx}')
+                m2n_afdconnector_data.handle = handle
+                m2n_afdconnector_data.topk_weights = topk_weights
+                # compute
             with set_ascend_forward_context(
                     attn_metadata=None,
                     vllm_config=self.vllm_config,
@@ -536,19 +593,18 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model):
-                if self.connector_name == "m2nconnector":
-                    self._capture_graph_for_layer_and_size(
-                        layer_idx, num_tokens,aclgraph_runtime_mode)
-                elif self.connector_name == "camconnector":
-
-                    self._capture_graph_for_layer_and_size(
-                        layer_idx, num_tokens,aclgraph_runtime_mode)
-                else:
-                    self._capture_graph_for_layer_and_size(
-                        layer_idx, num_tokens,aclgraph_runtime_mode)
-        print(f'self.dummy_run_call_cnt is {self.dummy_run_call_cnt}')
-        self.dummy_run_call_cnt += 1
-        
+                rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
+                                               layer_idx=layer_idx,
+                                               capture_mode=True,
+                                               group_list=group_list,
+                                                dynamic_scales=dynamic_scales,
+                                                topk_weights=topk_weights
+                                               )
+                # send
+                self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
+                # print(f'send_ffn_output success ,layer id is {layer_idx}')
+        return rank_ffn_output
+  
         
                        
     def _capture_graph_for_layer_and_size(self, layer_idx: int,
