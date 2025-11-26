@@ -65,25 +65,103 @@ def check_or_set_default_env(cmake_args,
     return cmake_args
 
 
+def get_value_from_lines(lines: List[str], key: str) -> str:
+    for line in lines:
+        line = ' '.join(line.split())
+        if key in line:
+            return line.split(':')[-1].strip()
+    return ""
+
+
+def get_chip_info() -> str:
+    try:
+        npu_info_lines = subprocess.check_output(
+            ['npu-smi', 'info', '-l']).decode().strip().split('\n')
+        npu_id = int(get_value_from_lines(npu_info_lines, 'NPU ID'))
+        chip_info_lines = subprocess.check_output(
+            ['npu-smi', 'info', '-t', 'board', '-i',
+             str(npu_id), '-c', '0']).decode().strip().split('\n')
+        chip_name = get_value_from_lines(chip_info_lines, 'Chip Name')
+        chip_type = get_value_from_lines(chip_info_lines, 'Chip Type')
+        npu_name = get_value_from_lines(chip_info_lines, 'NPU Name')
+
+        if "310" in chip_name:
+            # 310P case
+            assert chip_type
+            return (chip_type + chip_name).lower()
+        elif "910" in chip_name:
+            if chip_type:
+                # A2 case
+                assert not npu_name
+                return (chip_type + chip_name).lower()
+            else:
+                # A3 case
+                assert npu_name
+                return (chip_name + '_' + npu_name).lower()
+        else:
+            # TODO(zzzzwwjj): Currently, A5's chip name has not determined yet.
+            raise ValueError(
+                f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION"
+            )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Get chip info failed: {e}")
+    except FileNotFoundError:
+        # cpu envir, release code case, return `ascend910b1` by default
+        return "ascend910b1"
+
+
 envs = load_module_from_path("envs",
                              os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
+
+soc_version = get_chip_info()
+
+if not envs.SOC_VERSION:
+    envs.SOC_VERSION = soc_version
+else:
+    if envs.SOC_VERSION != soc_version:
+        logging.warning(
+            f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}"
+        )
 
 
 def gen_build_info():
     soc_version = envs.SOC_VERSION
-    if not soc_version:
-        raise ValueError(
-            "SOC version is not set. Please set SOC_VERSION environment variable."
-        )
     if "310" in soc_version and not envs.COMPILE_CUSTOM_KERNELS:
         raise ValueError(
             "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
         )
 
+    # TODO(zzzzwwjj): Add A5 case
+    soc_to_device = {
+        "ascend910b1": "_910B",
+        "ascend910b2": "_910B",
+        "ascend910b2c": "_910B",
+        "ascend910b3": "_910B",
+        "ascend910b4": "_910B",
+        "ascend910b4-1": "_910B",
+        "ascend910_9391": "_910_93",
+        "ascend910_9381": "_910_93",
+        "ascend910_9372": "_910_93",
+        "ascend910_9392": "_910_93",
+        "ascend910_9382": "_910_93",
+        "ascend910_9362": "_910_93",
+        "ascend310p1": "_310P",
+        "ascend310p3": "_310P",
+        "ascend310p5": "_310P",
+        "ascend310p7": "_310P",
+        "ascend310p3vir01": "_310P",
+        "ascend310p3vir02": "_310P",
+        "ascend310p3vir04": "_310P",
+        "ascend310p3vir08": "_310P",
+    }
+
+    assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
+    device_type = soc_to_device[soc_version]
+
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
     with open(package_dir, "w+") as f:
         f.write('# Auto-generated file\n')
-        f.write(f"__soc_version__ = '{soc_version}'\n")
+        f.write(f"__device_type__ = '{device_type}'\n")
         f.write(f"__sleep_mode_enabled__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
     logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
 

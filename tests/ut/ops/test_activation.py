@@ -19,6 +19,8 @@ import pytest
 import torch
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
+from vllm_ascend.utils import AscendDeviceType
+
 
 @pytest.fixture
 def dummy_tensor():
@@ -36,20 +38,22 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor):
     mock_gelu.assert_called_once()
 
 
-@pytest.mark.parametrize("is_310p_return", [True, False])
+@pytest.mark.parametrize("is_310p", [True, False])
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
 @patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj",
        side_effect=lambda x: None)
 def test_SiluAndMul_forward(mock_maybe_prefetch_mlp_down_proj,
                             mock_maybe_wait_prefetch_done, mock_swiglu,
-                            is_310p_return, dummy_tensor):
+                            is_310p, dummy_tensor):
 
-    with patch("vllm_ascend.utils.is_310p", return_value=is_310p_return):
+    with patch("vllm_ascend.utils.get_ascend_device_type",
+               return_value=AscendDeviceType._310P
+               if is_310p else AscendDeviceType._910_93):
         layer = SiluAndMul()
         out = layer.forward(dummy_tensor)
 
-        if is_310p_return:
+        if is_310p:
             expected_arg = dummy_tensor.to(torch.float32)
         else:
             expected_arg = dummy_tensor

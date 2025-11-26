@@ -35,16 +35,6 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
         importlib.reload(platform)
 
-    def test_is_310p(self):
-        utils._IS_310P = None
-        with mock.patch("vllm_ascend._build_info.__soc_version__",
-                        "Ascend310P3"):
-            self.assertTrue(utils.is_310p())
-        utils._IS_310P = None
-        with mock.patch("vllm_ascend._build_info.__soc_version__",
-                        "Ascend910P1"):
-            self.assertFalse(utils.is_310p())
-
     def test_is_enable_nz(self):
         with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
                         1):
