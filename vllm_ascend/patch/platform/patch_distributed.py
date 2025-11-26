@@ -21,7 +21,7 @@ import torch
 import vllm.envs as envs_vllm
 from vllm.config import ParallelConfig
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 def parallel_config_get_dp_port(self) -> int:
@@ -111,5 +111,5 @@ def communication_adaptation_310p():
         torch.distributed.distributed_c10d.all_reduce)
 
 
-if is_310p():
+if get_ascend_device_type() == AscendDeviceType._310P:
     communication_adaptation_310p()
