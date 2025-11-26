@@ -87,6 +87,7 @@ def rms_norm_fwd_kernel(
             bias = tl.load(B + offsets, mask=mask).to(tl.float32)
 
         x_hat = x * rstd
+        # Cast normalized x back to original data type to preserve precision contract
         x_hat = x_hat.to(original_dtype)
         y = x_hat * w
         if HAS_BIAS:
