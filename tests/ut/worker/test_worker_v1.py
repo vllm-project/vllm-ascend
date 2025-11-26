@@ -52,7 +52,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
+    @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
@@ -61,7 +61,7 @@ class TestNPUWorker(TestBase):
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
+        mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
         mock_register_ascend_customop,
@@ -93,7 +93,7 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions.assert_called_once()
         mock_register_ascend_customop.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
-        mock_init_ascend_soc_version.assert_called_once()
+        mock_check_ascend_device_type.assert_called_once()
 
         # Verify try_register_lib call
         mock_try_register_lib.assert_called_once_with(
@@ -114,7 +114,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
+    @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
@@ -123,7 +123,7 @@ class TestNPUWorker(TestBase):
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
+        mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
         mock_register_ascend_customop,
@@ -159,7 +159,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
+    @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
@@ -168,7 +168,7 @@ class TestNPUWorker(TestBase):
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
+        mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
         mock_register_ascend_customop,
@@ -327,6 +327,8 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.local_rank = 1
             worker.model_config = MagicMock()
+            worker.parallel_config = MagicMock()
+            worker.parallel_config.local_world_size = 0
             worker.model_config.seed = 42
 
             # Test _init_device

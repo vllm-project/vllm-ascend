@@ -10,10 +10,10 @@
   * vLLM-Ascend：main branch
 
 ### KV Pooling Parameter Description
-**kv_connector_extra_config**:Additional Configurable Parameters for Pooling.  
-**lookup_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
-**load_async**:Whether to Enable Asynchronous Loading. The default value is false.  
-**backend**:Set the storage backend for kvpool, with the default being mooncake.
+**kv_connector_extra_config**: Additional Configurable Parameters for Pooling.  
+**lookup_rpc_port**: Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
+**load_async**: Whether to Enable Asynchronous Loading. The default value is false.  
+**backend**: Set the storage backend for kvpool, with the default being mooncake.
 
 
 ## Example of using Mooncake as a KVCache pooling backend

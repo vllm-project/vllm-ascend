@@ -5,7 +5,8 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
-from vllm.utils import logger, make_zmq_socket
+from vllm.utils import logger
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput

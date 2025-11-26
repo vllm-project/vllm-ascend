@@ -5,7 +5,7 @@
 Refer to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process).
 
 ## Run with Docker
-Assume you have two Atlas 800 A3 (64G*16)  or four A2 nodes, and want to deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multiple nodes.
+Assume you have two Atlas 800 A3 (64G*16) or four A2 nodes, and want to deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multiple nodes.
 
 ```{code-block} bash
    :substitutions:

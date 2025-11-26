@@ -6,6 +6,7 @@
 import os
 from typing import Any, Optional
 
+import numpy as np
 import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
@@ -188,7 +189,7 @@ def create_model_runner_output(
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else 0
-    sampled_token_ids = [[sampled_token] for _ in req_ids]
+    sampled_token_ids = [np.array([sampled_token]) for _ in req_ids]
 
     # Make output data structure.
     extra_args = {}
