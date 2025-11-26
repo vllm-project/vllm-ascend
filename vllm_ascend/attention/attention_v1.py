@@ -350,6 +350,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: float | None,
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
+        sinks: torch.Tensor = None,
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
@@ -372,6 +373,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
+        if self.sliding_window is not None:
+            mask = torch.ones(2048, 2048, dtype=torch.bool)
+            triu_mask = torch.triu(mask, diagonal=1).to("npu")
+            tril_mask = torch.tril(mask, -self.sliding_window).to("npu")
+            self.share_mask_tril_spase = triu_mask + tril_mask
+        else:
+            self.share_mask_tril_spase = ~torch.tril(torch.ones((2048, 2048), device='npu', dtype=torch.bool))
+
+        # For sink attention
+        self.sinks = sinks
 
     @staticmethod
     def update_graph_params(
