@@ -49,6 +49,7 @@ ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
 _IS_310P = None
+_IS_ASCEND950 = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
@@ -708,7 +709,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
-    UNDEFINED = 2
+    A5 = 2
+    UNDEFINED = 3
 
 
 _ascend_soc_version = None
@@ -721,6 +723,8 @@ def init_ascend_soc_version():
         _ascend_soc_version = AscendSocVersion.A2
     elif 250 <= soc_version <= 255:
         _ascend_soc_version = AscendSocVersion.A3
+    elif soc_version == 260:
+        _ascend_soc_version = AscendSocVersion.A5
     else:
         _ascend_soc_version = AscendSocVersion.UNDEFINED
 
@@ -994,3 +998,10 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+
+def is_Ascend950():
+    global _IS_ASCEND950
+    if _IS_ASCEND950 is None:
+        _IS_ASCEND950 = (get_ascend_soc_version() == AscendSocVersion.A5)
+    return _IS_ASCEND950
