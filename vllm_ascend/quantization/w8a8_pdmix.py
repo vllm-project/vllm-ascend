@@ -3,7 +3,7 @@ from typing import Any, Dict
 import torch
 import torch_npu
 
-from vllm_ascend.ascend_config import PDScenarioState, get_ascend_config
+from vllm.config import get_current_vllm_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 from .w8a8 import AscendW8A8LinearMethod
@@ -18,7 +18,8 @@ class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
 
     @staticmethod
     def apply(layer, x, bias=None, tp_rank=0):
-        if get_ascend_config().pd_scenario_state == PDScenarioState.DNode:
+        kv_transfer_config = get_current_vllm_config().kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
             return AscendW8A8LinearMethod.apply(layer, x, bias, tp_rank)
         else:
             return AscendW8A8DynamicLinearMethod.apply(layer, x, bias, tp_rank)
