@@ -26,7 +26,29 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can using our official docker image to run `Qwen3-Coder-30B-A3B-Instruct` directly.
 
-- Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc1
+docker run --rm \
+--name vllm-ascend \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it $IMAGE bash
+```
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
