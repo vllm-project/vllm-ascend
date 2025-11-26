@@ -143,10 +143,12 @@ def get_vllm_config():
     )
     return vllm_config
 
+
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
     return NPUModelRunner(vllm_config, DEVICE)
+
 
 def test_update_config(model_runner):
     """
