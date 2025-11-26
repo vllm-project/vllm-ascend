@@ -34,6 +34,7 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, AscendDeviceType,
                                enable_sp, get_ascend_device_type, is_vl_model,
                                prefill_context_parallel_enable,
                                update_aclgraph_sizes,
+                               update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -217,6 +218,9 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+        from vllm_ascend.compilation.compiler_interface import AscendAdaptor
+        compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
+
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
@@ -229,7 +233,6 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
-            compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             logger.info(
