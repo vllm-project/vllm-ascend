@@ -641,10 +641,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Pre-allocated tensor for copying valid sampled token counts to CPU,
         # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
-        self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
+        self.valid_sampled_token_count_copy_stream: torch.npu.Stream | None = None
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_event = torch.Event()
-            self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+            self.valid_sampled_token_count_copy_stream = torch.npu.Stream()
         self.valid_sampled_token_count_cpu = torch.empty(
             self.max_num_reqs,
             dtype=torch.int64,
@@ -2835,10 +2835,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.valid_sampled_token_count_event is None:
             return
 
-        default_stream = torch.cuda.current_stream()
+        default_stream = torch.npu.current_stream()
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
-        with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(
                 default_stream)  # type: ignore
             counts = valid_sampled_tokens_count
