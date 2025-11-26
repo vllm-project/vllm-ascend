@@ -37,7 +37,7 @@ FlashComm_v1 significantly improves performance in large-batch scenarios by deco
 
 It is important to note that the decomposition of the allreduce communication into reduce-scatter and all-gather operations only provides benefits in high-concurrency scenarios, where there is no significant communication degradation. In other cases, this decomposition may result in noticeable performance degradation. To mitigate this, the current implementation uses a threshold-based approach, where FlashComm_v1 is only enabled if the actual token count for each inference schedule exceeds the threshold. This ensures that the feature is only activated in scenarios where it improves performance, avoiding potential degradation in lower-concurrency situations.
 
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled.
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM = 1` to be enabled.
 
 ### 4. Matmul and ReduceScatter Fusion
 Once FlashComm_v1 is enabled, an additional optimization can be applied. This optimization fuses matrix multiplication and ReduceScatter operations, along with tiling optimization. The Matmul computation is treated as one pipeline, while the ReduceScatter and dequant operations are handled in a separate pipeline. This approach significantly reduces communication steps, improves computational efficiency, and allows for better resource utilization, resulting in enhanced throughput, especially in large-scale distributed environments.
@@ -80,7 +80,7 @@ This optimization is enabled by setting --async-scheduling
 - `QWEN3-32B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
 - `Qwen3-32B-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
 
-Here is the **minimum** number of cards. To achieve optimal performance, the number of cards needs to be increased.
+This is just the **minimum** number of cards required for deployment. To achieve optimal performance, the number of cards needs to be increased.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -152,14 +152,17 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM=1
 
 ### Online Inference on Multi-NPU
 
-Run the following script to start the vLLM server on Multi-NPU:
+Run the following script to start the vLLM server on Multi-NPU.
 
-This script is configured to achieve optimal performance under the above specific example scenarios.
+This script is configured to achieve optimal performance under the above specific example scenarios,with batchsize = 72 on two A3 cards.
 
-## **Attention**
-/model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+#### **Attention**
+- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
-If the model is not a quantized model,remove "--quantization ascend".
+- If the model is not a quantized model,remove "--quantization ascend".
+
+- If the ultimate performance is desired, the following parameters can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_0.6B.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_0.6B.md#optimization-highlights).Here is an example of batchsize of 72:`--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
+
 
 ```bash
 vllm serve /model/Qwen3-32B-W8A8 \
@@ -174,7 +177,7 @@ vllm serve /model/Qwen3-32B-W8A8 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --port 8113 \
   --block-size 128 \
-  --gpu-memory-utilization 0.9 \
+  --gpu-memory-utilization 0.9
 ```
 
 Once your server is started, you can query the model with input prompts
@@ -194,12 +197,12 @@ curl http://localhost:8113/v1/chat/completions -H "Content-Type: application/jso
 
 ### Offline Inference on Multi-NPU
 
-Run the following script to execute offline inference on multi-NPU:
+Run the following script to execute offline inference on multi-NPU.
 
-## **Attention**
-/model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+#### **Attention**
+- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
-If the model is not a quantized model,remove "--quantization ascend".
+- If the model is not a quantized model,remove "--quantization ascend".
 
 ```python
 import gc
@@ -275,11 +278,10 @@ There are three `vllm bench` subcommand:
 Take the `serve` as an example. Run the code as follows.
 
 #### **Attention**
-/model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/Qwen3-32B-W8A8 --served-model-name qwen3 --port 8113 --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /model/Qwen3-32B-W8A8 --served-model-name qwen3 --port 8113 --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
