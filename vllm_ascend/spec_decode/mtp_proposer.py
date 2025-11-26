@@ -380,6 +380,7 @@ class MtpProposer(Proposer):
                 common_attn_metadata.query_start_loc = \
                     query_start_loc_pcp_full[:num_reqs + 1]
             if self.speculative_config.disable_padded_drafter_batch:
+                assert isinstance(sampled_token_ids, list)
                 # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                 token_indices_to_sample = None
                 common_attn_metadata, token_indices =\
@@ -438,7 +439,7 @@ class MtpProposer(Proposer):
     def _prepare_inputs(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
@@ -922,7 +923,7 @@ class MtpProposer(Proposer):
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[
                     req_id]
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
+            next_token_ids.append(next_token_id.item())
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.input_ids.device)

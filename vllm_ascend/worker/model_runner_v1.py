@@ -2556,7 +2556,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    not in invalid_req_indices_set else None)
                 else:
                     sampled_ids = valid_sampled_token_ids[req_idx]
-                if sampled_ids.shape[0] == 0:
+                if sampled_ids is None or sampled_ids.shape[0] == 0:
                     continue
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -2574,7 +2574,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.num_tokens[req_idx] = end_idx
                 req_id = self.input_batch.req_ids[req_idx]
                 req_state = self.requests[req_id]
-                req_state.output_token_ids.extend(sampled_ids)
+                req_state.output_token_ids.extend(sampled_ids.tolist())
 
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
