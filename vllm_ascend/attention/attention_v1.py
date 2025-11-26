@@ -367,6 +367,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output = output.view(num_tokens, self.num_heads, self.head_size)
         return output
 
+    def _forward_prefill_no_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: Optional[torch.Tensor] = None,
+        num_tokens=0,
+    ) -> torch.Tensor:
+        assert attn_metadata is not None
+        assert attn_metadata.attn_mask is not None
+
+        mask = attn_metadata.attn_mask
+
+        torch_npu._npu_flash_attention(query=query,
+                                       key=key,
+                                       value=value,
+                                       mask=mask,
+                                       seq_len=attn_metadata.seq_lens,
+                                       scale_value=self.scale,
+                                       num_heads=self.num_heads,
+                                       num_kv_heads=self.num_kv_heads,
+                                       out=output)
+        assert output is not None
+        return output[:num_tokens, :, :]
 
     def _forward_decode_only(
         self,
