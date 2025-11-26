@@ -190,9 +190,6 @@ class KVCacheSendingLayerThread(threading.Thread):
                     src_list.append(src)
                     dst_list.append(dst)
                     length_list.append(length)
-            if self.current_layer != layer_index:
-                self.current_layer = layer_index
-                self.model_stream.synchronize()
             ret = self.engine.batch_transfer_sync_write(
                 session_id, src_list, dst_list, length_list)
             if ret < 0:
@@ -243,7 +240,6 @@ class KVCacheSendingLayerThread(threading.Thread):
                                     ((self.tp_rank // self.num_head_replica) %
                                      self.pd_head_ratio))
                     src_layer_addr += length
-            self.model_stream.synchronize()
             ret = self.engine.batch_transfer_sync_write(
                 session_id, src_list, dst_list, length_list)
             if ret < 0:
@@ -1038,7 +1034,8 @@ class MooncakeLayerwiseConnectorWorker:
             )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        pass
+        if self.vllm_config.kv_transfer_config.is_kv_producer:
+            torch.npu.current_stream().synchronize()
 
 
 @contextlib.contextmanager
