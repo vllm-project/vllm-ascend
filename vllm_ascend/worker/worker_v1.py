@@ -52,12 +52,10 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
-<<<<<<< HEAD
-from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
-=======
-from vllm_ascend.utils import (enable_sp, init_ascend_soc_version,
-                               is_enable_nz, prefill_context_parallel_enable,
->>>>>>> 4d92e8db (format code)
+from vllm_ascend.utils import (check_ascend_device_type, enable_sp,
+                               init_ascend_soc_version, is_enable_nz,
+                               prefill_context_parallel_enable,
+
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib, vllm_version_is,
                                check_ascend_device_type)
