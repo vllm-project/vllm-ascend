@@ -256,9 +256,6 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self.vocab_size,
             )
 
-        valid_sampled_token_ids: list[np.ndarray] = [
-            row for row in self._sampled_token_ids_cpu.numpy()
-        ]
         for i in self._invalid_req_indices:
             valid_sampled_token_ids[i] = np.array([])
 
