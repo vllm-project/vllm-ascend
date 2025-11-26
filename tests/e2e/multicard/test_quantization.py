@@ -27,7 +27,7 @@ from tests.e2e.conftest import VllmRunner
 
 def test_models_distributed_quantized_W8A8():
     example_prompts = [
-        "Hello, my name is",
+        "The president of the United States is",
     ]
     max_tokens = 5
     with VllmRunner(snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
@@ -38,7 +38,7 @@ def test_models_distributed_quantized_W8A8():
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     golden_results = [
-        'Hello, my name is the head of state and',
+        'The president of the United States is the head of state and',
     ]
 
     for i in range(len(vllm_output)):
