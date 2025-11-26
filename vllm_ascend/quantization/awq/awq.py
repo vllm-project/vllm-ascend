@@ -1,37 +1,24 @@
-from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 import torch
-from torch.nn.modules import Module
 import torch_npu
-from vllm.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig, FusedMoEQuantConfig,
-                                                         int4_w4a16_moe_quant_config,
-                                                         int8_w8a16_moe_quant_config,)
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               RowParallelLinear, UnquantizedLinearMethod)
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig, FusedMoEQuantConfig)
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase)
 from vllm.model_executor.layers.quantization import \
     QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig, AWQMoEMethod
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Method
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod, VocabParallelEmbedding)
-from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (AWQ_QUANTIZATION_METHOD)
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+
 
 def remove_quantization_method():
     if AWQ_QUANTIZATION_METHOD in QUANTIZATION_METHODS:
