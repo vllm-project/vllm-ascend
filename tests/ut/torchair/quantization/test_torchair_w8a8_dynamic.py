@@ -5,7 +5,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import (
     torchair_fused_experts_with_all2all, torchair_fused_experts_with_mc2)
-from vllm_ascend.utils import AscendSocVersion
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendW8A8FusedMoEMethod(TestBase):
@@ -79,7 +79,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         'HCCL_INTRA_PCIE_ENABLE': '1'
     })
     @patch(
-        "vllm_ascend.torchair.quantization.torchair_w8a8_dynamic.get_ascend_soc_version"
+        "vllm_ascend.torchair.quantization.torchair_w8a8_dynamic.get_ascend_device_type"
     )
     @patch(
         'vllm_ascend.torchair.quantization.torchair_w8a8_dynamic.get_mc2_group'
@@ -94,7 +94,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             mock_ascend_soc_version):
         """Test expert_scales is passed in A2 SOC version with mc2 optimization"""
         # Setup mocks
-        mock_ascend_soc_version.return_value = AscendSocVersion.A2
+        mock_ascend_soc_version.return_value = AscendDeviceType._910B
 
         mock_group = MagicMock()
         mock_group.rank_in_group = 0

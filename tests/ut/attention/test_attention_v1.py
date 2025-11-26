@@ -9,12 +9,13 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendAttentionState)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendAttentionBackend(TestBase):
 
     def test_get_name(self):
-        self.assertEqual(AscendAttentionBackend.get_name(), "ASCEND")
+        self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
         self.assertEqual(AscendAttentionBackend.get_impl_cls(),
@@ -24,14 +25,15 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(),
                          AscendAttentionMetadataBuilder)
 
-    @patch('vllm_ascend.attention.attention_v1.is_310p')
-    def test_get_kv_cache_shape_310p(self, mock_is_310p):
-        mock_is_310p.return_value = True
+    @patch('vllm_ascend.attention.attention_v1.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
+    def test_get_kv_cache_shape_310p(self, mock_soc_version):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 30 * 40 // 16, 20, 16))
 
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
-    def test_get_kv_cache_shape_not_310p(self, mock_is_310p):
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
+    def test_get_kv_cache_shape_not_310p(self, mock_soc_version):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
@@ -96,8 +98,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('torch_npu.npu_format_cast')
     @patch('vllm_ascend.utils.nd_to_nz_2d')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
-    def test_build_prefill_no_cache(self, mock_is_310p, mock_nd_to_nz_2d,
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
+    def test_build_prefill_no_cache(self, mock_soc_version, mock_nd_to_nz_2d,
                                     mock_npu_format_cast,
                                     mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -128,10 +131,11 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('torch_npu.npu_format_cast')
     @patch('vllm_ascend.utils.nd_to_nz_spec')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch('vllm_ascend.attention.attention_v1.AscendAttentionState')
     def test_build_chunked_prefill(self, mock_ascend_attention_state,
-                                   mock_is_310p, mock_nd_to_nz_spec,
+                                   mock_soc_version, mock_nd_to_nz_spec,
                                    mock_npu_format_cast, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
@@ -162,8 +166,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.builder.build(1, common_attn_metadata, mock_model)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
-    def test_build_non_310p(self, mock_is_310p, mock_ascend_metadata):
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
+    def test_build_non_310p(self, mock_soc_version, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
             query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
@@ -450,12 +455,13 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.vanilla_chunked_prefill')
     def test_forward_head_size_192(self, mock_vanilla_prefill,
-                                   mock_npu_reshape_and_cache, mock_is_310p,
-                                   mock_get_forward_context):
+                                   mock_npu_reshape_and_cache,
+                                   mock_soc_version, mock_get_forward_context):
         """Test forward pass when head_size is 192"""
 
         self.impl.head_size = 192
@@ -522,9 +528,11 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu.npu_format_cast')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu.npu_fused_infer_attention_score')
-    @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_310p_device(self, mock_get_forward_context, mock_is_310p,
+    def test_forward_310p_device(self, mock_get_forward_context,
+                                 mock_soc_version,
                                  mock_npu_fused_infer_attention_score,
                                  mock_npu_reshape_and_cache,
                                  mock_npu_format_cast):

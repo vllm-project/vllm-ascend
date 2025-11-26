@@ -28,7 +28,7 @@ from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
 from vllm_ascend.utils import adapt_patch  # noqa E402
-from vllm_ascend.utils import AscendSocVersion
+from vllm_ascend.utils import AscendDeviceType
 
 adapt_patch(True)
 
@@ -398,7 +398,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         forward_context = MagicMock(
             fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
         with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
-             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3):
+             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_device_type", return_value=AscendDeviceType._910_93):
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
             moe_method.ep_size = ep_size
             x = torch.randn(8, 2, 2)
