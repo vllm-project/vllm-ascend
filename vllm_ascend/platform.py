@@ -66,15 +66,15 @@ class NPUPlatform(Platform):
 
     def is_sleep_mode_available(self) -> bool:
         return True
-    
+
     @property
     def pass_key(self) -> str:
         return "graph_fusion_manager"
-    
+
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
-    
+
     @classmethod
     def get_compile_backend(self) -> str:
         from vllm_ascend.compilation.compiler_interface import AscendAdaptor

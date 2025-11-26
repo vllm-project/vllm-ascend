@@ -23,8 +23,9 @@ from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 
 class AddRMSNormQuantPattern:
 
-    def __init__(self, vllm_config):
+    def __init__(self, vllm_config, eps=1e-6):
         self.vllm_config = vllm_config
+        self.eps = eps
 
     def get_inputs(self):
         """
@@ -41,10 +42,10 @@ class AddRMSNormQuantPattern:
 
         def pattern(rms_norm_input, residual, rms_norm_weight, scale, offset):
             """
-          Pattern for AddRMSNormQuant fusion.
-          """
+            Pattern for AddRMSNormQuant fusion.
+            """
             output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual,
-                                                    rms_norm_weight, 1e-6)
+                                                    rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
             quantized_output = torch.ops.npu.npu_quantize(
@@ -54,8 +55,8 @@ class AddRMSNormQuantPattern:
         def replacement(rms_norm_input, residual, rms_norm_weight, scale,
                         offset):
             """
-          Replacement for the AddRMSNormQuant fusion.
-          """
+            Replacement for the AddRMSNormQuant fusion.
+            """
             output = torch.ops.npu.npu_add_rms_norm_quant(
                 rms_norm_input,
                 residual,
@@ -63,7 +64,7 @@ class AddRMSNormQuantPattern:
                 1. /
                 scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
                 offset,
-                epsilon=1e-6)
+                epsilon=self.eps)
             quantized_output = output[0]
             out1 = output[2]
             return quantized_output, out1
@@ -79,26 +80,21 @@ class AscendQuantFusionPass(VllmInductorPass):
 
     def __init__(self, vllm_config):
         super().__init__(vllm_config)
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
+        self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
             pass_name="rmsnorm_quant_fusion_pass")
-        AddRMSNormQuantPattern(vllm_config).register(self.patterns)
+
+        common_epsilons = [1e-5, 1e-6]
+        for eps in common_epsilons:
+            AddRMSNormQuantPattern(vllm_config,
+                                   eps=eps).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        matched_count = self.patterns.apply(graph)
+        matched_count = self.pattern_match_passes.apply(graph)
         self.end_and_log()
 
-    def is_applicable(self, **kwargs):
+    def is_applicable(self, runtime_shape):
         """
         Check if the pass is applicable for the current configuration.
         """
-        arg_dtypes = kwargs.get("arg_dtypes", None)
-        if arg_dtypes is None:
-            return False
-        # We assume the first tensor's dtype is the data type of this model, update this solution when there is
-        # better solution.
-        dtype = arg_dtypes[0] if isinstance(
-            arg_dtypes, list) and len(arg_dtypes) > 0 else arg_dtypes
-        # We found that the kernel npu_add_rms_norm_quant accept varying data format for different dtypes, therefore, we only
-        # provide the solution on bfloat16 here.
-        return dtype in (torch.bfloat16, )
+        return True

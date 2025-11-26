@@ -69,7 +69,6 @@ class ACLGraphWrapper:
             "ascend_compilation_config", {})
         self.fx_graph_eager = self.ascend_compilation_config.get(
             "fx_graph_eager", False)
-        self.graph_pool = graph_pool
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
 

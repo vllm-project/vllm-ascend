@@ -36,10 +36,10 @@ class AscendConfig:
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
-        
+
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
-        
+
         ascend_compilation_config = additional_config.get(
             "ascend_compilation_config", {})
         self.ascend_compilation_config = AscendCompilationConfig(
@@ -146,12 +146,17 @@ class AscendConfig:
             "SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import \
             get_flashcomm2_oproj_tp_size_and_validate_config
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(self, vllm_config)
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+            self, vllm_config)
 
 
 class AscendCompilationConfig:
     """
-    Configuration Object for ascend_compilation_config from additional_config
+    Configuration for controlling the behavior of Ascend graph optimization.
+
+    This class provides a way to configure graph fusion optimizations.
+    These configurations directly impact the performance and behavior of models
+    deployed on Ascend platforms.
     """
 
     def __init__(self,
@@ -159,6 +164,27 @@ class AscendCompilationConfig:
                  fx_graph_eager: bool = False,
                  enable_quantization_fusion: bool = True,
                  **kwargs):
+        """
+        Initialize the configuration.
+        
+        Args:
+            enable_graph_fusion (bool): Whether to enable graph fusion optimization. 
+                When set to True, the system will attempt to fuse multiple operations 
+                into more efficient computational graph structures to improve performance.
+                Default: True
+                
+            fx_graph_eager (bool): Whether to use eager mode for graph transformation.
+                When set to False, uses symbolic execution for graph transformation;
+                when set to True, uses eager execution mode.
+                Default: False
+                
+            enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
+                When set to True, the system will optimize quantization-related operations,
+                reducing the number of quantization/dequantization nodes.
+                Default: True
+                
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
         self.enable_graph_fusion = enable_graph_fusion
         self.fx_graph_eager = fx_graph_eager
         self.enable_quantization_fusion = enable_quantization_fusion
@@ -353,10 +379,10 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "graph fusion enabled! Automatic kernel fusion is expected."
                 )
 
-                if ascend_config.ascend_compilation_config.enable_quantization_fusion:
-                    logger.info(
-                        "Quantization fusion enabled! op fusion on quantization are expected. "
-                    )
+            if ascend_config.ascend_compilation_config.enable_quantization_fusion:
+                logger.info(
+                    "Quantization fusion enabled! op fusion on quantization are expected. "
+                )
 
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
