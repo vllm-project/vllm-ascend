@@ -88,7 +88,6 @@ def rms_norm_fwd_kernel(
 
         x_hat = x * rstd
         x_hat = x_hat.to(original_dtype)
-        tl.device_print("[Row %d]xxxdtype: %s", row_idx, x_hat.dtype)
         y = x_hat * w
         if HAS_BIAS:
             y = y + bias
