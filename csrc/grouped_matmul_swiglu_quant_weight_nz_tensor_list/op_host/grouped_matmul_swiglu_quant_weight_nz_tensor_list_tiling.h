@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_tiling.h
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.h
  * \brief
  */
-#ifndef AIR_CXX_RUNTIME_V2_OP_IMPL_GROUPED_MATMUL_SWIGLU_QUANT_H
-#define AIR_CXX_RUNTIME_V2_OP_IMPL_GROUPED_MATMUL_SWIGLU_QUANT_H
+#ifndef AIR_CXX_RUNTIME_V2_OP_IMPL_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H
+#define AIR_CXX_RUNTIME_V2_OP_IMPL_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H
 
 #include <set>
 #include "register/tilingdata_base.h"
@@ -44,10 +44,10 @@ BEGIN_TILING_DATA_DEF(GMMSwigluQuantTilingData)
   TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTilingData);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(GroupedMatmulSwigluQuant, GMMSwigluQuantTilingData)
+REGISTER_TILING_DATA_CLASS(GroupedMatmulSwigluQuantWeightNzTensorList, GMMSwigluQuantTilingData)
 }
 
-namespace GroupedMatmulSwigluQuantTiling {
+namespace GroupedMatmulSwigluQuantWeightNzTensorListTiling {
 constexpr uint32_t X_INDEX = 0;
 constexpr uint32_t WEIGHT_INDEX = 1;
 constexpr uint32_t GROUPLIST_INDEX = 4;
@@ -63,6 +63,6 @@ const std::set<std::array<int64_t, 2>> PREFILL_WHITE_LIST = {   // used for preF
     {{2048, 1536}},
     {{4096, 3072}}
 };
-} // namespace GroupedMatmulSwigluQuantTiling
+} // namespace GroupedMatmulSwigluQuantWeightNzTensorListTiling
 
-#endif // AIR_CXX_RUNTIME_V2_OP_IMPL_GROUPED_MATMUL_SWIGLU_QUANT_H
+#endif // AIR_CXX_RUNTIME_V2_OP_IMPL_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H

@@ -9,14 +9,14 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_split_ws.h
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list_split_ws.h
  * \brief
  */
-#ifndef ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_SPLIT_WS_H
-#define ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_SPLIT_WS_H
+#ifndef ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_SPLIT_WS_H
+#define ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_SPLIT_WS_H
 
-#include "grouped_matmul_swiglu_quant_utils.h"
-namespace GROUPED_MATMUL_SWIGLU_QUANT {
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list_utils.h"
+namespace GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST {
 /** @brief internal computation class
 */
 
@@ -585,4 +585,4 @@ __aicore__ inline void GMMSwigluSplitWorkSpaceCompute<mmType, sync, CHANNELDTYPE
 }
 
 }  // namespace GROUPED_MATMUL
-#endif  // ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_SPLIT_WS_H
+#endif  // ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_SPLIT_WS_H

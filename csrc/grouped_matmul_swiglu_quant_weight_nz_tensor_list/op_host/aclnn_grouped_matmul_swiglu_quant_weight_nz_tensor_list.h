@@ -7,8 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef OP_API_INC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_H
-#define OP_API_INC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_H
+#ifndef OP_API_INC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H
+#define OP_API_INC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H
 #include "aclnn/aclnn_base.h"
 
 #ifdef __cplusplus
@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 /**
- * @brief The first interface of aclnnGroupedMatmulSwigluQuantWeightNZTensorList, which calculates the workspace size according to the specific calculation process.
+ * @brief The first interface of aclnnGroupedMatmulSwigluQuantWeightNzTensorList, which calculates the workspace size according to the specific calculation process.
  * @domain aclnn_ops_infer
  *
  * @param [in] x: Represents x in the formula. The data type supports INT8, and the data format supports ND.
@@ -33,20 +33,20 @@ extern "C" {
  * @param [out] executor: Returns the op executor, containing the operator calculation process.
  * @return aclnnStatus: Returns the status code.
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZTensorListGetWorkspaceSize(
+__attribute__((visibility("default"))) aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(
     const aclTensor *x, const aclTensorList *weight, const aclTensor *bias, const aclTensor *offset,
     const aclTensorList *weightScale, const aclTensor *xScale, const aclTensor *groupList,  
     aclTensor *output, aclTensor *outputScale, aclTensor *outputOffset, uint64_t *workspaceSize, aclOpExecutor **executor);
 
 /**
- * @brief The second interface of aclnnGroupedMatmulSwigluQuantWeightNZTensorList, used to execute calculations.
+ * @brief The second interface of aclnnGroupedMatmulSwigluQuantWeightNzTensorList, used to execute calculations.
  * @param [in] workspace: The starting address of the workspace memory applied for on the npu device side.
- * @param [in] workspaceSize: The workspace size applied for on the npu device side, obtained from the first interface aclnnGroupedMatmulSwigluQuantWeightNZTensorListGetWorkspaceSize.
+ * @param [in] workspaceSize: The workspace size applied for on the npu device side, obtained from the first interface aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize.
  * @param [in] stream: acl stream.
  * @param [in] executor: op executor, containing the operator calculation process.
  * @return aclnnStatus: Returns the status code.
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZTensorList(void* workspace,
+__attribute__((visibility("default"))) aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorList(void* workspace,
     uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream);
 
 #ifdef __cplusplus

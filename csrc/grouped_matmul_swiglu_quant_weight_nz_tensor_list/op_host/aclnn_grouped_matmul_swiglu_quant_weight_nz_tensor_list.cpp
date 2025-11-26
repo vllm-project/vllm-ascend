@@ -23,7 +23,7 @@
 #include "opdev/shape_utils.h"
 #include "opdev/tensor_view_utils.h"
 #include "opdev/make_op_executor.h"
-#include "grouped_matmul_swiglu_quant.h"
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list.h"
 #include "aclnn_grouped_matmul_swiglu_quant_weight_nz_tensor_list.h"
 
 using namespace op;
@@ -68,15 +68,15 @@ static bool CheckNotNull(const aclTensor* x, const aclTensorList* weight, const 
   OP_CHECK_NULL(output, return false);
   OP_CHECK_NULL(outputScale, return false);
   if (bias != nullptr) {
-    OP_LOGW("aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario where bias is not 0. "
+    OP_LOGW("aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario where bias is not 0. "
      "Features and accuracy are not guaranteed if inputting bias with values other than 0s.");
   }
   if (offset != nullptr) {
-    OP_LOGW("aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario where offset is not 0. "
+    OP_LOGW("aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario where offset is not 0. "
      "Features and accuracy are not guaranteed if inputting bias with values other than 0s.");
   }
   if (outputOffset != nullptr) {
-    OP_LOGW("aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario where outputOffset is not 0. "
+    OP_LOGW("aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario where outputOffset is not 0. "
      "Features and accuracy are not guaranteed if inputting bias with values other than 0s.");
   }
   return true;
@@ -111,7 +111,7 @@ static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, 
   int64_t e = weight->Size();
   if (n % SPLIT != 0){
     OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
-      "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, N is %ld , not an even number.", n);
+      "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, N is %ld , not an even number.", n);
     return false;
   }
   int64_t nAfterHalve = static_cast<int64_t>(n / SPLIT);
@@ -149,20 +149,20 @@ static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, 
   int64_t groupListLen = groupList->GetViewShape().GetDim(0);
   if(groupListLen > e) {
     OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
-      "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, Length of 'groupList' out of range (expected to be in range of [1, %ld], but got %ld)",
+      "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, Length of 'groupList' out of range (expected to be in range of [1, %ld], but got %ld)",
       e, groupListLen);
     return false;
   }
   if(nAfterHalve > N_LIMIT) {
     OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
-      "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario.\
+      "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
       where N after halve is %ld greater than %ld.",
       nAfterHalve, N_LIMIT);
     return false;
   }
   if(k >= K_LIMIT) {
     OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
-      "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario.\
+      "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
       The tail axis dimension of input0(x) is %ld, which need lower than %ld.",
       k, K_LIMIT);
     return false;
@@ -191,17 +191,17 @@ static bool CheckFormat(const aclTensor* x, const aclTensorList* weight, const a
   bool isNZ = (*weight)[0]->GetStorageFormat() == op::Format::FORMAT_FRACTAL_NZ;
   if (!isNZ) {
     // fp16 in fp32 out that is split k template, not precision-advanced now
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario.\
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
     weight Format expect is FRACTAL_NZ, but got [%s].", op::ToString((*weight)[0]->GetStorageFormat()).GetString());
     return false;
   }
   if (IsPrivateFormat(x->GetStorageFormat())) {
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario.\
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
     x Format Not support Private Format.");
     return false;
   }
   if (IsPrivateFormat(output->GetStorageFormat())) {
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The current version does not support the scenario.\
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
     output Format Not support Private Format.");
     return false;
   }
@@ -246,7 +246,7 @@ static aclnnStatus DataContiguous(const aclTensorList *&tensors, aclOpExecutor *
   return ACLNN_SUCCESS;
 }
 
-static aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(const aclTensor *x, const aclTensorList *weight,
+static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(const aclTensor *x, const aclTensorList *weight,
                                                                        const aclTensor *bias, const aclTensor *offset,
                                                                        const aclTensorList *weightScale, const aclTensor *xScale, 
                                                                        const aclTensor *groupList,  
@@ -278,7 +278,7 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(const acl
   groupList = l0op::Contiguous(groupList, uniqueExecutor.get());
   CHECK_RET(groupList != nullptr, ACLNN_ERR_INNER_NULLPTR);
   // Call L0 operator capability
-  auto ret_0 = l0op::GroupedMatmulSwigluQuant(x, weight, weightScale, xScale, groupList, uniqueExecutor.get());
+  auto ret_0 = l0op::GroupedMatmulSwigluQuantWeightNzTensorList(x, weight, weightScale, xScale, groupList, uniqueExecutor.get());
   CHECK_RET(ret_0 != std::tuple(nullptr, nullptr), ACLNN_ERR_INNER_NULLPTR);
   auto out0 = std::get<OUTPUT_IDX_0>(ret_0);
   auto ret_1 = l0op::ViewCopy(out0, output, uniqueExecutor.get());
@@ -291,7 +291,7 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(const acl
   return ACLNN_SUCCESS;
 }
 
-aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZTensorListGetWorkspaceSize(const aclTensor *x, const aclTensorList *weight,
+aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(const aclTensor *x, const aclTensorList *weight,
                                                                   const aclTensor *bias, const aclTensor *offset,
                                                                   const aclTensorList *weightScale, const aclTensor *xScale, 
                                                                   const aclTensor *groupList,  
@@ -299,7 +299,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZTensorListGetWorkspaceSize(cons
                                                                   aclTensor *outputOffset, uint64_t *workspaceSize,
                                                                   aclOpExecutor **executor) {
   OP_CHECK_COMM_INPUT(workspaceSize, executor);
-  L2_DFX_PHASE_1(aclnnGroupedMatmulSwigluQuantWeightNZTensorList,
+  L2_DFX_PHASE_1(aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
                  DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList),
                  DFX_OUT(output, outputScale, outputOffset));
   // weight is forcibly bound to StorageFormat and ViewFormat as NZ in this scenario
@@ -319,17 +319,17 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZTensorListGetWorkspaceSize(cons
     }
   }
   // Call the common interface
-  return aclnnGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(x, weight, bias, offset, weightScale, xScale, groupList, 
+  return aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(x, weight, bias, offset, weightScale, xScale, groupList, 
     output, outputScale, outputOffset, workspaceSize, executor);
 }
 
-aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZTensorList(void *workspace, 
+aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorList(void *workspace, 
                                           uint64_t workspaceSize, 
                                           aclOpExecutor *executor,
                                           aclrtStream stream) {
-  L2_DFX_PHASE_2(aclnnGroupedMatmulSwigluQuantWeightNZTensorList);
+  L2_DFX_PHASE_2(aclnnGroupedMatmulSwigluQuantWeightNzTensorList);
   CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS, ACLNN_ERR_INNER,
-             "This is an error in GroupedMatmulSwigluQuantWeightNZ launch aicore");
+             "This is an error in GroupedMatmulSwigluQuantWeightNzTensorList launch aicore");
   return ACLNN_SUCCESS;
 }
 

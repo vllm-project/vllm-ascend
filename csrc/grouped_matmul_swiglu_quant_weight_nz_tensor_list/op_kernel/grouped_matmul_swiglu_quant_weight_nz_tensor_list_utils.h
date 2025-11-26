@@ -9,17 +9,17 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_utils.h
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list_utils.h
  * \brief
  */
-#ifndef ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_UTILS_H
-#define ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_UTILS_H
+#ifndef ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_UTILS_H
+#define ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_UTILS_H
 
 #include "kernel_tiling/kernel_tiling.h"
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 
-namespace GROUPED_MATMUL_SWIGLU_QUANT {
+namespace GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST {
 using namespace AscendC;
 constexpr uint32_t INT8_BITS = 8;  // a int8 number has 8 bits
 constexpr uint32_t UB_BLOCK_UNIT_SIZE = 32;  // 32: a block has 32 bytes data

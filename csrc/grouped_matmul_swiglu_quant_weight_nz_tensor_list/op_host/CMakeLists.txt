@@ -8,35 +8,35 @@
 # ======================================================================================================================
 
 add_ops_compile_options(
-        OP_NAME GroupedMatmulSwigluQuant
+        OP_NAME GroupedMatmulSwigluQuantWeightNzTensorList
         OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
                 -Werror
 )
 
 target_sources(op_host_aclnnExc PRIVATE
-        grouped_matmul_swiglu_quant_def.cpp
+        grouped_matmul_swiglu_quant_weight_nz_tensor_list_def.cpp
 )
 
 target_sources(opapi PRIVATE
-        grouped_matmul_swiglu_quant.cpp
-        aclnn_grouped_matmul_swiglu_quant.cpp
+        grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
+        aclnn_grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
 )
 
 if (NOT BUILD_OPEN_PROJECT)
     target_sources(aclnn_ops_train PRIVATE
-        grouped_matmul_swiglu_quant.cpp
-        aclnn_grouped_matmul_swiglu_quant.cpp
+        grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
+        aclnn_grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
     )
 
     target_sources(aclnn_ops_infer PRIVATE
-        grouped_matmul_swiglu_quant.cpp
-        aclnn_grouped_matmul_swiglu_quant.cpp
+        grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
+        aclnn_grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
     )
 endif ()
 
 target_sources(optiling PRIVATE
-        grouped_matmul_swiglu_quant_tiling.cpp
+        grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.cpp
 )
 
 target_include_directories(optiling PRIVATE
@@ -44,7 +44,7 @@ target_include_directories(optiling PRIVATE
 )
 
 target_sources(opsproto PRIVATE
-        grouped_matmul_swiglu_quant_proto.cpp
+        grouped_matmul_swiglu_quant_weight_nz_tensor_list_proto.cpp
 )
 
 file(GLOB _GMM_Aclnn_header "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_grouped_matmul_swiglu_quant_weight_nz_tensor_list.h")

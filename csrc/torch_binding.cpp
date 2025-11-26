@@ -574,7 +574,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     at::Tensor output_offset = at::zeros({m}, x.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(
-        aclnnGroupedMatmulSwigluQuantWeightNZTensorList,
+        aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
         x,
         weight,
         bias,

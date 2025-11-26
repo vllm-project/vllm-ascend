@@ -9,11 +9,11 @@ if [[ "$SOC_VERSION" =~ ^[Aa][Ss][Cc][Ee][Nn][Dd]310 ]]; then
     exit 0
 elif [[ "$SOC_VERSION" =~ ^[Aa][Ss][Cc][Ee][Nn][Dd]910[Bb][0-9]$ ]]; then
     # ASCEND910B (A2) series
-    CUSTOM_OPS="grouped_matmul_swiglu_quant"
+    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list"
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^[Aa][Ss][Cc][Ee][Nn][Dd]910_93[0-9]{2}$ ]]; then
     # ASCEND910C (A3) series
-    CUSTOM_OPS="grouped_matmul_swiglu_quant"
+    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list"
     SOC_ARG="ascend910_93"
 else
     # others

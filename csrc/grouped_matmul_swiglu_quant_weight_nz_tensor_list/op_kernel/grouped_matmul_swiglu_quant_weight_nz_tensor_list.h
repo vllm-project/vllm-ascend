@@ -9,14 +9,14 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant.h
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list.h
  * \brief
  */
-#ifndef ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_H
-#define ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_H
+#ifndef ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H
+#define ASCENDC_GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST_H
 
-#include "grouped_matmul_swiglu_quant_utils.h"
-namespace GROUPED_MATMUL_SWIGLU_QUANT {
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list_utils.h"
+namespace GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST {
 /** @brief intenal computation class
 */
 template <class mmType, bool sync = false, typename CHANNELDTYPE = float>

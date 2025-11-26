@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_proto.cpp
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list_proto.cpp
  * \brief
  */
 #include "register/op_impl_registry.h"
@@ -22,7 +22,7 @@ const int64_t X_INDEX = 0;
 const int64_t WEIGHTSCALE_INDEX = 2;
 const int64_t M_DIM_INDEX = 0;
 const int64_t N_DIM_INDEX = 0;
-static ge::graphStatus InferShape4GroupedMatmulSwigluQuant(gert::InferShapeContext* context) {
+static ge::graphStatus InferShape4GroupedMatmulSwigluQuantWeightNzTensorList(gert::InferShapeContext* context) {
     const gert::Shape* xShape = context->GetInputShape(X_INDEX);
     const gert::Shape* weightScaleShape = context->GetDynamicInputShape(WEIGHTSCALE_INDEX, 0);
     int64_t m = xShape->GetDim(M_DIM_INDEX);
@@ -37,13 +37,13 @@ static ge::graphStatus InferShape4GroupedMatmulSwigluQuant(gert::InferShapeConte
     return GRAPH_SUCCESS;
 }
 
-static graphStatus InferDataType4GroupedMatmulSwigluQuant(gert::InferDataTypeContext* context) {
+static graphStatus InferDataType4GroupedMatmulSwigluQuantWeightNzTensorList(gert::InferDataTypeContext* context) {
     context->SetOutputDataType(0, DataType::DT_INT8);
     context->SetOutputDataType(1, DataType::DT_FLOAT);
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(GroupedMatmulSwigluQuant)
-    .InferShape(InferShape4GroupedMatmulSwigluQuant)
-    .InferDataType(InferDataType4GroupedMatmulSwigluQuant);
+IMPL_OP_INFERSHAPE(GroupedMatmulSwigluQuantWeightNzTensorList)
+    .InferShape(InferShape4GroupedMatmulSwigluQuantWeightNzTensorList)
+    .InferDataType(InferDataType4GroupedMatmulSwigluQuantWeightNzTensorList);
 }  // namespace ops

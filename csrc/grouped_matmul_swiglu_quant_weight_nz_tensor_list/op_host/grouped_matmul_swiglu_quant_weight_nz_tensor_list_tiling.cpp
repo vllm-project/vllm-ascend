@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_tiling.cpp
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.cpp
  * \brief
  */
 #include <climits>
@@ -18,10 +18,10 @@
 #include "log/ops_log.h"
 #include "error/ops_error.h"
 #include "tiling/tiling_base.h"
-#include "grouped_matmul_swiglu_quant_tiling.h"
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.h"
 using namespace ge;
 using namespace AscendC;
-using namespace GroupedMatmulSwigluQuantTiling;
+using namespace GroupedMatmulSwigluQuantWeightNzTensorListTiling;
 
 template <typename T1, typename T2>
 static T1 CeilDiv(T1 a, T2 b)
@@ -118,7 +118,7 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   tilingData.gmmSwiglu.set_groupListLen(groupNum);
   tilingData.gmmSwiglu.set_tokenLen(n);
   
-  OPS_LOG_D(context->GetNodeName(),"grouped_matmul_swiglu_quant_tiling.");
+  OPS_LOG_D(context->GetNodeName(),"grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.");
   OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.groupNum:  %ld", groupNum);
   OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.coreNum:   %u ", compileInfoPtr->aicNum_);
   OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.M:         %ld", m);
@@ -139,7 +139,7 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   tiling.SetOrgShape(m, n, k);
   tiling.SetBufferSpace(-1, -1, -1);
   OPS_ERR_IF(tiling.GetTiling(tilingData.mmTilingData) == -1,
-             OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "grouped_matmul_swiglu_quant_tiling, get tiling failed"),
+             OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling, get tiling failed"),
              return GRAPH_FAILED);
   auto workspaceSizes = context->GetWorkspaceSizes(1);
   bool isPreFill = IsPreFill(tilingData);
@@ -182,7 +182,7 @@ ASCENDC_EXTERN_C graphStatus TilingPrepareForGMMSwigluQuant(gert::TilingParseCon
   return GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(GroupedMatmulSwigluQuant)
+IMPL_OP_OPTILING(GroupedMatmulSwigluQuantWeightNzTensorList)
 .Tiling(TilingGMMSwigluQuant)
 .TilingParse<GMMSwigluCompileInfo>(TilingPrepareForGMMSwigluQuant); 
 }  // namespace optiling

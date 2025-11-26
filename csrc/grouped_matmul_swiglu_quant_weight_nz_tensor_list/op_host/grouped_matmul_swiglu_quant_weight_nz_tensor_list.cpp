@@ -11,20 +11,20 @@
 #include "opdev/op_log.h"
 #include "opdev/op_dfx.h"
 #include "opdev/make_op_executor.h"
-#include "grouped_matmul_swiglu_quant.h"
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list.h"
 
 using namespace op;
 
 namespace l0op {
-OP_TYPE_REGISTER(GroupedMatmulSwigluQuant);
+OP_TYPE_REGISTER(GroupedMatmulSwigluQuantWeightNzTensorList);
 
-const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuant(const aclTensor *x,
+const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuantWeightNzTensorList(const aclTensor *x,
                                                                   const aclTensorList *weight,
                                                                   const aclTensorList *perChannelScale,
                                                                   const aclTensor *perTokenScale,
                                                                   const aclTensor *groupList,
                                                                   aclOpExecutor *executor) {
-    L0_DFX(GroupedMatmulSwigluQuant, x, weight, perChannelScale, perTokenScale, groupList);
+    L0_DFX(GroupedMatmulSwigluQuantWeightNzTensorList, x, weight, perChannelScale, perTokenScale, groupList);
     if (x == nullptr) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "x is nullptr.");
         return std::tuple(nullptr, nullptr);
@@ -36,14 +36,14 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuant(const aclTenso
     gert::Shape scaleOutShape({m});
     auto out = executor->AllocTensor(outShape, DataType::DT_INT8, ge::FORMAT_ND);
     auto scaleOut = executor->AllocTensor(scaleOutShape, DataType::DT_FLOAT, ge::FORMAT_ND);
-    auto ret = INFER_SHAPE(GroupedMatmulSwigluQuant,
+    auto ret = INFER_SHAPE(GroupedMatmulSwigluQuantWeightNzTensorList,
                         OP_INPUT(x, weight, perChannelScale, perTokenScale, groupList),
                         OP_OUTPUT(out, scaleOut));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
         return std::tuple(nullptr, nullptr);
     }
-    ret = ADD_TO_LAUNCHER_LIST_AICORE(GroupedMatmulSwigluQuant,
+    ret = ADD_TO_LAUNCHER_LIST_AICORE(GroupedMatmulSwigluQuantWeightNzTensorList,
                                     OP_INPUT(x, weight, perChannelScale, perTokenScale, groupList),
                                     OP_OUTPUT(out, scaleOut));
     if (ret != ACLNN_SUCCESS) {

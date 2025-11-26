@@ -9,16 +9,16 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_def.cpp
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list_def.cpp
  * \brief
  */
 
 #include <cstdint>
 #include "register/op_def_registry.h"
 namespace ops {
-class GroupedMatmulSwigluQuant : public OpDef {
+class GroupedMatmulSwigluQuantWeightNzTensorList : public OpDef {
 public:
-    explicit GroupedMatmulSwigluQuant(const char* name) : OpDef(name)
+    explicit GroupedMatmulSwigluQuantWeightNzTensorList(const char* name) : OpDef(name)
     {
         this->Input("x")
             .ParamType(REQUIRED)
@@ -61,5 +61,5 @@ public:
     }
 };
  
-OP_ADD(GroupedMatmulSwigluQuant);
+OP_ADD(GroupedMatmulSwigluQuantWeightNzTensorList);
 }

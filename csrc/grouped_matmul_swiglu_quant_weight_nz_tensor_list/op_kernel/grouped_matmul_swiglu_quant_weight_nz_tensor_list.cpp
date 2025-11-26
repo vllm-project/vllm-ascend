@@ -9,15 +9,15 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant.cpp
+ * \file grouped_matmul_swiglu_quant_weight_nz_tensor_list.cpp
  * \brief
  */
-#include "grouped_matmul_swiglu_quant.h"
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list.h"
 #include <typeinfo>
-#include "grouped_matmul_swiglu_quant_split_ws.h"
+#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list_split_ws.h"
 using namespace AscendC;
 using namespace matmul;
-using namespace GROUPED_MATMUL_SWIGLU_QUANT;
+using namespace GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST;
 using MM_DTYPE_Y = int32_t;
 
 template <bool trans = false>
@@ -45,7 +45,7 @@ using yType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, MM_DTYPE_Y>;
         computeOp.Process();                                                                                       \
     } while (0)
 
-extern "C" __global__ __aicore__ void grouped_matmul_swiglu_quant(GM_ADDR x, GM_ADDR weight, GM_ADDR perChannelScale, GM_ADDR perTokenScale, 
+extern "C" __global__ __aicore__ void grouped_matmul_swiglu_quant_weight_nz_tensor_list(GM_ADDR x, GM_ADDR weight, GM_ADDR perChannelScale, GM_ADDR perTokenScale, 
                                                                   GM_ADDR groupList, GM_ADDR quantOutput, GM_ADDR quantScaleOutput, 
                                                                   GM_ADDR workspace, GM_ADDR tiling) {
     TPipe tPipe;
