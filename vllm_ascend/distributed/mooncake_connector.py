@@ -634,8 +634,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig,
-                 role: KVConnectorRole, kv_cache_config: KVCacheConfig):
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole,
+                 kv_cache_config: KVCacheConfig):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
