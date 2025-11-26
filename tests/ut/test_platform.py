@@ -10,7 +10,7 @@ from vllm.platforms import PlatformEnum
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD)
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType)
 
 
 class TestNPUPlatform(TestBase):
@@ -233,13 +233,14 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("os.environ", {})
     @patch(
         "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_basic_config_update(
-            self, mock_init_recompute, mock_is_310p, mock_update_acl,
+            self, mock_init_recompute, mock_soc_version, mock_update_acl,
             mock_init_ascend, mock_check_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
@@ -261,7 +262,8 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.assert_called_once_with(vllm_config)
         mock_check_ascend.assert_called_once()
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -269,7 +271,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_no_model_config_warning(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -285,7 +287,8 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
         self.assertTrue("Model config is missing" in cm.output[0])
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -293,7 +296,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_enforce_eager_mode(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -320,7 +323,8 @@ class TestNPUPlatform(TestBase):
             CUDAGraphMode.NONE,
         )
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -329,7 +333,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_unsupported_compilation_level(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_update_default, mock_is_310p):
+            mock_update_default, mock_soc_version):
         mock_update_default.return_value = MagicMock()
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
@@ -359,11 +363,12 @@ class TestNPUPlatform(TestBase):
 
     @pytest.mark.skip(
         "Revert me when vllm support setting cudagraph_mode on oot platform")
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     def test_check_and_update_config_unsupported_cudagraph_mode(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_ascend, mock_check_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -388,7 +393,8 @@ class TestNPUPlatform(TestBase):
                 CUDAGraphMode.NONE,
             )
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -397,7 +403,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_torchair_enabled_compilation(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_update_default, mock_is_310p):
+            mock_update_default, mock_soc_version):
         mock_update_default.return_value = MagicMock()
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.torchair_graph_config.enabled = True
@@ -426,7 +432,8 @@ class TestNPUPlatform(TestBase):
             CUDAGraphMode.NONE,
         )
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -434,7 +441,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_cache_config_block_size(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -452,7 +459,8 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 128)
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -460,7 +468,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_v1_worker_class_selection(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -491,12 +499,13 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch(
         "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_310p_no_custom_ops(
-            self, mock_init_recompute, mock_is_310p, mock_init_ascend,
+            self, mock_init_recompute, mock_soc_version, mock_init_ascend,
             mock_check_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
@@ -513,7 +522,8 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
         self.assertEqual(vllm_config.compilation_config.custom_ops, [])
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -521,7 +531,7 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_ascend_scheduler_config(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_soc_version):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.ascend_scheduler_config.enabled = True
         mock_init_ascend.return_value = mock_ascend_config
@@ -551,7 +561,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=True,
         )
@@ -572,7 +581,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=True,
         )
@@ -594,7 +602,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=False,
         )
@@ -616,7 +623,6 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=False,
         )

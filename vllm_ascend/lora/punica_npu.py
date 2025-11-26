@@ -4,9 +4,9 @@ from typing import Callable, Optional, Tuple, Union
 
 import torch
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-if is_310p():
+if get_ascend_device_type() == AscendDeviceType._310P:
     from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
                                          bgmv_shrink, sgmv_expand,
                                          sgmv_expand_slice, sgmv_shrink)
