@@ -90,7 +90,7 @@ class AscendQuantFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        matched_count = self.pattern_match_passes.apply(graph)
+        matched_count = self.pattern_match_passes.apply(graph)  # noqa: F841
         self.end_and_log()
 
     def is_applicable(self, runtime_shape):
