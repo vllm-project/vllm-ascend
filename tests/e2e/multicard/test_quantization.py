@@ -35,4 +35,12 @@ def test_models_distributed_quantized_W8A8():
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     enforce_eager=False) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    golden_results = [
+        'Hello, my name is the head of state and',
+    ]
+
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text: {vllm_output[i][1]!r}")

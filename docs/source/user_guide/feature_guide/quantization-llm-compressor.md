@@ -1,6 +1,16 @@
-# Quantization Guide
+# llm-compressor Quantization Guide
 
 Model quantization is a technique that reduces the size and computational requirements of a model by lowering the data precision of the weights and activation values in the model, thereby saving the memory and improving the inference speed.
+
+## Supported llm-compressor Quantization Types
+
+Support CompressedTensorsW8A8 static weight.
+
+weight: per-channel, int8, symmetric; activation: per-tensor, int8, symmetric.
+
+Support CompressedTensorsW8A8Dynamic weight.
+
+weight: per-channel, int8, symmetric; activation: per-token, int8, symmetric, dynamic.
 
 ## Install llm-compressor
 
