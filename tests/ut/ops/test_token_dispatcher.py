@@ -22,7 +22,7 @@ import torch
 from tests.ut.base import TestBase
 
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
-    AscendSocVersion, TokenDispatcherWithAll2AllV,
+    AscendDeviceType, TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
 
 
@@ -50,10 +50,10 @@ class TestTokenDispatcherWithMC2(TestBase):
             return_value=self.forward_context)
         self.forward_context_patch.start()
 
-        # Mock get_ascend_soc_version()
+        # Mock get_ascend_device_type()
         self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_soc_version",
-            return_value=AscendSocVersion.A3)
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type",
+            return_value=AscendDeviceType._910_93)
         self.ascend_soc_version_patch.start()
 
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}

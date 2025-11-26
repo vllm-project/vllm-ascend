@@ -57,7 +57,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               get_ascend_device_type)
 
 _ROUTER_SCALE = None
 
@@ -448,7 +449,8 @@ class PanguProMoESparseMoeBlock(nn.Module):
         # on 300I Duo platform, we find that num_voted_experts set to 5 achieves
         # good performance without sacrifice too much accuracy. for other platform,
         # this is set to 8 to use original pangu grouped topk.
-        num_voted_experts = 5 if is_310p() else 8
+        num_voted_experts = 5 if get_ascend_device_type(
+        ) == AscendDeviceType._310P else 8
 
         self.experts = FusedMoE(
             num_experts=config.num_experts,
@@ -1109,7 +1111,8 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-            if is_310p() and "head" in name:
+            if get_ascend_device_type(
+            ) == AscendDeviceType._310P and "head" in name:
                 # on 300I Duo platform, ACL_FORMAT_FRACTAL_NZ is much more preferred than
                 # ACL_FORMAT_FRACTAL_ND by matmul operation. Since lmhead is also implemented
                 # by linear, we manually cast the format here.

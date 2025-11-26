@@ -28,8 +28,8 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.utils import (npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
-                               dispose_tensor, get_ascend_soc_version,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               dispose_tensor, get_ascend_device_type,
                                is_enable_nz,
                                is_hierarchical_communication_enabled)
 
@@ -234,11 +234,11 @@ def torchair_fused_experts_with_mc2(
     ep_world_size = ep_group.world_size
 
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
-    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+    need_extra_args = (get_ascend_device_type() == AscendDeviceType._910_93
                        or is_torchair)
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    a3_need_extra_args = get_ascend_device_type() == AscendDeviceType._910_93
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
