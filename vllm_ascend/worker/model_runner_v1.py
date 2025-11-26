@@ -256,7 +256,7 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self.vocab_size,
             )
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i] = np.array([])
+            valid_sampled_token_ids[i].clear()
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -2257,7 +2257,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def propose_draft_token_ids(
         self,
-        valid_sampled_token_ids: Union[torch.Tensor, list[np.ndarray]],
+        valid_sampled_token_ids: Union[torch.Tensor, list[list[int]]],
         sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
         spec_decode_metadata: SpecDecodeMetadata,
@@ -2266,7 +2266,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         attn_metadata: dict[str, Any],
         aux_hidden_states: torch.Tensor = None,
-    ) -> Optional[torch.Tensor | list[list[int]]]:
+    ) -> Optional[list[list[int]]]:
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -2619,7 +2619,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)] = np.array([])
+                    valid_sampled_token_ids[int(i)].clear()
             else:
                 valid_sampled_token_ids = []
                 invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
@@ -2647,15 +2647,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # between the first-stage worker and the last-stage worker.
             for req_idx in range(num_sampled_tokens):
                 if self.use_async_scheduling:
-                    sampled_ids = (
-                        np.array([-1]) if req_idx not in invalid_req_indices_set else None
-                    )
+                    sampled_ids = [-1] * 1 if \
+                        req_idx not in invalid_req_indices_set else None
                 else:
                     sampled_ids = valid_sampled_token_ids[req_idx]
-                    num_sampled_ids: int = (
-                        sampled_ids.shape[0] if sampled_ids is not None else 0
-                    )
-                if sampled_ids is None or num_sampled_ids == 0:
+                if not sampled_ids:
                     continue
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
