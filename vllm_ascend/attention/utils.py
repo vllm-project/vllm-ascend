@@ -75,6 +75,9 @@ class AscendCommonAttentionMetadata:
     max_query_len: int
     """Max token number of request in batch"""
 
+    max_seq_len: int
+    """Longest context length in batch"""
+    
     decode_token_per_req: int
     """decode token number per request"""
 
