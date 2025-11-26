@@ -120,7 +120,33 @@ The specific example scenario is as follows:
 
 ### Run docker container:
 
-Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+#### **Attention**
+- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+--name vllm-ascend \
+--shm-size=1g \
+--privileged=true \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /model/Qwen3-32B-W8A8:/model/Qwen3-32B-W8A8 \
+-p 8000:8000 \
+-it $IMAGE bash
+```
 
 ### Setup environment variables
 
