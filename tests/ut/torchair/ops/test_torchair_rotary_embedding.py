@@ -8,6 +8,7 @@ from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
     _set_cos_sin_cache, custom_rotary_embedding_enabled,
     native_rope_deepseek_forward, rope_forward_oot, rotate_half,
     yarn_find_correction_dim, yarn_get_mscale)
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestCustomRotaryEmbeddingEnabled(TestBase):
@@ -107,14 +108,15 @@ class TestRopeForwardOot(TestBase):
     @patch('torch.ops._C_ascend')
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
-    @patch('vllm_ascend.torchair.ops.torchair_rotary_embedding.is_310p',
-           return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.custom_rotary_embedding_enabled',
         return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
-                                            mock_custom_enabled, mock_is_310p,
+                                            mock_custom_enabled,
+                                            mock_soc_version,
                                             mock_get_ascend_config, mock__c):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = False

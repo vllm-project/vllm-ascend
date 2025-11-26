@@ -5,7 +5,8 @@ import os
 from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.utils import get_ip, logger
+from vllm.utils import logger
+from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.mooncake.config_data import MooncakeEngineKey
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te

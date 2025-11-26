@@ -45,6 +45,7 @@ from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
@@ -54,12 +55,6 @@ from vllm_ascend.ascend_config import clear_ascend_config
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
 from vllm_ascend.utils import adapt_patch  # noqa E402
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_open_port
-else:
-    from vllm.utils.network_utils import get_open_port
 
 adapt_patch(True)
 adapt_patch(False)
