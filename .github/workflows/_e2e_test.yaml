@@ -40,7 +40,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -48,7 +48,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -137,7 +137,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -145,7 +145,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -171,7 +171,10 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_qwen3_moe_with_torchair
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair_v1scheduler
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_nz
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
@@ -179,6 +182,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_full_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
@@ -227,7 +231,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: ./vllm-ascend
 
@@ -237,7 +241,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}

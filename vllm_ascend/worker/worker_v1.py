@@ -35,6 +35,8 @@ from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
@@ -50,7 +52,7 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is)
+                               try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -64,12 +66,6 @@ torch_non_c_binding_in_graph_functions_npu[
     "torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(
     torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
-else:
-    from vllm.utils.mem_constants import GiB_bytes
-    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 class NPUWorker(WorkerBase):
@@ -87,7 +83,6 @@ class NPUWorker(WorkerBase):
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
-        is_enable_nz(vllm_config)
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
@@ -142,10 +137,7 @@ class NPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            if vllm_version_is("0.11.0"):
-                from vllm.utils import init_cached_hf_modules
-            else:
-                from vllm.utils.import_utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
 
             init_cached_hf_modules()
 

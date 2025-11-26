@@ -11,6 +11,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -23,13 +24,7 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-else:
-    from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
 
@@ -86,8 +81,7 @@ class TorchairMtpProposer(MtpProposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None) -> None:
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if not with_prefill:
             skip_attn = False
@@ -347,8 +341,7 @@ class TorchairMtpProposer(MtpProposer):
         num_tokens_across_dp = self.runner.num_tokens_across_dp
         with_prefill = self.runner.with_prefill
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \

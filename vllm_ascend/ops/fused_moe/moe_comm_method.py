@@ -27,7 +27,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast, QuantType)
+    PrepareAndFinalizeWithMC2, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2, TokenDispatcherWithMoge)
@@ -44,8 +44,6 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.NAIVE_MULTICAST] = NaiveMulticastCommImpl(
-        moe_config)
 
 
 class MoECommMethod(ABC):
@@ -245,32 +243,3 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
-
-
-class NaiveMulticastCommImpl(MoECommMethod):
-    """This implementation is the same as NativeAllGatherCommImpl,
-    but uses NPU-specific ops for better performance.
-
-    This implementation should be compatible with all scenarios, and
-    thus it is the default implementation for MoE communication methods.
-    It uses `torch_npu.npu_moe_init_routing_v2` for pre-processing
-    and `torch_npu.npu_moe_token_unpermute` for post-processing
-    to handle the token-to-expert mapping and communication efficiently.
-
-    NOTE(Yizhou): TBH, it is really weird that we were supposed to use
-    `torch_npu.npu_moe_init_routing_v2` and `torch_npu.npu_moe_finalize_routing`
-    or `torch_npu.npu_moe_token_permute` and `torch_npu.npu_moe_token_unpermute`
-    for pre-processing and post-processing, respectively.
-    But `npu_moe_finalize_routing` will lead to accuracy issues so we have to
-    use `torch_npu.npu_moe_token_unpermute` instead.
-    This is a workaround and should be removed after the issue is fixed.
-    """
-
-    def _get_token_dispatcher(self):
-        return TokenDispatcherWithAllGather(
-            top_k=self.moe_config.experts_per_token,
-            num_experts=self.moe_config.num_experts,
-            num_local_experts=self.moe_config.num_local_experts)
-
-    def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithNaiveMulticast(self.moe_config)

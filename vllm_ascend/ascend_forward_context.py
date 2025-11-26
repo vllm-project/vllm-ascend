@@ -29,16 +29,8 @@ class FusedMoEState(Enum):
     All2AllSeq = 5
 
 
-class MoECommType(Enum):
-    ALLGATHER = 0
-    MC2 = 1
-    ALLTOALL = 2
-    NAIVE_MULTICAST = 3
-
-
-# TODO(zzzzwwjj): add soc_version to choose branch
-def _get_fused_moe_state(ep_size: int, with_prefill: bool,
-                         is_deepseek_v3_r1: bool):
+def get_fused_moe_state(ep_size: int, with_prefill: bool,
+                        is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
     if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
@@ -54,6 +46,12 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
         return FusedMoEState.All2All
     else:
         return FusedMoEState.MC2
+
+
+class MoECommType(Enum):
+    ALLGATHER = 0
+    MC2 = 1
+    ALLTOALL = 2
 
 
 @contextmanager
@@ -72,7 +70,8 @@ def set_ascend_forward_context(
         batch_descriptor: Optional[BatchDescriptor] = None,
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
-        weight_prefetch_method: Optional[WeightPrefetchMethod] = None):
+        weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
+        is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -98,11 +97,12 @@ def set_ascend_forward_context(
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
 
+        # fused_moe_state is used in torchair, it will be deleted along with torchair
         is_deepseek_v3_r1 = hasattr(
             vllm_config.model_config.hf_config, 'n_routed_experts'
         ) and vllm_config.model_config.hf_config.n_routed_experts == 256
-        fused_moe_state = _get_fused_moe_state(ep_size, with_prefill,
-                                               is_deepseek_v3_r1)
+        fused_moe_state = get_fused_moe_state(ep_size, with_prefill,
+                                              is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
@@ -157,6 +157,7 @@ def set_ascend_forward_context(
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
+        forward_context.is_mtp_model = is_mtp_model
 
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.
