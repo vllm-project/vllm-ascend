@@ -317,7 +317,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                          query: torch.Tensor,
                          key: torch.Tensor,
                          value: torch.Tensor,
-                         attn_metadata: AscendMetadata, output):
+                         attn_metadata: AscendMetadata,
+                         output: torch.Tensor):
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
@@ -372,7 +373,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self,
             query: torch.Tensor,
             attn_metadata: AscendMetadata,
-            output: Optional[torch.Tensor] = None,
+            output: torch.Tensor,
     ) -> torch.Tensor:
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
             0] == query.size(0):
@@ -470,11 +471,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def _forward_encode(
             self,
-            query,
-            key,
-            value,
-            attn_metadata,
-            output,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_metadata: AscendMetadata,
+            output: torch.Tensor,
     ) -> torch.Tensor:
         cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
         output = torch_npu.npu_fusion_attention(
@@ -562,7 +563,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if self.attn_type == AttentionType.ENCODER_ONLY:
             ori_output = output
-            output = self._forward_encode(query, key, value, attn_metadata)
+            output = self._forward_encode(query, key, value, attn_metadata, output)
             ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
             return ori_output.view(num_tokens, self.hidden_size)
 
