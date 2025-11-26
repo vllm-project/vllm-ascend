@@ -25,9 +25,9 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
-                               get_ascend_device_type, is_enable_nz,
-                               COMPRESSED_TENSORS_METHOD)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+                               get_ascend_device_type, is_enable_nz)
 
 
 def quant_per_tensor(in_tensor: torch.Tensor,
@@ -153,7 +153,7 @@ class AscendW8A8LinearMethod:
         if getattr(layer, "ascend_quant_method",
                    "") == COMPRESSED_TENSORS_METHOD:
             quant_bias = bias
-            
+
         if get_ascend_device_type() == AscendDeviceType._310P:
             # On 300I Duo platform, we need transpose again if
             # using nz. This transpose can be skipped in torchair.
