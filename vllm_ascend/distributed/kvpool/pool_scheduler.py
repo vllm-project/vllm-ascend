@@ -306,7 +306,7 @@ def get_zmq_rpc_path_lookup(
     # Default to 0 if not configured
     rpc_port = 0
     if vllm_config is not None:
-        extra_config = vllm_config.kv_transfer_config.extra_config
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         if "lookup_rpc_port" in extra_config:
             rpc_port = extra_config["lookup_rpc_port"]
         elif "mooncake_rpc_port" in extra_config:
