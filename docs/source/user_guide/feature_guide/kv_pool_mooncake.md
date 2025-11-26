@@ -21,10 +21,10 @@
     Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
 
 ### KV Pooling Parameter Description
-**kv_connector_extra_config**:Additional Configurable Parameters for Pooling.  
-**mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
-**load_async**:Whether to Enable Asynchronous Loading. The default value is false.  
-**register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
+**kv_connector_extra_config**: Additional Configurable Parameters for Pooling.  
+**mooncake_rpc_port**: Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
+**load_async**: Whether to Enable Asynchronous Loading. The default value is false.  
+**register_buffer**: Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
 
 ## Run Mooncake Master
 
