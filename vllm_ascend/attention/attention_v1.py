@@ -56,6 +56,9 @@ if prefill_context_parallel_enable():
 
 # isort: on
 
+# A buffer to meet the requirements of the npu_fused_infer_attention_score kernel.
+NPU_ATTENTION_KERNEL_BLOCK_BUFFER = 5
+
 
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -868,6 +871,49 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_block, block_size, -1)
         value = self.value_cache.view(  # type: ignore
             num_block, block_size, -1)
+
+        if attn_metadata.block_tables is not None:
+            valid_block_indices = attn_metadata.block_tables[
+                attn_metadata.block_tables >= 0]
+            if len(valid_block_indices) > 0:
+                max_block_index = torch.max(valid_block_indices).item()
+                valid_block_num = max_block_index + NPU_ATTENTION_KERNEL_BLOCK_BUFFER
+            else:
+                valid_block_num = num_block
+        else:
+            valid_block_num = num_block
+
+        if valid_block_num > key.size(0):
+            padding_needed = valid_block_num - key.size(0)
+
+            key = torch.nn.functional.pad(key, (0, 0, 0, 0, 0, padding_needed),
+                                          mode='constant',
+                                          value=0)
+            value = torch.nn.functional.pad(value,
+                                            (0, 0, 0, 0, 0, padding_needed),
+                                            mode='constant',
+                                            value=0)
+
+        if not hasattr(attn_metadata, 'actual_seq_lengths_q'
+                       ) or attn_metadata.actual_seq_lengths_q is None:
+            query_lens = attn_metadata.query_lens
+            actual_seq_lengths_list = []
+            for length in query_lens:
+                chunks = (length + block_size - 1) // block_size
+                for i in range(chunks):
+                    chunk_size = min(block_size, length - i * block_size)
+                    actual_seq_lengths_list.append(chunk_size)
+            attn_metadata.actual_seq_lengths_q = torch.tensor(
+                actual_seq_lengths_list,
+                device=query.device,
+                dtype=torch.int32)
+
+        if not hasattr(attn_metadata,
+                       'seq_lens_list') or attn_metadata.seq_lens_list is None:
+            attn_metadata.seq_lens_list = torch.tensor([block_size] *
+                                                       valid_block_num,
+                                                       device=query.device,
+                                                       dtype=torch.int32)
 
         output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
