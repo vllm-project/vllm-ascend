@@ -12,6 +12,7 @@ from vllm.platforms import CpuArchEnum
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
+from vllm_ascend.utils import AscendDeviceType
 
 MODEL = "Qwen3-0.6B"
 MODEL_VL = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -97,7 +98,8 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.mock_self.is_neox_style = self.is_neox_style
 
     @patch('torch.ops._C_ascend')
-    @patch('vllm_ascend.ops.rotary_embedding.is_310p', return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
@@ -106,8 +108,8 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
-                                            mock_custom_enabled, mock_is_310p,
-                                            mock__c):
+                                            mock_custom_enabled,
+                                            mock_soc_version, mock__c):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = False
 
