@@ -284,6 +284,7 @@ class VllmRunner:
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         quantization: Optional[str] = None,
+        safetensors_load_strategy="eager",
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -301,6 +302,7 @@ class VllmRunner:
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
             quantization=quantization,
+            safetensors_load_strategy=safetensors_load_strategy,
             **kwargs,
         )
 
