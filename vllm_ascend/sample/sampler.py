@@ -51,7 +51,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits.masked_fill_(elements_to_discard, -float("inf"))
 
         if p is not None:
-            cumprob = torch.cumsum(probs_sort, dim=-1)
+            cumprob = torch.cumsum(probs_sort.to(torch.float32), dim=-1).to(probs_sort.dtype)
             top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
             top_p_mask[:, -1] = False  # at least one
 
