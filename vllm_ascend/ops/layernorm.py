@@ -19,12 +19,11 @@ from typing import Optional, Tuple, Union, cast
 
 import torch
 from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 class AscendRMSNorm(RMSNorm):
-    
+
     def __init__(
         self,
         hidden_size: int,
@@ -49,9 +48,9 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)

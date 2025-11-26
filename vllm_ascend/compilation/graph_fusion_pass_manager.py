@@ -23,19 +23,18 @@ from vllm.config import VllmConfig
 
 class GraphFusionPassManager:
     """
-    A pass manager for graph rewriting passes.
+    A pass manager for graph fusion passes.
     It handles the configuration and execution of passes.
-    The counterpart in vllm is PostGradPassManager. Since torch_npu does not
-    support inductor and triton for now, we choose to adopt the graph rewriter on
-    fx graph rather than the inductor pass manager.
+    The counterpart in vllm is PostGradPassManager. Since torch_npu 
+    does not support triton for now, we define our own pass manager.
     """
 
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
 
-    def __call__(self, graph: fx.Graph, **kwargs) -> fx.Graph:
+    def __call__(self, graph: fx.Graph, runtime_shape) -> fx.Graph:
         for pass_ in self.passes:
-            if pass_.is_applicable(**kwargs):
+            if pass_.is_applicable(runtime_shape):
                 pass_(graph)
         return graph
 
@@ -49,6 +48,6 @@ class GraphFusionPassManager:
             "ascend_compilation_config", {})
         if self.ascend_compilation_config.get("enable_quantization_fusion",
                                               True):
-            from .quant_fusion_pass import AscendQuantFusionPass
+            from .passes.quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed

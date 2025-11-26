@@ -35,7 +35,7 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, AscendDeviceType,
                                prefill_context_parallel_enable,
                                update_aclgraph_sizes,
                                update_default_aclgraph_sizes)
-from vllm_ascend.compilation.compiler_interface import AscendAdaptor
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -59,15 +59,15 @@ class NPUPlatform(Platform):
 
     def is_sleep_mode_available(self) -> bool:
         return True
-    
+
     @property
     def pass_key(self) -> str:
         return "graph_fusion_manager"
-    
+
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
-    
+
     @classmethod
     def get_compile_backend(self) -> str:
         from vllm_ascend.compilation.compiler_interface import AscendAdaptor

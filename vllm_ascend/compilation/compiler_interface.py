@@ -16,36 +16,17 @@
 # limitations under the License.
 #
 import functools
+from collections.abc import Sequence
 from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch._dynamo.backends.common import aot_autograd
-from torch._inductor.utils import output_node
+from torch._inductor.decomposition import select_decomp_table
+from torch._inductor.utils import InputType, output_node
+from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
-
-
-def get_dtype_from_args(args: list[Any]) -> list[torch.dtype]:
-    """
-    Extract the dtype from the kwargs dictionary.
-    """
-    dtype_list = []
-    for value in args:
-        if isinstance(value, torch.Tensor):
-            dtype_list.append(value.dtype)
-    return dtype_list
-
-
-def get_shapes_from_args(args: list[Any]) -> list[torch.Size]:
-    """
-    Extract the shapes from the kwargs dictionary.
-    """
-    shape_list = []
-    for value in args:
-        if isinstance(value, torch.Tensor):
-            shape_list.append(value.shape)
-    return shape_list
 
 
 def graph_returns_tuple(gm: fx.GraphModule) -> bool:
@@ -65,13 +46,13 @@ def graph_returns_tuple(gm: fx.GraphModule) -> bool:
 
 
 def make_graph_return_tuple(
-    gm: fx.GraphModule, ) -> tuple[Any, fx.GraphModule]:
+    gm: GraphModule,
+    inputs: Sequence[InputType],
+    compile_gm: Callable[..., Any],
+) -> Callable[..., Any]:
     """
     Mutate gm so it returns a tuple.  This is only needed for graphs
     not created by torchdynamo that return non-tuples.
-    Returns:
-        spec: The original output structure specification
-        gm: The modified GraphModule that returns a tuple
     """
     node = output_node(gm)
     (rv, ) = node.args
@@ -81,7 +62,26 @@ def make_graph_return_tuple(
     gm.graph.erase_node(node)
     assert graph_returns_tuple(gm)
 
-    return spec, gm
+    compiled_fn = compile_gm(gm, inputs)
+
+    @functools.wraps(compiled_fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return pytree.tree_unflatten(compiled_fn(*args, **kwargs), spec)
+
+    return wrapper
+
+
+def compile_fx(model_: GraphModule, example_inputs_: list,
+               inner_compile: Callable, decompositions: dict) -> Callable:
+    recursive_compile_fx = functools.partial(compile_fx,
+                                             inner_compile=inner_compile,
+                                             decompositions=decompositions)
+
+    if not graph_returns_tuple(model_):
+        return make_graph_return_tuple(model_, example_inputs_,
+                                       recursive_compile_fx)
+    return aot_autograd(fw_compiler=inner_compile)(model_, example_inputs_)
+
 
 class AscendAdaptor(CompilerInterface):
     name = "AscendAdaptor"
@@ -97,31 +97,16 @@ class AscendAdaptor(CompilerInterface):
 
         def compile_inner(graph, example_inputs):
             current_pass_manager = compiler_config["graph_fusion_manager"]
-            arg_dtypes = get_dtype_from_args(example_inputs)
-            arg_shapes = get_shapes_from_args(example_inputs)
-            kwargs = {
-                "runtime_shape": runtime_shape,
-                "arg_shapes": arg_shapes,
-                "arg_dtypes": arg_dtypes
-            }
-            graph = current_pass_manager(graph, **kwargs)
+            graph = current_pass_manager(graph, runtime_shape)
             return graph
 
-        if not graph_returns_tuple(graph):
-            spec, graph = make_graph_return_tuple(graph)
-        else:
-            spec = None
+        decompositions = select_decomp_table()
 
-        compiled_fn = aot_autograd(fw_compiler=compile_inner)(graph,
-                                                              example_inputs)
+        compiled_fn = compile_fx(
+            model_=graph,
+            example_inputs_=example_inputs,
+            inner_compile=compile_inner,
+            decompositions=decompositions,
+        )
 
-        if spec is not None:
-
-            @functools.wraps(compiled_fn)
-            def wrapper(*args, **kwargs):
-                return pytree.tree_unflatten(compiled_fn(*args, **kwargs),
-                                             spec)
-
-            return wrapper, None
-        else:
-            return compiled_fn, None
+        return compiled_fn, None
