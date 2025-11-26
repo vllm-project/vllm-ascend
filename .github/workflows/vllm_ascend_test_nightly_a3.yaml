@@ -52,6 +52,9 @@ jobs:
           - name: multi-node-deepseek-pd
             config_file_path: DeepSeek-V3.yaml
             size: 2
+          - name: multi-node-deepseek-pd
+            config_file_path: DeepSeek-V3-layerwise.yaml
+            size: 2
           - name: multi-node-qwen3-dp
             config_file_path: Qwen3-235B-A3B.yaml
             size: 2
@@ -60,6 +63,9 @@ jobs:
             size: 4
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
+            size: 2
+          - name: multi-node-qwenw8a8-2node
+            config_file_path: Qwen3-235B-W8A8-layerwise.yaml
             size: 2
           - name: multi-node-glm-2node
             config_file_path: GLM-4_5.yaml
