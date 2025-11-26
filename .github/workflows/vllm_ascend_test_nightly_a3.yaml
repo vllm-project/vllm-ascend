@@ -136,7 +136,7 @@ jobs:
             tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.11.0
+      vllm: v0.11.2
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}

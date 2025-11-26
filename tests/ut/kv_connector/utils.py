@@ -6,10 +6,12 @@
 import os
 from typing import Any, Optional
 
+import numpy as np
 import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -18,13 +20,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import sha256
-else:
-    from vllm.utils.hashing import sha256
 
 EOS_TOKEN_ID = 50256
 
@@ -111,21 +106,14 @@ def create_scheduler(
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    if vllm_version_is("0.11.0"):
-        return Scheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            log_stats=True,
-            structured_output_manager=StructuredOutputManager(vllm_config),
-        )
-    else:
-        return Scheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            log_stats=True,
-            block_size=block_size,
-            structured_output_manager=StructuredOutputManager(vllm_config),
-        )
+
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        log_stats=True,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
 
 
 _none_hash_initialized = False
@@ -201,7 +189,7 @@ def create_model_runner_output(
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else 0
-    sampled_token_ids = [[sampled_token] for _ in req_ids]
+    sampled_token_ids = [np.array([sampled_token]) for _ in req_ids]
 
     # Make output data structure.
     extra_args = {}

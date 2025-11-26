@@ -51,10 +51,9 @@ from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         get_rm_router_logits_state,
                                         npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_ascend_soc_version, is_310p,
-                               is_hierarchical_communication_enabled,
-                               vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
+                               get_ascend_device_type,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_fused_experts_with_mc2(
@@ -76,11 +75,11 @@ def torchair_fused_experts_with_mc2(
     ep_world_size = moe_parallel_config.ep_size
 
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
-    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+    need_extra_args = (get_ascend_device_type() == AscendDeviceType._910_93
                        or is_torchair)
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    a3_need_extra_args = get_ascend_device_type() == AscendDeviceType._910_93
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
@@ -468,7 +467,7 @@ def torchair_fused_experts_moge(
         group_list=group_list,
     )[0]
 
-    if is_310p():
+    if get_ascend_device_type() == AscendDeviceType._310P:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:
@@ -1069,12 +1068,8 @@ class TorchairAscendFusedMoE(FusedMoE):
                     get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
-            if vllm_version_is("0.11.0"):
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
-            else:
-                self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
+            self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
                 self.log2phy = determine_default_log2phy_map(

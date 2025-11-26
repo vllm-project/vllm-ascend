@@ -4,10 +4,8 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.utils import vllm_version_is
 
-init_cache_hf_modules_path = "vllm.utils.init_cached_hf_modules" if vllm_version_is(
-    "0.11.0") else "vllm.utils.import_utils.init_cached_hf_modules"
+init_cache_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
 
 class TestNPUTorchairWorker(TestBase):
@@ -59,6 +57,8 @@ class TestNPUTorchairWorker(TestBase):
             worker.model_config = MagicMock()
             worker.model_config.seed = 42
             worker.vllm_config = MagicMock()
+            worker.parallel_config = MagicMock()
+            worker.parallel_config.local_world_size = 0
 
             result = worker._init_device()
 
@@ -91,6 +91,8 @@ class TestNPUTorchairWorker(TestBase):
             worker.model_config = MagicMock()
             worker.model_config.seed = 42
             worker.vllm_config = MagicMock()
+            worker.parallel_config = MagicMock()
+            worker.parallel_config.local_world_size = 0
 
             result = worker._init_device()
 

@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
     get_compressed_expert_map)
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
+    SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -41,20 +43,10 @@ from vllm_ascend.quantization.w4a8_dynamic import \
     AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
-                               is_enable_nz, npu_stream_switch,
-                               shared_expert_dp_enabled,
-                               shared_experts_calculation_stream,
-                               vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.config import CompilationLevel
-
-    from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE  # type: ignore # isort:skip
-else:
-    from vllm.config import CompilationMode
-    from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
-        SharedFusedMoE
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               npu_stream_switch, shared_expert_dp_enabled,
+                               shared_experts_calculation_stream)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -62,28 +54,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
-
-        # NOTE: Currently, this self.use_aclgraph is only used in
-        # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
-        # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
-        # Once torch.randint_like is supported or removed, this flag can be removed.
-        vllm_config = get_current_vllm_config()
-        ascend_config = get_ascend_config()
         self.dynamic_eplb = get_ascend_config().dynamic_eplb
-        if ascend_config.torchair_graph_config.enabled:
-            self.use_aclgraph = False
-        else:
-            if vllm_version_is("0.11.0"):
-                self.use_aclgraph = (
-                    vllm_config.compilation_config.level
-                    == CompilationLevel.PIECEWISE
-                    and not vllm_config.model_config.enforce_eager)
-            else:
-                self.use_aclgraph = (
-                    vllm_config.compilation_config.mode
-                    == CompilationMode.VLLM_COMPILE
-                    and not vllm_config.model_config.enforce_eager)
-
         self.transpose = True
 
     def process_weights_after_loading(self, layer):
@@ -108,7 +79,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p() and is_enable_nz():
+        if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
+        ):
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(
@@ -152,7 +124,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if enable_force_load_balance and not self.use_aclgraph:
+        if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -209,12 +181,8 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe.
-        if vllm_version_is("0.11.0"):
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
-        else:
-            self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
+        self.local_num_experts, self.expert_map, _ = determine_expert_map(
+            self.ep_size, self.ep_rank, self.global_num_experts)
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -475,6 +443,13 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     @property
     def is_internal_router(self) -> bool:
+        return False
+
+    @property
+    def use_dp_chunking(self) -> bool:
+        """This func routes to the chunked forward path using the FlashInfer Cutlass kernel
+        only when data parallelism (DP) is enabled. Thus just returning False in vllm-ascend
+        """
         return False
 
     def forward(
