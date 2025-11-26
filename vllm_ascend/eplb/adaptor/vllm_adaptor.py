@@ -44,6 +44,15 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
 
+        for i in range(self.num_dense_layers, self.model.config.num_hidden_layers):
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_list"] = \
+                self.model.model.layers[i].mlp.experts.w13_weight_list
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_list"] = \
+                self.model.model.layers[i].mlp.experts.w2_weight_list
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_scale_list"] = \
+                self.model.model.layers[i].mlp.experts.w13_weight_scale_fp32_list
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_scale_list"] = \
+                self.model.model.layers[i].mlp.experts.w2_weight_scale_list
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
         if self.model.quant_config is not None:
             self.expert_weight_names = [
@@ -97,12 +106,19 @@ class VllmEplbAdaptor(EplbAdaptor):
             layer_idx = self.num_dense_layers + moe_layer_id
             self.expert_param_per_layer[layer_idx] = list()
             for local_expert_id in range(num_local_expert):
-                self.expert_param_per_layer[layer_idx].append([
-                    self.param_dict["model.layers." + str(layer_idx) +
-                                    ".mlp.experts." +
-                                    name].data[local_expert_id]
-                    for name in self.expert_weight_names
-                ])
+                per_expert_param = list()
+                for name in self.expert_weight_names:
+                    if name in ["w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"]:
+                        per_expert_param.append(
+                            self.param_dict["model.layers." + str(layer_idx) +
+                                            ".mlp.experts." + name][local_expert_id]
+                        )
+                    else:
+                        per_expert_param.append(
+                            self.param_dict["model.layers." + str(layer_idx) +
+                                            ".mlp.experts." + name].data[local_expert_id]
+                        )
+                self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
         self.moe_load = self.model.get_all_moe_loads()

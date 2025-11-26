@@ -124,16 +124,28 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 quant_mode=1,
             )
         # gmm2: down_proj
-        hidden_states = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=[w2],
-            scale=[w2_scale],
-            per_token_scale=[swiglu_out_scale],
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=group_list,
-            output_dtype=w2_scale.dtype)[0]
+        if dynamic_eplb:
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=w2,
+                scale=w2_scale,
+                per_token_scale=[swiglu_out_scale],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=w2_scale[0].dtype)[0]
+        else:
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=[w2],
+                scale=[w2_scale],
+                per_token_scale=[swiglu_out_scale],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=w2_scale.dtype)[0]
     else:
         if w1_scale_bias is not None:
             if group_list_type == 0:
