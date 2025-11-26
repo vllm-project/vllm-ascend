@@ -57,6 +57,11 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self.mix_placement = additional_config.get("mix_placement",False)
+        torchair_graph_config = additional_config.get("torchair_graph_config",
+                                                      {})
+        self.torchair_graph_config = TorchairGraphConfig(
+            torchair_graph_config, vllm_config, additional_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
@@ -188,13 +193,13 @@ class AscendCompilationConfig:
     def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
         """
         Initialize the configuration.
-        
+
         Args:
             enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
                 When set to True, the system will optimize quantization-related operations,
                 reducing the number of quantization/dequantization nodes.
                 Default: True
-                
+
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable_quantization_fusion = enable_quantization_fusion
