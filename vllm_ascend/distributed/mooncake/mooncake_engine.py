@@ -314,7 +314,8 @@ class MooncakeEngine:
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
                 continue
-            torch.npu.synchronize()
+            current_event = torch.npu.Event()
+            current_event.record()
             break
             
         for request in connector_metadata.requests:
@@ -356,8 +357,9 @@ class MooncakeEngine:
                 req_id,
                 token_ids,
                 request.block_ids,
-                store_mask,
-                request.is_last_chunk,
+                current_event=current_event,
+                mask=store_mask,
+                is_last_chunk=request.is_last_chunk,
             )
 
     def retrieve_layer(
