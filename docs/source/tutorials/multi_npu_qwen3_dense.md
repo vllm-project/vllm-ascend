@@ -135,9 +135,9 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 
 # Performance optimization of memory management
-# if os is Ubuntu
+# if os is Ubuntu,install it using `apt install libjemalloc2`
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-#if os is openEuler
+#if os is openEuler,install it using `yum install jemalloc`
 export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD
 
 # Enable the AIVector core to directly schedule ROCE communication
