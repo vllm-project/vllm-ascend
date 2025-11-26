@@ -31,6 +31,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (AWQ_QUANTIZATION_METHOD)
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
 def remove_quantization_method():
     if AWQ_QUANTIZATION_METHOD in QUANTIZATION_METHODS:
@@ -201,6 +202,12 @@ class AWQQuantConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             return AWQLinearAscendMethod(self)
         elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(
+                prefix,
+                self.modules_to_not_convert,
+                skip_with_substr=True,
+            ):
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AWQMoEAscendMethod(self)
         return None
 
