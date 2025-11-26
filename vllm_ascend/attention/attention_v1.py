@@ -329,6 +329,82 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+    
+    def full_graph_attention(self,
+                             query: torch.Tensor,
+                             key: torch.Tensor,
+                             value: torch.Tensor,
+                             kv_cache: Tuple[torch.Tensor],
+                             attn_metadata: AscendMetadata,
+                             output: torch.Tensor,
+                             num_tokens=0):
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            block_size = 128
+            block_table = None
+            actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            if is_310p():
+                # align q k v output tensors
+                query = aligned_16(query)
+                key = aligned_16(key)
+                value = aligned_16(value)
+                output = aligned_16(output)
+                # do reformat in case of broadcasted tensors
+                mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
+                mask = torch_npu.npu_format_cast(mask.contiguous(),
+                                                ACL_FORMAT_FRACTAL_NZ)
+        elif attn_metadata.attn_state == \
+            AscendAttentionState.PrefillCacheHit:
+            batch_size = attn_metadata.query_lens.shape[0]
+            block_table = attn_metadata.block_tables[:batch_size, :]
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        # Normal V1 situation.
+        else:
+            if is_310p():
+                # Do reformat in case of broadcasted tensors.
+                attn_metadata.attn_mask = \
+                    torch_npu.npu_format_cast(attn_metadata.attn_mask.contiguous(),
+                                            ACL_FORMAT_FRACTAL_NZ)
+                attn_metadata.seq_lens = \
+                    attn_metadata.seq_lens.to(device=query.device)
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            block_table = attn_metadata.block_tables
+            actual_seq_lengths_kv = attn_metadata.seq_lens_list
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        # Prepare tensors for attention output
+        # TODO: Refactor this to step-level instead of layer-level
+
+        # Get workspace from cache or calculate it if not present.
+        output, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=attn_metadata.attn_mask,
+            block_table=block_table,
+            input_layout="TND",
+            block_size=block_size,
+            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            sparse_mode=3,
+        )
+
+        output = output.view(num_tokens, self.num_heads, self.head_size)
+
+        return output, num_tokens
+
 
     def _forward_prefill_no_cache(
         self,
@@ -662,24 +738,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
                 output = attn_out[0]
             # V0-Style scheduler situation.
-            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                output = self._forward_prefill_no_cache(
-                    query, key, value, attn_metadata, output, num_tokens)
-            elif attn_metadata.attn_state == \
-                AscendAttentionState.PrefillCacheHit:
-                output = self._forward_prefill_cache_hit(
-                    query, attn_metadata, output)
             elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
                                                    output)
             # Normal V1 situation.
             else:
-                # npu_fused_infer_attention_score does not support cases
-                # where query.shape[0] != attn_metadata.query_start_loc[-1].
-                # Thus we need unpad it here.
-                num_tokens = attn_metadata.query_start_loc[-1]
-                query = query[:num_tokens]
-                output = self._forward_v1_style(query, attn_metadata, output)
+               intermediate_output, query_num_tokens = self.full_graph_attention(
+                query, key, value, kv_cache, attn_metadata, output)
+               output[:query_num_tokens] = intermediate_output[:query_num_tokens]
 
         # to make in-place change to the output tensor
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
