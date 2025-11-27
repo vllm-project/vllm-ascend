@@ -16,10 +16,10 @@
 #
 
 from typing import Any, Callable, Optional
+
 import torch
 import torch.fx as fx
 import vllm
-
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.compilation.counter import compilation_counter
 
