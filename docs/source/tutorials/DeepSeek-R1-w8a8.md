@@ -1,0 +1,326 @@
+# DeepSeek-R1-w8a8
+
+## Introduction
+
+DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language model developed by DeepSeek Company. It excels in complex logical reasoning, mathematical problem-solving, and code generation. By dynamically activating its expert networks, it delivers exceptional performance while maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs 8-bit integer (INT8) quantization for both weights and activations, which significantly reduces the model's memory footprint and computational requirements, enabling more efficient deployment and application in resource-constrained environments.
+
+## Supported Features
+
+Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## Environment Preparation
+
+### Model Weight
+
+- `DeepSeek-R1-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
+
+It is recommended to download the model weight to the shared directory of multiple nodes.
+
+### Verify Multi-node Communication(Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+
+### Installation
+
+You can using our official docker image and install extra operator for supporting `DeepSeek-R1-w8a8`.
+
+:::{note}
+Only AArch64 architecture are supported currently due to extra operator's installation limitations.
+:::
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
+
+1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+
+2. Install the package `custom-ops` to make the kernels available.
+
+```shell
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
+chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+```
+
+::::
+::::{tab-item} A2 series
+:sync: A2
+
+1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+
+2. Install the package `custom-ops` to make the kernels available.
+
+```shell
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/CANN-custom_ops-sfa-linux.aarch64.run
+chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+```
+
+::::
+:::::
+
+In addition, if you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+
+- Install extra operator for supporting `DeepSeek-R1-w8a8`, refer to the above tab.
+
+If you want to deploy multi-node environment, you need to set up environment on each node.
+
+## Deployment
+### Service-oriented  Deployment
+
+- `DeepSeek-R1-w8a8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} DeepSeek-R1-w8a8 A3 series
+:sync: A3
+
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+
+# AIV
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXCUTE_MODEL_TIMEOUT_SECONDS=3600000
+export VLLM_TORCH_PROFILER_DIR="PATH/profile"
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+export DISABLE_L2_CACHE=1
+
+vllm serve path/DeepSeek-R1-W8A8 \
+  --host 0.0.0.0 \
+  --port 8011 \
+  --data-parallel-size 4 \
+  --tensor-parallel-size 4 \
+  --quantization ascend \
+  --seed 1024 \
+  --served-model-name deepseek_r1 \
+  --enable-expert-parallel \
+  --max-num-seqs 16 \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 2048 \
+  --trust-remote-code \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.92 \
+  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}:' \
+  --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+```
+
+::::
+::::{tab-item} DeepSeek-R1-w8a8 A2 series
+:sync: A2
+
+Run the following scripts on two nodes respectively.
+
+**Node 0**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+
+# AIV
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+
+vllm serve path/DeepSeek-R1-W8A8 \
+  --host 0.0.0.0 \
+  --port 8004 \
+  --data-parallel-size 4 \
+  --tensor-parallel-size 2 \
+  --data-parallel-address $local_ip \
+  --data-parallel-rpc-port 13389 \
+  --tensor-parallel-size 4 \
+  --quantization ascend \
+  --seed 1024 \
+  --served-model-name deepseek_r1 \
+  --enable-expert-parallel \
+  --max-num-seqs 20 \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 4096 \
+  --trust-remote-code \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.92 \
+  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}:' \
+  --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+```
+
+**Node 1**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+node0_ip="xxxx" # same as the local_IP address in node 0
+
+# AIV
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+
+vllm serve path/DeepSeek-R1-W8A8 \
+  --host 0.0.0.0 \
+  --port 8004 \
+  --headless \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
+  --data-parallel-start-rank 2 \
+  --data-parallel-address $node0_ip \
+  --data-parallel-rpc-port 13389 \
+  --tensor-parallel-size 4 \
+  --quantization ascend \
+  --seed 1024 \
+  --served-model-name deepseek_r1 \
+  --enable-expert-parallel \
+  --max-num-seqs 20 \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 4096 \
+  --trust-remote-code \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.94 \
+  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+```
+
+::::
+:::::
+
+### Prefill-Decode Disaggregation
+
+Not supported yet.
+
+## Functional Verification
+
+Once your server is started, you can query the model with input prompts:
+
+```shell
+curl http://<node0_ip>:<port>/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "deepseek_r1",
+        "prompt": "The future of AI is",
+        "max_tokens": 50,
+        "temperature": 0
+    }'
+```
+
+## Accuracy Evaluation
+
+Here are two accuracy evaluation methods.
+
+### Using AISBench
+
+1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result, here is the result of `DeepSeek-R1-w8a8` in `vllm-ascend:0.11.0rc2` for reference only.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+|----- | ----- | ----- | ----- | -----|
+| aime2024dataset | - | accuracy | gen | 80.00 |
+
+### Using Language Model Evaluation Harness
+
+As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-R1-w8a8` in online mode.
+
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+lm_eval \
+  --model local-completions \
+  --model_args model=path/DeepSeek-R1-w8a8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --tasks gsm8k \
+  --output_path ./
+```
+
+3. After execution, you can get the result.
+
+
+## Performance
+
+### Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### Using vLLM Benchmark
+
+Run performance evaluation of `DeepSeek-R1-w8a8` as an example.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+There are three `vllm bench` subcommand:
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+Take the `serve` as an example. Run the code as follows.
+
+```shell
+export VLLM_USE_MODELSCOPE=true
+vllm bench serve --model path/DeepSeek-R1-w8a8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the performance evaluation result.
