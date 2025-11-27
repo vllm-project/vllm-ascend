@@ -490,6 +490,11 @@ class AscendMLATorchairMetadataBuilder:
                     num_reqs_pad_size = (
                         graph_pad_size //
                         common_attn_metadata.decode_token_per_req - num_reqs)
+                    # For the case when some request reach the max-tokens limit in this forward processing,
+                    # so in this forward new_tokens scheduled is less than decode_token_per_req(1 + spec_token_num).
+                    # Details can see PR:https://github.com/vllm-project/vllm/pull/27922
+                    num_reqs_pad_size = max(0, num_reqs_pad_size)
+
                     padded_seq_lens = seq_lens.tolist(
                     ) + [pad_value] * num_reqs_pad_size
                 else:
