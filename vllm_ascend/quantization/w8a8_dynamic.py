@@ -238,7 +238,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             hidden_states=x,
             pertoken_scale=pertoken_scale,
             w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
+            w1_scale=layer.w13_weight_scale.to(torch.float32),
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,
