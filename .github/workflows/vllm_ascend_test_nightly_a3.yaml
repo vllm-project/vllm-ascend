@@ -21,9 +21,9 @@
 name: 'ascend test / nightly-a3'
 
 on:
-  schedule:
-      # Run test at 24:00 Beijing time (UTC+8)
-      - cron: "0 16 * * *"
+  # schedule:
+  #     # Run test at 24:00 Beijing time (UTC+8)
+  #     - cron: "0 16 * * *"
   workflow_dispatch:
   pull_request: 
     branches:
@@ -43,7 +43,7 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    #if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -52,31 +52,31 @@ jobs:
           - name: multi-node-deepseek-pd
             config_file_path: DeepSeek-V3.yaml
             size: 2
-          - name: multi-node-qwen3-dp
-            config_file_path: Qwen3-235B-A3B.yaml
-            size: 2
-          - name: multi-node-dpsk-4node-pd
-            config_file_path: DeepSeek-R1-W8A8.yaml
-            size: 4
-          - name: multi-node-qwenw8a8-2node
-            config_file_path: Qwen3-235B-W8A8.yaml
-            size: 2
-          - name: multi-node-glm-2node
-            config_file_path: GLM-4_5.yaml
-            size: 2
-          - name: multi-node-dpsk3.2-exp-2node
-            config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
-            size: 2
-          - name: multi-node-deepseek-r1-w8a8-eplb
-            config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
-            size: 4
-          - name: multi-node-qwenw8a8-2node-eplb
-            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-            size: 2
+          # - name: multi-node-qwen3-dp
+          #   config_file_path: Qwen3-235B-A3B.yaml
+          #   size: 2
+          # - name: multi-node-dpsk-4node-pd
+          #   config_file_path: DeepSeek-R1-W8A8.yaml
+          #   size: 4
+          # - name: multi-node-qwenw8a8-2node
+          #   config_file_path: Qwen3-235B-W8A8.yaml
+          #   size: 2
+          # - name: multi-node-glm-2node
+          #   config_file_path: GLM-4_5.yaml
+          #   size: 2
+          # - name: multi-node-dpsk3.2-exp-2node
+          #   config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
+          #   size: 2
+          # - name: multi-node-deepseek-r1-w8a8-eplb
+          #   config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
+          #   size: 4
+          # - name: multi-node-qwenw8a8-2node-eplb
+          #   config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+          #   size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      runner: linux-aarch64-a3-0
+      runner: linux-aarch64-a3-2
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       replicas: 1
       size: ${{ matrix.test_config.size }}

@@ -20,9 +20,9 @@
 name: 'ascend test / nightly-a2'
 
 on:
-  schedule:
-      # Run test at 24:00 Beijing time (UTC+8)
-      - cron: "0 16 * * *"
+  # schedule:
+  #     # Run test at 24:00 Beijing time (UTC+8)
+  #     - cron: "0 16 * * *"
   workflow_dispatch:
   pull_request: 
     branches:

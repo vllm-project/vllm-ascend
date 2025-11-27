@@ -126,23 +126,44 @@ kill_npu_processes() {
 
 run_tests_with_log() {
     set +e
+    set -o pipefail
     kill_npu_processes
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
     BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
-    # each worker should have log file
-    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
-    mkdir -p ${RESULT_FILE_PATH}
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
-    ret=${PIPESTATUS[0]}
+    LOG_DIR="${RESULT_FILE_PATH}/${BASENAME}"
+    PLOGS_TO_COPY="${LOG_DIR}/plogs/worker_${LWS_WORKER_INDEX}_plog_${TIMESTAMP}"
+    LOG_FILE="${LOG_DIR}/worker_${LWS_WORKER_INDEX}.log"
+
+    # Just operate file in worker 0 to prevent concurrent read/write
+    if [ "$LWS_WORKER_INDEX" == "0" ]; then
+        # Clear logs before running tests
+        rm -fr ${LOG_DIR}/*
+        rm -fr $HOME/ascend/log/*
+        mkdir -p "${LOG_DIR}"
+    fi
+
+    set -o pipefail
+
+    if ! pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee "$LOG_FILE"; then
+        ret=$?
+    else
+        ret=0
+    fi
+
+    set +o pipefail
     set -e
-    if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-        if [ $ret -eq 0 ]; then
-            print_success "All tests passed!"
-        else
-            print_failure "Some tests failed!"
-            mv LOG_FILE error_${LOG_FILE}
-        fi
+
+    if [ $ret -eq 0 ]; then
+        print_success "Worker $LWS_WORKER_INDEX tests passed!"
+    else
+        mv "${LOG_FILE}" "${LOG_DIR}/worker_${LWS_WORKER_INDEX}_failed_${TIMESTAMP}.log"
+        # Copy device logs
+        mkdir -p $PLOGS_TO_COPY && cp -r $HOME/ascend/log/* $PLOGS_TO_COPY
+        print_failure "Worker $LWS_WORKER_INDEX tests failed!"
     fi
 }
+
 
 main() {
     check_npu_info

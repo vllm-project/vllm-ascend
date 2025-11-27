@@ -100,6 +100,7 @@ async def test_multi_node() -> None:
     disaggregated_prefill = config.disaggregated_prefill
     server_port = config.server_port
     proxy_port = config.proxy_port
+<<<<<<< HEAD
     server_host = config.node_info.ip
     proxy_script = config.envs.get("DISAGGREGATED_PREFILL_PROXY_SCRIPT", \
         'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py')
@@ -116,6 +117,19 @@ async def test_multi_node() -> None:
                 nodes_info=nodes_info,
                 max_wait_seconds=2000,
         ) as remote_server:
+=======
+    server_host = config.cluster_ips[0]
+    with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
+        with RemoteOpenAIServer(model=local_model_path,
+                                vllm_serve_args=config.server_cmd,
+                                server_port=server_port,
+                                server_host=server_host,
+                                env_dict=env_dict,
+                                auto_port=False,
+                                proxy_port=proxy_port,
+                                disaggregated_prefill=disaggregated_prefill,
+                                nodes_info=nodes_info) as remote_server:
+>>>>>>> 6da65ec0 (add dump log)
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
                 # aisbench test
