@@ -5,7 +5,6 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-from mooncake.engine import TransferEngine  # type: ignore
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
@@ -68,6 +67,7 @@ def get_transfer_timeout_value():
 class GlobalTE():
 
     def __init__(self):
+        from mooncake.engine import TransferEngine  # type: ignore
         self.transfer_engine = None
         self.is_register_buffer: bool = False
         self.transfer_engine_lock = threading.Lock()
