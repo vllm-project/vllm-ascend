@@ -37,7 +37,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 
-from ..utils import weak_ref_tensors
+from vllm_ascend.attention.utils import PAGED_ATTENTION_LIST
+from vllm_ascend.utils import weak_ref_tensors
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -375,6 +376,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        num_tokens = query.shape[0]
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
                 0] == query.size(0):
             batch_size = attn_metadata.seq_lens.shape[0]
@@ -402,6 +404,70 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_lengths_kv=attn_metadata.seq_lens)
 
             output = output.view(batch_size, self.num_heads, self.head_size)
+        elif num_tokens in PAGED_ATTENTION_LIST:
+            graph_params = get_graph_params()
+            forward_context: ForwardContext = get_forward_context()
+            if forward_context.capturing:
+                # Get workspace from cache or calculate it if not present.
+                workspace = graph_params.workspaces.get(num_tokens)
+                if workspace is None:
+                    workspace = torch_npu._npu_paged_attention_get_workspace(
+                        query=query,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        num_kv_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        block_table=attn_metadata.block_tables,
+                        context_lens=attn_metadata.seq_lens,
+                        out=output)
+                    update_graph_params_workspaces(num_tokens,
+                                                   weak_ref_tensors(workspace))
+
+                # Handle graph capturing mode
+                stream = torch_npu.npu.current_stream()
+
+                event = torch.npu.ExternalEvent()
+                event.wait(stream)
+                event.reset(stream)
+                graph_params.events[num_tokens].append(event)
+                graph_params.attn_params[num_tokens].append((
+                    weak_ref_tensors(query),
+                    weak_ref_tensors(self.key_cache),
+                    weak_ref_tensors(self.value_cache),
+                    self.num_kv_heads,
+                    self.num_heads,
+                    self.scale,
+                    attn_metadata.block_tables,
+                    attn_metadata.seq_lens,
+                    weak_ref_tensors(output),
+                ))
+
+                torch.npu.graph_task_group_begin(stream)
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens,
+                    out=output,
+                    workspace=workspace)
+                handle = torch.npu.graph_task_group_end(stream)
+                graph_params.handles[num_tokens].append(handle)
+            else:
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens,
+                    out=output)
         else:
             graph_params = get_graph_params()
             forward_context: ForwardContext = get_forward_context()
@@ -492,6 +558,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 
                 attn_output = attn_output.view(-1, self.num_heads, self.head_size)
                 output[:] = attn_output[:]
+        
         return output
 
     def _forward_encode(
