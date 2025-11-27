@@ -76,7 +76,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p() and is_enable_nz():
+        if not is_310p() and is_enable_nz(layer.w13_weight.data.dtype):
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(

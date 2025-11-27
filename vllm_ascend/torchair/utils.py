@@ -146,7 +146,7 @@ def converting_weight_acl_format(model, format):
             if torch_npu.get_npu_format(module.w13_weight.data) == format:
                 return
             if format == ACL_FORMAT_FRACTAL_NZ \
-                    and not is_enable_nz():
+                    and not is_enable_nz(module.w13_weight.data.dtype):
                 return
             module.w13_weight.data = torch_npu.npu_format_cast(
                 module.w13_weight.data, format)
