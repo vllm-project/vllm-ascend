@@ -360,12 +360,6 @@ class MooncakeEngine:
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
-            if self.kv_role == "kv_producer" and self.tp_rank not in self.get_save_tp_ranks(
-                    sum(store_mask).item()):
-                self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
-                    req_id)
-                continue
-
             logger.info(
                 "Storing KV cache for %d out of %d tokens "
                 "(skip_leading_tokens=%d) for request %s",
@@ -382,16 +376,6 @@ class MooncakeEngine:
                 store_mask,
                 request.is_last_chunk,
             )
-
-    def get_save_tp_ranks(self, tokens_num: int) -> List[int]:
-        if self.save_nums > 1 or not self.no_redundancy:
-            return list(range(self.tp_size))
-
-        block_num = tokens_num // self.block_size
-        if block_num >= self.tp_size:
-            return list(range(self.tp_size))
-        else:
-            return list(range(block_num))
 
     def retrieve_layer(
         self,

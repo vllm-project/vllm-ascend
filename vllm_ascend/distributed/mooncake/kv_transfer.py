@@ -164,10 +164,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 size_list.append(size)
                 blockIds.append(block_id)
             torch.npu.current_stream().synchronize()
-            self.m_store.put_batch(key_list[self.start_rank::self.group_num],
-                                   addr_list[self.start_rank::self.group_num],
-                                   size_list[self.start_rank::self.group_num],
-                                   blockIds)
+            if self.start_rank < len(key_list):
+                self.m_store.put_batch(
+                    key_list[self.start_rank::self.group_num],
+                    addr_list[self.start_rank::self.group_num],
+                    size_list[self.start_rank::self.group_num], blockIds)
         else:
             torch.npu.current_stream().synchronize()
             for start, end, key in self.token_database.process_tokens(
