@@ -319,13 +319,11 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
     ) -> torch.Tensor:
         # patchify
         seq_len, _ = x.size()
-        rotary_pos_emb_cos: list[torch.Tensor] = []
-        rotary_pos_emb_sin: list[torch.Tensor] = []
-        window_index: list[torch.Tensor] = []
-        cu_window_seqlens: list[torch.Tensor] = [
-            torch.tensor([0], dtype=torch.int32)
-        ]
-        cu_seqlens: list[torch.Tensor] = []
+        rotary_pos_emb_cos: list = []
+        rotary_pos_emb_sin: list = []
+        window_index: list = []
+        cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
+        cu_seqlens: list = []
 
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
@@ -375,15 +373,21 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
         max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
             cu_window_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
-        cu_window_seqlens = cu_window_seqlens.to(device=self.device,
-                                                 non_blocking=True)
-        rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=self.device,
-                                                   non_blocking=True)
-        rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=self.device,
-                                                   non_blocking=True)
-        window_index = window_index.to(device=hidden_states.device,
-                                       non_blocking=True)
+        cu_seqlens = cu_seqlens.to(  # type: ignore[attr-defined]
+            device=self.device,
+            non_blocking=True)
+        cu_window_seqlens = cu_window_seqlens.to(  # type: ignore[attr-defined]
+            device=self.device,
+            non_blocking=True)
+        rotary_pos_emb_cos = rotary_pos_emb_cos.to(  # type: ignore[attr-defined]
+            device=self.device,
+            non_blocking=True)
+        rotary_pos_emb_sin = rotary_pos_emb_sin.to(  # type: ignore[attr-defined]
+            device=self.device,
+            non_blocking=True)
+        window_index = window_index.to(  # type: ignore[attr-defined]
+            device=hidden_states.device,
+            non_blocking=True)
         reverse_indices = reverse_indices.to(device=hidden_states.device,
                                              non_blocking=True)
 
