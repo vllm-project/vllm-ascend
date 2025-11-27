@@ -69,16 +69,29 @@ class NPUPlatform(Platform):
 
     @property
     def pass_key(self) -> str:
+        """
+        Inductor config key for the PassManager custom pass, for example 'post_grad_custom_post_pass'.
+        It is a parameter of inductor_config used to register custom passes.
+        Currently, we only use Inductor's 'pattern matcher' functionality, so we define our own pass_key.
+        """
         return "graph_fusion_manager"
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
+        """
+        Get the pass manager class for this platform.
+        It will be registered as a custom pass under the current_platform.pass_key.
+        """
         return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
 
     @classmethod
     def get_compile_backend(self) -> str:
-        from vllm_ascend.compilation.compiler_interface import AscendAdaptor
-        return AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
+        """
+        Get the custom compile backend. Previously, we used EagerAdaptor by default. 
+        To use graph fusion operations, we defined our own backend compiler.
+        """
+        from vllm_ascend.compilation.compiler_interface import AscendCompiler
+        return AscendCompiler.__module__ + "." + AscendCompiler.__name__
 
     @classmethod
     def pre_register_and_update(cls,
@@ -227,8 +240,8 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        from vllm_ascend.compilation.compiler_interface import AscendAdaptor
-        compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
+        from vllm_ascend.compilation.compiler_interface import AscendCompiler
+        compilation_config.oot_compiler = AscendCompiler.__module__ + "." + AscendCompiler.__name__
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE

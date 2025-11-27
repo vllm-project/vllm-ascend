@@ -113,6 +113,8 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
+            # When fx_graph_eager is specified, we only trigger graph fusion to
+            # fuse the kernels without further capture them into the aclgraph.
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:

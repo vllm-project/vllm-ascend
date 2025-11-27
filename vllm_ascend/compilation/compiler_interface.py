@@ -16,75 +16,36 @@
 # limitations under the License.
 #
 import functools
-from collections.abc import Sequence
 from typing import Any, Callable, Optional
 
-import torch
 import torch.fx as fx
-import torch.utils._pytree as pytree
 from torch._dynamo.backends.common import aot_autograd
+from torch._inductor.compile_fx import (graph_returns_tuple,
+                                        make_graph_return_tuple)
 from torch._inductor.decomposition import select_decomp_table
-from torch._inductor.utils import InputType, output_node
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 
 
-def graph_returns_tuple(gm: fx.GraphModule) -> bool:
-    """True if a FX graph returns a tuple"""
-    if not isinstance(gm, fx.GraphModule):
-        return True  # can't check this, assume true
-    (rv, ) = output_node(gm).args
-    if isinstance(rv, (list, tuple)):
-        return True
-    if (isinstance(rv, torch.fx.node.Node) and hasattr(rv.target, "_schema")
-            and len(rv.target._schema.returns) > 1 and all(
-                str(ret.type) == "Tensor"
-                for ret in rv.target._schema.returns)):
-        # for graphs whose result is one node with multiple outputs
-        return True
-    return False
-
-
-def make_graph_return_tuple(
-    gm: GraphModule,
-    inputs: Sequence[InputType],
-    compile_gm: Callable[..., Any],
-) -> Callable[..., Any]:
-    """
-    Mutate gm so it returns a tuple.  This is only needed for graphs
-    not created by torchdynamo that return non-tuples.
-    """
-    node = output_node(gm)
-    (rv, ) = node.args
-    rv, spec = pytree.tree_flatten(rv)
-    with gm.graph.inserting_before(node):
-        gm.graph.output(rv)
-    gm.graph.erase_node(node)
-    assert graph_returns_tuple(gm)
-
-    compiled_fn = compile_gm(gm, inputs)
-
-    @functools.wraps(compiled_fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return pytree.tree_unflatten(compiled_fn(*args, **kwargs), spec)
-
-    return wrapper
-
-
-def compile_fx(model_: GraphModule, example_inputs_: list,
+def compile_fx(graph: GraphModule, example_inputs: list,
                inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx,
                                              inner_compile=inner_compile,
                                              decompositions=decompositions)
 
-    if not graph_returns_tuple(model_):
-        return make_graph_return_tuple(model_, example_inputs_,
+    if not graph_returns_tuple(graph):
+        return make_graph_return_tuple(graph, example_inputs,
                                        recursive_compile_fx)
-    return aot_autograd(fw_compiler=inner_compile)(model_, example_inputs_)
+    return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
 
 
-class AscendAdaptor(CompilerInterface):
-    name = "AscendAdaptor"
+class AscendCompiler(CompilerInterface):
+    """
+    AscendCompiler is a custom compiler interface for the Ascend platform.
+    This class provides a method to compile a PyTorch FX graph module with
+    specific configurations for graph fusion and decomposition.
+    """
+    name = "AscendCompiler"
 
     def compile(
         self,
@@ -103,8 +64,8 @@ class AscendAdaptor(CompilerInterface):
         decompositions = select_decomp_table()
 
         compiled_fn = compile_fx(
-            model_=graph,
-            example_inputs_=example_inputs,
+            graph=graph,
+            example_inputs=example_inputs,
             inner_compile=compile_inner,
             decompositions=decompositions,
         )

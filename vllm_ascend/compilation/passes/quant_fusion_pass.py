@@ -15,6 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import logging
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
@@ -88,10 +90,10 @@ class AscendQuantFusionPass(VllmInductorPass):
             AddRMSNormQuantPattern(vllm_config,
                                    eps=eps).register(self.pattern_match_passes)
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
-        self.begin()
-        matched_count = self.pattern_match_passes.apply(graph)  # noqa: F841
-        self.end_and_log()
+        self.matched_count = self.pattern_match_passes.apply(graph)
+        logging.info("Replaced %s patterns", self.matched_count)
 
     def is_applicable(self, runtime_shape):
         """
