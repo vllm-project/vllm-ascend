@@ -373,21 +373,16 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
         max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
             cu_window_seqlens)
 
-        cu_seqlens = cu_seqlens.to(
-            device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
-        cu_window_seqlens = cu_window_seqlens.to(
-            device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
-        rotary_pos_emb_cos = rotary_pos_emb_cos.to(
-            device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
-        rotary_pos_emb_sin = rotary_pos_emb_sin.to(
-            device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
-        window_index = window_index.to(
-            device=hidden_states.device,
-            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
+        cu_seqlens: torch.Tensor = cu_seqlens.to(device=self.device,
+                                                 non_blocking=True)
+        cu_window_seqlens: torch.Tensor = cu_window_seqlens.to(
+            device=self.device, non_blocking=True)
+        rotary_pos_emb_cos: torch.Tensor = rotary_pos_emb_cos.to(
+            device=self.device, non_blocking=True)
+        rotary_pos_emb_sin: torch.Tensor = rotary_pos_emb_sin.to(
+            device=self.device, non_blocking=True)
+        window_index: torch.Tensor = window_index.to(
+            device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(device=hidden_states.device,
                                              non_blocking=True)
 
