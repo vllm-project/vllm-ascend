@@ -107,6 +107,19 @@ def get_net_interface(ip: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def get_all_ipv4():
+    """get all the ipv4 address for current node"""
+    ipv4s = set()
+    hostname = socket.gethostname()
+
+    for info in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
+        ipv4s.add(info[4][0])
+
+    ipv4s.add("127.0.0.1")
+
+    return list(ipv4s)
+
+
 def setup_logger():
     """Setup logging configuration."""
     logging.basicConfig(
