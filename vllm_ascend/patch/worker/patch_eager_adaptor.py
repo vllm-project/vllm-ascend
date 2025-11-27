@@ -15,65 +15,68 @@
 # limitations under the License.
 #
 
+
 from typing import Any, Optional, Callable
 
-import vllm
 import torch
 import torch.fx as fx
-from vllm.compilation.counter import compilation_counter
+import vllm
+
 from vllm.compilation.compiler_interface import CompilerInterface
+from vllm.compilation.counter import compilation_counter
 
 from vllm_ascend.ascend_config import get_ascend_config
 
+
 class EagerAdaptorPatch(CompilerInterface):
     name = "eager"
-    
+
     def compile(
-        self,
-        fx_graph: fx.GraphModule,
-        example_inputs: list[Any],
-        compiler_config: dict[str, Any],
-        runtime_shape: Optional[int] = None,
-        key: Optional[str] = None,
+            self,
+            fx_graph: fx.GraphModule,
+            example_inputs: list[Any],
+            compiler_config: dict[str, Any],
+            runtime_shape: Optional[int] = None,
+            key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
-        
+
         ascend_config = get_ascend_config()
         if not ascend_config.enable_npugraph_ex_optimize:
             compilation_counter.num_eager_compiles += 1
             return fx_graph, None
-        
-        # When currently using the FULL_DECODE_ONLY mode, 
+
+        # When currently using the FULL_DECODE_ONLY mode,
         # the piecewise compilation level slicing process
-        # in vllm is also encountered. 
-        # This process causes the output to no longer be 
-        # wrapped as a tuple when the fx graph has a single 
+        # in vllm is also encountered.
+        # This process causes the output to no longer be
+        # wrapped as a tuple when the fx graph has a single
         # output, but torch.compile has a mandatory check.
         graph = fx_graph.graph
         output_node = graph.output_node()
         return_value = output_node.args[0]
         if not (isinstance(return_value, tuple) or
-            (isinstance(return_value, fx.Node) and
-             return_value.op == "call_function" and
-             return_value.target == tuple)):
-            
+                (isinstance(return_value, fx.Node) and return_value.op
+                 == "call_function" and return_value.target is tuple)):
             with graph.inserting_before(output_node):
                 tuple_node = graph.create_node(
-                    "call_function", tuple, args=([return_value],))
+                    "call_function",
+                    tuple,
+                    args=([return_value],))
             output_node.args = (tuple_node,)
             fx_graph.recompile()
-        
+
         import torchair
-        
+
         torch.npu.set_compile_mode(jit_compile=False)
         config = torchair.CompilerConfig()
         config.debug.run_eagerly = True
         config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
         config.debug.aclgraph.disable_mempool_reuse_in_same_fx = True
-        
+
         npu_backend = torchair.get_npu_backend(compiler_config=config)
         compile_graph = npu_backend(fx_graph, example_inputs)
         compilation_counter.num_eager_compiles += 1
         return compile_graph, None
-    
+
 
 vllm.compilation.compiler_interface.EagerAdaptor = EagerAdaptorPatch
