@@ -2681,16 +2681,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_id = self.input_batch.req_ids[req_idx]
                 req_state = self.requests[req_id]
                 req_state.output_token_ids.extend(sampled_ids.tolist())
-
-                    self.input_batch.token_ids_cpu[req_idx,
-                                                start_idx:end_idx] = sampled_ids
-                    self.input_batch.is_token_ids[req_idx,
-                                                start_idx:end_idx] = True
-                    self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-                    self.input_batch.num_tokens[req_idx] = end_idx
-                    req_id = self.input_batch.req_ids[req_idx]
-                    req_state = self.requests[req_id]
-                    req_state.output_token_ids.extend(sampled_ids)
         self.input_batch.prev_sampled_token_ids = None
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
