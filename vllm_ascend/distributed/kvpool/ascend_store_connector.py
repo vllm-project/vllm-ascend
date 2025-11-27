@@ -25,7 +25,9 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole,
                  kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
+        super().__init__(vllm_config=vllm_config,
+                         role=role,
+                         kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
