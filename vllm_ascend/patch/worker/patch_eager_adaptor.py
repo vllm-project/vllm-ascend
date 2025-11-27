@@ -59,7 +59,7 @@ class EagerAdaptorPatch(CompilerInterface):
             with graph.inserting_before(output_node):
                 tuple_node = graph.create_node("call_function",
                                                tuple,
-                                               args=([return_value],))
+                                               args=([return_value], ))
             output_node.args = (tuple_node, )
             fx_graph.recompile()
 
@@ -71,8 +71,8 @@ class EagerAdaptorPatch(CompilerInterface):
         config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
         config.debug.aclgraph.disable_mempool_reuse_in_same_fx = True
 
-        npu_backend = torchair.get_npu_backend(compiler_config=config)
-        compile_graph = npu_backend(fx_graph, example_inputs)
+        npugraph_ex = torchair.get_npu_backend(compiler_config=config)
+        compile_graph = npugraph_ex(fx_graph, example_inputs)
         compilation_counter.num_eager_compiles += 1
         return compile_graph, None
 

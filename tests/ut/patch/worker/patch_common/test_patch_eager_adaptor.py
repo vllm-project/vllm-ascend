@@ -17,11 +17,13 @@ from unittest.mock import MagicMock, patch
 
 import torch.fx as fx
 import torch.nn as nn
+
 from tests.ut.base import TestBase
 from vllm_ascend.patch.worker.patch_eager_adaptor import EagerAdaptorPatch
 
 
 class MyNet(nn.Module):
+
     def __init__(self, input_size=5, output_size=2):
         super(MyNet, self).__init__()
         self.linear = nn.Linear(input_size, output_size)
