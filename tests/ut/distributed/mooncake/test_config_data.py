@@ -1,6 +1,6 @@
 import unittest
 
-from vllm_ascend.distributed.kvpool.mooncake_backend import (
+from vllm_ascend.distributed.kvpool.backend.mooncake_backend import (
     _convert_to_bytes, _parse_global_segment_size)
 
 

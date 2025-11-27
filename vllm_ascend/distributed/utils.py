@@ -1,12 +1,15 @@
 import ipaddress
 import os
 import threading
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
+
+if TYPE_CHECKING:
+    from mooncake.engine import TransferEngine  # type: ignore
 
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor,
