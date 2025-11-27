@@ -1922,7 +1922,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
                 seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
                 seq_lens=self.seq_lens_cpu[:num_reqs],
-                max_seq_len=self.seq_lens_cpu[:num_reqs].np[:num_reqs].max().item(),
                 num_reqs=num_reqs,
                 num_actual_tokens=slot_mapping_size,
                 num_input_tokens=num_input_tokens,
@@ -2749,7 +2748,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         max_model_len)
 
                 input_fits_in_drafter = self.spec_decode_common_attn_metadata and (
-                    self.spec_decode_common_attn_metadata.max_seq_len +
+                    self.seq_lens_cpu[:self.input_batch.num_reqs].
+                    np[:self.input_batch.num_reqs].max().item() +
                     self.num_spec_tokens <= effective_drafter_max_model_len)
 
                 if use_padded_batch_for_eagle:
