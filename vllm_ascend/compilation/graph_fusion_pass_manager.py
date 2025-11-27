@@ -43,11 +43,11 @@ class GraphFusionPassManager:
         self.passes.append(pass_)
 
     def configure(self, config: VllmConfig):
-        # By default, we enable the graph rewriter and quantization fusion pass.
+        # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get(
             "ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("enable_quantization_fusion",
-                                              True):
+        self.pass_config = config.compilation_config.pass_config
+        if self.pass_config.get("enable_ascend_quant_fusion_pass", True):
             from .passes.quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed
