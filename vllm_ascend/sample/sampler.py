@@ -24,7 +24,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
     def set_q_event(self, q, event):
         self.q = q
         self.event = event
-    
+
     def _apply_top_k_top_p(
         self,
         logits: torch.Tensor,
