@@ -80,6 +80,11 @@ class TestAscendQuantConfig(TestBase):
             hf_quant_cfg, None)
         self.assertIsNone(result)
 
+        # Test when quant_method is specified
+        hf_quant_cfg = {"quant_method": "awq"}
+        result = AscendQuantConfig.override_quantization_method(hf_quant_cfg, None)
+        self.assertIsNone(result)
+
     def test_get_quant_method_for_linear(self):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
