@@ -281,6 +281,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups: list[list[AttentionGroup]] = []
         self.encoder_cache: Dict[str, torch.Tensor] = {}
         self.attn_mask = None
+        self.fia_attn_mask = None
         self.attn_state = None
         self.requests: Dict[str, CachedRequestState] = {}
         self.intermediate_tensors: Optional[IntermediateTensors] = None
@@ -562,6 +563,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             device=self.device,
                             pin_memory=self.pin_memory,
                             with_numpy=numpy)
+
+    def _make_fia_attention_mask(self) -> torch.Tensor:
+        if self.attn_mask_builder is None:
+            raise ValueError("Attn mask builder is None")
+        return self.attn_mask_builder.get_splitfuse_attn_mask()
 
     def _update_states_after_model_execute(
             self, output_token_ids: torch.Tensor) -> None:
@@ -1345,6 +1351,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
                                                    position=positions_cpu,
                                                    attn_state=attn_state)
+        self.fia_attn_mask = self._make_fia_attention_mask()
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -1482,6 +1489,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
+                fia_attn_mask=self.fia_attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
                 enable_dbo_across_dp=enable_dbo,
@@ -2242,6 +2250,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
+        num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
@@ -2256,6 +2265,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             seq_lens = max_query_len
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
+
+            cu_num_tokens, arange = self._get_cumsum_and_arange(
+                num_scheduled_tokens)
+            self.query_start_loc[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
+            self.query_start_loc_cpu[1:num_reqs +
+                                     1] = torch.Tensor(cu_num_tokens)
+            
+            assigned_mask_dim = 2048
+
+            self.fia_attn_mask = torch.triu(torch.ones(assigned_mask_dim,
+                                                       assigned_mask_dim),
+                                            diagonal=1).to(torch.int8).to(
+                                                self.device)
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -2281,6 +2303,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     positions=self.positions,
                     attn_mask=self.attn_mask,
+                    fia_attn_mask=self.fia_attn_mask,
                     spec_attn_mask=self.spec_attn_mask,
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
@@ -2453,6 +2476,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_tokens=num_tokens,
                 max_query_len=max_query_len,
+                num_scheduled_tokens=num_scheduled_tokens,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
                 force_attention=force_attention,
             )
