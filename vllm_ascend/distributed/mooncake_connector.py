@@ -966,7 +966,7 @@ class MooncakeConnectorWorker:
         ) if prefill_context_parallel_enable() else 1
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size
-                    > 1), "pp and pcp cannot oepn in same time"
+                    > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_prefill_context_model_parallel_rank(
         ) if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
