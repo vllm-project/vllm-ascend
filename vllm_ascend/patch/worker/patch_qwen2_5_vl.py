@@ -373,15 +373,21 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
         max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
             cu_window_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
-        cu_window_seqlens = cu_window_seqlens.to(device=self.device,
-                                                 non_blocking=True)
-        rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=self.device,
-                                                   non_blocking=True)
-        rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=self.device,
-                                                   non_blocking=True)
-        window_index = window_index.to(device=hidden_states.device,
-                                       non_blocking=True)
+        cu_seqlens = cu_seqlens.to(
+            device=self.device,
+            non_blocking=True)  # type: ignore[attr-defined]
+        cu_window_seqlens = cu_window_seqlens.to(
+            device=self.device,
+            non_blocking=True)  # type: ignore[attr-defined]
+        rotary_pos_emb_cos = rotary_pos_emb_cos.to(
+            device=self.device,
+            non_blocking=True)  # type: ignore[attr-defined]
+        rotary_pos_emb_sin = rotary_pos_emb_sin.to(
+            device=self.device,
+            non_blocking=True)  # type: ignore[attr-defined]
+        window_index = window_index.to(
+            device=hidden_states.device,
+            non_blocking=True)  # type: ignore[attr-defined]
         reverse_indices = reverse_indices.to(device=hidden_states.device,
                                              non_blocking=True)
 
