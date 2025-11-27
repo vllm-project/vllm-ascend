@@ -20,14 +20,12 @@
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
-#include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
 #include "ops.h"
 #include "utils.h"
-#include "pytorch_npu_helper.hpp"
 #include "mla_preprocess/op_host/mla_preprocess.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 

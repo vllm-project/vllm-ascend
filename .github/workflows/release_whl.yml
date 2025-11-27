@@ -96,7 +96,6 @@ jobs:
           --exclude libge_common_base.so \
           --exclude libc10.so \
           --exclude libc_sec.so \
-          --exclude libopapi.so \
           --exclude libnnopbase.so \
           --exclude libprofapi.so \
           --exclude libgraph_base.so \

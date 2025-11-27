@@ -233,19 +233,6 @@ static aclnnStatus CheckParams(const aclTensor* x, const aclTensorList* weight, 
   return ACLNN_SUCCESS;
 }
 
-static aclnnStatus DataContiguous(const aclTensorList *&tensors, aclOpExecutor *executor) {
-  std::vector<const aclTensor *> tensorsVec;
-  const aclTensor *contiguousTensor = nullptr;
-  for (size_t i = 0; i < tensors->Size(); ++i) {
-    const aclTensor *tensor = (*tensors)[i];
-    contiguousTensor = l0op::Contiguous(tensor, executor);
-    CHECK_RET(contiguousTensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    tensorsVec.push_back(contiguousTensor);
-  }
-  tensors = executor->AllocTensorList(tensorsVec.data(), tensorsVec.size());
-  return ACLNN_SUCCESS;
-}
-
 static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(const aclTensor *x, const aclTensorList *weight,
                                                                        const aclTensor *bias, const aclTensor *offset,
                                                                        const aclTensorList *weightScale, const aclTensor *xScale, 
@@ -269,10 +256,9 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSi
   // Convert to contiguous
   x = l0op::Contiguous(x, uniqueExecutor.get());
   CHECK_RET(x != nullptr, ACLNN_ERR_INNER_NULLPTR);
-  CHECK_COND(DataContiguous(weight, uniqueExecutor.get()) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-             "Contiguous weight failed.");
-  CHECK_COND(DataContiguous(weightScale, uniqueExecutor.get()) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-            "Contiguous weightScale failed.");
+  for (size_t i = 0; i < weight->Size(); ++i) {
+    (*weight)[i]->SetOriginalShape((*weight)[i]->GetViewShape());
+  }
   xScale = l0op::Contiguous(xScale, uniqueExecutor.get());
   CHECK_RET(xScale != nullptr, ACLNN_ERR_INNER_NULLPTR);
   groupList = l0op::Contiguous(groupList, uniqueExecutor.get());
@@ -308,6 +294,11 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(cons
     auto storgeShape = (*weight)[i]->GetStorageShape();
     auto viewShape = (*weight)[i]->GetViewShape();
     aclTensor* weightNZ = const_cast<aclTensor*>((*weight)[i]);
+    CHECK_COND((storgeShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT), 
+              ACLNN_ERR_PARAM_INVALID,
+              "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The dimnum of storageShape for second input (weight) \
+              must be 4. \n But StorageShape got %s , and dimNum is %lu.",
+              op::ToString(storgeShape).GetString(), storgeShape.GetDimNum());
     // The StorageFormat of weight is unconditionally regarded as NZ
     weightNZ->SetStorageFormat(op::Format::FORMAT_FRACTAL_NZ);
     if (viewShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT){

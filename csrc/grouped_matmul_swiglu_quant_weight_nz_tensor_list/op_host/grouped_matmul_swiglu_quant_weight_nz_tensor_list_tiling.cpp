@@ -103,7 +103,7 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   const int64_t k = xTensor->GetStorageShape().GetDim(1);
   auto wTensor = context->GetDynamicInputTensor(WEIGHT_INDEX, 0);
   OPS_LOG_E_IF_NULL(context, wTensor, return GRAPH_FAILED);
-  const int64_t n = wTensor->GetStorageShape().GetDim(1);
+  const int64_t n = wTensor->GetStorageShape().GetDim(0) * wTensor->GetStorageShape().GetDim(3);
   auto groupListTensor = context->GetDynamicInputTensor(GROUPLIST_INDEX, 0);
   OPS_LOG_E_IF_NULL(context, groupListTensor, return GRAPH_FAILED);
   const int64_t groupNum = groupListTensor->GetStorageShape().GetDim(0);
