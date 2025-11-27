@@ -44,7 +44,7 @@ class FaultAware:
         rank = self.rank
         logger.info(
             f"init fault aware process group: "
-            f"rank={rank},world_size={self.world_size},backend=gloo}"
+            f"rank={rank},world_size={self.world_size},backend=gloo"
         )
         FaultAware._fault_aware_group = torch.distributed.new_group(
             ranks=None,
@@ -69,7 +69,7 @@ class FaultAware:
 
     def _handler(self):
         torch.npu.set_device(self.npu_id)
-        status = FaultStatus.ACTIVE
+        status = FaultStatus.ACTIVE.value
         status_list = (
             [torch.zeros([1],dtype=torch.int64) for _ in range(self.world_size)]
             if self.rank == 0
@@ -86,22 +86,22 @@ class FaultAware:
                     return
             try:
                 torch.distributed.gather(
-                    tensor = status,
+                    tensor=status,
                     gather_list=status_list,
-                    dst = 0,
-                    group = self._fault_aware_thread,
+                    dst=0,
+                    group = self._fault_aware_group,
                 )
                 fault_cmd = FaultCommand.INIT_CMD
                 if self.rank == 0:
-                    if all(torch.equal(t,FaultStatus.ACTIVE) for t in status_list):
+                    if all(torch.equal(t,FaultStatus.ACTIVE.value) for t in status_list):
                         fault_cmd = FaultCommand.SILENCE_CMD
                     else:
                         fault_cmd = FaultCommand.STOP_DEVICE_CMD
 
                 torch.distributed.broadcast(
-                    tensor = fault_cmd,
-                    src = 0,
-                    group = self._fault_aware_group,
+                    tensor=fault_cmd,
+                    src=0,
+                    group=self._fault_aware_group,
                 )
 
                 if torch.equal(fault_cmd,FaultCommand.SILENCE_CMD):

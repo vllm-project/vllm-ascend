@@ -125,31 +125,27 @@ class FaultTolerance:
         Failure at any recovery stage will cause re-inference to fail
         Therefore, re-inference is executed only when both restart recovery and fault recovery succeed
         """
-        reinit_status = self._restart_and_reinit(ctx)
+
         # determine fault action for single rank situation
         if not dist.is_initialized() or self.world_size == 1:
+            reinit_status = self._restart_and_reinit(ctx)
             if torch.equal(reinit_status,RecoveryStatus.SUCCESS):
                 return self._single_node_decision(local_recovery_status)
             else:
                 return FaultAction.RAISE_EXCEPTION
         #TODO:Should refactor codes below
+        all_recovery_status = self._gather_statuses(local_recovery_status)
+        reinit_status = self._restart_and_reinit(ctx)
+        all_reinit_status = self._gather_statuses(reinit_status)
         if self.rank == 0:
-            all_reinit_status = self._gather_statuses(reinit_status)
             has_failed = any(torch.equal(status, RecoveryStatus.FAILED) for status in all_reinit_status)
             if has_failed:
                 reinit_actions = self._analyze_global_status(all_reinit_status)
-                self._scatter_ft_actions(reinit_actions)
+                return self._scatter_ft_actions(reinit_actions)
             else:
-                continue_signal = torch.tensor([1])
-                self._broadcast_continue_signal(continue_signal)
-                all_recovery_status = self._gather_statuses(local_recovery_status)
                 ft_actions = self._analyze_global_status(all_recovery_status)
                 return self._scatter_ft_actions(ft_actions)
         else:
-            self._gather_statuses(reinit_status)
-            signal = self._recv_continue_signal()
-            if torch.equal(signal,torch.tensor([1])):
-                self._gather_statuses(local_recovery_status)
             return self._receive_ft_actions()
 
     def _single_node_decision(self, local_status: torch.Tensor) -> torch.Tensor:
@@ -160,14 +156,6 @@ class FaultTolerance:
             return FaultAction.RECOMPUTE
         else:
             return FaultAction.RAISE_EXCEPTION
-
-    def _broadcast_continue_signal(self,signal:torch.Tensor) -> torch.Tensor:
-        dist.broadcast(signal,src=0,group=FaultTolerance._recovery_group)
-
-    def _recv_continue_signal(self) -> torch.Tensor:
-        signal = torch.tensor([0])
-        dist.broadcast(signal,src=0,group=FaultTolerance._recovery_group)
-        return signal
 
     def _gather_statuses(self, local_status:torch.Tensor) -> List[torch.Tensor]:
         """Rank 0 gathers status from each rank"""
