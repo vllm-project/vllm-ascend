@@ -16,7 +16,6 @@
 #
 
 from typing import Any, Callable, Optional
-
 import torch
 import torch.fx as fx
 import vllm
