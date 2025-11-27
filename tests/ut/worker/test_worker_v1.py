@@ -329,6 +329,8 @@ class TestNPUWorker(TestBase):
             worker.model_config = MagicMock()
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
+            worker.parallel_config.data_parallel_size = 1
+
             worker.model_config.seed = 42
 
             # Test _init_device
