@@ -39,6 +39,7 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
+from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
@@ -961,9 +962,12 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group(
-        ).rank_in_group if self.pcp_size > 1 else 0
+        self.pcp_size = get_prefill_context_model_parallel_world_size(
+        ) if prefill_context_parallel_enable() else 1
+        # Assert that pp_size and pcp_size cannot both be greater than 1
+        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot oepn in same time"
+        self.pcp_rank = get_prefill_context_model_parallel_rank(
+        ) if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
