@@ -126,7 +126,7 @@ The specific example scenario is as follows:
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc2
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
