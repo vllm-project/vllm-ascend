@@ -167,7 +167,7 @@ class MultiNodeConfig:
             self.process = None
 
         def __enter__(self):
-            o: MultiNodeConfig = self.outer
+            o = self.outer
             if not o.disaggregated_prefill or not o.is_master:
                 logger.info(
                     "Disaggregated prefill not enabled or not master node, skipping proxy launch."
