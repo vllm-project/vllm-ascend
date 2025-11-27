@@ -560,8 +560,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value.contiguous()
 
         if self.attn_type == AttentionType.ENCODER_ONLY:
-            attn_output = self._forward_encode(query, key, value, attn_metadata,
-                                          output)
+            attn_output = self._forward_encode(query, key, value,
+                                               attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
 
