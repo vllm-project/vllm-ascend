@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Union
 
 # Third Party
-from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.utils import logger
 from vllm.utils.network_utils import get_ip
