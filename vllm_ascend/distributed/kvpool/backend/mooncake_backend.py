@@ -69,7 +69,7 @@ class MooncakeBackend(Backend):
             sizes: list[list[int]]):
         try:
             res = self.store.batch_get_into_multi_buffers(
-                keys, addrs, sizes, True)
+                keys, addrs, sizes)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to get key {keys}, res:{res}")
