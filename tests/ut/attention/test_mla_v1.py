@@ -456,6 +456,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def test_build_prefix_no_cache_metadata(self, mock_get_ascend_config,
                                             mock_dcp_world_size):
+        if not torch.npu.is_available():
+            self.skipTest("NPU not available, skipping NPU-dependent tests")
         mock_dcp_world_size.return_value = 1
 
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -506,6 +508,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def test_build_chunked_prefix_metadata(self, mock_get_ascend_config,
                                            mock_dcp_world_size):
+        if not torch.npu.is_available():
+            self.skipTest("NPU not available, skipping NPU-dependent tests")
         mock_dcp_world_size.return_value = 1
 
         common_attn_metadata = AscendCommonAttentionMetadata(

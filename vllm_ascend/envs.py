@@ -50,11 +50,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
-    # The version of the Ascend chip. If not set, the default value is
-    # ASCEND910B1(Available for A2 and A3 series). It's used for package building.
+    # The version of the Ascend chip. It's used for package building.
+    # If not set, we will query chip info through `npu-smi`.
     # Please make sure that the version is correct.
     "SOC_VERSION":
-    lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
+    lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
