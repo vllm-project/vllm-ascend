@@ -675,7 +675,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             initial_state[~has_initial_state, ...] = 0
 
             batch_size = initial_state.shape[0]
-            core_attn_out = []
+            temp_core_attn_out = []
             last_recurrent_state = []
 
             for b_idx in range(batch_size):
@@ -702,18 +702,18 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
                     use_qk_l2norm_in_kernel=True,
                 )
 
-                core_attn_out.append(cur_core_attn_out_non_spec)
+                temp_core_attn_out.append(cur_core_attn_out_non_spec)
                 last_recurrent_state.append(cur_last_recurrent_state)
 
-            tar_dtype = core_attn_out[0].dtype
-            tar_device = core_attn_out[0].device
-            tar_shape = list(core_attn_out[0].shape)
+            tar_dtype = temp_core_attn_out[0].dtype
+            tar_device = temp_core_attn_out[0].device
+            tar_shape = list(temp_core_attn_out[0].shape)
             tar_shape[1] = non_spec_query_start_loc[-1]
             core_attn_out_non_spec = torch.empty(tar_shape,
                                                  dtype=tar_dtype,
                                                  device=tar_device)
             for b_idx in range(batch_size):
-                cur_core_attn_out = core_attn_out[b_idx]
+                cur_core_attn_out = temp_core_attn_out[b_idx]
                 start, end = non_spec_query_start_loc[
                     b_idx], non_spec_query_start_loc[b_idx + 1]
                 core_attn_out_non_spec[:, start:end, ...] = cur_core_attn_out
