@@ -86,9 +86,9 @@ class GlobalTE():
             with self.transfer_engine_lock:
                 # Double-Checked Locking
                 if self.transfer_engine is None:
-                    if TransferEngine is None:
+                    if TransferEngine is None:  # type: ignore
                         raise RuntimeError("mooncake is not available")
-                    self.transfer_engine = TransferEngine()
+                    self.transfer_engine = TransferEngine()  # type: ignore
                     device_name = device_name if device_name is not None else ""
                     ret_value = self.transfer_engine.initialize(
                         hostname, "P2PHANDSHAKE", "ascend", device_name)
