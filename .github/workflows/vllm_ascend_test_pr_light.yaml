@@ -81,6 +81,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        SOC_VERSION: ascend910b1
     strategy:
       matrix:
         vllm_version: [v0.11.2]
