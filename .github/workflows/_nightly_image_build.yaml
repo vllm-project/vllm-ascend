@@ -19,7 +19,7 @@ jobs:
       image-tag: ${{ steps.build-image.outputs.image-tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Show build target
         run: |

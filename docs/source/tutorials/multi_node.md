@@ -131,9 +131,9 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --served-model-name deepseek_v3.1 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 32768 \
+--max-model-len 8192 \
 --quantization ascend \
---max-num-batched-tokens 4096 \
+--max-num-batched-tokens 8192 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
@@ -176,8 +176,8 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --quantization ascend \
 --served-model-name deepseek_v3.1 \
 --max-num-seqs 16 \
---max-model-len 32768 \
---max-num-batched-tokens 4096 \
+--max-model-len 8192 \
+--max-num-batched-tokens 8192 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \

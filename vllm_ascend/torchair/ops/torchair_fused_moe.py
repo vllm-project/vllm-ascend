@@ -43,8 +43,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
-                                              determine_default_log2phy_map)
+from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.sequence_parallel import MetadataForPadding
@@ -52,10 +51,9 @@ from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         get_rm_router_logits_state,
                                         npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_ascend_soc_version, is_310p,
-                               is_hierarchical_communication_enabled,
-                               vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
+                               get_ascend_device_type,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_fused_experts_with_mc2(
@@ -77,11 +75,11 @@ def torchair_fused_experts_with_mc2(
     ep_world_size = moe_parallel_config.ep_size
 
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
-    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+    need_extra_args = (get_ascend_device_type() == AscendDeviceType._910_93
                        or is_torchair)
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    a3_need_extra_args = get_ascend_device_type() == AscendDeviceType._910_93
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
@@ -469,7 +467,7 @@ def torchair_fused_experts_moge(
         group_list=group_list,
     )[0]
 
-    if is_310p():
+    if get_ascend_device_type() == AscendDeviceType._310P:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:
@@ -1042,7 +1040,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.expert_map_path) and os.access(self.expert_map_path,
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
-                self.expert_map_path, self.global_num_experts)
+                self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
@@ -1052,15 +1050,14 @@ class TorchairAscendFusedMoE(FusedMoE):
                         self.moe_instance_id, self.ep_rank))
                 self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
+                self.global_num_experts = num_experts + self.global_redundant_expert_num
             except Exception as e:
                 logger.warning(
                     f"Init expert map of mtp/eagle when using sample.{e}")
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
             if self.expert_map is not None and isinstance(
                     self.expert_map, torch.Tensor):
                 logger.info_once(
@@ -1071,21 +1068,12 @@ class TorchairAscendFusedMoE(FusedMoE):
                     get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
-            if vllm_version_is("0.11.0"):
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
-            else:
-                self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
+            self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
-                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
             if self.expert_map is not None and isinstance(
                     self.expert_map, torch.Tensor):
                 logger.info_once(

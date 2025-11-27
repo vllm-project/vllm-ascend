@@ -5,13 +5,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -22,14 +24,6 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.config import CompilationLevel
-    from vllm.utils import is_pin_memory_available
-else:
-    from vllm.config import CompilationMode
-    from vllm.utils.platform_utils import is_pin_memory_available
 
 PADDING_SLOT_ID = -1
 
@@ -52,16 +46,9 @@ class EagleProposer(Proposer):
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size(
         )
 
-        if vllm_version_is("0.11.0"):
-            self.use_cuda_graph = (
-                self.vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE
-                and not self.vllm_config.model_config.enforce_eager)
-        else:
-            self.use_cuda_graph = (
-                self.vllm_config.compilation_config.mode
-                == CompilationMode.VLLM_COMPILE
-                and not self.vllm_config.model_config.enforce_eager)
+        self.use_cuda_graph = (self.vllm_config.compilation_config.mode
+                               == CompilationMode.VLLM_COMPILE and
+                               not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
             reversed(
@@ -137,8 +124,7 @@ class EagleProposer(Proposer):
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None):
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
                                         moe_comm_type=moe_comm_type,
@@ -150,7 +136,7 @@ class EagleProposer(Proposer):
             )
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[list[int]],
+                           valid_sampled_token_ids: list[np.ndarray],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -163,7 +149,7 @@ class EagleProposer(Proposer):
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -175,7 +161,7 @@ class EagleProposer(Proposer):
                            scheduler_output.num_scheduled_tokens[req_id])
 
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
+            next_token_ids.append(next_token_id.item())
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
@@ -195,7 +181,7 @@ class EagleProposer(Proposer):
         else:
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
@@ -473,11 +459,7 @@ class EagleProposer(Proposer):
         else:
             num_input_tokens = num_tokens
 
-        with_prefill = attn_metadata.attn_state not in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
@@ -517,8 +499,7 @@ class EagleProposer(Proposer):
         else:
             input_batch_size = batch_size
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            input_batch_size, False)
+        moe_comm_type = self.runner._select_moe_comm_method(input_batch_size)
 
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1

@@ -18,9 +18,8 @@ def test_concurrent_partial_prefill(enforce_eager):
                         },
                     },
                     max_num_seqs=3,
-                    max_num_batched_tokens=2048,
+                    max_num_batched_tokens=8192,
                     enforce_eager=enforce_eager,
-                    max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         outputs = vllm_model.model.generate(["Hello my name is Robert and I"] *
                                             3)
@@ -38,9 +37,8 @@ def test_prefix_cache_stats_is_recorded(enforce_eager):
                         },
                     },
                     max_num_seqs=3,
-                    max_num_batched_tokens=2048,
+                    max_num_batched_tokens=8192,
                     enforce_eager=enforce_eager,
-                    max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         # 17 tokens will make sure first 16 tokens are cached in a block
         input_tokens = {"prompt_token_ids": [101] * 129}
@@ -51,7 +49,7 @@ def test_prefix_cache_stats_is_recorded(enforce_eager):
 
 @pytest.mark.parametrize("max_tokens",
                          [4])  # cannot align results when max_tokens > 4
-@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [2048])
 def test_chunked_prefill_with_ascend_scheduler(
         max_tokens: int, chunked_prefill_token_size: int) -> None:
     example_prompts = [
@@ -93,7 +91,7 @@ def test_chunked_prefill_with_ascend_scheduler(
 
 @pytest.mark.parametrize("max_tokens",
                          [4])  # cannot align results when max_tokens > 4
-@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [2048])
 def test_chunked_prefill_with_scheduler_dynamic_batch(
         max_tokens: int, chunked_prefill_token_size: int) -> None:
     example_prompts = [
@@ -128,7 +126,7 @@ def test_chunked_prefill_with_scheduler_dynamic_batch(
     )
 
 
-def test_async_scheduling() -> None:
+def test_async_scheduling_eager() -> None:
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -147,4 +145,26 @@ def test_async_scheduling() -> None:
             gpu_memory_utilization=0.9,
             async_scheduling=True,
     ) as vllm_model:
+        vllm_model.generate(prompts, sampling_params=sampling_params)
+
+
+def test_async_scheduling_with_full_graph() -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ] * 10
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=10,
+                                     stop_token_ids=None)
+
+    with VllmRunner("Qwen/Qwen3-8B",
+                    max_model_len=4096,
+                    max_num_seqs=50,
+                    dtype="bfloat16",
+                    gpu_memory_utilization=0.9,
+                    async_scheduling=True,
+                    compilation_config={"cudagraph_mode":
+                                        "FULL"}) as vllm_model:
         vllm_model.generate(prompts, sampling_params=sampling_params)

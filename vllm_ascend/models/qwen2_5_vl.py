@@ -43,11 +43,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, is_enable_nz,
-                               vllm_version_is)
-
-if not vllm_version_is("0.11.0"):
-    from vllm.model_executor.models.vision import conv3d_to_linear_weight
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, is_enable_nz
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
@@ -147,8 +143,14 @@ class AscendQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
-                         quant_config, prefix)
+        super().__init__(dim=dim,
+                         num_heads=num_heads,
+                         mlp_hidden_dim=mlp_hidden_dim,
+                         act_fn=act_fn,
+                         norm_layer=norm_layer,
+                         quant_config=quant_config,
+                         prefix=prefix)
+
         self.attn = AscendQwen2_5_VisionAttention(embed_dim=dim,
                                                   num_heads=num_heads,
                                                   projection_size=dim,
@@ -161,14 +163,6 @@ class AscendQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
             self.norm1(x), cu_seqlens=cu_seqlens, cos=cos, sin=sin)
 
         x = x + self.mlp(self.norm2(x))
-        return x
-
-
-class AscendQwen2_5_VisionPatchEmbed(Qwen2_5_VisionPatchEmbed):
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.matmul(
-            self.proj.weight.data.view(self.hidden_size, -1).transpose(0, 1))
         return x
 
 
@@ -198,7 +192,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = AscendQwen2_5_VisionRotaryEmbedding(head_dim //
                                                                   2)
-        self.patch_embed = AscendQwen2_5_VisionPatchEmbed(
+        self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=vision_config.patch_size,
             temporal_patch_size=vision_config.temporal_patch_size,
             in_channels=vision_config.in_channels,
@@ -360,9 +354,6 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if not vllm_version_is("0.11.0"):
-                if name.endswith("patch_embed.proj.weight"):
-                    loaded_weight = conv3d_to_linear_weight(loaded_weight)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -537,11 +528,8 @@ class AscendQwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            if vllm_version_is("0.11.0"):
+            with set_ascend_forward_context(None, self.vllm_config):
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-            else:
-                with set_ascend_forward_context(None, self.vllm_config):
-                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -558,13 +546,9 @@ class AscendQwen2_5_VLForConditionalGeneration(
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
-            if vllm_version_is("0.11.0"):
+            with set_ascend_forward_context(None, self.vllm_config):
                 video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=grid_thw)
-            else:
-                with set_ascend_forward_context(None, self.vllm_config):
-                    video_embeds = self.visual(pixel_values_videos,
-                                               grid_thw=grid_thw)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
