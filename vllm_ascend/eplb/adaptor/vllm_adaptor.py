@@ -97,7 +97,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                     self.num_dense_layers) + ".mlp.experts." + name
                 if name in [
                         "w13_weight_list", "w2_weight_list",
-                        "w13_weight_scale_fp32_list", "w2_weight_scale_list"
+                        "w13_weight_scale_list", "w2_weight_scale_list"
                 ]:
                     expert_tensor = self.param_dict[complete_name][0]
                     expert_tensor = expert_tensor.clone()
@@ -117,18 +117,17 @@ class VllmEplbAdaptor(EplbAdaptor):
                 for name in self.expert_weight_names:
                     if name in [
                             "w13_weight_list", "w2_weight_list",
-                            "w13_weight_scale_fp32_list",
-                            "w2_weight_scale_list"
+                            "w13_weight_scale_list", "w2_weight_scale_list"
                     ]:
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
-                                            ".mlp.experts." + name][local_expert_id]
-                        )
+                                            ".mlp.experts." +
+                                            name][local_expert_id])
                     else:
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
-                                            ".mlp.experts." + name].data[local_expert_id]
-                        )
+                                            ".mlp.experts." +
+                                            name].data[local_expert_id])
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
