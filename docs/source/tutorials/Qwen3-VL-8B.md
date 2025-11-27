@@ -28,11 +28,10 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ### Model Weight
 
 - `Qwen2.5-VL-7B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)
-- `Qwen3-VL-2B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
-- `Qwen3-VL-4B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
-- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
-- `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
-
+- `Qwen3-VL-2B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
+- `Qwen3-VL-4B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
+- `Qwen3-VL-8B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-32B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
 ### Installation
 
@@ -215,8 +214,8 @@ INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 ### Using Language Model Evaluation Harness
 
 The accuracy of some models is already within our CI monitoring scope, including:
-- Qwen2.5-VL-7B-Instruct
-- Qwen3-VL-8B-Instruct
+- `Qwen2.5-VL-7B-Instruct`
+- `Qwen3-VL-8B-Instruct`
 
 You can refer to the [monitoring configuration](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml).
 
