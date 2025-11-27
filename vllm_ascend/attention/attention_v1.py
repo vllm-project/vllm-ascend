@@ -547,9 +547,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             attn_output = layer.quant_method.apply(layer, query, key, value,
-                                                  kv_cache, attn_metadata,
-                                                  self.attn_type, self.scale,
-                                                  output)
+                                                   kv_cache, attn_metadata,
+                                                   self.attn_type, self.scale,
+                                                   output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
 
