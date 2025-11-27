@@ -15,7 +15,6 @@ from tests.e2e.nightly.multi_node.config.utils import (get_all_ipv4,
 
 setup_logger()
 logger = logging.getLogger(__name__)
-DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
 DISAGGEGATED_PREFILL_PORT = 5333
 CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/config/models/"
 
@@ -345,3 +344,5 @@ if __name__ == '__main__':
     config = MultiNodeConfig.from_yaml()
     for node in config.nodes_info:
         print(node)
+    print(config.nic_name)
+    print(config.node_info)
