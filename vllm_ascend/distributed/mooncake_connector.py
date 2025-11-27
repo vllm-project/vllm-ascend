@@ -37,7 +37,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import prefill_context_parallel_enable, vllm_version_is
+from vllm_ascend.utils import prefill_context_parallel_enable
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -46,10 +46,7 @@ if prefill_context_parallel_enable():
                                   )
 # isort: on
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
-else:
-    from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata

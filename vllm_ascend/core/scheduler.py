@@ -22,14 +22,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import cdiv
-else:
-    from vllm.utils.math_utils import cdiv
-
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -38,8 +31,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
-
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendScheduler(Scheduler):
@@ -71,14 +62,9 @@ class AscendScheduler(Scheduler):
         log_stats: bool = False,
     ) -> None:
         # Call the parent class's __init__ method
-        if vllm_version_is("0.11.0"):
-            super().__init__(vllm_config, kv_cache_config,
-                             structured_output_manager, mm_registry,
-                             include_finished_set, log_stats)
-        else:
-            super().__init__(vllm_config, kv_cache_config,
-                             structured_output_manager, block_size,
-                             mm_registry, include_finished_set, log_stats)
+        super().__init__(vllm_config, kv_cache_config,
+                         structured_output_manager, block_size, mm_registry,
+                         include_finished_set, log_stats)
 
         # Initialize common attributes
         self._initialize_common()
@@ -233,7 +219,8 @@ class AscendScheduler(Scheduler):
                 # Schedule encoder inputs.
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
-                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                     new_encoder_budget,
+                     _) = self._try_schedule_encoder_inputs(
                          request, num_computed_tokens, num_new_tokens,
                          encoder_budget)
                     if num_new_tokens == 0 or len(
@@ -462,14 +449,9 @@ class AscendScheduler(Scheduler):
             self.kv_cache_config.kv_cache_groups)
         if self.running:
             any_request = self.running[0]
-            if vllm_version_is("0.11.0"):
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(
-                        any_request, len(self.running)))
-            else:
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(
-                        any_request.request_id))
+            num_common_prefix_blocks = (
+                self.kv_cache_manager.get_num_common_prefix_blocks(
+                    any_request.request_id))
 
         # Construct the scheduler output.
         new_reqs_data = [
@@ -483,7 +465,6 @@ class AscendScheduler(Scheduler):
             num_scheduled_tokens, scheduled_spec_decode_tokens,
             req_to_new_blocks)
         scheduled_cached_reqs = cached_reqs_data
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=scheduled_cached_reqs,
@@ -499,10 +480,7 @@ class AscendScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,  # type: ignore
             free_encoder_mm_hashes=self.encoder_cache_manager.
             get_freed_mm_hashes(),
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
-
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
@@ -558,10 +536,10 @@ class AscendScheduler(Scheduler):
     def _get_prompt_limit(self, request: Request) -> int:
         if (self.scheduler_config.chunked_prefill_enabled
                 and not self.scheduler_config.is_multi_step):
-            prompt_limit = self.scheduler_config.max_model_len
+            prompt_limit = self.vllm_config.model_config.max_model_len
         else:
             prompt_limit = min(
-                self.scheduler_config.max_model_len,
+                self.vllm_config.model_config.max_model_len,
                 self.scheduler_config.max_num_batched_tokens,
             )
 

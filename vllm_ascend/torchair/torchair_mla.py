@@ -12,13 +12,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import cdiv, round_down
-else:
-    from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.math_utils import cdiv, round_down
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -496,6 +490,11 @@ class AscendMLATorchairMetadataBuilder:
                     num_reqs_pad_size = (
                         graph_pad_size //
                         common_attn_metadata.decode_token_per_req - num_reqs)
+                    # For the case when some request reach the max-tokens limit in this forward processing,
+                    # so in this forward new_tokens scheduled is less than decode_token_per_req(1 + spec_token_num).
+                    # Details can see PR:https://github.com/vllm-project/vllm/pull/27922
+                    num_reqs_pad_size = max(0, num_reqs_pad_size)
+
                     padded_seq_lens = seq_lens.tolist(
                     ) + [pad_value] * num_reqs_pad_size
                 else:

@@ -62,7 +62,7 @@ jobs:
       }}
     if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -132,4 +132,5 @@ jobs:
         file: Dockerfile.310p.openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
+          SOC_VERSION=ascend310p1
         provenance: false
