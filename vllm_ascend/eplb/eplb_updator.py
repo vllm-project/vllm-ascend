@@ -34,7 +34,7 @@ class EplbUpdator:
         self.eplb_loader = loader
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
-        self.moe_imbalance_dict = {}
+        self.moe_imbalance_dict: dict[int, float] = {}
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
@@ -180,7 +180,7 @@ class EplbUpdator:
             self.summarize_moe_imbalance()
 
         return moe_load
-    
+
     def compute_moe_imbalance(self, moe_load: torch.Tensor):
 
         self.moe_imbalance_dict.clear()
@@ -198,11 +198,10 @@ class EplbUpdator:
 
     def summarize_moe_imbalance(self):
 
-        if len(self.moe_imbalance_dict) == 0:
+        values = list(self.moe_imbalance_dict.values())
+        if not values:
             logger.info("[MOE_load_stats] No data available.")
             return
-
-        values = list(self.moe_imbalance_dict.values())
 
         avg_imbalance = sum(values) / len(values)
         max_imbalance = max(values)
@@ -211,7 +210,7 @@ class EplbUpdator:
         logger.info(
             f"[ModelRunner][MOE_load_stats] Peak-to-Average-Ratio: "
             f"Mean={avg_imbalance:.4f}, Max={max_imbalance:.4f}, Min={min_imbalance:.4f}"
-        )   
+        )
 
     def warm_up_eplb(self):
 
