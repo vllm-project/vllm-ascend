@@ -34,6 +34,7 @@ from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
+from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
@@ -47,11 +48,6 @@ if prefill_context_parallel_enable():
                                   get_prefill_context_model_parallel_world_size
                                   )
 # isort: on
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
-else:
-    from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -940,6 +936,8 @@ class MooncakeConnectorWorker:
         self.side_channel_host = get_ip()
         self.pcp_size = get_prefill_context_model_parallel_world_size(
         ) if prefill_context_parallel_enable() else 1
+        # Assert that pp_size and pcp_size cannot both be greater than 1
+        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot oepn in same time"
         self.pcp_rank = get_prefill_context_model_parallel_rank(
         ) if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
