@@ -177,7 +177,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL":
-    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL"), 1),
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL", 1)),
 }
 
 # end-env-vars-definition
