@@ -40,7 +40,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import prefill_context_parallel_enable, vllm_version_is
+from vllm_ascend.utils import prefill_context_parallel_enable
 
 # isort: off
 if prefill_context_parallel_enable():
