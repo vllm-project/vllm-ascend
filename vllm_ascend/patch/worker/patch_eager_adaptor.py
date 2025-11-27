@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-
 from typing import Any, Optional, Callable
 
 import torch
@@ -32,12 +31,12 @@ class EagerAdaptorPatch(CompilerInterface):
     name = "eager"
 
     def compile(
-            self,
-            fx_graph: fx.GraphModule,
-            example_inputs: list[Any],
-            compiler_config: dict[str, Any],
-            runtime_shape: Optional[int] = None,
-            key: Optional[str] = None,
+        self,
+        fx_graph: fx.GraphModule,
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
+        runtime_shape: Optional[int] = None,
+        key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
 
         ascend_config = get_ascend_config()
@@ -58,10 +57,9 @@ class EagerAdaptorPatch(CompilerInterface):
                 (isinstance(return_value, fx.Node) and return_value.op
                  == "call_function" and return_value.target is tuple)):
             with graph.inserting_before(output_node):
-                tuple_node = graph.create_node(
-                    "call_function",
-                    tuple,
-                    args=([return_value],))
+                tuple_node = graph.create_node("call_function",
+                                                tuple,
+                                                args=([return_value],))
             output_node.args = (tuple_node,)
             fx_graph.recompile()
 
