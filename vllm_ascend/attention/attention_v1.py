@@ -505,9 +505,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape = [key_cache, value_cache]
                       key_cache = [num_blocks, block_size,
                                    num_kv_heads, head_size]
@@ -543,14 +543,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return output.view(num_tokens, self.hidden_size)
 
         if attn_metadata is None:
-            return output.view(num_tokens, self.hidden_size).fill_(0)
+            return output.fill_(0)
 
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = layer.quant_method.apply(layer, query, key, value,
                                               kv_cache, attn_metadata,
                                               self.attn_type, self.scale,
                                               output)
-            return output.view(num_tokens, self.hidden_size)
+            return output
 
         # View q k v to BSH.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -560,11 +560,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value.contiguous()
 
         if self.attn_type == AttentionType.ENCODER_ONLY:
-            ori_output = output
             output = self._forward_encode(query, key, value, attn_metadata,
                                           output)
-            ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
-            return ori_output.view(num_tokens, self.hidden_size)
+            return output
 
         if len(kv_cache) > 1:
             if self.key_cache is None:
@@ -583,8 +581,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             output = self._forward_prefill(query, key, value, attn_metadata,
                                            output)
-
-        return output.view(num_tokens, self.hidden_size)
+        return output
 
 
 def unified_ascend_attention_with_output(
