@@ -2,7 +2,7 @@ import json
 import os.path
 import torch
 import yaml
-
+import torch_npu
 
 from abc import ABC, abstractmethod
 from typing import List,Tuple,Dict,Any
@@ -13,31 +13,20 @@ from torch_npu.npu.utils import _get_uce_addr
 from collections.abc import Generator
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from safetensors.torch import safe_open
-"""
-all_err = [
-    "UCE ERROR",
-    "HBM MULTI BIT ECC ERROR",
-    "FORCE STOP",
-    "SUSPECT MEM ERROR",
-    "HCCS LINK ERROR",
-    "HCCL OP RETRY FAILED",
-    "SUSPECT REMOTE ERROR"
-]
-"""
 
 uce_error = [
-    "UCE ERROR",
-    "HBM MULTI BIT ECC ERROR"
+    "uce error",
+    "hbm multi bit ecc error"
 ]
-force_stop_error = ["FORCE STOP"]
+force_stop_error = ["force stop"]
 network_error = [
-    "SUSPECT REMOTE ERROR",
-    "HCCL OP RETRY FAILED"
+    "suspect remote error",
+    "hccl op retry failed"
 ]
 
 
 class RecoveryHandler(ABC):
-    """责任链处理器基类"""
+
     def __init__(self):
         self.next_handler = None
 
@@ -63,14 +52,12 @@ class RecoveryHandler(ABC):
             return self.next_handler.handle(ctx)
         else:
             logger.warning("No handler can process the exception")
-            return RecoveryStatus.FAILED_ABORT
+            return RecoveryStatus.FAILED
 
 
 class ForceStopHandler(RecoveryHandler):
-    """处理Force Stop异常的处理器"""
 
     def can_handle(self, ctx:RecoveryContext) -> bool:
-        """判断是否为Force Stop异常，如果是则入队"""
         error_str = str(ctx.exception).lower()
         for error in force_stop_error:
             if error in error_str:
@@ -78,8 +65,8 @@ class ForceStopHandler(RecoveryHandler):
         return False
 
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
-        """处理Force Stop异常，仅返回状态"""
-        return RecoveryStatus.SUCCESS_RECOMPUTE
+        """Force stop needs no extra recovery"""
+        return RecoveryStatus.SUCCESS
 
 class NetworkHandler(RecoveryHandler):
 
@@ -93,7 +80,7 @@ class NetworkHandler(RecoveryHandler):
 
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """恢复Network Error,无特殊操作"""
-        return RecoveryStatus.SUCCESS_RECOMPUTE
+        return RecoveryStatus.SUCCESS
 
 class UCEHandler(RecoveryHandler):
     """统一处理UCE异常的处理器"""
@@ -113,21 +100,20 @@ class UCEHandler(RecoveryHandler):
         recovery_statuses = []
         #2.根据类型执行恢复策略
         for uce_type,layer_names in uce_result:
-            if uce_type == UCEType.KVCACHE_UCE.name:
+            if uce_type == UCEType.KVCACHE_UCE.value:
                 recovery_statuses.append(self._recover_kv_cache_uce(ctx,layer_names))
-            elif uce_type == UCEType.WEIGHTS_UCE.name:
+            elif uce_type == UCEType.WEIGHTS_UCE.value:
                 recovery_statuses.append(self._recover_weight_uce(ctx,layer_names))
-            elif uce_type == UCEType.ACTIVATION_UCE.name:
+            elif uce_type == UCEType.ACTIVATION_UCE.value:
                 recovery_statuses.append(self._recover_activation_uce(ctx))
             else:
                 logger.error(f"UCEHandler: Unknown UCE type: {uce_type}")
-                recovery_statuses.append(RecoveryStatus.FAILED_ABORT)
-        if RecoveryStatus.FAILED_ABORT in recovery_statuses:
-            return RecoveryStatus.FAILED_ABORT
-        return RecoveryStatus.SUCCESS_RECOMPUTE
+                recovery_statuses.append(RecoveryStatus.FAILED)
+        if RecoveryStatus.FAILED in recovery_statuses:
+            return RecoveryStatus.FAILED
+        return RecoveryStatus.SUCCESS
 
     def classify_uce_type(self,ctx:RecoveryContext) -> List[Tuple[UCEType,List[str]]]:
-        #1.获取出现uce的地址信息
         try:
             memory_block_info = ctx.memory_block_info
             if not memory_block_info.initialized:
@@ -146,11 +132,9 @@ class UCEHandler(RecoveryHandler):
             raise RuntimeError("Failed to classify UCE type")
 
     def _recover_weight_uce(self, ctx:RecoveryContext,layer_names:List[str]) -> RecoveryStatus:
-        """恢复权重UCE错误"""
-        # 1. 出错层名称检查
         if not layer_names:
             logger.error(f"UCEHandler:layer_names is empty")
-            return RecoveryStatus.FAILED_ABORT
+            return RecoveryStatus.FAILED
 
         logger.info(f"UCEHandler: Recovering weight UCE for layer: {layer_names}")
         # 2. 增量重加载权重
@@ -161,10 +145,10 @@ class UCEHandler(RecoveryHandler):
             weight_iterator = self.get_weight_iterator(ctx,original_weights_file_name)
             loaded_weights = ctx.model.load_model(weight_iterator)
             #TODO:这里可能要判断一下是否把需要加载的权重都加载成功了
-            return RecoveryStatus.SUCCESS_RECOMPUTE
+            return RecoveryStatus.SUCCESS
         except Exception as e:
             logger.error(f"UCEHandler: Weight reload failed: {e}")
-            return RecoveryStatus.FAILED_ABORT
+            return RecoveryStatus.FAILED
 
     def _recover_kv_cache_uce(self, ctx:RecoveryContext,layer_names:List[str]) -> RecoveryStatus:
         """恢复KV Cache UCE错误"""
@@ -172,23 +156,23 @@ class UCEHandler(RecoveryHandler):
 
         if level == FaultToleranceLevel.BASIC:
             logger.warning("UCEHandler: KV Cache UCE in BASIC level, aborting recovery")
-            return RecoveryStatus.FAILED_ABORT
+            return RecoveryStatus.FAILED
 
         if level == FaultToleranceLevel.FULL:
             try:
                 pass
             except Exception as e:
                 logger.error(f"UCEHandler: KV Cache recovery failed: {e}")
-                return RecoveryStatus.FAILED_ABORT
+                return RecoveryStatus.FAILED
 
         logger.warning(f"UCEHandler: Unsupported fault tolerance level: {level}")
-        return RecoveryStatus.FAILED_ABORT
+        return RecoveryStatus.FAILED
 
     def _recover_activation_uce(self, ctx:RecoveryContext) -> RecoveryStatus:
         """恢复激活值UCE错误"""
         logger.info("UCEHandler: Activation UCE detected, no special recovery needed")
         # 激活值UCE无需特殊恢复，直接返回成功
-        return RecoveryStatus.SUCCESS_RECOMPUTE
+        return RecoveryStatus.SUCCESS
 
 
     def _load_mapping_config(self,config_path:str)->Dict[str,List[Tuple[str,Any]]]:

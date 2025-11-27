@@ -1,6 +1,7 @@
 from queue import Queue
 from vllm_ascend.worker.common import FaultToleranceLevel
 from vllm_ascend.worker.memory_block_info import MemoryBlockInfo
+
 class RecoveryContext:
     def __init__(self,model,level:FaultToleranceLevel,exception : 'Exception',rank: int,model_or_path:'str',
                  memory_block_info :'MemoryBlockInfo',fault_queue:'Queue'):
