@@ -4493,7 +4493,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return [row for row in pinned.numpy()]
 
     def _do_async_exponential(self, default_stream, logits_indices):
-        # Calculating exponential randoms in a different stream 
+        # Calculating exponential randoms in a different stream
         # and overlapping with model executing.
         with torch.npu.stream(self._async_exponential_stream):
             self._async_exponential_stream.wait_stream(default_stream)
