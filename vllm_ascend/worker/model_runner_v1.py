@@ -2759,8 +2759,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         max_model_len)
 
                 input_fits_in_drafter = self.spec_decode_common_attn_metadata and (
-                    self.seq_lens_cpu[:self.input_batch.num_reqs].
-                    np[:self.input_batch.num_reqs].max().item() +
+                    self.seq_lens_np[:self.input_batch.num_reqs].max().item() +
                     self.num_spec_tokens <= effective_drafter_max_model_len)
 
                 if use_padded_batch_for_eagle:
