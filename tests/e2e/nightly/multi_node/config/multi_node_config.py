@@ -251,6 +251,7 @@ class MultiNodeConfig:
             assert len(cluster_ips) == num_nodes, \
                 "Must provide cluster_ips for all nodes if it is explicitly specified."
         else:
+            logger.info("Resolving cluster IPs via DNS...")
             cluster_ips = get_cluster_ips(num_nodes)
         nodes_info = []
 
