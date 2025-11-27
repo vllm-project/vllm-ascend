@@ -1,14 +1,21 @@
-# Single NPU (Qwen3-VL-8B)
+# Qwen3-VL-8B
 
 ## Introduction
 
-Qwen3-VL 8B is a Multi-modal Large Language Model (MLLM). It is based on the Qwen3 language model architecture and integrates a vision encoder, enabling it to understand and process image inputs. This model is designed to deliver high-performance multi-modal comprehension and generation capabilities on consumer-grade hardware.
+The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-NPU deployment, accuracy and performance evaluation.
 
-The `Qwen3-VL 8B` model is first supported in `vllm-ascend:v0.11.0rc0`.
+The steps and configurations in this document apply to the following models supported in vllm-ascend:`v0.11.0rc0`:
+- Single NPU Support:
+  - `Qwen2.5-VL-7B-Instruct`
+  - `Qwen3-VL-2B-Instruct`
+  - `Qwen3-VL-4B-Instruct`
+  - `Qwen3-VL-8B-Instruct`
+- Multi-NPU Support (Requires 4 NPUs):
+  - `Qwen3-VL-32B-Instruct`
 
-**Note on Model Compatibility**: All steps and configurations provided in this guide, including **Offline Inference** and **Online Serving**, are also **applicable** to the **Qwen2.5-VL 7B** model. To use this model, simply replace the model path `Qwen/Qwen3-VL-8B-Instruct` in the configuration or code with `Qwen/Qwen2.5-VL-7B-Instruct`.
+This guide uses `Qwen3-VL-8B-Instruct` as an example to demonstrate the deployment and inference process.
 
 ## Supported Features
 
@@ -20,7 +27,12 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen3-VL-8B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen2.5-VL-7B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)
+- `Qwen3-VL-2B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
+- `Qwen3-VL-4B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
+- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+
 
 ### Installation
 
@@ -201,6 +213,12 @@ INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 ## Accuracy Evaluation
 
 ### Using Language Model Evaluation Harness
+
+The accuracy of some models is already within our CI monitoring scope, including:
+- Qwen2.5-VL-7B-Instruct
+- Qwen3-VL-8B-Instruct
+
+You can refer to the [monitoring configuration](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml).
 
 As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
 
