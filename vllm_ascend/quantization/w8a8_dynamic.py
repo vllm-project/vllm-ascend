@@ -298,8 +298,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 for weight in layer.w13_weight.data.unbind(dim=0)
             ]
             layer.w2_weight_list = [
-                weight.clone()
-                for weight in layer.w2_weight.data.unbind(dim=0)
+                weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)
             ]
             layer.w13_weight_scale_fp32_list = [
                 weight.clone()
