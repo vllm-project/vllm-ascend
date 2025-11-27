@@ -7,9 +7,9 @@ from typing import Optional
 import regex as re
 import yaml
 
-from tests.e2e.nightly.multi_node.config.utils import (get_avaliable_port,
+from tests.e2e.nightly.multi_node.config.utils import (get_all_ipv4,
+                                                       get_avaliable_port,
                                                        get_cluster_ips,
-                                                       get_cur_ip,
                                                        get_net_interface,
                                                        setup_logger)
 
@@ -32,8 +32,8 @@ class NodeInfo:
         return (f"NodeInfo:\n"
                 f"  index={self.index}\n"
                 f"  ip={self.ip}\n"
-                f"  server_port={self.server_port}"
-                f"  headless={self.headless}\n")
+                f"  server_port={self.server_port}\n"
+                f"  headless={self.headless}")
 
 
 class MultiNodeConfig:
@@ -63,16 +63,47 @@ class MultiNodeConfig:
         self.perf_cmd = perf_cmd
         self.acc_cmd = acc_cmd
 
-        self.cur_index = int(os.getenv("LWS_WORKER_INDEX", 0))
-        self.cur_ip = get_cur_ip()
-        self.nic_name = get_net_interface(self.cur_ip)
-        self.cur_node_info: NodeInfo = self.nodes_info[self.cur_index]
         self.disaggregated_prefill = disaggregated_prefill
         self._init_disaggregated_prefill()
 
         self._init_dist_env()
-        self.server_cmd = self._expand_env_vars(self.cur_node_info.server_cmd,
+        self.server_cmd = self._expand_env_vars(self.node_info.server_cmd,
                                                 self.envs)
+
+    @property
+    def cur_ip(self):
+        return self.nodes_info[self.cur_index].ip
+
+    @property
+    def nic_name(self):
+        return get_net_interface(self.cur_ip)
+
+    @property
+    def node_info(self):
+        return self.nodes_info[self.cur_index]
+
+    @property
+    def cur_index(self):
+        # 1. Try to read worker index from K8s environment variable
+        worker_index = os.environ.get("LWS_WORKER_INDEX")
+        if worker_index:
+            return int(worker_index)
+
+        # 2. Fallback: match local IP against cluster IP list
+        cluster_ips = [node.ip for node in self.nodes_info]
+        cluster_ip_set = set(cluster_ips)
+
+        cur_ips = get_all_ipv4()
+
+        for ip in cur_ips:
+            if ip in cluster_ip_set:
+                return cluster_ips.index(ip)
+
+        raise RuntimeError(
+            "Could not determine current node index: no matching IP.\n"
+            f"Local machine IPs: {cur_ips}\n"
+            f"Cluster IPs: {cluster_ips}\n"
+            "Please check your config file or network settings.")
 
     def _init_disaggregated_prefill(self):
         if self.disaggregated_prefill:
