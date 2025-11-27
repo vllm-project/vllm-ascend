@@ -2318,11 +2318,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                            uniform_decode=uniform_decode)
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(batch_descriptor)
-        
+
         if envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
             default_stream = torch.npu.current_stream()
-            self._do_async_exponential(default_stream=default_stream, logits_indices=logits_indices)
-        
+            self._do_async_exponential(default_stream=default_stream, 
+                                       logits_indices=logits_indices)
+
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with set_ascend_forward_context(
