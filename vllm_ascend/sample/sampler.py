@@ -80,7 +80,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         if getattr(self, "q", None) is not None:
-            return self.random_sample(probs, self.q, self.event), logits_to_return
+            return self.random_sample(probs, self.q,
+                                      self.event), logits_to_return
         return random_sample(probs, generators), logits_to_return
 
     def random_sample(self, probs, q, event):
