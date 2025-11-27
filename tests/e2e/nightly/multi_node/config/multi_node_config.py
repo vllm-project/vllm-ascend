@@ -28,13 +28,20 @@ class NodeInfo:
     headless: bool
     server_port: int
 
+    def __str__(self):
+        return (f"NodeInfo:\n"
+                f"  index={self.index}\n"
+                f"  ip={self.ip}\n"
+                f"  server_port={self.server_port}"
+                f"  headless={self.headless}\n")
+
 
 class MultiNodeConfig:
 
     def __init__(self,
                  model: str,
                  test_name: str,
-                 nodes_info:list[NodeInfo],
+                 nodes_info: list[NodeInfo],
                  npu_per_node: int = 16,
                  server_port: int = 8080,
                  disaggregated_prefill: Optional[dict] = None,
@@ -301,3 +308,9 @@ class MultiNodeConfig:
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(
             str(ranktable_path)), "failed generate ranktable.json"
+
+
+if __name__ == '__main__':
+    config = MultiNodeConfig.from_yaml()
+    for node in config.nodes_info:
+        print(node)
