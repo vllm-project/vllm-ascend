@@ -9,7 +9,7 @@ import torch.distributed as dist
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
 if TYPE_CHECKING:
-    from mooncake.engine import TransferEngine  # type: ignore
+    from mooncake.engine import TransferEngine  # noqa: F401
 
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor,
@@ -70,7 +70,11 @@ def get_transfer_timeout_value():
 class GlobalTE():
 
     def __init__(self):
-        from mooncake.engine import TransferEngine  # type: ignore
+        try:
+            from mooncake.engine import TransferEngine  # type: ignore
+            self.TransferEngine = TransferEngine
+        except ImportError:
+            self.TransferEngine = None
         self.transfer_engine = None
         self.is_register_buffer: bool = False
         self.transfer_engine_lock = threading.Lock()
@@ -89,9 +93,9 @@ class GlobalTE():
             with self.transfer_engine_lock:
                 # Double-Checked Locking
                 if self.transfer_engine is None:
-                    if TransferEngine is None:  # type: ignore
+                    if self.TransferEngine is None:
                         raise RuntimeError("mooncake is not available")
-                    self.transfer_engine = TransferEngine()  # type: ignore
+                    self.transfer_engine = self.TransferEngine()
                     device_name = device_name if device_name is not None else ""
                     ret_value = self.transfer_engine.initialize(
                         hostname, "P2PHANDSHAKE", "ascend", device_name)
