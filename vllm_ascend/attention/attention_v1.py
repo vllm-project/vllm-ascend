@@ -540,16 +540,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value,
                 output=output,
                 layer_name=layer.layer_name)
-            return output.view(num_tokens, self.hidden_size)
+            return output
 
         if attn_metadata is None:
             return output.fill_(0)
 
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
-            output = layer.quant_method.apply(layer, query, key, value,
+            attn_output = layer.quant_method.apply(layer, query, key, value,
                                               kv_cache, attn_metadata,
                                               self.attn_type, self.scale,
                                               output)
+            output[:num_tokens] = attn_output[:num_tokens]
             return output
 
         # View q k v to BSH.
