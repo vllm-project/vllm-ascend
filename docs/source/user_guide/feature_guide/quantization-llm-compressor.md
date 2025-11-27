@@ -16,7 +16,7 @@ weight: per-channel, int8, symmetric; activation: per-token, int8, symmetric, dy
 
 To quantize a model, you should install [llm-compressor](https://github.com/vllm-project/llm-compressor/blob/main/README.md). It is a unified library for creating compressed models for faster inference with vLLM.
 
-Install llm-compressor:
+Install llm-compressor
 
 ```bash
 pip install llmcompressor
