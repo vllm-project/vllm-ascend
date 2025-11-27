@@ -81,7 +81,7 @@ class NPUWorker(WorkerBase):
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
-        is_enable_nz(vllm_config)
+        is_enable_nz(vllm_config=vllm_config)
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
