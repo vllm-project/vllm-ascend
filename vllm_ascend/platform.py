@@ -59,6 +59,8 @@ if os.path.exists(CUSTOM_LIB_PATH):
     else:
         os.environ["LD_LIBRARY_PATH"] = CUSTOM_LIB_PATH
 
+# yapf: enable
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser

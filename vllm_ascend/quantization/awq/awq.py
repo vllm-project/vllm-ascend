@@ -4,20 +4,22 @@ import torch
 import torch_npu
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig, FusedMoEQuantConfig)
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase)
-from vllm.model_executor.layers.quantization import \
-    QUANTIZATION_METHODS, register_quantization_config
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import (
+    QUANTIZATION_METHODS, register_quantization_config)
+from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import \
+    is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils import (AWQ_QUANTIZATION_METHOD)
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.utils import AWQ_QUANTIZATION_METHOD
 
 
 def remove_quantization_method():
@@ -26,6 +28,7 @@ def remove_quantization_method():
 
 
 remove_quantization_method()
+
 
 def npu_fused_experts(
     hidden_states: torch.Tensor,
@@ -50,24 +53,23 @@ def npu_fused_experts(
     num_tokens = hidden_states.shape[0]
     num_experts = w13.shape[0]
     row_idx_len = num_tokens * top_k
-    row_idx = (
-        torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
-        .view(top_k, -1)
-        .permute(1, 0)
-        .contiguous()
-    )
+    row_idx = (torch.arange(0,
+                            row_idx_len,
+                            dtype=torch.int32,
+                            device=topk_weights.device).view(
+                                top_k, -1).permute(1, 0).contiguous())
     hidden_states, expanded_row_idx, expanded_expert_idx = (
-        torch_npu.npu_moe_init_routing(
-            hidden_states, row_idx=row_idx, expert_idx=topk_ids, active_num=num_tokens
-        )
-    )
+        torch_npu.npu_moe_init_routing(hidden_states,
+                                       row_idx=row_idx,
+                                       expert_idx=topk_ids,
+                                       active_num=num_tokens))
     expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-        expanded_expert_idx, num_experts
-    )
+        expanded_expert_idx, num_experts)
     expert_tokens = expert_tokens.to(torch.int64)
     # gmm1: gate_up_proj
     if not use_wna16:
-        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
+            hidden_states)
         scale_args13 = {
             "scale": [w13_scale.to(scale_dtype)],
             "per_token_scale": [pertoken_scale],
@@ -91,14 +93,18 @@ def npu_fused_experts(
     # act_fn: swiglu
     hidden_states = torch_npu.npu_swiglu(hidden_states)
     if not use_wna16:
-        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
+            hidden_states)
 
         scale_args2 = {
             "scale": [w2_scale.to(scale_dtype)],
             "per_token_scale": [pertoken_scale],
         }
     else:
-        scale_args2 = {"antiquant_scale": [w2_scale], "antiquant_offset": [w2_offset]}
+        scale_args2 = {
+            "antiquant_scale": [w2_scale],
+            "antiquant_offset": [w2_offset]
+        }
     # gmm2: down_proj
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -127,13 +133,14 @@ def npu_fused_experts(
 
 @register_quantization_config(AWQ_QUANTIZATION_METHOD)
 class AWQQuantConfig(QuantizationConfig):
+
     def __init__(
-            self,
-            weight_bits: int,
-            group_size: int,
-            zero_point: bool,
-            modules_to_not_convert: list[str] | None = None,
-        ):
+        self,
+        weight_bits: int,
+        group_size: int,
+        zero_point: bool,
+        modules_to_not_convert: list[str] | None = None,
+    ):
         super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -143,25 +150,25 @@ class AWQQuantConfig(QuantizationConfig):
         if self.weight_bits != 4:
             raise ValueError(
                 "Currently, only 4-bit weight quantization is supported for "
-                f"AWQ, but got {self.weight_bits} bits."
-            )
+                f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor = 32 // self.weight_bits
 
     def get_name(self) -> str:
         return AWQ_QUANTIZATION_METHOD
-    
+
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.half, torch.bfloat16]
-    
+
     @classmethod
     def get_min_capability(cls) -> int:
         raise NotImplementedError(
             "Ascend hardware dose not support \"get_min_capability\" feature.")
-    
+
     @staticmethod
     def get_config_filenames() -> List[str]:
-        return ["quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
+        return [
+            "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
             # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
             "quantize_config.json",
         ]
@@ -172,27 +179,26 @@ class AWQQuantConfig(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
         modules_to_not_convert = cls.get_from_keys_or(
-            config, ["modules_to_not_convert"], None
-        )
+            config, ["modules_to_not_convert"], None)
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
     def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
+            self, layer: torch.nn.Module, prefix: str
     ) -> Union["LinearMethodBase", "QuantizeMethodBase"] | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
-                prefix,
-                self.modules_to_not_convert,
-                self.packed_modules_mapping,
-                skip_with_substr=True,
+                    prefix,
+                    self.modules_to_not_convert,
+                    self.packed_modules_mapping,
+                    skip_with_substr=True,
             ):
                 return AscendUnquantizedLinearMethod()
             return AWQLinearAscendMethod(self)
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
-                prefix,
-                self.modules_to_not_convert,
-                skip_with_substr=True,
+                    prefix,
+                    self.modules_to_not_convert,
+                    skip_with_substr=True,
             ):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AWQMoEAscendMethod(self)
@@ -200,11 +206,13 @@ class AWQQuantConfig(QuantizationConfig):
 
 
 class AWQLinearAscendMethod(AWQLinearMethod):
+
     def __init__(self, quant_config: AWQQuantConfig):
         self.quant_config = quant_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data,
+                                          requires_grad=False)
         qweight_tmp = torch.zeros_like(layer.qweight.data)
         qzeros_tmp = layer.qzeros.data
         qzeros_list = []
@@ -213,13 +221,13 @@ class AWQLinearAscendMethod(AWQLinearMethod):
         for i in range(0, self.quant_config.pack_factor):
             shift_num = shifts[i] * 4
             qzeros_list.append((qzeros_tmp.reshape(-1, 1) >> shift_num) & 0xF)
-            qweight_tmp.bitwise_or_(
-                ((layer.qweight.data >> shift_num) * (2 ** (4 * i))) & (0xF << (4 * i))
-            )
+            qweight_tmp.bitwise_or_(((layer.qweight.data >> shift_num) *
+                                     (2**(4 * i))) & (0xF << (4 * i)))
 
         qweight_tmp.bitwise_xor_(0x88888888)
 
-        qzeros_tmp = torch.cat(qzeros_list, dim=-1).reshape(qzeros_tmp.shape[0], -1)
+        qzeros_tmp = torch.cat(qzeros_list,
+                               dim=-1).reshape(qzeros_tmp.shape[0], -1)
         qzeros_tmp = -(qzeros_tmp - 8)
         qzeros_tmp = qzeros_tmp.to(layer.scales.data.dtype)
 
@@ -236,7 +244,7 @@ class AWQLinearAscendMethod(AWQLinearMethod):
         scales = layer.scales
         qzeros = layer.qzeros
         pack_factor = self.quant_config.pack_factor
-        out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
+        out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor, )
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         if bias is not None and bias.dtype == torch.bfloat16:
@@ -252,8 +260,10 @@ class AWQLinearAscendMethod(AWQLinearMethod):
         )
 
         return out.reshape(out_shape)
-    
+
+
 class AWQMoEAscendMethod(FusedMoEMethodBase):
+
     def __init__(self, quant_config: AWQQuantConfig):
         super().__init__(FusedMoEConfig)
         self.quant_config = quant_config
@@ -261,18 +271,19 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        extra_weight_attrs.update(
-            {
-                "is_transposed": True,
-                "quant_method": FusedMoeWeightScaleSupported.GROUP.value,
-            }
-        )
+        extra_weight_attrs.update({
+            "is_transposed":
+            True,
+            "quant_method":
+            FusedMoeWeightScaleSupported.GROUP.value,
+        })
 
         w13_qweight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 hidden_size,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                2 * intermediate_size_per_partition //
+                self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -310,7 +321,10 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
         w2_scales = torch.nn.Parameter(
-            torch.empty(num_experts, num_groups_w2, hidden_size, dtype=params_dtype),
+            torch.empty(num_experts,
+                        num_groups_w2,
+                        hidden_size,
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_scales", w2_scales)
@@ -322,7 +336,8 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                2 * intermediate_size_per_partition //
+                self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -351,50 +366,46 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
         for i in range(0, self.quant_config.pack_factor):
             shift_num = shifts[i] * 4
             w13_qzeros_list.append(
-                (layer.w13_qzeros.data.reshape(-1, 1) >> shift_num) & 0xF
-            )
+                (layer.w13_qzeros.data.reshape(-1, 1) >> shift_num) & 0xF)
             w2_qzeros_list.append(
-                (layer.w2_qzeros.data.reshape(-1, 1) >> shift_num) & 0xF
-            )
-            w13_qweight_tmp.bitwise_or_(
-                ((layer.w13_qweight.data >> shift_num) * (2 ** (4 * i)))
-                & (0xF << (4 * i))
-            )
-            w2_qweight_tmp.bitwise_or_(
-                ((layer.w2_qweight.data >> shift_num) * (2 ** (4 * i)))
-                & (0xF << (4 * i))
-            )
+                (layer.w2_qzeros.data.reshape(-1, 1) >> shift_num) & 0xF)
+            w13_qweight_tmp.bitwise_or_((
+                (layer.w13_qweight.data >> shift_num) * (2**(4 * i)))
+                                        & (0xF << (4 * i)))
+            w2_qweight_tmp.bitwise_or_(((layer.w2_qweight.data >> shift_num) *
+                                        (2**(4 * i)))
+                                       & (0xF << (4 * i)))
 
         w13_qweight_tmp.bitwise_xor_(0x88888888)
         w2_qweight_tmp.bitwise_xor_(0x88888888)
 
-        w13_qzeros_tmp = torch.cat(w13_qzeros_list, dim=-1).reshape(
-            layer.w13_qzeros.shape[0], layer.w13_qzeros.shape[1], -1
-        )
+        w13_qzeros_tmp = torch.cat(w13_qzeros_list,
+                                   dim=-1).reshape(layer.w13_qzeros.shape[0],
+                                                   layer.w13_qzeros.shape[1],
+                                                   -1)
         w13_qzeros_tmp = -(w13_qzeros_tmp - 8)
         w13_qzeros_tmp = w13_qzeros_tmp.to(layer.w13_scales.data.dtype)
-        w2_qzeros_tmp = torch.cat(w2_qzeros_list, dim=-1).reshape(
-            layer.w2_qzeros.shape[0], layer.w2_qzeros.shape[1], -1
-        )
+        w2_qzeros_tmp = torch.cat(w2_qzeros_list,
+                                  dim=-1).reshape(layer.w2_qzeros.shape[0],
+                                                  layer.w2_qzeros.shape[1], -1)
         w2_qzeros_tmp = -(w2_qzeros_tmp - 8)
         w2_qzeros_tmp = w2_qzeros_tmp.to(layer.w2_scales.data.dtype)
 
         layer.register_parameter(
-            "w13_qzeros", torch.nn.Parameter(w13_qzeros_tmp, requires_grad=False)
-        )
+            "w13_qzeros",
+            torch.nn.Parameter(w13_qzeros_tmp, requires_grad=False))
         layer.register_parameter(
-            "w13_qweight", torch.nn.Parameter(w13_qweight_tmp, requires_grad=False)
-        )
+            "w13_qweight",
+            torch.nn.Parameter(w13_qweight_tmp, requires_grad=False))
         layer.register_parameter(
-            "w2_qzeros", torch.nn.Parameter(w2_qzeros_tmp, requires_grad=False)
-        )
+            "w2_qzeros", torch.nn.Parameter(w2_qzeros_tmp,
+                                            requires_grad=False))
         layer.register_parameter(
-            "w2_qweight", torch.nn.Parameter(w2_qweight_tmp, requires_grad=False)
-        )
+            "w2_qweight",
+            torch.nn.Parameter(w2_qweight_tmp, requires_grad=False))
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+            self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
