@@ -23,7 +23,9 @@ from vllm_ascend.distributed.kvpool.pool_worker import KVPoolWorker
 
 class AscendStoreConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole,
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
                  kv_cache_config: Optional[KVCacheConfig] = None):
         super().__init__(vllm_config=vllm_config,
                          role=role,
