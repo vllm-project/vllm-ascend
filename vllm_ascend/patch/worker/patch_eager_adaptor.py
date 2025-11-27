@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Optional, Callable
+from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
@@ -58,9 +58,9 @@ class EagerAdaptorPatch(CompilerInterface):
                  == "call_function" and return_value.target is tuple)):
             with graph.inserting_before(output_node):
                 tuple_node = graph.create_node("call_function",
-                                                tuple,
-                                                args=([return_value],))
-            output_node.args = (tuple_node,)
+                                               tuple,
+                                               args=([return_value],))
+            output_node.args = (tuple_node, )
             fx_graph.recompile()
 
         import torchair
