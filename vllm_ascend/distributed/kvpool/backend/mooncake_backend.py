@@ -57,11 +57,8 @@ class MooncakeBackend(Backend):
     def put(self, keys: list[str], addrs: list[list[int]],
             sizes: list[list[int]]):
         try:
-            config = ReplicateConfig()
-            config.preferred_segment = self.local_seg
-            config.prefer_alloc_in_same_node = True
             res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, config)
+                keys, addrs, sizes)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to put key {keys},res:{res}")
