@@ -167,7 +167,7 @@ class MultiNodeConfig:
             self.process = None
 
         def __enter__(self):
-            o = self.outer
+            o: MultiNodeConfig = self.outer
             if not o.disaggregated_prefill or not o.is_master:
                 logger.info(
                     "Disaggregated prefill not enabled or not master node, skipping proxy launch."
@@ -181,8 +181,9 @@ class MultiNodeConfig:
             assert not common_indices, f"Common indices found: {common_indices}"
             assert o.proxy_port is not None, "proxy_port must be set"
 
-            prefiller_ips = [o.cluster_ips[i] for i in prefiller_indices]
-            decoder_ips = [o.cluster_ips[i] for i in decoder_indices]
+            cluster_ips = [node.ip for node in o.nodes_info]
+            prefiller_ips = [cluster_ips[i] for i in prefiller_indices]
+            decoder_ips = [cluster_ips[i] for i in decoder_indices]
             prefiller_ports_list = [str(o.server_port)] * len(prefiller_ips)
             decoder_ports_list = [str(o.server_port)] * len(decoder_ips)
 
