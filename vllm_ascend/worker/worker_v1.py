@@ -51,6 +51,8 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
+from vllm_ascend.worker.common import FaultToleranceLevel
+from vllm_ascend.worker.fault_tolerance import FaultTolerance
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -311,6 +313,12 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.load_model()
+            self.fault_tolerance = FaultTolerance(
+                vllm_config=self.vllm_config,
+                model=self.model_runner.model,
+                level=FaultToleranceLevel.BASIC
+            )
+            self.execute_model = self.fault_tolerance.fault_tolerance_decorator(self.execute_model)
 
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.
