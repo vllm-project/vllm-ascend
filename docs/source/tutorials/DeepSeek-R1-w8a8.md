@@ -112,14 +112,14 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXCUTE_MODEL_TIMEOUT_SECONDS=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3600000
 export VLLM_TORCH_PROFILER_DIR="PATH/profile"
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
 export DISABLE_L2_CACHE=1
 
 vllm serve path/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
-  --port 8011 \
+  --port 8000 \
   --data-parallel-size 4 \
   --tensor-parallel-size 4 \
   --quantization ascend \
@@ -133,7 +133,7 @@ vllm serve path/DeepSeek-R1-W8A8 \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.92 \
   --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}:' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
 ```
 
@@ -171,9 +171,9 @@ export HCCL_INTRA_ROCE_ENABLE=0
 
 vllm serve path/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
-  --port 8004 \
+  --port 8000 \
   --data-parallel-size 4 \
-  --tensor-parallel-size 2 \
+  --data-parallel-size_local 2 \
   --data-parallel-address $local_ip \
   --data-parallel-rpc-port 13389 \
   --tensor-parallel-size 4 \
@@ -188,7 +188,7 @@ vllm serve path/DeepSeek-R1-W8A8 \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.92 \
   --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}:' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
 ```
 
@@ -221,7 +221,7 @@ export HCCL_INTRA_ROCE_ENABLE=0
 
 vllm serve path/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
-  --port 8004 \
+  --port 8000 \
   --headless \
   --data-parallel-size 4 \
   --data-parallel-size-local 2 \
@@ -291,7 +291,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 ```shell
 lm_eval \
   --model local-completions \
-  --model_args model=path/DeepSeek-R1-w8a8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=path/DeepSeek-R1-w8a8,base_url=http://<node0_ip>:<port>/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
