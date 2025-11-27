@@ -383,7 +383,7 @@ def rejection_greedy_sample_pytorch(
         target_argmax[global_idx].to(output_token_ids.dtype),
         output_token_ids
     )
-    output_token_ids_.copy_(output_token_ids)
+    output_token_ids.copy_(output_token_ids_)
     # Fill bonus token.
     needs_bonus = is_greedy & (first_mismatch_pos_per_req
                                >= draft_tokens_per_req)

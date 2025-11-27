@@ -2144,16 +2144,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         target_logits_indices += arange
 
         # TODO: Optimize the CPU -> NPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True)
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
-            self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).to(self.device,
-                                                             non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True)
+        cu_num_draft_tokens = (
+            torch.from_numpy(cu_num_draft_tokens)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
+        cu_num_sampled_tokens = (
+            torch.from_numpy(cu_num_sampled_tokens)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
+        logits_indices = (
+            torch.from_numpy(logits_indices)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
+        target_logits_indices = (
+            torch.from_numpy(target_logits_indices)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
+        bonus_logits_indices = (
+            torch.from_numpy(bonus_logits_indices)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
