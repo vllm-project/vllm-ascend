@@ -142,6 +142,8 @@ class AscendConfig:
             get_flashcomm2_oproj_tp_size_and_validate_config
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
             self, vllm_config)
+        self.enable_npugraph_ex_optimize = additional_config.get(
+            "enable_npugraph_ex_optimize", False)
 
 
 class TorchairGraphConfig:

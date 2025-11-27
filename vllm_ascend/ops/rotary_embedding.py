@@ -73,7 +73,8 @@ def _rope_forward_oot(
             query = query.contiguous().view(1, query.shape[0], -1,
                                             self.head_size)
             key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-            torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
+            query, key = torch_npu.npu_apply_rotary_pos_emb(
+                query, key, self.cos, self.sin)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)

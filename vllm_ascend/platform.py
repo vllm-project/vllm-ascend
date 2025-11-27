@@ -229,6 +229,7 @@ class NPUPlatform(Platform):
                 "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
+            compilation_config.splitting_ops = []
             warning_message = """\033[91m
             **********************************************************************************
             * WARNING: You have enabled the *full graph* feature.
