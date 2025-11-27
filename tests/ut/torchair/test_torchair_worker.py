@@ -59,6 +59,7 @@ class TestNPUTorchairWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
+            worker.parallel_config.data_parallel_size = 1
 
             result = worker._init_device()
 
@@ -93,6 +94,7 @@ class TestNPUTorchairWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.parallel_config = MagicMock()
             worker.parallel_config.local_world_size = 0
+            worker.parallel_config.data_parallel_size = 1
 
             result = worker._init_device()
 
