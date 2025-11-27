@@ -161,7 +161,6 @@ class AscendCompilationConfig:
 
     def __init__(self,
                  enable_graph_fusion: bool = True,
-                 fx_graph_eager: bool = False,
                  enable_quantization_fusion: bool = True,
                  **kwargs):
         """
@@ -173,11 +172,6 @@ class AscendCompilationConfig:
                 into more efficient computational graph structures to improve performance.
                 Default: True
                 
-            fx_graph_eager (bool): Whether to use eager mode for graph transformation.
-                When set to False, uses symbolic execution for graph transformation;
-                when set to True, uses eager execution mode.
-                Default: False
-                
             enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
                 When set to True, the system will optimize quantization-related operations,
                 reducing the number of quantization/dequantization nodes.
@@ -186,7 +180,6 @@ class AscendCompilationConfig:
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable_graph_fusion = enable_graph_fusion
-        self.fx_graph_eager = fx_graph_eager
         self.enable_quantization_fusion = enable_quantization_fusion
         # Add more compilation related configs here as needed
 
@@ -373,7 +366,6 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
-            # This graph fusion can actually works on eager mode.
             if ascend_config.ascend_compilation_config.enable_graph_fusion:
                 logger.info(
                     "graph fusion enabled! Automatic kernel fusion is expected."
