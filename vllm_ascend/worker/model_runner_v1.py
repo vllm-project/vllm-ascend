@@ -2782,8 +2782,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         self._copy_valid_sampled_token_count(
                             next_token_ids, valid_sampled_tokens_count)
 
-            if has_kv_transfer_group():
-                get_kv_transfer_group().clear_connector_metadata()
+                if (self.speculative_config and not use_padded_batch_for_eagle
+                        and input_fits_in_drafter):
+                    # ngram and other speculative decoding methods use the sampled
+                    # tokens on the CPU, so they are run after bookkeeping.
+                    propose_draft_token_ids(valid_sampled_token_ids)
 
         extra_args = ({"kv_connector_output": kv_connector_output})
 
