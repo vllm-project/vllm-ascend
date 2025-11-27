@@ -317,21 +317,27 @@ def rejection_greedy_sample_pytorch(
         draft_token_ids,  # [num_tokens]
         target_argmax,  # [num_tokens]
         bonus_token_ids,  # [batch_size]
-        draft_tokens_per_req,  # [batch_size], list
+        draft_tokens_per_req_cpu,  # [batch_size], list
         max_spec_len,
         is_greedy=None,  # [batch_size] or None
 ):
     batch_size = output_token_ids.size(0)
     num_tokens = draft_token_ids.size(0)
     device = output_token_ids.device
-    draft_tokens_per_req = torch.tensor(draft_tokens_per_req).pin_memory().to(
-        device, non_blocking=True)
+    draft_tokens_per_req = (
+        torch.tensor(draft_tokens_per_req_cpu)
+        .pin_memory()
+        .to(device, non_blocking=True)
+    )
     if is_greedy is None:
         is_greedy = torch.ones(batch_size, dtype=torch.bool, device=device)
 
     start_indices = cu_num_draft_tokens - draft_tokens_per_req
     req_ids = torch.arange(batch_size, device=device)
-    token_req_ids = torch.repeat_interleave(req_ids, draft_tokens_per_req)
+    total_draft_tokens = torch.sum(draft_tokens_per_req_cpu).item()
+    token_req_ids = torch.repeat_interleave(
+        req_ids, draft_tokens_per_req, output_size=total_draft_tokens
+    )
     token_positions = torch.arange(
         num_tokens, device=device) - start_indices[token_req_ids]
 
