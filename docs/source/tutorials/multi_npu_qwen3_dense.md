@@ -72,15 +72,15 @@ This optimization is enabled by setting --async-scheduling
 
 ### Model Weight
 
-- `QWEN3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)
-- `QWEN3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)
-- `QWEN3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)
-- `QWEN3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
-- `QWEN3-14B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
-- `QWEN3-32B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
-- `Qwen3-32B-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
+- `QWEN3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)
+- `QWEN3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)
+- `QWEN3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)
+- `QWEN3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
+- `QWEN3-14B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) node or 2 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
+- `QWEN3-32B`(BF16 version): require 4 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800I A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
+- `Qwen3-32B-W8A8`(Quantized version): require 4 Atlas 800 A3 (64G × 16) node or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
 
-This is just the **minimum** number of cards required for deployment. To achieve optimal performance, the number of cards needs to be increased.
+These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
