@@ -2122,7 +2122,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_scheduled_tokens - num_sampled_tokens,
                 num_sampled_tokens)
             logits_indices_pcp += arange
-            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).to(
+            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(
                 self.device, non_blocking=True)
 
         # Compute the bonus logits indices.
