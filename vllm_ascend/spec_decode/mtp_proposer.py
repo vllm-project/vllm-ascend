@@ -237,8 +237,6 @@ class MtpProposer(Proposer):
                     query_start_loc_cpu=self.runner.
                     query_start_loc_cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens_cpu,
-                    seq_lens=self.runner.seq_lens_cpu[:num_reqs],
-                    max_seq_len=self.runner.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     max_query_len=self.num_speculative_tokens + 1,
