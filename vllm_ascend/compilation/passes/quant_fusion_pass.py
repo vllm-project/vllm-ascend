@@ -90,10 +90,11 @@ class AscendQuantFusionPass(VllmInductorPass):
             AddRMSNormQuantPattern(vllm_config,
                                    eps=eps).register(self.pattern_match_passes)
 
-    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
+        self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
         logging.info("Replaced %s patterns", self.matched_count)
+        self.end_and_log()
 
     def is_applicable(self, runtime_shape):
         """

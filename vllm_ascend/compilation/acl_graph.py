@@ -67,8 +67,6 @@ class ACLGraphWrapper:
         self.vllm_config = vllm_config
         self.ascend_compilation_config: dict = vllm_config.additional_config.get(
             "ascend_compilation_config", {})
-        self.fx_graph_eager = self.ascend_compilation_config.get(
-            "fx_graph_eager", False)
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
 
@@ -105,16 +103,13 @@ class ACLGraphWrapper:
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or \
-                            aclgraph_runtime_mode != self.runtime_mode or \
-                            self.fx_graph_eager:
+                    aclgraph_runtime_mode != self.runtime_mode:
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
             # running without aclgraphs.
             # We do not trigger capture/replay if the runtime mode is not
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
-            # When fx_graph_eager is specified, we only trigger graph fusion to
-            # fuse the kernels without further capture them into the aclgraph.
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:

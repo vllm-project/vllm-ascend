@@ -46,8 +46,8 @@ class GraphFusionPassManager:
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get(
             "ascend_compilation_config", {})
-        self.pass_config = config.compilation_config.pass_config
-        if self.pass_config.get("enable_ascend_quant_fusion_pass", True):
+        if self.ascend_compilation_config.get(
+                "enable_ascend_quant_fusion_pass", True):
             from .passes.quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed
