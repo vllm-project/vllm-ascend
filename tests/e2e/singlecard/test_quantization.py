@@ -33,3 +33,16 @@ def test_quant_W8A8():
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+def test_quant_awq():
+    max_tokens = 5
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
+    ]
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen2.5-0.5B-Instruct-AWQ"),
+            max_model_len=8192,
+            enforce_eager=False,
+            gpu_memory_utilization=0.7,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
