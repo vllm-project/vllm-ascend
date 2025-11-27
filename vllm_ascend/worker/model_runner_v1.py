@@ -890,14 +890,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _make_attention_mask(self, seq_lens, position,
                              attn_state) -> torch.Tensor:
+        if self.vllm_config.model_config.use_mla:
+            return None
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
-        # Chunk Prefill situation.
-        if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
-            return self.attn_mask_builder.get_splitfuse_attn_mask()
-        # Prefill without cache situation and Prefill with cache hit.
-        if attn_state == AscendAttentionState.PrefillNoCache or attn_state == AscendAttentionState.PrefillCacheHit:
+        # fia prefill situation.
+        if attn_state in [AscendAttentionState.PrefillNoCache, AscendAttentionState.PrefillCacheHit,
+                          AscendAttentionState.ChunkedPrefill]:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
         # Decode-only situation.
         return None
