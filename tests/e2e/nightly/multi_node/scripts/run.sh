@@ -138,9 +138,8 @@ run_tests_with_log() {
     # Just operate file in worker 0 to prevent concurrent read/write
     if [ "$LWS_WORKER_INDEX" == "0" ]; then
         # Clear logs before running tests
-        rm -fr ${LOG_DIR}/*
-        rm -fr $HOME/ascend/log/*
-        mkdir -p "${LOG_DIR}"
+        rm -rf "${LOG_DIR}"
+        rm -rf "$HOME/ascend/log" && mkdir -p "$HOME/ascend/log"
     fi
 
     set -o pipefail
