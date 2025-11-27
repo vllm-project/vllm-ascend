@@ -44,7 +44,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
 
-        for i in range(self.num_dense_layers, self.model.config.num_hidden_layers):
+        for i in range(self.num_dense_layers,
+                       self.model.config.num_hidden_layers):
             self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_list"] = \
                 self.model.model.layers[i].mlp.experts.w13_weight_list
             self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_list"] = \
@@ -93,8 +94,11 @@ class VllmEplbAdaptor(EplbAdaptor):
             for name in self.expert_weight_names:
                 complete_name = "model.layers." + str(
                     self.num_dense_layers) + ".mlp.experts." + name
-                expert_tensor = self.param_dict[complete_name].data[0]
-                if name in ["w13_weight", "w2_weight"]:
+                if name in [
+                        "w13_weight_list", "w2_weight_list",
+                        "w13_weight_scale_list", "w2_weight_scale_list"
+                ]:
+                    expert_tensor = self.param_dict[complete_name][0]
                     expert_tensor = expert_tensor.clone()
                 buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
@@ -108,16 +112,19 @@ class VllmEplbAdaptor(EplbAdaptor):
             for local_expert_id in range(num_local_expert):
                 per_expert_param = list()
                 for name in self.expert_weight_names:
-                    if name in ["w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"]:
+                    if name in [
+                            "w13_weight_list", "w2_weight_list",
+                            "w13_weight_scale_list", "w2_weight_scale_list"
+                    ]:
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
-                                            ".mlp.experts." + name][local_expert_id]
-                        )
+                                            ".mlp.experts." +
+                                            name][local_expert_id])
                     else:
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
-                                            ".mlp.experts." + name].data[local_expert_id]
-                        )
+                                            ".mlp.experts." +
+                                            name].data[local_expert_id])
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
