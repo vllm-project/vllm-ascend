@@ -18,6 +18,7 @@ class AscendSampler(Sampler):
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
 
+
 class AscendTopKTopPSampler(TopKTopPSampler):
 
     def set_q_event(self, q, event):

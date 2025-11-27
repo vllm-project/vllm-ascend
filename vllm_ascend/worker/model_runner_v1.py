@@ -628,7 +628,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.transfer_event = torch.npu.Event()
 
         if envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
-            logger.info("********** Enable async exponential while model executing")
+            logger.info("Enable async exponential while model executing.")
             self._async_exponential_stream = torch.npu.Stream()
             self._async_exponential_event = torch.npu.Event()
 
