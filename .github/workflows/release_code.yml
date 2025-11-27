@@ -59,6 +59,8 @@ jobs:
           python3 -m pip install twine setuptools_scm
 
       - name: Generate tar.gz
+        env:
+          SOC_VERSION: ascend910b1
         run: |
           python3 setup.py sdist
           ls dist
