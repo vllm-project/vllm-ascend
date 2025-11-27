@@ -153,7 +153,6 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
-        ascend_scheduler_config = ascend_config.ascend_scheduler_config
 
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)
@@ -291,35 +290,19 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-
-            if cache_config.enable_prefix_caching or \
-                not ascend_scheduler_config.enabled or \
-                getattr(ascend_scheduler_config, "enable_chunked_prefill", False):
-                logger.warning(
-                    "If chunked prefill or prefix caching is enabled, block size must be set to 128."
-                )
-                origin_block_size = cache_config.block_size
-                cache_config.block_size = 128
+            if not (model_config
+                    and model_config.hf_config.model_type == "qwen3_next"):
+                # override block size to 128 except qwen3-next
                 # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-                if model_config and model_config.hf_config.model_type == "qwen3_next":
-                    logger.warning(
-                        "When running qwen3-next model, block_size needs to be restored to its original value."
-                    )
-                    cache_config.block_size = origin_block_size
+                logger.warning(
+                    "block size must be set to 128 on NPU platform.")
+                cache_config.block_size = 128
 
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        # If ascend_scheduler_config is enabled,
-        # extents original scheduler_config to use AscendScheduler.
-        if ascend_config.ascend_scheduler_config.enabled:
-            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
-            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config,
-                ascend_config.ascend_scheduler_config)
-            vllm_config.scheduler_config = ascend_scheduler_config
-        elif ascend_config.recompute_scheduler_enable:
+        if ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_schedule_config import \
                 RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(

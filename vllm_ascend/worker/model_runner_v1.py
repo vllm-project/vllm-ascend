@@ -330,10 +330,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        if self.ascend_config.ascend_scheduler_config.enabled:
-            self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
-        else:
-            self.chunked_prefill_enabled = True
         self.weight_prefetch_method = WeightPrefetchMethod(
             self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
@@ -1942,7 +1938,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
-        ascend_config = get_ascend_config()
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
@@ -1959,10 +1954,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
         # splitfuse
-        elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
-            attn_state = AscendAttentionState.ChunkedPrefill
         else:
-            attn_state = AscendAttentionState.PrefillCacheHit
+            attn_state = AscendAttentionState.ChunkedPrefill
         return attn_state
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
