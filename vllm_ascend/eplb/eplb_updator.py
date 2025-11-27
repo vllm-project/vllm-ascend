@@ -194,6 +194,12 @@ class EplbUpdator:
             max_load = layer_load.max().item()
 
             moe_load_imbalance = max_load / (mean_load + 1e-6)
+
+            logger.debug(
+                f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] "
+                f"PAR={moe_load_imbalance:.4f}"
+            )
+
             self.moe_imbalance_dict[layer_idx] = moe_load_imbalance
 
     def summarize_moe_imbalance(self):
