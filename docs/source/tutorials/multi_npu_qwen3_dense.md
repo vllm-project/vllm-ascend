@@ -6,12 +6,12 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 Welcome to the tutorial on optimizing Qwen Dense models in the vLLM-Ascend environment. This guide will help you configure the most effective settings for your use case, with practical examples that highlight key optimization points. We will also explore how adjusting service parameters can maximize throughput performance across various scenarios.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, accuracy and performance evaluation.
 
 The Qwen3 Dense models is first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429)
 
 ## **Attention**
-This example requires version **v0.11.0rc1**.Earlier versions may lack certain features.
+This example requires version **v0.11.0rc2**.Earlier versions may lack certain features.
 
 ## Supported Features
 
@@ -37,7 +37,7 @@ FlashComm_v1 significantly improves performance in large-batch scenarios by deco
 
 It is important to note that the decomposition of the allreduce communication into reduce-scatter and all-gather operations only provides benefits in high-concurrency scenarios, where there is no significant communication degradation. In other cases, this decomposition may result in noticeable performance degradation. To mitigate this, the current implementation uses a threshold-based approach, where FlashComm_v1 is only enabled if the actual token count for each inference schedule exceeds the threshold. This ensures that the feature is only activated in scenarios where it improves performance, avoiding potential degradation in lower-concurrency situations.
 
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM = 1` to be enabled.
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled.
 
 ### 4. Matmul and ReduceScatter Fusion
 Once FlashComm_v1 is enabled, an additional optimization can be applied. This optimization fuses matrix multiplication and ReduceScatter operations, along with tiling optimization. The Matmul computation is treated as one pipeline, while the ReduceScatter and dequant operations are handled in a separate pipeline. This approach significantly reduces communication steps, improves computational efficiency, and allows for better resource utilization, resulting in enhanced throughput, especially in large-scale distributed environments.
@@ -91,13 +91,13 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ### Installation
 
 You can using our official docker image for supporting Qwen3 Dense models.
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc1`、`quay.io/ascend/vllm-ascend:v0.11.0rc1-a3` and so on.[Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
+Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc2`、`quay.io/ascend/vllm-ascend:v0.11.0rc2-a3` and so on.[Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
 
 #### Docker Pull (by tag)
 
-`docker pull quay.io/ascend/vllm-ascend:v0.11.0rc1`
+`docker pull quay.io/ascend/vllm-ascend:v0.11.0rc2`
 
-`docker pull quay.io/ascend/vllm-ascend:v0.11.0rc1-a3`
+`docker pull quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`
 
 Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -144,7 +144,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /model/Qwen3-32B-W8A8:/model/Qwen3-32B-W8A8 \
--p 8000:8000 \
+-p 8113:8113 \
 -it $IMAGE bash
 ```
 
@@ -173,7 +173,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 ```
 
 ### Online Inference on Multi-NPU
@@ -187,7 +187,7 @@ This script is configured to achieve optimal performance under the above specifi
 
 - If the model is not a quantized model,remove "--quantization ascend".
 
-- If the ultimate performance is desired, the following parameters can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_0.6B.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_0.6B.md#optimization-highlights).Here is an example of batchsize of 72:`--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
+- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_0.6B.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_0.6B.md#optimization-highlights).Here is an example of batchsize of 72:`--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
 
 ```bash
@@ -228,7 +228,7 @@ Run the following script to execute offline inference on multi-NPU.
 #### **Attention**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
-- If the model is not a quantized model,remove "--quantization ascend".
+- If the model is not a quantized model,remove "quantization="ascend".
 
 ```python
 import gc
@@ -276,7 +276,7 @@ Here is one accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen3-32B-W8A8` in `vllm-ascend:0.11.0rc1` for reference only.
+2. After execution, you can get the result, here is the result of `Qwen3-32B-W8A8` in `vllm-ascend:0.11.0rc2` for reference only.
 
 | dataset | version | metric    | mode | task name                            | vllm-api-general-chat |
 |---------|---------|-----------|------|--------------------------------------|-----------------------|
