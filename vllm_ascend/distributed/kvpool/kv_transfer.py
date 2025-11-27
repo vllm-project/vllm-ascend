@@ -8,8 +8,12 @@ from vllm.utils import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
-from vllm_ascend.distributed.kvpool.config_data import (
-    ChunkedTokenDatabase, LasyerMultiBlockReqMeta)
+
+# isort: off
+from vllm_ascend.distributed.kvpool.config_data import (ChunkedTokenDatabase,
+                                                        LasyerMultiBlockReqMeta
+                                                        )
+# isort: on
 
 
 class KVTransferThread(threading.Thread):
