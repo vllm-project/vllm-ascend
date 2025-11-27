@@ -116,7 +116,7 @@ The specific example scenario is as follows:
 - The LLM is Qwen3-32B-W8A8
 - The data scenario is a fixed-length input of 3.5K and an output of 1.5K.
 - The parallel configuration requirement is DP=1&TP=4
-- If the machine environment is an Atlas 800I A2(64G*8), the deployment approach stays identical.
+- If the machine environment is an **Atlas 800I A2(64G*8)**, the deployment approach stays identical.
 
 ### Run docker container:
 
@@ -187,10 +187,9 @@ This script is configured to achieve optimal performance under the above specifi
 #### **Attention**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
-- If the model is not a quantized model,remove "--quantization ascend".
+- If the model is not a quantized model, remove "--quantization ascend".
 
-- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_0.6B.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_0.6B.md#optimization-highlights).Here is an example of batchsize of 72:
-`--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
+- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_0.6B.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_0.6B.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
 ```bash
 vllm serve /model/Qwen3-32B-W8A8 \
