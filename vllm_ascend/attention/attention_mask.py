@@ -50,7 +50,7 @@ class AttentionMaskBuilder:
         assigned_mask_dim = 2048
         self.chunked_prefill_attn_mask = torch.triu(
             torch.ones(assigned_mask_dim, assigned_mask_dim),
-            diagonal=1).to(torch.int8).to(device)
+            diagonal=1).to(torch.bfloat16).to(device)
 
     @staticmethod
     def get_mask_scale_factor(dtype: torch.dtype = torch.float16):

@@ -79,7 +79,7 @@ class EagleProposer(Proposer):
                                    dtype=torch.int32)
         attn_mask_len = self.vllm_config.model_config.max_model_len
         self.attn_mask_builder = AttentionMaskBuilder(
-            attn_mask_len, self.vllm_config.model_config.dtype)
+            attn_mask_len, self.vllm_config.model_config.dtype, device=device)
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
