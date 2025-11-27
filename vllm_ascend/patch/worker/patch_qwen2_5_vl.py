@@ -375,19 +375,19 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
 
         cu_seqlens = cu_seqlens.to(
             device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined]
+            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
         cu_window_seqlens = cu_window_seqlens.to(
             device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined]
+            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(
             device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined]
+            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(
             device=self.device,
-            non_blocking=True)  # type: ignore[attr-defined]
+            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
         window_index = window_index.to(
             device=hidden_states.device,
-            non_blocking=True)  # type: ignore[attr-defined]
+            non_blocking=True)  # type: ignore[attr-defined] # noqa: F821
         reverse_indices = reverse_indices.to(device=hidden_states.device,
                                              non_blocking=True)
 
