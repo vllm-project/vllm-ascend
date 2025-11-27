@@ -82,79 +82,79 @@ def _triton_rope(
         return torch.stack((o1, o2), dim=-1).flatten(-2)
     """
     pid = tl.program_id(0).to(tl.int64)
-    row_idx = pid
+    row_block_size = tl.num_programs(0)
+    
+    for row_idx in tl.range(pid, num_tokens, row_block_size):
+        q_start_ptr = q_ptr + row_idx * q_row_stride
+        k_start_ptr = k_ptr + row_idx * k_row_stride
 
-    # locate start address
-    q_ptr = q_ptr + row_idx * q_row_stride
-    k_ptr = k_ptr + row_idx * k_row_stride
+        # ####################################################################
+        # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
+        # m of this program instance
+        # ####################################################################
+        cos_start_ptr = cos + row_idx * cos_row_stride
+        sin_start_ptr = sin + row_idx * sin_row_stride
 
-    # ####################################################################
-    # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
-    # m of this program instance
-    # ####################################################################
-    cos = cos + row_idx * cos_row_stride
-    sin = sin + row_idx * sin_row_stride
+        cos_offsets = tl.arange(0, pad_rope_dim // 2)
+        cos_mask = cos_offsets < (rope_dim // 2)
+        cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+        sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
 
-    cos_offsets = tl.arange(0, pad_rope_dim // 2)
-    cos_mask = cos_offsets < (rope_dim // 2)
-    cos_row = tl.load(cos + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
-    sin_row = tl.load(sin + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+        # ####################################################################
+        # Load the left and right half of q and k for the current
+        # program instance (i.e. for the current token) separately
+        # ####################################################################
+        # left half of the head
+        if IS_NEOX_STYLE:
+            first_half_q_offsets = tl.arange(0,
+                                            pad_n_qh)[:, None] * hd + tl.arange(
+                                                0, pad_rope_dim // 2)[None, :]
+            first_half_k_offsets = tl.arange(0,
+                                            pad_n_kh)[:, None] * hd + tl.arange(
+                                                0, pad_rope_dim // 2)[None, :]
+        else:
+            first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (
+                2 * tl.arange(0, pad_rope_dim // 2)[None, :])
+            first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (
+                2 * tl.arange(0, pad_rope_dim // 2)[None, :])
 
-    # ####################################################################
-    # Load the left and right half of q and k for the current
-    # program instance (i.e. for the current token) separately
-    # ####################################################################
-    # left half of the head
-    if IS_NEOX_STYLE:
-        first_half_q_offsets = tl.arange(0,
-                                         pad_n_qh)[:, None] * hd + tl.arange(
-                                             0, pad_rope_dim // 2)[None, :]
-        first_half_k_offsets = tl.arange(0,
-                                         pad_n_kh)[:, None] * hd + tl.arange(
-                                             0, pad_rope_dim // 2)[None, :]
-    else:
-        first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (
-            2 * tl.arange(0, pad_rope_dim // 2)[None, :])
-        first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (
-            2 * tl.arange(0, pad_rope_dim // 2)[None, :])
+        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
+            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
+            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        q_tile_1 = tl.load(q_start_ptr + first_half_q_offsets,
+                        mask=first_q_mask,
+                        other=0).to(sin_row.dtype)
+        k_tile_1 = tl.load(k_start_ptr + first_half_k_offsets,
+                        mask=first_k_mask,
+                        other=0).to(sin_row.dtype)
 
-    first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
-        0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
-    first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
-        0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
-    q_tile_1 = tl.load(q_ptr + first_half_q_offsets,
-                       mask=first_q_mask,
-                       other=0).to(sin_row.dtype)
-    k_tile_1 = tl.load(k_ptr + first_half_k_offsets,
-                       mask=first_k_mask,
-                       other=0).to(sin_row.dtype)
+        # right half of the head
+        if IS_NEOX_STYLE:
+            second_half_q_offsets = first_half_q_offsets + (rope_dim // 2)
+            second_half_k_offsets = first_half_k_offsets + (rope_dim // 2)
+        else:
+            second_half_q_offsets = first_half_q_offsets + 1
+            second_half_k_offsets = first_half_k_offsets + 1
+        second_q_mask = first_q_mask
+        second_k_mask = first_k_mask
+        q_tile_2 = tl.load(q_start_ptr + second_half_q_offsets,
+                        mask=second_q_mask,
+                        other=0).to(sin_row.dtype)
+        k_tile_2 = tl.load(k_start_ptr + second_half_k_offsets,
+                        mask=second_k_mask,
+                        other=0).to(sin_row.dtype)
 
-    # right half of the head
-    if IS_NEOX_STYLE:
-        second_half_q_offsets = first_half_q_offsets + (rope_dim // 2)
-        second_half_k_offsets = first_half_k_offsets + (rope_dim // 2)
-    else:
-        second_half_q_offsets = first_half_q_offsets + 1
-        second_half_k_offsets = first_half_k_offsets + 1
-    second_q_mask = first_q_mask
-    second_k_mask = first_k_mask
-    q_tile_2 = tl.load(q_ptr + second_half_q_offsets,
-                       mask=second_q_mask,
-                       other=0).to(sin_row.dtype)
-    k_tile_2 = tl.load(k_ptr + second_half_k_offsets,
-                       mask=second_k_mask,
-                       other=0).to(sin_row.dtype)
+        # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+        new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+        tl.store(q_start_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+        new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+        tl.store(q_start_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
 
-    # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
-    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
-    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
-    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
-    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
-
-    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
-    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
-    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
-    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+        new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+        tl.store(k_start_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+        new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+        tl.store(k_start_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
 def rope_forward_triton(q,
@@ -181,8 +181,7 @@ def rope_forward_triton(q,
     pad_n_q_head = triton.next_power_of_2(n_q_head)
     pad_n_kv_head = triton.next_power_of_2(n_kv_head)
     BLOCK_SIZE = max(pad_n_q_head, pad_n_kv_head)
-
-    n_row = num_tokens
+    n_row = min(num_tokens, NUM_VECTORCORE)
 
     _triton_rope[(n_row, )](
         q,
