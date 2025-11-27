@@ -334,7 +334,7 @@ def rejection_greedy_sample_pytorch(
 
     start_indices = cu_num_draft_tokens - draft_tokens_per_req
     req_ids = torch.arange(batch_size, device=device)
-    total_draft_tokens = torch.sum(draft_tokens_per_req_cpu).item()
+    total_draft_tokens = sum(draft_tokens_per_req_cpu)
     token_req_ids = torch.repeat_interleave(
         req_ids, draft_tokens_per_req, output_size=total_draft_tokens
     )
@@ -363,8 +363,11 @@ def rejection_greedy_sample_pytorch(
                                          max_spec_len * 2)
         first_mismatch_pos_per_req, _ = torch.min(mismatch_positions, dim=1)
         no_mismatch_mask = (first_mismatch_pos_per_req == max_spec_len * 2)
-        first_mismatch_pos_per_req[no_mismatch_mask] = draft_tokens_per_req[
-            no_mismatch_mask]
+        first_mismatch_pos_per_req = torch.where(
+            no_mismatch_mask,
+            draft_tokens_per_req,
+            first_mismatch_pos_per_req,
+        )
 
     # Copy matched target tokens into output.
     copy_len = torch.minimum(first_mismatch_pos_per_req + 1,
@@ -375,16 +378,19 @@ def rejection_greedy_sample_pytorch(
     greedy_mask = is_greedy.unsqueeze(1)
     final_copy_mask = copy_mask & greedy_mask
     global_idx = start_indices.unsqueeze(1) + copy_indices
-    output_token_ids[final_copy_mask] = target_argmax[
-        global_idx[final_copy_mask]].to(output_token_ids.dtype)
+    output_token_ids_ = torch.where(
+        final_copy_mask,
+        target_argmax[global_idx].to(output_token_ids.dtype),
+        output_token_ids
+    )
+    output_token_ids_.copy_(output_token_ids)
     # Fill bonus token.
     needs_bonus = is_greedy & (first_mismatch_pos_per_req
                                >= draft_tokens_per_req)
-    if torch.any(needs_bonus):
-        bonus_rows = torch.where(needs_bonus)[0]
-        bonus_cols = draft_tokens_per_req[bonus_rows]
-        bonus_token_ids = bonus_token_ids.squeeze(1)
-        output_token_ids[bonus_rows, bonus_cols] = bonus_token_ids[bonus_rows]
+    bonus_rows = torch.where(needs_bonus)[0]
+    bonus_cols = draft_tokens_per_req[bonus_rows]
+    bonus_token_ids = bonus_token_ids.squeeze(1)
+    output_token_ids[bonus_rows, bonus_cols] = bonus_token_ids[bonus_rows]
 
 
 def rejection_random_sample_pytorch(
