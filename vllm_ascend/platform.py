@@ -39,6 +39,8 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
 
 # isort: on
 
+# yapf: enable
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser

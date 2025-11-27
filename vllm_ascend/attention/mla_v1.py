@@ -1517,8 +1517,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fused_qkv_a_proj is not None:
             if hasattr(self.fused_qkv_a_proj, 'weight'):
                 maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
-                                dependency=hidden_states,
-                                enabled=self.enable_prefetch)
+                                   dependency=hidden_states,
+                                   enabled=self.enable_prefetch)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],

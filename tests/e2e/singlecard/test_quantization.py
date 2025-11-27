@@ -34,6 +34,7 @@ def test_quant_W8A8():
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
+
 def test_quant_awq():
     max_tokens = 5
     example_prompts = [

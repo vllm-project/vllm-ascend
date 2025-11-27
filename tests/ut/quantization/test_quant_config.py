@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -82,7 +83,8 @@ class TestAscendQuantConfig(TestBase):
 
         # Test when quant_method is specified
         hf_quant_cfg = {"quant_method": "awq"}
-        result = AscendQuantConfig.override_quantization_method(hf_quant_cfg, None)
+        result = AscendQuantConfig.override_quantization_method(
+            hf_quant_cfg, None)
         self.assertIsNone(result)
 
     def test_get_quant_method_for_linear(self):
