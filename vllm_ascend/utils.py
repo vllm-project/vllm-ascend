@@ -71,7 +71,8 @@ def is_310p():
     return _IS_310P
 
 
-def is_enable_nz(dtype: Optional[torch.dtype] = torch.int8, vllm_config: Optional[VllmConfig] = None) -> bool:
+def is_enable_nz(dtype: Optional[torch.dtype] = torch.int8,
+                 vllm_config: Optional[VllmConfig] = None) -> bool:
     global _ENABLE_NZ
     if _ENABLE_NZ is None:
         if not vllm_config:
