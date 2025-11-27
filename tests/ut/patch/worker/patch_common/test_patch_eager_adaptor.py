@@ -56,6 +56,6 @@ class TestPatchEagerAdaptor(TestBase):
 
         fx_graph = fx.symbolic_trace(self.model)
 
-        graph, _ = self.adaptor.compile(fx_graph)
+        graph, _ = self.adaptor.compile(fx_graph, [], {})
 
         self.assertTrue(isinstance(graph, fx.GraphModule))
