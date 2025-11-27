@@ -40,7 +40,7 @@ class TestPatchEagerAdaptor(TestBase):
         self.model = MyNet()
     
     def test_EagerAdaptor_patched(self):
-        from vllm.compiletion.compiler_interface import EagerAdaptor
+        from vllm.compilation.compiler_interface import EagerAdaptor
         
         self.assertIs(EagerAdaptor, EagerAdaptorPatch)
         

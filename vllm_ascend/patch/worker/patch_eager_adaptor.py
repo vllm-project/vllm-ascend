@@ -21,7 +21,7 @@ import vllm
 import torch
 import torch.fx as fx
 from vllm.compilation.counter import compilation_counter
-from vllm.compiletion.compiler_interface import CompilerInterface
+from vllm.compilation.compiler_interface import CompilerInterface
 
 from vllm_ascend.ascend_config import get_ascend_config
 
@@ -76,4 +76,4 @@ class EagerAdaptorPatch(CompilerInterface):
         return compile_graph, None
     
 
-vllm.compiletion.compiler_interface.EagerAdaptor = EagerAdaptorPatch
+vllm.compilation.compiler_interface.EagerAdaptor = EagerAdaptorPatch
