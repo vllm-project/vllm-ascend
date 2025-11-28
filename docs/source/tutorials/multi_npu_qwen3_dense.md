@@ -168,7 +168,7 @@ apt update
 apt install libjemalloc2
 #if os is openEuler, add `sslverify=0` to each warehouse paragraph in openEuler.repo
 cp /etc/yum.repos.d/openEuler.repo /etc/yum.repos.d/openEuler.repo.bak
-vim /etc/yum.repos.d/openEuler.repo
+sed -i '/^name.*$/a sslverify=0' /etc/yum.repos.d/openEuler.repo
 yum install jemalloc
 # Add the LD_PRELOAD environment variable
 if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
@@ -198,7 +198,7 @@ This script is configured to achieve optimal performance under the above specifi
 #### **Attention**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
-- If the model is not a quantized model, remove "--quantization ascend".
+- If the model is not a quantized model, remove the `--quantization ascend` parameter.
 
 - If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_dense.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
