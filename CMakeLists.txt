@@ -111,6 +111,7 @@ pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 target_link_directories(
   vllm_ascend_C
   PRIVATE
+  ${TORCH_LIBRARY_DIRS}
   ${TORCH_NPU_PATH}/lib/
   ${ASCEND_HOME_PATH}/lib64
 )
@@ -119,7 +120,7 @@ target_link_libraries(
   vllm_ascend_C
   PUBLIC
   ${TORCH_LIBRARIES}
-  libtorch_npu.so
+  torch_npu
   vllm_ascend_kernels
   ascendcl
   tiling_api
@@ -127,6 +128,7 @@ target_link_libraries(
   platform
   ascendalog
   dl
+  opapi
 )
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib")
