@@ -1,4 +1,4 @@
-# Qwen3-VL-8B
+# Qwen2.5-VL/Qwen3-VL
 
 ## Introduction
 
@@ -75,7 +75,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ## Deployment
 
-### Offline Inference on Single NPU
+### Offline Inference
 
 Run the following script to execute offline inference on a single NPU:
 
@@ -92,6 +92,7 @@ MODEL_PATH = "Qwen/Qwen3-VL-8B-Instruct"
 
 llm = LLM(
     model=MODEL_PATH,
+    tensor_parallel_size=1,
     max_model_len=16384,
     limit_mm_per_prompt={"image": 10},
 )
@@ -154,13 +155,14 @@ The image displays a logo consisting of two main elements: a stylized geometric 
 The overall design is modern and minimalist, with a clear contrast between the geometric and textual elements. The use of blue for the geometric design could suggest themes of technology, connectivity, or innovation, which are common associations with the color blue in branding. The simplicity of the design makes it easily recognizable and memorable.
 ```
 
-### Online Serving on Single NPU
+### Online Serving
 
 Run docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
    :substitutions:
 vllm serve Qwen/Qwen3-VL-8B-Instruct \
+--tensor-parallel-size 1 \
 --dtype bfloat16 \
 --max_model_len 16384 \
 --max-num-batched-tokens 16384
@@ -230,6 +232,7 @@ lm_eval \
     --model vllm-vlm \
     --model_args pretrained=/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
     --tasks mmmu_val \
+    --tensor_parallel_size 1 \
     --batch_size 32 \
     --apply_chat_template \
     --trust_remote_code \
