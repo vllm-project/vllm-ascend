@@ -58,7 +58,6 @@ INPUT_PROMPTS = [
 ]
 
 
-@pytest.mark.skip(reason="Fix me, the accuracy is not correct")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
 def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
@@ -66,6 +65,7 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
                     enforce_eager=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
+                    enable_chunked_prefill=True,
                     gpu_memory_utilization=0.7) as vllm_model:
         prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
@@ -75,6 +75,7 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
                     enforce_eager=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
+                    enable_chunked_prefill=True,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
