@@ -166,7 +166,7 @@ export TASK_QUEUE_ENABLE=1
 # if os is Ubuntu
 apt update
 apt install libjemalloc2
-#if os is openEuler, add `sslverify=0` to each warehouse paragraph
+#if os is openEuler, add `sslverify=0` to each warehouse paragraph in openEuler.repo
 cp /etc/yum.repos.d/openEuler.repo /etc/yum.repos.d/openEuler.repo.bak
 vim /etc/yum.repos.d/openEuler.repo
 yum install jemalloc
