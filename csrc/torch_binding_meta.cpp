@@ -178,12 +178,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
     // grouped_matmul_swiglu_quant meta implementation
     ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
-<<<<<<< HEAD
     // Grouped matmul swiglu quant weight nz tensor list
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
-=======
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
->>>>>>> d7542c93 (add bmm_transpose ops)
 }
 }
