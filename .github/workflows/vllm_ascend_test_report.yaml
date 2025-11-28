@@ -74,7 +74,7 @@ jobs:
     with:
       vllm: v0.11.2
       runner: ${{ matrix.runner }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       model_list: ${{ toJson(matrix.model_list) }}
       upload: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.vllm-ascend-version == 'latest' }}
 
