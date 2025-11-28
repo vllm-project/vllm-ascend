@@ -35,8 +35,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (
+    get_graph_params, get_mtp_graph_params, update_graph_params_workspaces,
+    update_mtp_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
 
@@ -336,7 +337,10 @@ class AscendAttentionMetadataBuilder:
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
         model: Optional[nn.Module] = None,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+        if attn_state in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        }:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -422,7 +426,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         num_tokens = attn_metadata.query_start_loc_list[-1]
-        graph_params = get_graph_params()
+        forward_context = get_forward_context()
+        if forward_context.is_draft_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
+
         query_start_loc = attn_metadata.query_start_loc_list
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
@@ -446,7 +455,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=3,
                 scale=self.scale,
             )
-            update_graph_params_workspaces(num_tokens, workspace)
+            if forward_context.is_draft_model:
+                update_mtp_graph_params_workspaces(num_tokens, workspace)
+            else:
+                update_graph_params_workspaces(num_tokens, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()

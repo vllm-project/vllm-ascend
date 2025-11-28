@@ -310,7 +310,7 @@ class MtpProposer(Proposer):
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    is_mtp_model=True):
+                    is_draft_model=True):
                 if self.enable_shared_expert_dp:
                     positions = positions.unsqueeze(-1)
                     positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
@@ -787,7 +787,7 @@ class MtpProposer(Proposer):
                     batch_descriptor=batch_descriptor,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens,
-                    is_mtp_model=True):
+                    is_draft_model=True):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata

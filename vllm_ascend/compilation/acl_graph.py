@@ -194,7 +194,10 @@ class ACLGraphWrapper:
 
 
 def update_attn_params(update_stream, forward_context, runtime_shape):
-    graph_params = get_graph_params()
+    if forward_context.is_draft_model:
+        graph_params = get_mtp_graph_params()
+    else:
+        graph_params = get_graph_params()
     # For Qwen3-next, since the kv_cache_config has already categorized
     # linear_attn and self_attn, the attn_metadata is first arranged with
     # self_attn followed by linear_attn. Therefore, using zip directly
@@ -238,7 +241,7 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                            speculative_config):
-    if forward_context.is_mtp_model:
+    if forward_context.is_draft_model:
         graph_params = get_mtp_graph_params()
     else:
         graph_params = get_graph_params()
@@ -258,7 +261,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
             seq_lens_list = forward_context.attn_metadata[
                 key].decode.seq_lens_list
             if speculative_config and speculative_config.method == "mtp" \
-                    and not forward_context.is_mtp_model:
+                    and not forward_context.is_draft_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
                 spec_multiple = speculative_config.num_speculative_tokens + 1
@@ -268,7 +271,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                     spec_multiple * (i + 1)
                     for i in range(runtime_shape // spec_multiple)
                 ]
-            elif forward_context.is_mtp_model:
+            elif forward_context.is_draft_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
                 block_table = forward_context.attn_metadata[
