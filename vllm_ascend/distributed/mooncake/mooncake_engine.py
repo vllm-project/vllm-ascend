@@ -314,7 +314,15 @@ class MooncakeEngine:
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
                 continue
-
+            current_event = torch.npu.Event()
+            current_event.record()
+            break
+            
+        for request in connector_metadata.requests:
+            save_spec = request.save_spec
+            if save_spec is None or not save_spec.can_save:
+                continue
+                
             token_ids = request.token_ids
             req_id = request.req_id
             assert isinstance(token_ids, torch.Tensor)
@@ -349,8 +357,9 @@ class MooncakeEngine:
                 req_id,
                 token_ids,
                 request.block_ids,
-                store_mask,
-                request.is_last_chunk,
+                current_event=current_event,
+                mask=store_mask,
+                is_last_chunk=request.is_last_chunk,
             )
 
     def retrieve_layer(

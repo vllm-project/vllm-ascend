@@ -350,6 +350,11 @@ class MooncakeStoreConnectorV1Scheduler:
                     raise ValueError(
                         f"Request {req_id} is not in _unfinished_requests, "
                         f"but it is scheduled to be cached")
+                num_computed_token = cached_reqs.num_computed_tokens[i]
+                skip_save = False
+                if num_computed_token >= len(request.prompt_token_ids):
+                    skip_save = True
+
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
                     continue
@@ -367,7 +372,7 @@ class MooncakeStoreConnectorV1Scheduler:
                     request_tracker,
                     self._block_size,
                     load_spec=None,
-                    skip_save=force_skip_save,
+                    skip_save=force_skip_save or skip_save,
                     is_last_chunk=len(request_tracker.token_ids)
                     >= last_chunk_tokens_num,
                     discard_partial_chunks=self._discard_partial_chunks,

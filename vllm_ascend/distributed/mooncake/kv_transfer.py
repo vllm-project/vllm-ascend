@@ -75,6 +75,7 @@ class KVTransferThread(threading.Thread):
         req_id: str,
         tokens: torch.Tensor,
         block_ids: list[int],
+        current_event,
         mask: Optional[torch.Tensor] = None,
         is_last_chunk: Optional[bool] = None,
     ) -> torch.Tensor:
@@ -82,6 +83,7 @@ class KVTransferThread(threading.Thread):
             "req_id": req_id,
             "tokens": tokens,
             "block_ids": block_ids,
+            "current_event": current_event,
             "mask": mask,
             "is_last_chunk": is_last_chunk,
         })
@@ -141,6 +143,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         mask = req_meta["mask"]
         block_ids = req_meta["block_ids"]
         req_id = req_meta["req_id"]
+        current_event = req_meta["current_event"]
         is_last_chunk = req_meta["is_last_chunk"]
         if self.m_store.config.use_ascend_direct:
             addr_list = []
@@ -155,7 +158,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
                 blockIds.append(block_id)
-            torch.npu.current_stream().synchronize()
+            current_event.wait()
             self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
         else:
             torch.npu.current_stream().synchronize()
