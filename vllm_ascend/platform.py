@@ -162,6 +162,13 @@ class NPUPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        if ascend_compilation_config:
+            vllm_config.additional_config.setdefault(
+                "ascend_compilation_config", {}).update(
+                    vars(ascend_compilation_config
+                         ) if not isinstance(ascend_compilation_config, dict)
+                    else ascend_compilation_config)
 
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)

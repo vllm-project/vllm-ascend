@@ -65,8 +65,6 @@ class ACLGraphWrapper:
                  cudagraph_options: Optional[CUDAGraphOptions] = None):
         self.runnable = runnable
         self.vllm_config = vllm_config
-        self.ascend_compilation_config: dict = vllm_config.additional_config.get(
-            "ascend_compilation_config", {})
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
 
@@ -103,7 +101,7 @@ class ACLGraphWrapper:
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or \
-                    aclgraph_runtime_mode != self.runtime_mode:
+                            aclgraph_runtime_mode != self.runtime_mode:
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
             # running without aclgraphs.
             # We do not trigger capture/replay if the runtime mode is not

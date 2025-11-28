@@ -159,19 +159,11 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self,
-                 enable_graph_fusion: bool = True,
-                 enable_quantization_fusion: bool = True,
-                 **kwargs):
+    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
         """
         Initialize the configuration.
         
         Args:
-            enable_graph_fusion (bool): Whether to enable graph fusion optimization. 
-                When set to True, the system will attempt to fuse multiple operations 
-                into more efficient computational graph structures to improve performance.
-                Default: True
-                
             enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
                 When set to True, the system will optimize quantization-related operations,
                 reducing the number of quantization/dequantization nodes.
@@ -179,7 +171,6 @@ class AscendCompilationConfig:
                 
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
-        self.enable_graph_fusion = enable_graph_fusion
         self.enable_quantization_fusion = enable_quantization_fusion
         # Add more compilation related configs here as needed
 
@@ -366,11 +357,6 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
-            if ascend_config.ascend_compilation_config.enable_graph_fusion:
-                logger.info(
-                    "graph fusion enabled! Automatic kernel fusion is expected."
-                )
-
             if ascend_config.ascend_compilation_config.enable_quantization_fusion:
                 logger.info(
                     "Quantization fusion enabled! op fusion on quantization are expected. "
