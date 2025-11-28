@@ -219,13 +219,18 @@ class AscendW8A8DynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            mix_placement=getattr(layer.ascend_config, "mix_placement",
+                                  False),
+            num_logical_experts=global_num_experts -
+            global_redundant_expert_num,
             global_num_experts=global_num_experts)
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+            topk_ids = torch.randint_like(
+                topk_ids, 0, global_num_experts - global_redundant_expert_num)
 
         if self.use_aclgraph:
             moe_comm_method = get_forward_context().moe_comm_method
@@ -249,7 +254,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
+            w1_scale=layer.w13_weight_scale.to(torch.float32),
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,
