@@ -14,12 +14,12 @@ from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
 class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
 
     def __init__(self):
+        self.kv_transfer_config = get_current_vllm_config().kv_transfer_config
         super().__init__()
 
     @staticmethod
     def apply(layer, x, bias=None, tp_rank=0):
-        kv_transfer_config = get_current_vllm_config().kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+        if layer.is_kv_consumer:
             return AscendW8A8LinearMethod.apply(layer, x, bias, tp_rank)
         else:
             return AscendW8A8DynamicLinearMethod.apply(layer, x, bias, tp_rank)
@@ -55,6 +55,7 @@ class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
+        layer.is_kv_consumer = self.kv_transfer_config is not None and self.kv_transfer_config.is_kv_consumer
 
 
 class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
