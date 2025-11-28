@@ -64,9 +64,14 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     dynamic_scale: torch.Tensor = None,
                     w1_scale_bias: torch.Tensor = None,
                     w2_scale_bias: torch.Tensor = None,
+                    w1_offset: Optional[torch.Tensor] = None,
+                    w2_offset: Optional[torch.Tensor] = None,
                     fusion: bool = False,
                     dynamic_eplb: bool = False) -> torch.Tensor:
-    if dynamic_scale is None:
+    if w1_offset is not None:
+        unquantized_hidden_states = hidden_states
+        quantized_hidden_states = None
+    elif dynamic_scale is None:
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
             hidden_states)
@@ -75,6 +80,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         dispose_tensor(unquantized_hidden_states)
         quantized_hidden_states = None
     else:
+        unquantized_hidden_states = None
         pertoken_scale = dynamic_scale
         quantized_hidden_states = hidden_states
 
@@ -86,7 +92,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
             hidden_states)
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
-    if w1_scale_bias is None and is_mc2:
+    if w1_scale_bias is None and w1_offset is None and is_mc2:
         if fusion and not dynamic_eplb:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
@@ -134,6 +140,32 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=w2_scale.dtype)[0]
+    elif w1_offset is not None:
+        # gmm1: gate_up_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[unquantized_hidden_states],
+            weight=[w1],
+            antiquant_scale=[w1_scale],
+            antiquant_offset=[w1_offset],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=_output_dtype)[0]
+        dispose_tensor(unquantized_hidden_states)
+        # act_fn: swiglu
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        # gmm2: down_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w2],
+            antiquant_scale=[w2_scale],
+            antiquant_offset=[w2_offset],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=_output_dtype)[0]
     else:
         if w1_scale_bias is not None:
             if group_list_type == 0:

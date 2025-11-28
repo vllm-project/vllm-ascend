@@ -3327,13 +3327,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
                     # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
                     # and rope head dim.
-                    if self.model_config.is_deepseek_mla:
+                    if self.model_config.use_mla:
                         head_size = self.model_config.hf_text_config.qk_rope_head_dim + \
                             self.model_config.hf_text_config.kv_lora_rank
 
                     dsa_k_cache_factor = None
                     dsa_k_cache_size = None
-                    if not self.model_config.is_deepseek_mla:
+                    if not self.model_config.use_mla:
                         # for non-mla model, use FullAttentionSpec
                         k_tensor_split_factor = 2
                         v_tensor_split_factor = 2
@@ -3483,7 +3483,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    if not self.model_config.is_deepseek_mla:
+                    if not self.model_config.use_mla:
                         k_shape = kv_cache_shape[1:]
                         v_shape = k_shape
                     else:
