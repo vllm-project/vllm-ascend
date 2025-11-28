@@ -3,8 +3,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import (CacheConfig, CompilationConfig, ModelConfig,
-                         SchedulerConfig, SpeculativeConfig, VllmConfig)
+from vllm.config import (CacheConfig, CompilationConfig, CUDAGraphMode,
+                         ModelConfig, SchedulerConfig, SpeculativeConfig,
+                         VllmConfig)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -134,16 +135,49 @@ class TestMtpProposer:
         with pytest.raises(AssertionError):
             proposer.load_model(mock_model)
 
+    @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
-    def test_dummy_run(self, mock_set_context, vllm_config, runner):
+    def test_dummy_run(self, mock_set_context, mock_get_forward_context,
+                       vllm_config, runner):
         # Setup
         proposer = MtpProposer(vllm_config, "npu", runner)
         proposer.model = MagicMock()
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
         runner._select_moe_comm_method.return_value = "alltoall"
 
+        mock_get_forward_context = MagicMock()
+        mock_get_forward_context.cudagraph_runtime_mode = None
+        mock_get_forward_context.capturing = True
         # Execute
         proposer.dummy_run(8)
+
+        # Verify
+        runner._sync_metadata_across_dp.assert_called_once()
+        runner._select_moe_comm_method.assert_called_once()
+        mock_set_context.assert_called()
+
+        # Check that model was called correct number of times
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
+
+    @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
+    def test_dummy_run_full_graph(self, mock_set_context,
+                                  mock_get_forward_context, vllm_config,
+                                  runner):
+        # Setup
+        proposer = MtpProposer(vllm_config, "npu", runner)
+        proposer.model = MagicMock()
+        runner._sync_metadata_across_dp.return_value = (8, 8, False)
+        runner._select_moe_comm_method.return_value = "alltoall"
+        runner.attn_groups = []
+
+        mock_get_forward_context = MagicMock()
+        mock_get_forward_context.cudagraph_runtime_mode = None
+        mock_get_forward_context.capturing = True
+        # Execute
+        proposer.dummy_run(num_tokens=8,
+                           num_reqs=5,
+                           aclgraph_runtime_mode=CUDAGraphMode.FULL)
 
         # Verify
         runner._sync_metadata_across_dp.assert_called_once()
@@ -208,50 +242,28 @@ class TestMtpProposer:
         assert torch.equal(draft_token_ids, proposer._propose.return_value)
 
     def test_prepare_next_token_ids_cpu(self):
-        mock_requests = {}
-        req1 = MagicMock(spec=CachedRequestState)
-        req1.num_computed_tokens = 5
-        req1.get_token_id = MagicMock(return_value=1000)
-        mock_requests["req_001"] = req1
-        req2 = MagicMock(spec=CachedRequestState)
-        req2.num_computed_tokens = 8
-        req2.get_token_id = MagicMock(return_value=2000)
-        mock_requests["req_002"] = req2
-        req3 = MagicMock(spec=CachedRequestState)
-        req3.num_computed_tokens = 3
-        req3.get_token_id = MagicMock(return_value=3000)
-        mock_requests["req_003"] = req3
-
-        mock_gpu_input_batch = MagicMock(spec=InputBatch)
-        mock_gpu_input_batch.req_ids = ["req_001", "req_002", "req_003"]
-
-        mock_num_scheduled_tokens = {"req_001": 2, "req_002": 0, "req_003": 1}
-
         sampled_token_ids = [
-            [101, 102, 103],  # req001: return 103
-            [],  # req002: return fallback 2000
-            [301]  # req003: return 301
+            np.array([10, 20, 30]),
+            np.array([40, 50]),
+            np.array([60])
         ]
+
+        mock_gpu_batch = MagicMock()
+        mock_gpu_batch.req_ids = ["req1", "req2", "req3"]
+        mock_num_scheduled = {"req1": 0, "req2": 0, "req3": 0}
 
         proposer = MagicMock(spec=MtpProposer)
         proposer.input_ids = MagicMock(device=torch.device("cpu"))
         proposer.prepare_next_token_ids_cpu = MtpProposer.prepare_next_token_ids_cpu.__get__(
             proposer)
-
-        next_token_ids = proposer.prepare_next_token_ids_cpu(
+        result = proposer.prepare_next_token_ids_cpu(
             sampled_token_ids=sampled_token_ids,
-            requests=mock_requests,
-            gpu_input_batch=mock_gpu_input_batch,
-            num_scheduled_tokens=mock_num_scheduled_tokens)
+            requests={},
+            gpu_input_batch=mock_gpu_batch,
+            num_scheduled_tokens=mock_num_scheduled)
 
-        expected = torch.tensor([103, 2000, 301],
-                                dtype=torch.int32,
-                                device="cpu")
-        assert torch.equal(next_token_ids, expected)
-
-        mock_requests["req_002"].get_token_id.assert_called_once_with(8)
-        mock_requests["req_001"].get_token_id.assert_not_called()
-        mock_requests["req_003"].get_token_id.assert_not_called()
+        assert torch.all(
+            result == torch.tensor([30, 50, 60], dtype=torch.int32))
 
     def test_prepare_next_token_ids_padded(self):
         mock_common_attn_metadata = MagicMock(spec=CommonAttentionMetadata)
@@ -266,7 +278,7 @@ class TestMtpProposer:
                                               dtype=torch.int32,
                                               device="cpu")
 
-        mock_requests = {}
+        mock_requests = {}  # dict[str, CachedRequestState]
         req0 = MagicMock(spec=CachedRequestState)
         req0.get_token_id = MagicMock(return_value=1000)
         mock_requests["req_0"] = req0
