@@ -1,3 +1,14 @@
+import sys
+import types
+import unittest
+from unittest.mock import MagicMock
+
+fake_engine = types.ModuleType("mooncake.engine")
+fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
+sys.modules["mooncake.engine"] = fake_engine
+
+from vllm_ascend.distributed.kvpool.mooncake_backend import (  # noqa: E402
+    _convert_to_bytes, _parse_global_segment_size)
 import unittest
 from unittest.mock import MagicMock, patch
 
