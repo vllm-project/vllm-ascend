@@ -78,7 +78,7 @@ This optimization is enabled by setting --async-scheduling
 - `QWEN3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
 - `QWEN3-14B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) node or 2 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
 - `QWEN3-32B`(BF16 version): require 4 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800I A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
-- `Qwen3-32B-W8A8`(Quantized version): require 4 Atlas 800 A3 (64G × 16) node or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
+- `Qwen3-32B-W8A8`(Quantized version): require 4 Atlas 800 A3 (64G × 16) node or 4 Atlas 800I A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -163,10 +163,21 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 
 # Performance optimization of memory management
-# if os is Ubuntu,install it using `apt install libjemalloc2`
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-#if os is openEuler,install it using `yum install jemalloc`
-export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD
+# if os is Ubuntu
+apt update
+apt install libjemalloc2
+#if os is openEuler, add `sslverify=0` to each warehouse paragraph
+cp /etc/yum.repos.d/openEuler.repo /etc/yum.repos.d/openEuler.repo.bak
+vim /etc/yum.repos.d/openEuler.repo
+yum install jemalloc
+# Add the LD_PRELOAD environment variable
+if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
+    # On Ubuntu, first install with `apt install libjemalloc2`
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+elif [ -f /usr/lib64/libjemalloc.so.2 ]; then
+    # On openEuler, first install with `yum install jemalloc`
+    export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD
+fi
 
 # Enable the AIVector core to directly schedule ROCE communication
 export HCCL_OP_EXPANSION_MODE="AIV"
