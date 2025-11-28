@@ -326,14 +326,12 @@ class AscendAttentionMetadataBuilder:
                                                                        + 1]
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
-        if attn_state == AscendAttentionState.DecodeOnly and \
-                common_attn_metadata.num_input_tokens > num_actual_tokens:
+        if common_attn_metadata.num_input_tokens > num_actual_tokens:
             padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
             seq_lens = torch.cat([
                 seq_lens,
-                torch.ones(padded_num_tokens,
-                           dtype=seq_lens.dtype,
-                           device=seq_lens.device)
+                torch.tensor([padded_num_tokens
+                              ]).to(seq_lens.device).to(seq_lens.dtype)
             ])
             block_table_padding = torch.zeros(
                 (padded_num_tokens, ) + block_table.shape[1:],
@@ -342,10 +340,8 @@ class AscendAttentionMetadataBuilder:
             block_table = torch.cat([block_table, block_table_padding], dim=0)
             query_start_loc_cpu = torch.cat([
                 query_start_loc_cpu,
-                torch.arange(query_start_loc_cpu[-1] + 1,
-                             query_start_loc_cpu[-1] + padded_num_tokens,
-                             dtype=query_start_loc_cpu.dtype,
-                             device=query_start_loc_cpu.device)
+                torch.tensor([query_start_loc_cpu[-1] + padded_num_tokens]).to(
+                    query_start_loc_cpu.device).to(query_start_loc_cpu.dtype)
             ])
 
         query_start_loc = query_start_loc_cpu.to(self.device,
@@ -621,7 +617,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         num_tokens = attn_metadata.query_start_loc_list[-1]
-        query = query[:num_tokens]
         graph_params = get_graph_params()
         query_start_loc = attn_metadata.query_start_loc_list
         # Prepare tensors for attention output
