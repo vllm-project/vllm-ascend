@@ -169,7 +169,7 @@ apt install libjemalloc2
 #if os is openEuler, add `sslverify=0` to each warehouse paragraph in openEuler.repo
 cp /etc/yum.repos.d/openEuler.repo /etc/yum.repos.d/openEuler.repo.bak
 sed -i '/^name.*$/a sslverify=0' /etc/yum.repos.d/openEuler.repo
-yum install jemalloc
+yum install -y jemalloc
 # Add the LD_PRELOAD environment variable
 if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
     # On Ubuntu, first install with `apt install libjemalloc2`
