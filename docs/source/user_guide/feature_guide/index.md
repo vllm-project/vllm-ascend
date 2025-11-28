@@ -14,6 +14,6 @@ lora
 eplb_swift_balancer
 netloader
 dynamic_batch
-kv_pool_mooncake
+kv_pool
 external_dp
 :::
