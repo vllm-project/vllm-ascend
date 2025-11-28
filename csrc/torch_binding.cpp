@@ -587,6 +587,63 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(
+    const at::Tensor &x,
+    const at::Tensor &expert_ids,
+    const at::Tensor &gmm1_permuted_weight,
+    const at::Tensor &gmm1_permuted_weight_scale,
+    const at::Tensor &gmm2_weight,
+    const at::Tensor &gmm2_weight_scale,
+    const at::Tensor &expert_smooth_scales_optional,
+    const at::Tensor &expert_scales_optional,
+    c10::string_view hcom_ep_name,
+    int64_t num_ranks,
+    int64_t rank,
+    int64_t moe_expert_num,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs)
+{
+    auto x_shape = x.sizes();
+    int bs = x_shape[0];
+    int h = x_shape[1];
+
+    at::Tensor output = at::empty({bs, h}, x.options());
+
+    bool is_shared_expert = (rank < shared_expert_rank_num);
+    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (num_ranks - shared_expert_rank_num);
+    at::Tensor ep_recv_count = at::empty({num_local_experts * num_ranks}, expert_ids.options());
+
+    vector<char> group_ep_chrs(hcom_ep_name.begin(), hcom_ep_name.end());
+    group_ep_chrs.push_back('\0');
+    char *group_ep_ptr = &group_ep_chrs[0];
+    EXEC_NPU_CMD(
+        // op api
+        aclnnDispatchGmmCombineDecode,
+        // input tensors
+        x,
+        expert_ids,
+        gmm1_permuted_weight,
+        gmm1_permuted_weight_scale,
+        gmm2_weight,
+        gmm2_weight_scale,
+        expert_smooth_scales_optional,
+        expert_scales_optional,
+        //input attrs
+        group_ep_ptr,
+        num_ranks,
+        rank,
+        moe_expert_num,
+        shared_expert_num,
+        shared_expert_rank_num,
+        quant_mode,
+        global_bs,
+        // output tensors
+        output,
+        ep_recv_count);
+    return {output, ep_recv_count};
+}
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -657,4 +714,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                                  (Tensor output, Tensor output_scale, Tensor output_offset)"
     );
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz_tensor_list);
+
+    ops.def(
+        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor gmm1_permuted_weight,"
+        "                            Tensor gmm1_permuted_weight_scale,"
+        "                            Tensor gmm2_weight, Tensor gmm2_weight_scale,"
+        "                            Tensor expert_smooth_scales_optional, Tensor expert_scales_optional,"
+        "                            str hcom_ep_name,"
+        "                            int num_ranks, int rank, int moe_expert_num,"
+        "                            int shared_expert_num, int shared_expert_rank_num,"
+        "                            int quant_mode,"
+        "                            int global_bs) -> (Tensor output, Tensor ep_recv_count)"
+    );
+    ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 }

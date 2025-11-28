@@ -15,7 +15,15 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
-    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list"
+    # depdendency: catlass
+    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass
+    if [[ ! -d "${CATLASS_PATH}" ]]; then
+        echo "depdendency catlass does not exist, please run 'git submodule update --init --recursive'"
+        exit 1
+    fi
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH=${ABSOLUTE_CATLASS_PATH}/include:${CPATH}
+    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;dispatch_gmm_combine_decode"
     SOC_ARG="ascend910_93"
 else
     # others
