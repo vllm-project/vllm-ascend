@@ -162,6 +162,7 @@ class MtpProposer(Proposer):
         )
         self.use_sparse = hasattr(vllm_config.model_config.hf_config,
                                   "index_topk")
+        self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
 
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
@@ -711,7 +712,11 @@ class MtpProposer(Proposer):
                                                uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
-
+        if self.use_async_scheduling:
+            # there is synchronize between mtp steps when enable aclgraph,
+            # disable aclgraph when use async scheduling to avoid the
+            # synchronize overhead.
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
             graph_pad_size = num_input_tokens
