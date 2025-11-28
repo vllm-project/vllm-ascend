@@ -41,11 +41,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
-                               aligned_16, get_ascend_device_type, nd_to_nz_2d,
-                               nd_to_nz_spec, prefill_context_parallel_enable,
-                               weak_ref_tensors)
+from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -572,8 +568,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              output: torch.Tensor,
                              num_tokens=0):
         if self.pcp_size * self.dcp_size > 1:
-            attn_output = self._forward_pcp_dcp(
-                query, key, value, kv_cache, attn_metadata, output)
+            attn_output = self._forward_pcp_dcp(query, key, value, kv_cache,
+                                                attn_metadata, output)
             return attn_output, query.shape[0]
         elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
@@ -1350,12 +1346,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value
 
     def _forward_encode(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            attn_metadata: AscendMetadata,
-            output: torch.Tensor,
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
     ) -> torch.Tensor:
         cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
         output = torch_npu.npu_fusion_attention(
@@ -1470,9 +1466,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                output = self._forward_decode_only(query, attn_metadata, output)
+                output = self._forward_decode_only(query, attn_metadata,
+                                                   output)
             else:
-                output = self._forward_prefill(query, key, value, attn_metadata, output)
+                output = self._forward_prefill(query, key, value,
+                                               attn_metadata, output)
         else:
             attn_output, num_tokens = self.full_graph_attention(
                 query, key, value, kv_cache, attn_metadata, output)
