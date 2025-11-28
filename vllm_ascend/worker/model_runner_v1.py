@@ -832,11 +832,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # of the request. for example:
             # fist step: num_computed_tokens = 0, spec_tokens = [],
             # prev_num_draft_len = 0.
-            # second step: num_computed_tokens = 100(prompt lenth),
+            # second step: num_computed_tokens = 100(prompt length),
             # spec_tokens = [a,b], prev_num_draft_len = 0.
             # third step: num_computed_tokens = 100 + 2, spec_tokens = [c,d],
             # prev_num_draft_len = 2.
-            # num_computed_tokens in first step and second step does't contain
+            # num_computed_tokens in first step and second step doesn't contain
             # the spec tokens length, but in third step it contains the
             # spec tokens length. we only need to update num_computed_tokens
             # when prev_num_draft_len > 0.
