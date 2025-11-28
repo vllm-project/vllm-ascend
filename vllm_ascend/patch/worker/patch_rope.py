@@ -15,17 +15,19 @@
 # limitations under the License.
 #
 
-from vllm.triton_utils import HAS_TRITON
+import torch
+import torch.nn as nn
+from vllm.model_executor.layers.rotary_embedding.base import \
+    RotaryEmbeddingBase
 
-if HAS_TRITON:
-    import vllm_ascend.patch.worker.patch_triton
 
-# isort: off
-import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-import vllm_ascend.patch.worker.patch_distributed  # noqa
-import vllm_ascend.patch.worker.patch_roberta  # noqa
-import vllm_ascend.patch.worker.patch_weight_loader  # noqa
-import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
-import vllm_ascend.patch.worker.patch_minicpm  # noqa
-import vllm_ascend.patch.worker.patch_qwen2_5_vl  # noqa
-import vllm_ascend.patch.worker.patch_rope  # noqa
+class AscendRotaryEmbeddingBase(nn.Module):
+
+    def get_cos_sin(self, seqlen: int) -> tuple[torch.Tensor, torch.Tensor]:
+        cos_sin = self.cos_sin_cache[:seqlen]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        return cos, sin
+
+
+# NOTE: These will be removed after vllm-ascend is aligned with vllm latest main.
+RotaryEmbeddingBase.get_cos_sin = AscendRotaryEmbeddingBase.get_cos_sin
