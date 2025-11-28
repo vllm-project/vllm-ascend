@@ -423,50 +423,20 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
                 non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
 
-            batch_size = initial_state.shape[0]
-            core_attn_out = []
-            last_recurrent_state = []
-
-            for b_idx in range(batch_size):
-                start, end = non_spec_query_start_loc[
-                    b_idx], non_spec_query_start_loc[b_idx + 1]
-                cur_q = query_non_spec[:, start:end, ...]
-                cur_k = key_non_spec[:, start:end, ...]
-                cur_v = value_non_spec[:, start:end, ...]
-                cur_g = g_non_spec[:, start:end, ...]
-                cur_b = beta_non_spec[:, start:end, ...]
-                cur_state = initial_state[b_idx].unsqueeze(0)
-
-                (
-                    cur_core_attn_out_non_spec,
-                    cur_last_recurrent_state,
-                ) = chunk.chunk_gated_delta_rule(
-                    query=cur_q,
-                    key=cur_k,
-                    value=cur_v,
-                    g=cur_g,
-                    beta=cur_b,
-                    initial_state=cur_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                )
-
-                core_attn_out.append(cur_core_attn_out_non_spec)
-                last_recurrent_state.append(cur_last_recurrent_state)
-
-            tar_dtype = core_attn_out[0].dtype
-            tar_device = core_attn_out[0].device
-            tar_shape = list(core_attn_out[0].shape)
-            tar_shape[1] = non_spec_query_start_loc[-1]
-            core_attn_out_non_spec = torch.empty(tar_shape,
-                                                 dtype=tar_dtype,
-                                                 device=tar_device)
-            for b_idx in range(batch_size):
-                cur_core_attn_out = core_attn_out[b_idx]
-                start, end = non_spec_query_start_loc[
-                    b_idx], non_spec_query_start_loc[b_idx + 1]
-                core_attn_out_non_spec[:, start:end, ...] = cur_core_attn_out
-            last_recurrent_state = torch.cat(last_recurrent_state, dim=0)
+            (
+                core_attn_out_non_spec,
+                last_recurrent_state,
+            ) = chunk.chunk_gated_delta_rule(
+                q=query_non_spec,
+                k=key_non_spec,
+                v=value_non_spec,
+                g=g_non_spec,
+                beta=beta_non_spec,
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=non_spec_query_start_loc,
+                head_first=False,
+                use_qk_l2norm_in_kernel=True)
 
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
