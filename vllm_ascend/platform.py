@@ -290,13 +290,17 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
+            # ignore block size check if model is qwen3-next
+            # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
             if not (model_config
                     and model_config.hf_config.model_type == "qwen3_next"):
-                # override block size to 128 except qwen3-next
-                # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-                logger.warning(
-                    "block size must be set to 128 on NPU platform.")
-                cache_config.block_size = 128
+                # we must set block size to 128 if prefix caching is enabled or chunked prefill is enabled
+                if cache_config.enable_prefix_caching or \
+                    (vllm_config.scheduler_config and vllm_config.scheduler_config.enable_chunked_prefill):
+                    if cache_config.block_size != 128:
+                        logger.warning(
+                            "block size must be set to 128 on NPU platform.")
+                        cache_config.block_size = 128
 
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:

@@ -1954,8 +1954,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
         # splitfuse
-        else:
+        elif self.scheduler_config.enable_chunked_prefill:
             attn_state = AscendAttentionState.ChunkedPrefill
+        else:
+            attn_state = AscendAttentionState.PrefillCacheHit
         return attn_state
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
