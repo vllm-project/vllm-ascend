@@ -409,8 +409,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                     dtype=torch.int32,
                                     device=self.device)
 
-        if self.vllm_config.model_config.use_mla and \
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+        if self.vllm_config.model_config.use_mla:
             rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
             self.cos = torch.ones(self.max_num_reqs *
                                   self.decode_token_per_req,
