@@ -8,6 +8,7 @@ from vllm.attention.layer import Attention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -23,6 +24,10 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               set_mtp_graph_params,
+                                               update_attn_params,
+                                               update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 
 PADDING_SLOT_ID = -1
@@ -38,6 +43,7 @@ class EagleProposer(Proposer):
         self.vllm_config = vllm_config
         self.device = device
         self.runner = runner
+        self.num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
 
         self.block_size = vllm_config.cache_config.block_size
         # We need to get the hidden size from the draft model config because
@@ -87,6 +93,14 @@ class EagleProposer(Proposer):
         self.model = get_model(vllm_config=self.vllm_config,
                                model_config=self.vllm_config.
                                speculative_config.draft_model_config)
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
+        ):
+            self.update_stream = torch.npu.Stream()
+            set_mtp_graph_params(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes)
+            self.model = ACLGraphWrapper(self.model,
+                                         self.vllm_config,
+                                         runtime_mode=CUDAGraphMode.FULL)
         draft_attn_layer_names = (get_layers_from_vllm_config(
             self.vllm_config, AttentionLayerBase).keys() -
                                   target_attn_layer_names)
@@ -125,15 +139,77 @@ class EagleProposer(Proposer):
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None):
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
-        with set_ascend_forward_context(None,
-                                        self.vllm_config,
-                                        moe_comm_type=moe_comm_type,
-                                        num_tokens=num_tokens):
-            self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
+
+        attn_metadata = None
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(
+                self.runner.attn_groups) > 0:
+            num_computed_tokens_cpu = (
+                self.runner.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs])
+            common_attn_metadata = AscendCommonAttentionMetadata(
+                query_start_loc=self.runner.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.runner.query_start_loc_cpu[:num_reqs +
+                                                                    1],
+                seq_lens_cpu=self.runner.seq_lens_cpu,
+                seq_lens=self.runner.seq_lens_cpu[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=num_tokens,
+                max_query_len=self.num_speculative_tokens + 1,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+                block_table_tensor=self.runner.input_batch.block_table[0].
+                get_device_tensor()[:num_reqs],
+                slot_mapping=self.runner.input_batch.block_table[0].
+                slot_mapping,
+                positions=self.runner.positions,
+                attn_mask=self.runner.attn_mask,
+                fia_attn_mask=self.runner.fia_attn_mask,
+                spec_attn_mask=self.runner.spec_attn_mask,
+                attn_state=self.runner.attn_state,
+                decode_token_per_req=self.runner.decode_token_per_req,
+                cos=self.runner.cos,
+                sin=self.runner.sin,
             )
+
+            builder = self.runner.attn_groups[0][0].get_metadata_builder()
+            attn_metadata_mtp = builder.build_for_graph_capture(
+                common_attn_metadata, AscendAttentionState.SpecDecoding)
+            attn_metadata = {}
+            for layer_name in [self.attn_layer_name]:
+                attn_metadata[layer_name] = attn_metadata_mtp
+        for i in range(self.num_speculative_tokens):
+            if i > 0:
+                aclgraph_runtime_mode = CUDAGraphMode.NONE
+            with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    moe_comm_type=moe_comm_type,
+                    num_tokens=num_tokens,
+                    batch_descriptor=batch_descriptor,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    is_draft_model=True):
+                forward_context = get_forward_context()
+                self.model(
+                    input_ids=self.input_ids[:num_tokens],
+                    positions=self.positions[:num_tokens],
+                    hidden_states=self.hidden_states[:num_tokens],
+                )
+                if (forward_context.cudagraph_runtime_mode
+                        == CUDAGraphMode.FULL
+                        and not forward_context.capturing):
+                    if self.vllm_config.model_config.use_mla:
+                        update_mla_attn_params(
+                            self.update_stream,
+                            forward_context,
+                            num_tokens,
+                            self.vllm_config.speculative_config,
+                        )
+                    else:
+                        update_attn_params(
+                            self.update_stream,
+                            forward_context,
+                            num_tokens,
+                        )
 
     def generate_token_ids(self,
                            valid_sampled_token_ids: list[np.ndarray],
@@ -353,6 +429,7 @@ class EagleProposer(Proposer):
                 slot_mapping,
                 positions=self.runner.positions,
                 attn_mask=self.runner.attn_mask,
+                fia_attn_mask=self.runner.fia_attn_mask,
                 spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
@@ -386,6 +463,12 @@ class EagleProposer(Proposer):
 
         return cu_num_tokens, arange
 
+    def get_model(self) -> nn.Module:
+        # get raw model out of the aclgraph wrapper.
+        if isinstance(self.model, ACLGraphWrapper):
+            return self.model.unwrap()
+        return self.model
+
     def _propose(
         self,
         # [num_tokens]
@@ -412,7 +495,7 @@ class EagleProposer(Proposer):
         last_token_indices = cu_num_tokens[1:] - 1
         target_positions = target_positions.cpu()
         if self.name == SpecDcodeType.EAGLE3:
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            assert isinstance(self.get_model(), Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
@@ -444,6 +527,7 @@ class EagleProposer(Proposer):
             slot_mapping=target_slot_mapping,
             positions=target_positions,
             attn_mask=attn_mask,
+            fia_attn_mask=attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
@@ -461,19 +545,43 @@ class EagleProposer(Proposer):
 
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
+        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                           uniform_decode=True)
+        aclgraph_runtime_mode, batch_descriptor = \
+            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
+
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
-        with set_ascend_forward_context(attn_metadata,
-                                        self.vllm_config,
-                                        moe_comm_type=moe_comm_type,
-                                        num_tokens=num_input_tokens):
+        with set_ascend_forward_context(
+            {self.attn_layer_name: attn_metadata},
+                self.vllm_config,
+                moe_comm_type=moe_comm_type,
+                num_tokens=num_input_tokens,
+                batch_descriptor=batch_descriptor,
+                aclgraph_runtime_mode=aclgraph_runtime_mode,
+                is_draft_model=True):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
+            forward_context = get_forward_context()
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                if self.vllm_config.model_config.use_mla:
+                    update_mla_attn_params(
+                        self.update_stream,
+                        forward_context,
+                        num_tokens,
+                        self.vllm_config.speculative_config,
+                    )
+                else:
+                    update_attn_params(
+                        self.update_stream,
+                        forward_context,
+                        num_tokens,
+                    )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
@@ -570,7 +678,8 @@ class EagleProposer(Proposer):
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
                                             moe_comm_type=moe_comm_type,
-                                            num_tokens=input_batch_size):
+                                            num_tokens=input_batch_size,
+                                            is_draft_model=True):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],

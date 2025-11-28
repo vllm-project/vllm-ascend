@@ -31,9 +31,9 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               get_mtp_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (
+    get_graph_params, get_mtp_graph_params, update_graph_params_workspaces,
+    update_mtp_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
@@ -1390,7 +1390,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_mtp_model:
+        if forward_context.is_draft_model:
             graph_params = get_mtp_graph_params()
         else:
             graph_params = get_graph_params()
@@ -1406,7 +1406,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs)
-                update_graph_params_workspaces(num_tokens, workspace)
+                if forward_context.is_draft_model:
+                    update_mtp_graph_params_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
 
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty(num_tokens,
