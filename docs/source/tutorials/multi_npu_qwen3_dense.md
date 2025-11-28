@@ -123,10 +123,10 @@ The specific example scenario is as follows:
 #### **Attention**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 - v0.11.0rc2 is image tag, replace this with your actual tag.
-- '-p 8113:8113' is the port, replace this with your actual port.
+- replace this with your actual port: '-p 8113:8113'.
+- replace this with your actual card: '--device /dev/davinci0'.
 
 ```{code-block} bash
-   :substitutions:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc2
 docker run --rm \
