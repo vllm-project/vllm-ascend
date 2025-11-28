@@ -73,7 +73,7 @@ def get_value_from_lines(lines: List[str], key: str) -> str:
     return ""
 
 
-def get_chip_info() -> str:
+def get_chip_type() -> str:
     try:
         npu_info_lines = subprocess.check_output(
             ['npu-smi', 'info', '-l']).decode().strip().split('\n')
@@ -106,19 +106,27 @@ def get_chip_info() -> str:
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Get chip info failed: {e}")
     except FileNotFoundError:
-        # cpu envir, release code case, return `ascend910b1` by default
-        return "ascend910b1"
+        logging.warning(
+            "npu-smi command not found, if this is an npu envir, please check if npu driver is installed correctly."
+        )
+        return ""
 
 
 envs = load_module_from_path("envs",
                              os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
-soc_version = get_chip_info()
+soc_version = get_chip_type()
 
 if not envs.SOC_VERSION:
+    if not soc_version:
+        raise RuntimeError(
+            "Could not determine chip type automatically via 'npu-smi'. "
+            "This can happen in a CPU-only environment. "
+            "Please set the 'SOC_VERSION' environment variable to specify the target chip."
+        )
     envs.SOC_VERSION = soc_version
 else:
-    if envs.SOC_VERSION != soc_version:
+    if soc_version and envs.SOC_VERSION != soc_version:
         logging.warning(
             f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}"
         )
@@ -126,10 +134,6 @@ else:
 
 def gen_build_info():
     soc_version = envs.SOC_VERSION
-    if "310" in soc_version and not envs.COMPILE_CUSTOM_KERNELS:
-        raise ValueError(
-            "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
-        )
 
     # TODO(zzzzwwjj): Add A5 case
     soc_to_device = {
@@ -157,6 +161,11 @@ def gen_build_info():
 
     assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
     device_type = soc_to_device[soc_version]
+
+    if device_type == "_310P" and not envs.COMPILE_CUSTOM_KERNELS:
+        raise ValueError(
+            "device type 310P only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
+        )
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
     with open(package_dir, "w+") as f:

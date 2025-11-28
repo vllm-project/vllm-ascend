@@ -69,6 +69,7 @@ jobs:
         ls
         docker build -f ./.github/Dockerfile.buildwheel \
         --build-arg PY_VERSION=${{ matrix.python-version }} \
+        --build-arg SOC_VERSION=ascend910b1 \
         -t wheel:v1 .
         docker run --rm \
         -u $(id -u):$(id -g) \
@@ -97,6 +98,7 @@ jobs:
           --exclude libc_sec.so \
           --exclude "libascend*.so" \
           --exclude "libtorch*.so" \
+          --exclude "libopapi.so" \
           --exclude "liberror_manager.so"
         done
         rm -f dist/*.whl
