@@ -144,6 +144,9 @@ class MtpProposer(Proposer):
         self.arange = torch.arange(max_num_slots_for_arange,
                                    device=device,
                                    dtype=torch.int32)
+        self.arange_cpu = torch.arange(
+            max_num_slots_for_arange, device="cpu", dtype=torch.int32
+        )
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -814,7 +817,7 @@ class MtpProposer(Proposer):
             # When disable_padded_drafter_batch=False, it should not to be updating these params, maybe.
             if self.speculative_config.disable_padded_drafter_batch or \
                     aclgraph_runtime_mode != CUDAGraphMode.FULL:
-                attn_metadata_i.decode.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
+                attn_metadata_i.decode.actual_seq_lengths_q = self.arange_cpu[
                     1:batch_size + 1].tolist()
                 if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                     attn_metadata_i.decode.actual_seq_lengths_q = \
