@@ -904,8 +904,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
-            return self.attn_mask_builder.get_attn_mask(
-                128, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask().to(
+                torch.bool)
         # Decode-only situation.
         else:
             return None
@@ -1587,10 +1587,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
+            if self.drafter and self.drafter.name in (SpecDcodeType.EAGLE,
+                                                      SpecDcodeType.EAGLE3):
                 attn_state = AscendAttentionState.ChunkedPrefill
+            else:
+                attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
