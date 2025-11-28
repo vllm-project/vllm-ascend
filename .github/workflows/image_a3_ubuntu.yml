@@ -127,6 +127,5 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
-          SOC_VERSION=ascend910_9391
         provenance: false
 
