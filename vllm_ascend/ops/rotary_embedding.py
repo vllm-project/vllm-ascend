@@ -407,7 +407,6 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        # TODO: This judgment will be removed once the mrope precision issue is fixed
         if self.mrope_section != [16, 24, 24]:
             return super().forward_oot(positions, query, key)
 
