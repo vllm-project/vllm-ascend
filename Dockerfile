@@ -15,15 +15,17 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:8.3.rc2-910b-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
 ARG MOONCAKE_TAG="v0.3.7.post2"
+ARG SOC_VERSION
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+ENV SOC_VERSION=$SOC_VERSION
 
 WORKDIR /workspace
 
@@ -46,10 +48,8 @@ RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=2918c1b49c88c29783c86f78d2c4221cb9622379
-# Revert this change once VLLM_TAG is specified to branch or tag
-# RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
-RUN git clone $VLLM_REPO /vllm-workspace/vllm && (cd /vllm-workspace/vllm && git checkout $VLLM_TAG)
+ARG VLLM_TAG=v0.11.2
+RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \

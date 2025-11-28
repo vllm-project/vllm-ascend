@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -128,4 +128,5 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
+          SOC_VERSION=ascend910b1
         provenance: false

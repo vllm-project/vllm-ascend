@@ -16,6 +16,7 @@ torchvision
 wheel
 pandas-stubs
 opencv-python-headless<=4.11.0.86 # Required to avoid numpy version conflict with vllm
+compressed_tensors>=0.11.0
 
 # requirements for disaggregated prefill
 msgpack
@@ -28,3 +29,5 @@ numba
 #--pre
 #--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 torch-npu==2.7.1
+
+transformers<=4.57.1

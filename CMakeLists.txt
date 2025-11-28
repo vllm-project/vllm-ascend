@@ -63,7 +63,8 @@ ascendc_library(vllm_ascend_kernels SHARED
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 file(GLOB VLLM_ASCEND_SRC
-${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp)
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 
 include_directories(
   ${pybind11_INCLUDE_DIRS}
@@ -81,6 +82,7 @@ set(
   ${TORCH_NPU_INCLUDE_DIRS}
   ${ASCEND_HOME_PATH}/include
   ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
+  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
@@ -88,6 +90,7 @@ pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 target_link_directories(
   vllm_ascend_C
   PRIVATE
+  ${TORCH_LIBRARY_DIRS}
   ${TORCH_NPU_PATH}/lib/
   ${ASCEND_HOME_PATH}/lib64
 )
@@ -96,7 +99,7 @@ target_link_libraries(
   vllm_ascend_C
   PUBLIC
   ${TORCH_LIBRARIES}
-  libtorch_npu.so
+  torch_npu
   vllm_ascend_kernels
   ascendcl
   tiling_api
@@ -104,6 +107,7 @@ target_link_libraries(
   platform
   ascendalog
   dl
+  opapi
 )
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib")

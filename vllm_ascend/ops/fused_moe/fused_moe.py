@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch_npu
-from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
@@ -43,9 +43,9 @@ from vllm_ascend.quantization.w4a8_dynamic import \
     AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
-                               is_enable_nz, npu_stream_switch,
-                               shared_expert_dp_enabled,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               npu_stream_switch, shared_expert_dp_enabled,
                                shared_experts_calculation_stream)
 
 
@@ -54,21 +54,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
-
-        # NOTE: Currently, this self.use_aclgraph is only used in
-        # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
-        # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
-        # Once torch.randint_like is supported or removed, this flag can be removed.
-        vllm_config = get_current_vllm_config()
-        ascend_config = get_ascend_config()
         self.dynamic_eplb = get_ascend_config().dynamic_eplb
-        if ascend_config.torchair_graph_config.enabled:
-            self.use_aclgraph = False
-        else:
-            self.use_aclgraph = (vllm_config.compilation_config.mode
-                                 == CompilationMode.VLLM_COMPILE and
-                                 not vllm_config.model_config.enforce_eager)
-
         self.transpose = True
 
     def process_weights_after_loading(self, layer):
@@ -93,7 +79,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p() and is_enable_nz():
+        if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
+        ):
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(
@@ -137,7 +124,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if enable_force_load_balance and not self.use_aclgraph:
+        if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -456,6 +443,13 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     @property
     def is_internal_router(self) -> bool:
+        return False
+
+    @property
+    def use_dp_chunking(self) -> bool:
+        """This func routes to the chunked forward path using the FlashInfer Cutlass kernel
+        only when data parallelism (DP) is enabled. Thus just returning False in vllm-ascend
+        """
         return False
 
     def forward(
