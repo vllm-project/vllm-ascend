@@ -1456,8 +1456,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         forward_context: ForwardContext = get_forward_context()
         if not forward_context.capturing:
             if self.pcp_size * self.dcp_size > 1:
-                attn_output = self._forward_pcp_dcp(
-                    query, key, value, kv_cache, attn_metadata, output)
+                attn_output = self._forward_pcp_dcp(query, key, value,
+                                                    kv_cache, attn_metadata,
+                                                    output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
             if self.attn_type == AttentionType.ENCODER_ONLY:
