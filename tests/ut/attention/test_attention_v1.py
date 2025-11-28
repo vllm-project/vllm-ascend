@@ -288,7 +288,7 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu._npu_flash_attention')
+    @patch('torch_npu.npu_fused_infer_attention_score')
     def test_forward_prefill_no_cache(self, mock_flash_attention,
                                       mock_reshape_cache,
                                       mock_get_forward_context):
