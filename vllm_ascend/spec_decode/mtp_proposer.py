@@ -144,9 +144,9 @@ class MtpProposer(Proposer):
         self.arange = torch.arange(max_num_slots_for_arange,
                                    device=device,
                                    dtype=torch.int32)
-        self.arange_cpu = torch.arange(
-            max_num_slots_for_arange, device="cpu", dtype=torch.int32
-        )
+        self.arange_cpu = torch.arange(max_num_slots_for_arange,
+                                       device="cpu",
+                                       dtype=torch.int32)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -346,7 +346,8 @@ class MtpProposer(Proposer):
                     self.runner.discard_request_indices.gpu,
                     self.runner.num_discarded_requests
                 )
-            self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+            self._copy_valid_sampled_token_count(next_token_ids,
+                                                 valid_sampled_tokens_count)
 
         req_scheduled_tokens = scheduler_output.num_scheduled_tokens
         if self.pcp_size > 1:
@@ -426,24 +427,28 @@ class MtpProposer(Proposer):
         )
 
         return draft_token_ids
-    
+
     def _copy_valid_sampled_token_count(
-        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
-    ) -> None:
+            self, next_token_ids: torch.Tensor,
+            valid_sampled_tokens_count: torch.Tensor) -> None:
         if self.runner.valid_sampled_token_count_event is not None:
             default_stream = torch.npu.current_stream()
             # initialize a new stream to overlap the copy operation with
             # prepare_input of draft model.
-            with torch.npu.stream(self.runner.valid_sampled_token_count_copy_stream):
+            with torch.npu.stream(
+                    self.runner.valid_sampled_token_count_copy_stream):
                 self.runner.valid_sampled_token_count_copy_stream.wait_stream(
-                    default_stream
-                )  # type: ignore
-                self.runner.valid_sampled_token_count_cpu[
-                    : valid_sampled_tokens_count.shape[0]
-                ].copy_(valid_sampled_tokens_count, non_blocking=True)
+                    default_stream)  # type: ignore
+                self.runner.valid_sampled_token_count_cpu[:
+                                                          valid_sampled_tokens_count
+                                                          .shape[0]].copy_(
+                                                              valid_sampled_tokens_count,
+                                                              non_blocking=True
+                                                          )
                 self.runner.valid_sampled_token_count_event.record()
 
-            self.runner.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            self.runner.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(
+                1)
 
     def _init_mtp_model(self):
         architecture = self.vllm_config.model_config.architecture

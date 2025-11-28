@@ -94,6 +94,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              PoolerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer
@@ -103,7 +104,6 @@ from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
                                   gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
-from vllm.v1.sample.rejection_sampler import RejectionSampler
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -247,7 +247,9 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         max_gen_len = self._sampled_token_ids_cpu.shape[-1]
         if max_gen_len == 1:
-            valid_sampled_token_ids: list[np.ndarray] = [row for row in self._sampled_token_ids_cpu.numpy()]
+            valid_sampled_token_ids: list[np.ndarray] = [
+                row for row in self._sampled_token_ids_cpu.numpy()
+            ]
         else:
             valid_sampled_token_ids = RejectionSampler.parse_output(
                 self._sampled_token_ids_cpu,
@@ -596,7 +598,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory,
-        )  
+        )
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -843,7 +845,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     req_state.prev_num_draft_len = 0
                 else:
                     assert self.input_batch.prev_req_id_to_index is not None
-                    prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
+                    prev_req_index = self.input_batch.prev_req_id_to_index[
+                        req_id]
                     num_accepted = valid_sampled_token_count[prev_req_index] - 1
                     num_rejected = req_state.prev_num_draft_len - num_accepted
                     num_computed_tokens -= num_rejected
@@ -935,15 +938,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _get_valid_sampled_token_count(self) -> list[int]:
         # Wait until valid_sampled_tokens_count is copied to cpu,
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
-        if (
-            self.valid_sampled_token_count_event is None
-            or prev_sampled_token_ids is None
-        ):
+        if (self.valid_sampled_token_count_event is None
+                or prev_sampled_token_ids is None):
             return []
 
         counts_cpu = self.valid_sampled_token_count_cpu
         self.valid_sampled_token_count_event.synchronize()
-        return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
+        return counts_cpu[:prev_sampled_token_ids.shape[0]].tolist()
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         assert supports_mrope(self.model), "MROPE is not supported"
@@ -1278,7 +1279,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return cu_num_tokens, arange
 
-    def _prepare_input_ids(self, scheduler_output: "SchedulerOutput", total_num_scheduled_tokens: int,
+    def _prepare_input_ids(self, scheduler_output: "SchedulerOutput",
+                           total_num_scheduled_tokens: int,
                            cu_num_tokens: np.ndarray) -> None:
         """Prepare the input IDs for the current batch.
 
@@ -1295,7 +1297,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
             self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
-        
+
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the NPU from prev_sampled_token_ids.
@@ -1322,8 +1324,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # spec_flattened_indices = [1,   3, 4,    6, 7]
                 sample_flattened_indices.append(flattened_index - draft_len)
                 spec_flattened_indices.extend(
-                    range(flattened_index - draft_len + 1, flattened_index + 1)
-                )
+                    range(flattened_index - draft_len + 1,
+                          flattened_index + 1))
                 start = prev_index * self.num_spec_tokens
                 # prev_draft_token_indices is used to find which draft_tokens_id
                 # should be copied to input_ids
@@ -1331,14 +1333,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # flatten draft_tokens_id [1,2,3,4,5,6]
                 # draft_len of each request [1, 2, 1]
                 # then prev_draft_token_indices is [0,   2, 3,   4]
-                prev_draft_token_indices.extend(range(start, start + draft_len))
+                prev_draft_token_indices.extend(range(start,
+                                                      start + draft_len))
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
         num_commmon_tokens = len(sample_flattened_indices)
-        total_without_spec = (
-            total_num_scheduled_tokens
-            - total_num_spec_tokens
-        )
+        total_without_spec = (total_num_scheduled_tokens -
+                              total_num_spec_tokens)
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the NPU first.
@@ -1365,17 +1366,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
-            sample_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
+            sample_flattened_indices,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory).to(self.device, non_blocking=True)
         prev_common_req_indices_tensor = torch.tensor(
-            prev_common_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
+            prev_common_req_indices,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory).to(self.device, non_blocking=True)
         self.input_ids.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
             src=self.input_batch.prev_sampled_token_ids[
-                prev_common_req_indices_tensor, 0
-            ],
+                prev_common_req_indices_tensor, 0],
         )
 
         # scatter the draft tokens after the sampled tokens are scattered.
@@ -1384,11 +1386,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         assert isinstance(self._draft_token_ids, torch.Tensor)
         draft_tokens_index_tensor = torch.tensor(
-            spec_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
+            spec_flattened_indices,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory).to(self.device, non_blocking=True)
         prev_draft_token_indices_tensor = torch.tensor(
-            prev_draft_token_indices, dtype=torch.int64, pin_memory=self.pin_memory
-        ).to(self.device, non_blocking=True)
+            prev_draft_token_indices,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory).to(self.device, non_blocking=True)
 
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
@@ -1672,9 +1676,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Copy the tensors to the NPU.
-        self._prepare_input_ids(
-            scheduler_output, total_num_scheduled_tokens, cu_num_tokens
-        )
+        self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens,
+                                cu_num_tokens)
         self.positions_cpu[total_num_scheduled_tokens:num_input_tokens].zero_()
         self.positions[:num_input_tokens].copy_(
             self.positions_cpu[:num_input_tokens], non_blocking=True)
@@ -2122,8 +2125,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_scheduled_tokens - num_sampled_tokens,
                 num_sampled_tokens)
             logits_indices_pcp += arange
-            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(
-                self.device, non_blocking=True)
+            logits_indices_pcp = torch.from_numpy(
+                logits_indices_pcp).pin_memory().to(self.device,
+                                                    non_blocking=True)
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
@@ -2145,27 +2149,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = (
-            torch.from_numpy(cu_num_draft_tokens)
-            .pin_memory()
-            .to(self.device, non_blocking=True)
-        )
+            torch.from_numpy(cu_num_draft_tokens).pin_memory().to(
+                self.device, non_blocking=True))
         cu_num_sampled_tokens = (
-            torch.from_numpy(cu_num_sampled_tokens)
-            .pin_memory()
-            .to(self.device, non_blocking=True)
-        )
-        logits_indices = (
-            torch.from_numpy(logits_indices)
-            .pin_memory()
-            .to(self.device, non_blocking=True)
-        )
+            torch.from_numpy(cu_num_sampled_tokens).pin_memory().to(
+                self.device, non_blocking=True))
+        logits_indices = (torch.from_numpy(logits_indices).pin_memory().to(
+            self.device, non_blocking=True))
         target_logits_indices = (
-            torch.from_numpy(target_logits_indices)
-            .pin_memory()
-            .to(self.device, non_blocking=True)
-        )
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(
-            self.device, non_blocking=True)
+            torch.from_numpy(target_logits_indices).pin_memory().to(
+                self.device, non_blocking=True))
+        bonus_logits_indices = torch.from_numpy(
+            bonus_logits_indices).pin_memory().to(self.device,
+                                                  non_blocking=True)
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
@@ -2654,7 +2650,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # when preparing inputs.
                     self.input_batch.prev_sampled_token_ids = sampled_token_ids
 
-                
+
                 self.input_batch.prev_sampled_token_ids_invalid_indices = \
                     invalid_req_indices_set
                 self.input_batch.prev_req_id_to_index = {
@@ -2671,8 +2667,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for req_idx in range(num_sampled_tokens):
                     sampled_ids: np.ndarray | None
                     if self.use_async_scheduling:
-                        sampled_ids = (np.array([-1]) if req_idx
-                                    not in invalid_req_indices_set else None)
+                        sampled_ids = (np.array([
+                            -1
+                        ]) if req_idx not in invalid_req_indices_set else None)
                     else:
                         sampled_ids = valid_sampled_token_ids[req_idx]
                     if sampled_ids is None or sampled_ids.shape[0] == 0:
@@ -2685,16 +2682,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         f"Total number of tokens: {end_idx} > max_model_len: "
                         f"{self.model_config.max_model_len}")
 
-                    self.input_batch.token_ids_cpu[req_idx,
-                                                start_idx:end_idx] = sampled_ids
+                    self.input_batch.token_ids_cpu[
+                        req_idx, start_idx:end_idx] = sampled_ids
                     self.input_batch.is_token_ids[req_idx,
-                                                start_idx:end_idx] = True
+                                                  start_idx:end_idx] = True
                     self.input_batch.num_tokens_no_spec[req_idx] = end_idx
                     self.input_batch.num_tokens[req_idx] = end_idx
                     req_id = self.input_batch.req_ids[req_idx]
                     req_state = self.requests[req_id]
                     req_state.output_token_ids.extend(sampled_ids.tolist())
         self.input_batch.prev_sampled_token_ids = None
+
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(

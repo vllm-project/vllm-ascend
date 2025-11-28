@@ -348,8 +348,8 @@ class AscendAttentionMetadataBuilder:
                              device=query_start_loc_cpu.device)
             ])
 
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device,
-                                                 non_blocking=True)
+        query_start_loc = query_start_loc_cpu.pin_memory().to(
+            self.device, non_blocking=True)
 
         if get_ascend_device_type() == AscendDeviceType._310P:
             if attn_state == AscendAttentionState.PrefillNoCache:
