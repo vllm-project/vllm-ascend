@@ -56,6 +56,10 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertFalse(torchair_graph_config.enable_kv_nz)
 
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        self.assertTrue(ascend_compilation_config.enable_graph_fusion)
+        self.assertTrue(ascend_compilation_config.enable_quantization_fusion)
+
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
         self.assertFalse(ascend_scheduler_config.enabled)
 
@@ -72,6 +76,10 @@ class TestAscendConfig(TestBase):
                 "enable_view_optimize": True,
                 "enable_frozen_parameter": True,
                 "enable_kv_nz": True
+            },
+            "ascend_compilation_config": {
+                "enable_graph_fusion": False,
+                "enable_quantization_fusion": False,
             },
             "multistream_overlap_shared_expert": True,
             "ascend_scheduler_config": {
@@ -93,6 +101,9 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_view_optimize)
         self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertTrue(torchair_graph_config.enable_kv_nz)
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        self.assertFalse(ascend_compilation_config.enable_graph_fusion)
+        self.assertFalse(ascend_compilation_config.enable_quantization_fusion)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
         self.assertTrue(ascend_scheduler_config.enabled)
