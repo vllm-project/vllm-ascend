@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -58,7 +59,10 @@ class CPUOffloadingConnectorMetadata(KVConnectorMetadata):
 
 class CPUOffloadingConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         if not vllm_config.cache_config.enable_prefix_caching:
             self.connector_scheduler: Optional[
                 CPUOffloadingConnectorScheduler] = None
