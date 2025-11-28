@@ -76,11 +76,12 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
-      # fixme: vllm-ascend install failed with 8.3.rc1 on github action
-      image: quay.io/ascend/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      # fixme: vllm-ascend install failed with 8.3.rc2 on github action
+      image: quay.io/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        SOC_VERSION: ascend910b1
     strategy:
       matrix:
         vllm_version: [v0.11.2]
@@ -150,5 +151,5 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       type: light
