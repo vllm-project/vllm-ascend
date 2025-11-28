@@ -189,7 +189,7 @@ This script is configured to achieve optimal performance under the above specifi
 
 - If the model is not a quantized model, remove "--quantization ascend".
 
-- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_0.6B.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_0.6B.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
+- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_dense.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
 ```bash
 vllm serve /model/Qwen3-32B-W8A8 \
