@@ -45,7 +45,7 @@ jobs:
             --network host \
             --platform linux/arm64 \
             -f .github/Dockerfile.nightly.${TARGET} \
-            --build-arg CANN_VERSION="8.3.rc1" \
+            --build-arg CANN_VERSION="8.3.rc2" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
             -t "$IMAGE_TAG" .
