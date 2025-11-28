@@ -116,7 +116,7 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
 
     def wait_for_save(self):
         """MooncakeStoreConnector does not save explicitly."""
-        if self.kv_role == "kv_consumer":
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_save:
             # Don't do save if the role is kv_consumer
             return
 
@@ -131,7 +131,8 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         meta = self._get_connector_metadata()
-        done_sending, done_recving = self.connector_worker.get_finished()
+        done_sending, done_recving = self.connector_worker.get_finished(
+            finished_req_ids)
         sended_and_finished: set[str] = set()
         for item in list(self.sended_but_unfinished_reqs):
             if item not in meta.unfinished_request_ids:
@@ -166,8 +167,12 @@ class MooncakeStoreConnectorV1Scheduler:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
+        self.consumer_is_to_save = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_save", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
+        self.save_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_async", False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
@@ -282,7 +287,7 @@ class MooncakeStoreConnectorV1Scheduler:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer"
+        is_consumer = self.kv_role == "kv_consumer"
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -308,19 +313,21 @@ class MooncakeStoreConnectorV1Scheduler:
                 request_tracker,
                 self._block_size,
                 load_spec=load_spec,
-                skip_save=force_skip_save,
+                skip_save=is_consumer,
                 is_last_chunk=len(request_tracker.token_ids)
                 >= last_chunk_tokens_num,
                 discard_partial_chunks=self._discard_partial_chunks,
+                first_scheduled=True,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        if isinstance(cached_reqs, list) and not force_skip_save:
+        if isinstance(cached_reqs, list) and not is_consumer:
             for i, req in enumerate(cached_reqs):
                 request_tracker = self._request_trackers[req.req_id]
-                request_tracker.update(req.new_token_ids, req.new_block_ids)
+                request_tracker.token_ids.extend(req.new_token_ids)
+                request_tracker.update(req.new_block_ids)
                 last_chunk_tokens_num = ((len(req.prompt_token_ids) //
                                           self._block_size * self._block_size)
                                          if self._discard_partial_chunks else
@@ -329,14 +336,14 @@ class MooncakeStoreConnectorV1Scheduler:
                     request_tracker,
                     self._block_size,
                     load_spec=None,
-                    skip_save=force_skip_save,
+                    skip_save=is_consumer,
                     is_last_chunk=len(request_tracker.token_ids)
                     >= last_chunk_tokens_num,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
-        elif not force_skip_save:
+        elif self.consumer_is_to_save or not is_consumer:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 request_tracker = self._request_trackers[req_id]
                 num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -350,14 +357,12 @@ class MooncakeStoreConnectorV1Scheduler:
                     raise ValueError(
                         f"Request {req_id} is not in _unfinished_requests, "
                         f"but it is scheduled to be cached")
+                request_tracker.token_ids.extend(new_token_ids)
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
                     continue
-                request_tracker.update(new_token_ids, new_block_ids)
-                # decode not save
-                if len(request_tracker.token_ids) > len(
-                        request.prompt_token_ids):
-                    continue
+
+                request_tracker.update(new_block_ids)
 
                 last_chunk_tokens_num = ((len(request.prompt_token_ids) //
                                           self._block_size * self._block_size)
@@ -367,9 +372,9 @@ class MooncakeStoreConnectorV1Scheduler:
                     request_tracker,
                     self._block_size,
                     load_spec=None,
-                    skip_save=force_skip_save,
+                    skip_save=is_consumer,
                     is_last_chunk=len(request_tracker.token_ids)
-                    >= last_chunk_tokens_num,
+                    >= last_chunk_tokens_num if is_consumer else None,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -419,7 +424,7 @@ class MooncakeStoreConnectorV1Scheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-        if self.kv_role == "kv_consumer":
+        if self.consumer_is_to_save and not self.save_async:
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:

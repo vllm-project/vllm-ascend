@@ -1,5 +1,6 @@
 import queue
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
@@ -34,6 +35,7 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
+        self.stored_requests = defaultdict[str, int](int)
 
     def prepare_value(self, start: int, end: int, block_ids: list[int]):
         addr_list = []
@@ -85,6 +87,7 @@ class KVTransferThread(threading.Thread):
             "mask": mask,
             "is_last_chunk": is_last_chunk,
         })
+        self.stored_requests[req_id] += 1
         self.request_queue.put(req)
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -100,6 +103,7 @@ class KVTransferThread(threading.Thread):
 
     def set_finished_request(self, req_id):
         with self.done_task_lock:
+            self.stored_requests.pop(req_id, None)
             self.finished_requests.add(req_id)
 
     def run(self):
@@ -165,7 +169,36 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.m_store.put(key, addr, size)
         if is_last_chunk:
             self.set_finished_request(req_id)
+        self.stored_requests[req_id] -= 1
         self.request_queue.task_done()
+
+    def handle_request(self, req_meta: dict[str, Any]):
+        tokens = req_meta["tokens"]
+        mask = req_meta["mask"]
+        block_ids = req_meta["block_ids"]
+        req_id = req_meta["req_id"]
+        if self.m_store.config.use_ascend_direct:
+            addr_list = []
+            size_list = []
+            key_list = []
+            blockIds = []
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, block_id = self.prepare_value(
+                    start, end, block_ids)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                blockIds.append(block_id)
+            torch.npu.current_stream().synchronize()
+            self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
+        else:
+            torch.npu.current_stream().synchronize()
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, _ = self.prepare_value(start, end, block_ids)
+                self.m_store.put(key, addr, size)
+        self.stored_requests[req_id] -= 1
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):

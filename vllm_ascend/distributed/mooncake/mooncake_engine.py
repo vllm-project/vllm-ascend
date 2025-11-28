@@ -38,8 +38,12 @@ class MooncakeEngine:
         self.tp_rank = parallel_config.rank
         self.tp_size = parallel_config.tensor_parallel_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
+        self.save_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_async", False)
         self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "register_buffer", False)
         self.block_size = vllm_config.cache_config.block_size
@@ -74,6 +78,8 @@ class MooncakeEngine:
 
         self.kv_send_thread: Optional[KVTransferThread] = None
         self.kv_recv_thread: Optional[KVTransferThread] = None
+
+        self.finished_store_req: set[str] = set()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
@@ -345,13 +351,23 @@ class MooncakeEngine:
                 request.req_id,
             )
 
-            self.kv_send_thread.add_request(  # type: ignore[union-attr]
-                req_id,
-                token_ids,
-                request.block_ids,
-                store_mask,
-                request.is_last_chunk,
-            )
+            if self.save_async:
+                self.kv_send_thread.add_request(  # type: ignore[union-attr]
+                    req_id,
+                    token_ids,
+                    request.block_ids,
+                    store_mask,
+                    request.is_last_chunk,
+                )
+            else:
+                req = ({
+                    "req_id": req_id,
+                    "tokens": token_ids,
+                    "block_ids": request.block_ids,
+                    "mask": store_mask,
+                })
+                self.kv_send_thread.handle_request(  # type: ignore[union-attr]
+                    req)
 
     def retrieve_layer(
         self,
@@ -483,22 +499,50 @@ class MooncakeEngine:
         logger.debug(
             f"Stored {num_stored_tokens} out of total {len(tokens)} tokens")
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self,
+                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         done_sending = (
             self.kv_send_thread.
             get_and_clear_finished_requests(  # type: ignore[union-attr]
-            ) if self.kv_role in ['kv_producer', 'kv_both'] else set())
-
-        done_recving = (
-            self.kv_recv_thread.
-            get_and_clear_finished_requests(  # type: ignore[union-attr]
-            ) if self.load_async else set())
+            ) if self.kv_role in ['kv_producer', 'kv_both']
+            or not self.consumer_is_to_load else
+            self.decode_get_finished(finished_req_ids))
+        done_recving = self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
+        )
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive "
             "requests: %d, tp_rank:%d", len(done_sending), len(done_recving),
             self.tp_rank)
         return done_sending, done_recving
+
+    def decode_get_finished(self, finished_req_ids: set[str]) -> set[str]:
+        finished_sending = set()
+        for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
+        ):
+            if self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
+                    req_id] == 0:
+                self.finished_store_req.add(req_id)
+            else:
+                continue
+
+            if req_id in self.finished_store_req:
+                self.finished_store_req.remove(req_id)
+                finished_sending.add(req_id)
+                del self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
+                    req_id]
+
+        for req_id in finished_req_ids:
+            req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
+                req_id, 0)
+            if req_remain_jobs == 0:
+                finished_sending.add(req_id)
+                self.kv_send_thread.stored_requests.pop(  # type: ignore[union-attr]
+                    req_id)
+            elif req_remain_jobs is not None:
+                self.finished_store_req.add(req_id)
+
+        return finished_sending
 
     def wait_layer_transfer_finish(self):
         time.sleep(10)
