@@ -240,7 +240,7 @@ Run the following script to execute offline inference on multi-NPU.
 #### **Attention**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
-- If the model is not a quantized model,remove "quantization="ascend".
+- If the model is not a quantized model,remove the `quantization="ascend"` parameter.
 
 ```python
 import gc
