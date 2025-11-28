@@ -4,11 +4,11 @@ Model quantization is a technique that reduces the size and computational requir
 
 ## Supported llm-compressor Quantization Types
 
-Support CompressedTensorsW8A8 static weight:
+Support CompressedTensorsW8A8 static weight
 
 weight: per-channel, int8, symmetric; activation: per-tensor, int8, symmetric.
 
-Support CompressedTensorsW8A8Dynamic weight:
+Support CompressedTensorsW8A8Dynamic weight
 
 weight: per-channel, int8, symmetric; activation: per-token, int8, symmetric, dynamic.
 
