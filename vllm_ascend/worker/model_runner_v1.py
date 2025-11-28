@@ -2122,7 +2122,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_scheduled_tokens - num_sampled_tokens,
                 num_sampled_tokens)
             logits_indices_pcp += arange
-            logits_indices_pcp = torch.tensor(logits_indices_pcp, pin_memory=True).to(
+            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(
                 self.device, non_blocking=True)
 
         # Compute the bonus logits indices.
@@ -2145,25 +2145,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = (
-            torch.tensor(cu_num_draft_tokens, pin_memory=True)
+            torch.from_numpy(cu_num_draft_tokens)
+            .pin_memory()
             .to(self.device, non_blocking=True)
         )
         cu_num_sampled_tokens = (
-            torch.tensor(cu_num_sampled_tokens, pin_memory=True)
+            torch.from_numpy(cu_num_sampled_tokens)
+            .pin_memory()
             .to(self.device, non_blocking=True)
         )
         logits_indices = (
-            torch.tensor(logits_indices, pin_memory=True)
+            torch.from_numpy(logits_indices)
+            .pin_memory()
             .to(self.device, non_blocking=True)
         )
         target_logits_indices = (
-            torch.tensor(target_logits_indices, pin_memory=True)
+            torch.from_numpy(target_logits_indices)
+            .pin_memory()
             .to(self.device, non_blocking=True)
         )
-        bonus_logits_indices = (
-            torch.tensor(bonus_logits_indices, pin_memory=True)
-            .to(self.device, non_blocking=True)
-        )
+        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(
+            self.device, non_blocking=True)
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
