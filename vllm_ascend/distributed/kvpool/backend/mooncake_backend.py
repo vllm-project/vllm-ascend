@@ -11,7 +11,7 @@ from vllm.utils import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
-from vllm_ascend.distributed.utils import global_te
+from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
