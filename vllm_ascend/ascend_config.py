@@ -27,6 +27,21 @@ def _check_torchair_supported(model_type: str):
             return True
     return False
 
+def check_kv_extra_config(vllm_config):
+    dp_key = "dp_size"
+    tp_key = "tp_size"
+    if vllm_config.kv_transfer_config.is_kv_producer:
+        prefill_parallel_config = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+        if tp_key in prefill_parallel_config.keys():
+            assert prefill_parallel_config[tp_key] == vllm_config.parallel_config.tensor_parallel_size
+        if dp_key in prefill_parallel_config.keys():
+            assert prefill_parallel_config[dp_key] == vllm_config.parallel_config.data_parallel_size
+    if vllm_config.kv_transfer_config.is_kv_consumer:
+        decode_parallel_config = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
+        if tp_key in decode_parallel_config.keys():
+            assert decode_parallel_config[tp_key] == vllm_config.parallel_config.tensor_parallel_size
+        if dp_key in decode_parallel_config.keys():
+            assert decode_parallel_config[dp_key] == vllm_config.parallel_config.data_parallel_size
 
 class AscendConfig:
     """
@@ -112,6 +127,10 @@ class AscendConfig:
                 )
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
+        
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
