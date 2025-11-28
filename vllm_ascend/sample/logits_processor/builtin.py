@@ -40,8 +40,8 @@ class AscendMinPLogitsProcessor(MinPLogitsProcessor):
         # Convert logits to probability distribution
         probability_values = torch.nn.functional.softmax(logits, dim=-1)
         # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values, 
-                                       dim=-1, 
+        max_probabilities = torch.amax(probability_values,
+                                       dim=-1,
                                        keepdim=True)
         # Adjust min_p
         adjusted_min_p = max_probabilities.mul_(self.min_p)
