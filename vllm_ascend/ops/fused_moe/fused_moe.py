@@ -293,7 +293,7 @@ class AscendFusedMoE(FusedMoE):
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(
             final_hidden_states)
 
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
