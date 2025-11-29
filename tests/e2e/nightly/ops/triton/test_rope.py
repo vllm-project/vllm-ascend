@@ -60,7 +60,7 @@ def _apply_rotary_emb(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_rotary_embedding_quant_with_leading_dim(
+def test_rotary_embedding_triton_kernel(
     is_neox_style: bool,
     num_tokens: int,
     num_q_heads: int,
