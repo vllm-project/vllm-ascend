@@ -28,22 +28,25 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
     get_compressed_expert_map)
-from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
+    SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
-                                              determine_default_log2phy_map)
+from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.quantization.w4a8_dynamic import \
+    AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
-                               is_enable_nz, npu_stream_switch,
-                               shared_expert_dp_enabled,
-                               shared_experts_compute_stream)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               npu_stream_switch, shared_expert_dp_enabled,
+                               shared_experts_calculation_stream)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -76,7 +79,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p() and is_enable_nz(layer.w13_weight.data.dtype):
+        if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
+        ):
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(
@@ -134,7 +138,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             expert_map=expert_map,
             shared_experts=shared_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            dynamic_eplb=self.dynamic_eplb)
+            dynamic_eplb=self.dynamic_eplb,
+            mc2_mask=kwargs.get("mc2_mask", None))
 
 
 class AscendFusedMoE(FusedMoE):
@@ -149,10 +154,8 @@ class AscendFusedMoE(FusedMoE):
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
-        self.global_num_experts = num_experts
         self.expert_map = None
         self.log2phy = None
-        self.global_redundant_expert_num = 0
 
         if self.quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(
@@ -172,20 +175,25 @@ class AscendFusedMoE(FusedMoE):
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num
-        init_eplb_enable = False
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
             vllm_config = get_current_vllm_config()
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype)
+
+        # init moe.
+        self.local_num_experts, self.expert_map, _ = determine_expert_map(
+            self.ep_size, self.ep_rank, self.global_num_experts)
+        init_eplb_enable = False
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
-                self.expert_map_path, self.global_num_experts)
+                self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
+            self.global_num_experts = num_experts + self.global_redundant_expert_num
             try:
                 self.local_num_experts, self.expert_map = (
                     self.expert_load_balancer.get_rank_placement_map(
@@ -196,41 +204,21 @@ class AscendFusedMoE(FusedMoE):
             except Exception as e:
                 logger.warning(
                     f"Init expert map of mtp/eagle when using sample.{e}")
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
-            if self.expert_map is not None and isinstance(
-                    self.expert_map, torch.Tensor):
-                logger.info_once(
-                    "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                    " number of experts: %s/%s. Experts local to global index map:"
-                    " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                    self.global_num_experts,
-                    get_compressed_expert_map(self.expert_map))
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
         else:
-            # init moe.
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
-                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
-            if self.expert_map is not None and isinstance(
-                    self.expert_map, torch.Tensor):
-                logger.info_once(
-                    "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                    " number of experts: %s/%s. Experts local to global index map:"
-                    " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                    self.global_num_experts,
-                    get_compressed_expert_map(self.expert_map))
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
+        if self.expert_map is not None and isinstance(self.expert_map,
+                                                      torch.Tensor):
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         local_num_experts = (torch.sum(
             self.expert_map != -1) if self.expert_map is not None else
                              self.global_num_experts)
@@ -239,9 +227,9 @@ class AscendFusedMoE(FusedMoE):
                                         dtype=torch.int64).npu()
 
         if init_eplb_enable and (
-            not hasattr(self.quant_method, "quant_method") 
-            or not isinstance(self.quant_method.quant_method,
-                              AscendW8A8DynamicFusedMoEMethod)):
+                    not hasattr(self.quant_method, "quant_method") 
+                    or not isinstance(self.quant_method.quant_method,
+                                    AscendW8A8DynamicFusedMoEMethod)):
             raise ValueError("Eplb supports only w8a8_dynamic quantization.")
 
         self.moe_config.num_experts = self.global_num_experts
@@ -265,6 +253,22 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         setup_moe_comm_method(self.moe_config)
+        self.quant_type = self._get_quant_type()
+
+    def _get_quant_type(self) -> QuantType:
+        quant_method = self.quant_method
+        if not hasattr(quant_method,
+                       "quant_method") or quant_method.quant_method is None:
+            return QuantType.NONE
+
+        method = quant_method.quant_method
+
+        if isinstance(method, AscendW8A8DynamicFusedMoEMethod):
+            return QuantType.W8A8
+        elif isinstance(method, AscendW4A8DynamicFusedMoEMethod):
+            return QuantType.W4A8
+        else:
+            return QuantType.NONE
 
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
@@ -273,7 +277,7 @@ class AscendFusedMoE(FusedMoE):
         return self.expert_map
 
     def get_log2phy_map(self):
-        return self.log2phy
+        return self.logical_to_physical_map
 
     def clear_moe_load(self):
         if self.moe_load is not None:
@@ -305,17 +309,24 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance = forward_context.in_profile_run
 
         forward_context = get_forward_context()
-        hidden_states, router_logits = forward_context.moe_comm_method.prepare(
+        hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp)
+            enable_shared_expert_dp=self.enable_shared_expert_dp,
+            quant_type=self.quant_type)
+
+        if isinstance(hidden_states, tuple):
+            hidden_states, pertoken_scale = hidden_states
+        else:
+            pertoken_scale = None
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
+            pertoken_scale=pertoken_scale,
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
@@ -333,18 +344,19 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=None,
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num)
+            global_redundant_expert_num=self.global_redundant_expert_num,
+            mc2_mask=mc2_mask)
 
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
-
             if self.dynamic_eplb:
                 self.moe_load += expert_tokens if group_list_type == 1 else \
                     torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
-            reduce_results=self.reduce_results)
+            reduce_results=self.reduce_results,
+            context_metadata=context_metadata)
 
         return final_hidden_states
 
@@ -409,10 +421,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def __init__(
         self,
         shared_experts: torch.nn.Module,
+        gate: Optional[torch.nn.Module] = None,
         use_overlapped: bool = True,
         **kwargs,
     ):
         AscendFusedMoE.__init__(self, **kwargs)
+
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
@@ -422,6 +436,23 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
             )
+
+        self._gate = gate
+
+    @property
+    def gate(self) -> Optional[torch.nn.Module]:
+        return self._gate if self.use_overlapped else None
+
+    @property
+    def is_internal_router(self) -> bool:
+        return False
+
+    @property
+    def use_dp_chunking(self) -> bool:
+        """This func routes to the chunked forward path using the FlashInfer Cutlass kernel
+        only when data parallelism (DP) is enabled. Thus just returning False in vllm-ascend
+        """
+        return False
 
     def forward(
         self,
@@ -439,9 +470,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                      router_logits: torch.Tensor):
         # Make sure the shared experts stream begins after hidden_states are ready.
         if self.multistream_overlap_shared_expert:
-            shared_experts_compute_stream().wait_stream(  # type: ignore
+            shared_experts_calculation_stream().wait_stream(  # type: ignore
                 torch.npu.current_stream())
-        with npu_stream_switch(shared_experts_compute_stream(),
+        with npu_stream_switch(shared_experts_calculation_stream(),
                                enabled=self.multistream_overlap_shared_expert):
             # Use a separate stream to run shared experts.
             # Note that currently we only support calculations in separate streams with aclgraph.
@@ -456,7 +487,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # Make sure the default stream waits for the shared experts stream to finish.
         if self.multistream_overlap_shared_expert:
             torch.npu.current_stream().wait_stream(
-                shared_experts_compute_stream())
+                shared_experts_calculation_stream())
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
         forward_context = get_forward_context()
         moe_comm_type = forward_context.moe_comm_type
