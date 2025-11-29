@@ -39,8 +39,6 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
 
 # isort: on
 
-# yapf: enable
-
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -63,7 +61,8 @@ class NPUPlatform(Platform):
     dispatch_key: str = "PrivateUse1"
 
     supported_quantization: list[str] = [
-        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AWQ_QUANTIZATION_METHOD
+        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
+        AWQ_QUANTIZATION_METHOD
     ]
 
     def is_sleep_mode_available(self) -> bool:
@@ -112,12 +111,12 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
+        from vllm_ascend.quantization.awq.awq import \
+            AWQQuantConfig  # noqa: F401
         from vllm_ascend.quantization.compressed_tensors.compressed_tensors import \
             AscendCompressedTensorsConfig  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
-        from vllm_ascend.quantization.awq.awq import \
-            AWQQuantConfig  # noqa: F401
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
