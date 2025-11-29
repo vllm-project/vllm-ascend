@@ -84,7 +84,9 @@ class MoECommMethod(ABC):
             self,
             hidden_states: torch.Tensor,
             w1: list[torch.Tensor],
+            w1_scale: list[torch.Tensor],
             w2: list[torch.Tensor],
+            w2_scale: list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
@@ -93,8 +95,6 @@ class MoECommMethod(ABC):
             use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[list[torch.Tensor]] = None,
-            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
             # For TorchAir graph
