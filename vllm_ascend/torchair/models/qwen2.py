@@ -77,8 +77,6 @@ class CustomQwen2Attention(Qwen2Attention):
         num_heads: int,
         num_kv_heads: int,
         rope_parameters: Optional[dict[str, Any]] = None,
-        rope_theta: float = 10000,
-        rope_scaling: tuple | None = None,
         max_position: int = 4096 * 32,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -96,10 +94,7 @@ class CustomQwen2Attention(Qwen2Attention):
             prefix=prefix,
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
-            # Pass both rope_parameters and rope_theta/rope_scaling for compatibility
-            **(dict(
-                rope_parameters=rope_parameters) if vllm_version_is("0.11.2")
-               else dict(rope_theta=rope_theta, rope_scaling=rope_scaling)))
+            rope_parameters=rope_parameters)
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
@@ -154,14 +149,7 @@ class CustomQwen2DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        # NOTE: remove this once we drop vllm v0.11.2
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        rope_parameters = None
-        if not vllm_version_is("0.11.2"):
-            # Requires transformers > 4.32.0
-            set_default_rope_theta(config, default_theta=1000000)
-            rope_parameters = config.rope_parameters
+        set_default_rope_theta(config, default_theta=1000000)
 
         dual_chunk_attention_config = getattr(config,
                                               "dual_chunk_attention_config",
@@ -181,9 +169,7 @@ class CustomQwen2DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_parameters=rope_parameters,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
