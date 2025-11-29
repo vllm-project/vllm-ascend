@@ -29,7 +29,9 @@ from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
 =======
 >>>>>>> b2a32244 (fix pre-commit)
 
-enable_custom_op()
+
+def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
+    return fusion and dynamic_eplb and enable_custom_op()
 
 
 def cumsum_group_list(group_list: torch.Tensor,
@@ -94,7 +96,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
 
     if w1_scale_bias is None and is_mc2:
-        if fusion and dynamic_eplb:
+        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = (
                 torch.ops._C_ascend.
@@ -164,7 +166,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if fusion and dynamic_eplb:
+        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = (
                 torch.ops._C_ascend.
