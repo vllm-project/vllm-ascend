@@ -825,7 +825,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_data.resumed_from_preemption[i]
+            resumed_from_preemption = req_id in req_data.resumed_req_ids
+            num_output_tokens = req_data.num_output_tokens[i]
             req_index = self.input_batch.req_id_to_index.get(req_id)
             # prev_num_draft_len is used in async scheduling mode with
             # spec decode. it indicates if need to update num_computed_tokens
@@ -883,8 +884,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_state.block_ids = new_block_ids
             if req_index is None:
                 # The request is not in the persistent batch.
-                # The request was either preempted and resumed later, or was not
-                # scheduled in the previous step and needs to be added again.
+                # The request was either preempted and resumed later, or was
+                # not scheduled in the previous step and needs to be added
+                # again.
+
+                if self.use_async_scheduling and num_output_tokens > 0:
+                    # We must recover the output token ids for resumed requests
+                    # in the async scheduling case, so that correct input_ids
+                    # are obtained.
+                    resumed_token_ids = req_data.all_token_ids[req_id]
+                    req_state.output_token_ids = resumed_token_ids[
+                        -num_output_tokens:]
+
                 req_ids_to_add.append(req_id)
                 continue
 
