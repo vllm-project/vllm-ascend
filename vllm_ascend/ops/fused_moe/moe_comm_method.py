@@ -137,7 +137,6 @@ class MoECommMethod(ABC):
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
 
-        assert w1_scale is not None and w2_scale is not None
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=w1,
                                        w1_scale=w1_scale,
