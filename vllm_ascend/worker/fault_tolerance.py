@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
+from vllm.distributed.parallel_state import get_pp_group,get_tp_group
 from vllm_ascend.worker.memory_block_info import MemoryBlockInfo
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
@@ -32,9 +33,10 @@ class FaultTolerance:
         self.memory_info.initialize()
 
         self.aware_event = threading.Event()
-        FaultAware(
-            self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
-        ).start()
+        if self.level != FaultToleranceLevel.OFF:
+            FaultAware(
+                self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
+            ).start()
 
     def _init_recovery_group(self):
         """
@@ -134,6 +136,10 @@ class FaultTolerance:
             else:
                 return FaultAction.RAISE_EXCEPTION
         #TODO:Should refactor codes below
+        if self.vllm_config.parallel_config.distributed_executor_backend != (
+            "external_launcher") and not get_pp_group().is_last_rank:
+            get_pp_group().send_tensor_dict(torch.tensor([0]),all_gather_group=get_tp_group())
+
         all_recovery_status = self._gather_statuses(local_recovery_status)
         reinit_status = self._restart_and_reinit(ctx)
         all_reinit_status = self._gather_statuses(reinit_status)
