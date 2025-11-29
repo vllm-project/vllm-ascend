@@ -16,7 +16,7 @@
 #
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.triton_utils import NUM_VECTORCORE
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 # TODO(whx-sjtu): Add tiling of n_q_head and n_kv_head to support more models.
@@ -181,8 +181,8 @@ def rope_forward_triton(q,
     pad_n_q_head = triton.next_power_of_2(n_q_head)
     pad_n_kv_head = triton.next_power_of_2(n_kv_head)
     BLOCK_SIZE = max(pad_n_q_head, pad_n_kv_head)
-    assert NUM_VECTORCORE > 0, "Triton-related device properties not initialized."
-    n_row = min(num_tokens, NUM_VECTORCORE)
+    num_vectorcore = get_vectorcore_num()
+    n_row = min(num_tokens, num_vectorcore)
 
     _triton_rope[(n_row, )](
         q,

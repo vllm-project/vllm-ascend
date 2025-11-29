@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm_ascend.ops.triton.rope import rope_forward_triton
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
@@ -73,6 +74,7 @@ def test_rotary_embedding_triton_kernel(
 ) -> None:
     torch.manual_seed(seed)
     torch.set_default_device(device)
+    init_device_properties_triton()
     if rotary_dim == -1:
         rotary_dim = head_size
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
