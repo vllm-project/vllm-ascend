@@ -279,6 +279,7 @@ Here are two accuracy evaluation methods.
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
 | aime2024dataset | - | accuracy | gen | 80.00 |
+| gpqadataset | - | accuracy | gen | 72.22 |
 
 ### Using Language Model Evaluation Harness
 
