@@ -48,7 +48,9 @@ _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "Qwen3NextForCausalLM":
-    ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP")
+    ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP"),
+    "Glm4MoeForCausalLM":
+    ("vllm.model_executor.models.glm4_moe_mtp", "Glm4MoeMTP")
 }
 
 _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
