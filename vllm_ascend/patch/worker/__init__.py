@@ -27,3 +27,5 @@ import vllm_ascend.patch.worker.patch_roberta  # noqa
 import vllm_ascend.patch.worker.patch_weight_loader  # noqa
 import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
 import vllm_ascend.patch.worker.patch_minicpm  # noqa
+import vllm_ascend.patch.worker.patch_qwen2_5_vl  # noqa
+import vllm_ascend.patch.worker.patch_rope  # noqa

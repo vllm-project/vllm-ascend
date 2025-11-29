@@ -28,6 +28,7 @@ from vllm.forward_context import ForwardContext
 from vllm.utils import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
 import vllm_ascend.envs as envs_ascend
@@ -100,7 +101,10 @@ class LLMDataDistCMgrConnectorMetadata(KVConnectorMetadata):
 
 class LLMDataDistCMgrConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         if role == KVConnectorRole.SCHEDULER:
