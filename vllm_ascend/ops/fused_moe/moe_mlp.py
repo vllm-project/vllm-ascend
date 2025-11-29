@@ -24,10 +24,6 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
                                enable_custom_op, get_ascend_device_type)
-<<<<<<< HEAD
-
-=======
->>>>>>> b2a32244 (fix pre-commit)
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
