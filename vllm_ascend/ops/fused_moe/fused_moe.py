@@ -293,7 +293,7 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states)
 
     def forward_oot(self, hidden_states: torch.Tensor,
-                     router_logits: torch.Tensor):
+                    router_logits: torch.Tensor):
         assert self.quant_method is not None
 
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
