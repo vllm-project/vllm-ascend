@@ -3,8 +3,9 @@ from typing import Optional
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
-                                             get_tp_group, get_world_group,
-                                             init_model_parallel_group, get_pp_group)
+                                             get_pp_group, get_tp_group,
+                                             get_world_group,
+                                             init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config

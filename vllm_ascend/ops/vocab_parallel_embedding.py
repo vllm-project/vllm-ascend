@@ -15,16 +15,13 @@
 # limitations under the License.
 #
 
-from itertools import accumulate
 from typing import Optional, Tuple
 
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide
-from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
@@ -33,11 +30,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, pad_vocab_size)
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_embed_tp_group,
                                                     get_lmhead_tp_group)
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
-from vllm.distributed import get_dp_group
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -155,7 +150,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
-        if self.forward_type is "embed_tp":
+        if self.forward_type == "embed_tp":
             return self._forward_embed_tp(input_)
         else:
             return self._forward_origin(input_)
