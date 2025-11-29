@@ -35,9 +35,9 @@ It is recommended to download the model weight to the shared directory of multip
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
 
-
 ## Deployment
 ### Run docker container
+
 ```shell
 export IMAGE=quay.io/ascend/vllm-ascend:0.11.0rc1
 docker run --rm \
@@ -112,7 +112,6 @@ Here are two accuracy evaluation methods.
 ### Using AISBench
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
-
 
 ## Performance
 
