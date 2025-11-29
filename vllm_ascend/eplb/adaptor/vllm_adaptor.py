@@ -101,6 +101,8 @@ class VllmEplbAdaptor(EplbAdaptor):
                 ]:
                     expert_tensor = self.param_dict[complete_name][0]
                     expert_tensor = expert_tensor.clone()
+                else:
+                    expert_tensor = self.param_dict[complete_name][0].data[0]
                 buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
@@ -126,7 +128,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
                                             ".mlp.experts." +
-                                            name].data[local_expert_id])
+                                            name][0].data[local_expert_id])
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
