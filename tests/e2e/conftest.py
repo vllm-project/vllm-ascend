@@ -280,7 +280,7 @@ class VllmRunner:
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
-        enable_chunked_prefill: bool = False,
+        enable_chunked_prefill: bool = True,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         quantization: Optional[str] = None,
