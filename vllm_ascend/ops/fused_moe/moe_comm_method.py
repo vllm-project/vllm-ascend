@@ -93,8 +93,8 @@ class MoECommMethod(ABC):
             use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
-            w1_scale: list[torch.Tensor] | None = None,
-            w2_scale: list[torch.Tensor] | None = None,
+            w1_scale: Optional[list[torch.Tensor]] = None,
+            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
             # For TorchAir graph
