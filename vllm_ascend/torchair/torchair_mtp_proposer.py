@@ -23,6 +23,8 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode import MtpProposer
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
+from vllm_ascend.torchair.models.torchair_openpangu_mtp import \
+    TorchairOpenPanguMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
@@ -55,9 +57,12 @@ class TorchairMtpProposer(MtpProposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-
-            self.model = TorchairDeepSeekMTP(
-                vllm_config=self.vllm_config).to(target_device)
+            if self.vllm_config.model_config.hf_config.model_type == 'pangu_ultra_moe':
+                self.model = TorchairOpenPanguMTP(
+                    vllm_config=self.vllm_config).to(target_device)
+            else:
+                self.model = TorchairDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (get_layers_from_vllm_config(
             self.vllm_config, AttentionLayerBase).keys() -
