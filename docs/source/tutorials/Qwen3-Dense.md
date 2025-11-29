@@ -99,7 +99,9 @@ Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0r
 
 `docker pull quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`
 
-Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+#### Docker run
+Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker). 
+
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
@@ -200,7 +202,7 @@ This script is configured to achieve optimal performance under the above specifi
 
 - If the model is not a quantized model, remove the `--quantization ascend` parameter.
 
-- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./multi_npu_qwen3_dense.md#key-optimization-points)、[optimization-highlights](./multi_npu_qwen3_dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
+- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./Qwen3-Dense.md#key-optimization-points)、[optimization-highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
 ```bash
 vllm serve /model/Qwen3-32B-W8A8 \
