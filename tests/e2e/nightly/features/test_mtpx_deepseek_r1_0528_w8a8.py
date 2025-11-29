@@ -73,7 +73,11 @@ async def test_models(model: str, mode: str) -> None:
         "VLLM_RPC_TIMEOUT": "3600000",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000"
     }
-    additional_config: dict[str, Any] = {}
+    additional_config: dict[str, Any] = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+    }
     speculative_config = {
         "num_speculative_tokens": 2,
         "method": "deepseek_mtp"
