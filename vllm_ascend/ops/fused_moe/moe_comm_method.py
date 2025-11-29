@@ -84,9 +84,7 @@ class MoECommMethod(ABC):
             self,
             hidden_states: torch.Tensor,
             w1: list[torch.Tensor],
-            w1_scale: list[torch.Tensor],
             w2: list[torch.Tensor],
-            w2_scale: list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
@@ -95,6 +93,8 @@ class MoECommMethod(ABC):
             use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
+            w1_scale: Optional[list[torch.Tensor]] = None,
+            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
             # For TorchAir graph
@@ -137,6 +137,7 @@ class MoECommMethod(ABC):
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
 
+        assert w1_scale is not None and w2_scale is not None
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=w1,
                                        w1_scale=w1_scale,
