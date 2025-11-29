@@ -18,30 +18,8 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-import vllm.envs as envs_vllm
-from vllm.config import ParallelConfig
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-
-def parallel_config_get_dp_port(self) -> int:
-    """
-    We might need to initialize process groups in multiple
-    processes that is related to data parallelism,
-    e.g. both in the worker and in the engine, which
-    can live in different processes. To avoid port conflicts, we
-    increment the port number each time we need to initialize a
-    new process group related to data parallelism.
-    """
-    answer = self.data_parallel_master_port
-    self.data_parallel_master_port += 1
-
-    # NOTE: Get port from envs directly when using torchrun
-    port = envs_vllm.VLLM_DP_MASTER_PORT if envs_vllm.VLLM_DP_MASTER_PORT else answer
-    return port
-
-
-ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 
 
 class NullHandle:
