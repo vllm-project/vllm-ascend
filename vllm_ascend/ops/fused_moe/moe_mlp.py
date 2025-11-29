@@ -262,10 +262,10 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
 
 def unified_apply_mlp(hidden_states: torch.Tensor,
                       w1: list[torch.Tensor],
-                      w1_scale: list[torch.Tensor],
                       w2: list[torch.Tensor],
-                      w2_scale: list[torch.Tensor],
                       group_list: torch.Tensor,
+                      w1_scale: Optional[list[torch.Tensor]] = None,
+                      w2_scale: Optional[list[torch.Tensor]] = None,
                       dynamic_scale: torch.Tensor = None,
                       group_list_type: int = 1,
                       w1_scale_bias: torch.Tensor = None,
@@ -276,6 +276,7 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                       need_trans: bool = True,
                       dynamic_eplb: bool = False) -> torch.Tensor:
     if with_quant:
+        assert w1_scale is not None and w2_scale is not None
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,
                                w1_scale=w1_scale,

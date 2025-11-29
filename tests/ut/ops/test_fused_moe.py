@@ -409,9 +409,9 @@ class TestUnifiedApplyMLP(TestBase):
         topk_scales = torch.randn(10, 1, dtype=torch.float16)
 
         result = unified_apply_mlp(hidden_states=hidden_states,
-                                   w1=w1,
+                                   w1=[w1],
                                    w1_scale=None,
-                                   w2=w2,
+                                   w2=[w2],
                                    w2_scale=None,
                                    group_list=group_list,
                                    dynamic_scale=None,
@@ -512,9 +512,9 @@ class TestUnifiedApplyMLP(TestBase):
         topk_scales = torch.randn(10, 1, dtype=torch.float16)
 
         result = unified_apply_mlp(hidden_states=hidden_states,
-                                   w1=w1,
+                                   w1=[w1],
                                    w1_scale=None,
-                                   w2=w2,
+                                   w2=[w2],
                                    w2_scale=None,
                                    group_list=group_list,
                                    dynamic_scale=None,
