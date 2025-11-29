@@ -128,7 +128,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                         per_expert_param.append(
                             self.param_dict["model.layers." + str(layer_idx) +
                                             ".mlp.experts." +
-                                            name].data[local_expert_id])
+                                            name][0].data[local_expert_id])
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
