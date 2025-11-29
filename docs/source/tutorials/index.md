@@ -13,7 +13,7 @@ single_node_pd_disaggregation_llmdatadist
 multi_npu_qwen3_next
 multi_npu
 multi_npu_moge
-multi_npu_qwen3_dense
+Qwen3-Dense
 multi_npu_qwen3_moe
 multi_npu_quantization
 single_node_300i

@@ -1,4 +1,4 @@
-# Multi-NPU (Qwen3-32B-W8A8)
+# Qwen3-Dense
 
 ## Introduction
 
