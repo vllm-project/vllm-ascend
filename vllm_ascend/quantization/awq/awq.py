@@ -432,7 +432,6 @@ class AWQMoEAscendMethod(FusedMoEMethodBase):
         logical_replica_count: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
