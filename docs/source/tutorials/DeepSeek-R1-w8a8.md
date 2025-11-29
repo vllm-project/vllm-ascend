@@ -90,7 +90,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ::::{tab-item} DeepSeek-R1-w8a8 A3 series
 :sync: A3
 
-
 ```shell
 #!/bin/sh
 
@@ -144,7 +143,6 @@ vllm serve path/DeepSeek-R1-W8A8 \
 Run the following scripts on two nodes respectively.
 
 **Node 0**
-
 ```shell
 #!/bin/sh
 
@@ -193,7 +191,6 @@ vllm serve path/DeepSeek-R1-W8A8 \
 ```
 
 **Node 1**
-
 ```shell
 #!/bin/sh
 
@@ -299,9 +296,7 @@ lm_eval \
 
 3. After execution, you can get the result.
 
-
 ## Performance
-
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
