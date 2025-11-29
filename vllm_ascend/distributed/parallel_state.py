@@ -4,7 +4,7 @@ import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
                                              get_tp_group, get_world_group,
-                                             init_model_parallel_group)
+                                             init_model_parallel_group, get_pp_group)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -80,7 +80,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-
+    global_tp_size = get_tp_group().world_size
+    global_dp_size = get_dp_group().world_size
+    global_pp_size = get_pp_group().world_size
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
@@ -180,12 +182,18 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         if group_size is None:
             return None
         if group_size not in _group_cache:
-            assert world_size % group_size == 0, f"world_size {world_size} not divisible by group_size {group_size}"
-            num_groups = world_size // group_size
-            group_ranks = [
-                list(range(i * group_size, (i + 1) * group_size))
-                for i in range(num_groups)
-            ]
+
+            rank_grid = torch.arange(world_size).reshape(global_pp_size, global_dp_size, global_tp_size)
+            assert global_dp_size % group_size == 0, \
+                f"group_size ({group_size}) must divide global_dp_size ({global_dp_size})"
+            num_chunks = global_dp_size // group_size
+            group_ranks = []
+            for pp_idx in range(global_pp_size):
+                stage_ranks = rank_grid[pp_idx]  # (dp, tp)
+                for chunk in range(num_chunks):
+                    for tp_idx in range(global_tp_size):
+                        group = stage_ranks[chunk * group_size : (chunk + 1) * group_size, tp_idx].tolist()
+                        group_ranks.append(group)
             pg = init_model_parallel_group(
                 group_ranks,
                 get_world_group().local_rank,
