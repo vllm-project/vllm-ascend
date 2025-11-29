@@ -1,9 +1,7 @@
-# Standard
 import math
 import threading
 from typing import Dict, Generator, Optional, Type
 
-# Third Party
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (get_decode_context_model_parallel_rank,
@@ -27,9 +25,11 @@ from vllm_ascend.distributed.kvpool.kv_transfer import (
 from vllm_ascend.utils import prefill_context_parallel_enable
 
 if prefill_context_parallel_enable():
-    from vllm.distributed import (
-        get_prefill_context_model_parallel_rank,
-        get_prefill_context_model_parallel_world_size)
+    # isort: off
+    from vllm.distributed import (get_prefill_context_model_parallel_rank,
+                                  get_prefill_context_model_parallel_world_size
+                                  )
+    # isort: on
 
 backend_map: Dict[str, Type[Backend]] = {
     "mooncake": MooncakeBackend,
