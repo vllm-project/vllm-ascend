@@ -5,6 +5,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.w8a16 import AscendW8A16LinearMethod
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendW8A16LinearMethod(TestBase):
@@ -34,9 +35,10 @@ class TestAscendW8A16LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
-    @patch("vllm_ascend.quantization.w8a16.is_310p", return_value=True)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch("torch_npu.npu_weight_quant_batchmatmul")
-    def test_apply_with_x_is_310p(self, mock_npu_weight_quant_batchmatmul, mock_is_310p):
+    def test_apply_with_x_is_310p(self, mock_npu_weight_quant_batchmatmul, mock_soc_version):
         layer = MagicMock()
         layer.weight.data = torch.randn(128, 256)
         layer.weight_scale.data = torch.randn(128, 1)

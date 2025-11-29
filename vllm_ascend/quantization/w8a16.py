@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch_npu
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, is_enable_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, AscendDeviceType, get_ascend_device_type, is_enable_nz
 
 
 class AscendW8A16LinearMethod:
@@ -29,7 +29,7 @@ class AscendW8A16LinearMethod:
 
     def __init__(self) -> None:
         # aclnn quant matmul requires to transpose matrix B, set to true by default.
-        self.transpose_weight = not is_310p()
+        self.transpose_weight = get_ascend_device_type() != AscendDeviceType._310P
 
     @staticmethod
     def get_weight(
@@ -74,7 +74,7 @@ class AscendW8A16LinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             # On 300I Duo platform, we need transpose again if
             # using nz. This transpose can be skipped in torchair.
             output = torch_npu.npu_weight_quant_batchmatmul(
