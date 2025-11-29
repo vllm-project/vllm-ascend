@@ -221,20 +221,20 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
 
 
 def unquant_apply_mlp(hidden_states: torch.Tensor,
-                      w1: list[torch.Tensor],
-                      w2: list[torch.Tensor],
+                      w1: torch.Tensor,
+                      w2: torch.Tensor,
                       group_list: torch.Tensor,
                       group_list_type: int = 1,
                       topk_scales: Optional[torch.Tensor] = None,
                       need_trans: bool = True) -> torch.Tensor:
 
     if need_trans:
-        w1[0] = w1[0].transpose(1, 2)
-        w2[0] = w2[0].transpose(1, 2)
+        w1 = w1.transpose(1, 2)
+        w2 = w2.transpose(1, 2)
 
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
-        weight=w1,
+        weight=[w1],
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
@@ -251,7 +251,7 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
 
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
-        weight=w2,
+        weight=[w2],
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
@@ -261,8 +261,8 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
 
 
 def unified_apply_mlp(hidden_states: torch.Tensor,
-                      w1: list[torch.Tensor],
-                      w2: list[torch.Tensor],
+                      w1: torch.Tensor | list[torch.Tensor],
+                      w2: torch.Tensor | list[torch.Tensor],
                       group_list: torch.Tensor,
                       w1_scale: Optional[list[torch.Tensor]] = None,
                       w2_scale: Optional[list[torch.Tensor]] = None,
