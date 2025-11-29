@@ -648,7 +648,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
@@ -658,6 +657,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendQKVParallelLinear,
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
+    from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
         AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
