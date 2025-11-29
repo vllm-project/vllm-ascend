@@ -113,6 +113,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               apply_router_weight_on_input: bool = False,
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
+              log2phy: torch.Tensor = None,
+              global_redundant_expert_num: int = 0,
               **kwargs) -> torch.Tensor:
 
         topk_weights, topk_ids = select_experts(
@@ -147,7 +149,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             expert_map=expert_map,
             shared_experts=shared_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            dynamic_eplb=self.dynamic_eplb)
+            dynamic_eplb=self.dynamic_eplb,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -300,6 +304,8 @@ class AscendFusedMoE(FusedMoE):
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(
             final_hidden_states)
 
+    from vllm.utils.profiling import cprofile
+    @cprofile("forward_impl.prof")
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
