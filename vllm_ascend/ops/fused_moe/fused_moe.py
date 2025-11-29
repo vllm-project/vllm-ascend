@@ -307,7 +307,8 @@ class AscendFusedMoE(FusedMoE):
                 value=0.0,
             )
         if self.shared_experts is None:
-            fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits,
+            fused_output = torch.ops.vllm.moe_forward(hidden_states,
+                                                      router_logits,
                                                       self.layer_name)
             return fused_output[..., :og_hidden_states]
         else:
