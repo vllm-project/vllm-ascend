@@ -1641,6 +1641,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds)
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             input_ids = None
+
+            if enable_sp(self.vllm_config):
+                from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+                inputs_embeds = torch.chunk(inputs_embeds, get_tensor_model_parallel_world_size(), dim=0)[get_tensor_model_parallel_rank()]
         elif self.enable_prompt_embeds and get_pp_group().is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -2949,6 +2953,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                if enable_sp(self.vllm_config):
+                    from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+                    inputs_embeds = torch.chunk(inputs_embeds, get_tensor_model_parallel_world_size(), dim=0)[get_tensor_model_parallel_rank()]
             elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
