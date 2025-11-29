@@ -1,12 +1,12 @@
-# Qwen2.5-VL/Qwen3-VL
+# Qwen-VL(Dense)
 
 ## Introduction
 
 The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-NPU deployment, accuracy and performance evaluation.
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
-The steps and configurations in this document apply to the following models supported in vllm-ascend:`v0.11.0rc0`:
+The steps and configurations in this document apply to the following models:
 - Single NPU Support:
   - `Qwen2.5-VL-7B-Instruct`
   - `Qwen3-VL-2B-Instruct`
