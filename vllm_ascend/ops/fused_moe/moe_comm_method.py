@@ -83,8 +83,8 @@ class MoECommMethod(ABC):
     def fused_experts(
             self,
             hidden_states: torch.Tensor,
-            w1: list[torch.Tensor],
-            w2: list[torch.Tensor],
+            w1: torch.Tensor | list[torch.Tensor],
+            w2: torch.Tensor | list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
