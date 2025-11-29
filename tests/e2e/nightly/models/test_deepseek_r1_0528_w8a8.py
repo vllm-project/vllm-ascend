@@ -33,6 +33,7 @@ MODES = [
     "single",
     "aclgraph",
     "aclgraph_mlapo",
+    "no_chunkprefill",
 ]
 
 prompts = [
@@ -81,6 +82,9 @@ async def test_models(model: str, mode: str) -> None:
         "method": "deepseek_mtp"
     }
     additional_config = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_moe": False,
@@ -108,6 +112,10 @@ async def test_models(model: str, mode: str) -> None:
     if mode == "aclgraph_mlapo":
         env_dict["VLLM_ASCEND_ENABLE_MLAPO"] = "1"
         additional_config["torchair_graph_config"] = {"enabled": False}
+    if mode == "no_chunkprefill":
+        additional_config["ascend_scheduler_config"] = {"enabled": True}
+        i = server_args.index("--max-num-batched-tokens") + 1
+        server_args[i] = "36864"
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

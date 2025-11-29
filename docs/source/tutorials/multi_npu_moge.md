@@ -158,6 +158,11 @@ if __name__ == "__main__":
             'torchair_graph_config': {
             'enabled': True,
             },
+            'ascend_scheduler_config':{
+            'enabled': True,
+            'enable_chunked_prefill' : False,
+            'chunked_prefill_enabled': False
+            },
             })
 
     outputs = llm.generate(prompts, sampling_params)

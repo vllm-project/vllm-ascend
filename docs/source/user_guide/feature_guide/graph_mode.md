@@ -45,14 +45,14 @@ import os
 from vllm import LLM
 
 # TorchAirGraph only works without chunked-prefill now
-model = LLM(model="path/to/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True}})
+model = LLM(model="path/to/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True}})
 outputs = model.generate("Hello, how are you?")
 ```
 
 Online example:
 
 ```shell
-vllm serve path/to/DeepSeek-R1-0528 --additional-config='{"torchair_graph_config": {"enabled": true}}'
+vllm serve path/to/DeepSeek-R1-0528 --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true}}'
 ```
 
 You can find more details about additional configuration [here](../configuration/additional_config.md).
