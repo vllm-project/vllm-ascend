@@ -137,7 +137,7 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
 **Node 1**
@@ -182,7 +182,7 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
 The deployment view looks like:
