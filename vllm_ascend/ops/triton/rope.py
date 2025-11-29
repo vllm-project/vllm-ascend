@@ -18,6 +18,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import NUM_VECTORCORE
 
+
 # TODO(whx-sjtu): Add tiling of n_q_head and n_kv_head to support more models.
 # I only have tested this kernel on Deepseek V3.2 and Qwen3-Next.
 # For models with larger n_q_head and n_kv_head such as GLM 4.6, this is not supported yet.

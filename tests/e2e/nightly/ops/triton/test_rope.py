@@ -1,8 +1,9 @@
-import torch
 import gc
 from typing import Optional
 
 import pytest
+import torch
+
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 IS_NEOX_STYLE = [True, False]
@@ -17,6 +18,7 @@ DEVICES = [f"npu:{0}"]
 # Set tolerance to 1 for quant ops
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
+
 
 def _apply_rotary_emb(
     x: torch.Tensor,
@@ -46,6 +48,7 @@ def _apply_rotary_emb(
     else:
         return torch.stack((o1, o2), dim=-1).flatten(-2)
 
+
 # test with leading dimension and merge seqlen and batch_size as num_tokens
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -74,12 +77,33 @@ def test_rotary_embedding_quant_with_leading_dim(
         rotary_dim = head_size
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
-    q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
-    k_trt = torch.randn(num_tokens, num_k_heads, head_size, dtype=dtype, device=device)
-    q_gold = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
-    k_gold = torch.randn(num_tokens, num_k_heads, head_size, dtype=dtype, device=device)
-    
-    q_trt, k_trt = rope_forward_triton(q_trt, k_trt, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
+    q_trt = torch.randn(num_tokens,
+                        num_q_heads,
+                        head_size,
+                        dtype=dtype,
+                        device=device)
+    k_trt = torch.randn(num_tokens,
+                        num_k_heads,
+                        head_size,
+                        dtype=dtype,
+                        device=device)
+    q_gold = torch.randn(num_tokens,
+                         num_q_heads,
+                         head_size,
+                         dtype=dtype,
+                         device=device)
+    k_gold = torch.randn(num_tokens,
+                         num_k_heads,
+                         head_size,
+                         dtype=dtype,
+                         device=device)
+
+    q_trt, k_trt = rope_forward_triton(q_trt,
+                                       k_trt,
+                                       cos,
+                                       sin,
+                                       rope_dim=rotary_dim,
+                                       is_neox_style=is_neox_style)
     q_gold = _apply_rotary_emb(q_gold, cos, sin, is_neox=is_neox_style)
     k_gold = _apply_rotary_emb(k_gold, cos, sin, is_neox=is_neox_style)
 
@@ -94,4 +118,4 @@ def test_rotary_embedding_quant_with_leading_dim(
                                rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()    
+    torch.npu.reset_peak_memory_stats()
