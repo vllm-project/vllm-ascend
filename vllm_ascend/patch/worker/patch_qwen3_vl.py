@@ -31,8 +31,7 @@ from vllm.model_executor.models.qwen3_vl import (Qwen3_VisionBlock,
                                                  Qwen3_VisionPatchEmbed,
                                                  Qwen3_VisionPatchMerger,
                                                  Qwen3_VisionTransformer)
-
-from .vision import get_vit_attn_backend
+from vllm.model_executor.models.vision import get_vit_attn_backend
 
 
 class AscendQwen3_VisionBlock(nn.Module):
@@ -44,7 +43,6 @@ class AscendQwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
             max_seqlen: torch.Tensor,  # Only used for Flash Attention
-            seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -52,7 +50,6 @@ class AscendQwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -70,7 +67,8 @@ class AscendQwen3_VisionTransformer(nn.Module):
         use_data_parallel: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
+
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.num_position_embeddings = vision_config.num_position_embeddings
@@ -197,18 +195,11 @@ class AscendQwen3_VisionTransformer(nn.Module):
                              non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
-        # if isinstance(grid_thw, list):
-        #     grid_thw_list = grid_thw
-        #     grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
-        # else:
-        #     grid_thw_list = grid_thw.tolist()
         if isinstance(grid_thw, list):
-            print("Vit grid_thw -> list", flush=True)
             grid_thw_list = grid_thw
             grid_thw = np.array(grid_thw, dtype=np.int32)
         else:
-            print("Vit grid_thw -> tensor", flush=True)
-            # grid_thw = grid_thw.to("cpu")
+            grid_thw = grid_thw.to("cpu")
             grid_thw_list = grid_thw.tolist()
             grid_thw = grid_thw.numpy()
 
@@ -221,15 +212,13 @@ class AscendQwen3_VisionTransformer(nn.Module):
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device,
                                                    non_blocking=True)
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2],
-            grid_thw[:, 0]).cumsum(dim=0,
-                                   dtype=grid_thw.dtype
-                                   if torch.jit.is_tracing() else torch.int32)
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
+        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2],
+                               grid_thw[:, 0]).cumsum(axis=0, dtype=np.int32)
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        cu_seqlens = torch.from_numpy(cu_seqlens)
 
         hidden_states = hidden_states.unsqueeze(1)
-        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
@@ -240,7 +229,6 @@ class AscendQwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(
@@ -255,6 +243,7 @@ class AscendQwen3_VisionTransformer(nn.Module):
         return hidden_states
 
 
+# NOTE: These will be removed after vllm-ascend is aligned with vllm latest main.
 Qwen3_VisionBlock.forward = AscendQwen3_VisionBlock.forward
 Qwen3_VisionTransformer.__init__ = AscendQwen3_VisionTransformer.__init__
 Qwen3_VisionTransformer.rot_pos_emb = AscendQwen3_VisionTransformer.rot_pos_emb
