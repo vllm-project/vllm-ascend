@@ -230,9 +230,8 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 ```shell
 lm_eval \
     --model vllm-vlm \
-    --model_args pretrained=/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
+    --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7,tensor_parallel_size=1 \
     --tasks mmmu_val \
-    --tensor_parallel_size 1 \
     --batch_size 32 \
     --apply_chat_template \
     --trust_remote_code \
