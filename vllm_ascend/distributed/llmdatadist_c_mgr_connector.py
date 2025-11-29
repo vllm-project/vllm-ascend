@@ -28,22 +28,19 @@ from vllm.forward_context import ForwardContext
 from vllm.utils import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
-                               prefill_context_parallel_enable,
-                               vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               prefill_context_parallel_enable)
 
 if prefill_context_parallel_enable():
     from vllm.distributed.parallel_state import \
         get_prefill_context_model_parallel_rank
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip
-else:
-    from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -104,7 +101,10 @@ class LLMDataDistCMgrConnectorMetadata(KVConnectorMetadata):
 
 class LLMDataDistCMgrConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         if role == KVConnectorRole.SCHEDULER:
@@ -380,7 +380,7 @@ class LLMDataDistCMgrConnectorWorker():
                                         self.local_agent_metadata.cluster_id)
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
-        self.soc_info = get_ascend_soc_version()
+        self.soc_info = get_ascend_device_type()
         # Set hccl deterministic for model execute
         os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
@@ -765,7 +765,7 @@ class LLMDataDistCMgrConnectorWorker():
             rank_table["server_list"].append(  # type: ignore[attr-defined]
                 decode_server_device_info)
 
-        if self.soc_info == AscendSocVersion.A3:
+        if self.soc_info == AscendDeviceType._910_93:
             # generate super_pod_list for rank table
             super_pod_list = []
             prefill_super_pod_info = {

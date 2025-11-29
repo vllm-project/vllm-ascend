@@ -1,5 +1,6 @@
 import types
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torchair
@@ -11,6 +12,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -23,13 +25,7 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-else:
-    from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
 
@@ -86,8 +82,7 @@ class TorchairMtpProposer(MtpProposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None) -> None:
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if not with_prefill:
             skip_attn = False
@@ -152,7 +147,7 @@ class TorchairMtpProposer(MtpProposer):
                 break
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[list[int]],
+                           valid_sampled_token_ids: list[np.ndarray],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -165,7 +160,7 @@ class TorchairMtpProposer(MtpProposer):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -176,7 +171,7 @@ class TorchairMtpProposer(MtpProposer):
                 seq_len = (req_state.num_computed_tokens +
                            scheduler_output.num_scheduled_tokens[req_id])
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
+            next_token_ids.append(next_token_id.item())
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
@@ -192,7 +187,7 @@ class TorchairMtpProposer(MtpProposer):
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
@@ -347,8 +342,7 @@ class TorchairMtpProposer(MtpProposer):
         num_tokens_across_dp = self.runner.num_tokens_across_dp
         with_prefill = self.runner.with_prefill
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
