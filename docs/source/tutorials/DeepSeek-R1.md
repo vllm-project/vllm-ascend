@@ -39,7 +39,6 @@ Only AArch64 architecture are supported currently due to extra operator's instal
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
-
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
