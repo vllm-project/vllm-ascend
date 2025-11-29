@@ -1,4 +1,3 @@
-import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -38,7 +37,8 @@ class TestAscendW8A16LinearMethod(TestBase):
     @patch('vllm_ascend.utils.get_ascend_device_type',
            return_value=AscendDeviceType._310P)
     @patch("torch_npu.npu_weight_quant_batchmatmul")
-    def test_apply_with_x_is_310p(self, mock_npu_weight_quant_batchmatmul, mock_soc_version):
+    def test_apply_with_x_is_310p(self, mock_npu_weight_quant_batchmatmul,
+                                  mock_soc_version):
         layer = MagicMock()
         layer.weight.data = torch.randn(128, 256)
         layer.weight_scale.data = torch.randn(128, 1)

@@ -19,7 +19,9 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch_npu
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, AscendDeviceType, get_ascend_device_type, is_enable_nz
+
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               get_ascend_device_type, is_enable_nz)
 
 
 class AscendW8A16LinearMethod:
@@ -29,7 +31,8 @@ class AscendW8A16LinearMethod:
 
     def __init__(self) -> None:
         # aclnn quant matmul requires to transpose matrix B, set to true by default.
-        self.transpose_weight = get_ascend_device_type() != AscendDeviceType._310P
+        self.transpose_weight = get_ascend_device_type(
+        ) != AscendDeviceType._310P
 
     @staticmethod
     def get_weight(
@@ -82,16 +85,14 @@ class AscendW8A16LinearMethod:
                 weight=layer.weight.data.transpose(0, 1),
                 antiquant_scale=layer.weight_scale,
                 antiquant_offset=layer.weight_offset,
-                bias=bias
-            )
+                bias=bias)
         else:
             output = torch_npu.npu_weight_quant_batchmatmul(
                 x=x,
                 weight=layer.weight,
                 antiquant_scale=layer.weight_scale,
                 antiquant_offset=layer.weight_offset,
-                bias=bias
-            )
+                bias=bias)
         return output
 
     def process_weights_after_loading(self, layer):
