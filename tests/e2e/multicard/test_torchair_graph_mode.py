@@ -44,6 +44,9 @@ def _deepseek_torchair_test_fixture(
     kwargs = {}
     if not use_v1_schduler:
         kwargs = {
+            "ascend_scheduler_config": {
+                "enabled": True,
+            },
             "refresh": True,
         }
     additional_config.update(**kwargs)
@@ -117,6 +120,9 @@ def _pangu_torchair_test_fixture(
 
     # torchair is only work without chunked-prefill now
     kwargs = {
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
         "refresh": True,
     }
     additional_config.update(**kwargs)
@@ -179,6 +185,9 @@ def _qwen_torchair_test_fixture(
         "torchair_graph_config": {
             "enabled": False,
         },
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
         "refresh": True,
     }
 
@@ -235,6 +244,9 @@ def _deepseek_v2_lite_torchair_test_fixure(
     kwargs = {}
     if not use_v1_schduler:
         kwargs = {
+            "ascend_scheduler_config": {
+                "enable": True,
+            },
             "refresh": True,
         }
     additional_config.update(**kwargs)

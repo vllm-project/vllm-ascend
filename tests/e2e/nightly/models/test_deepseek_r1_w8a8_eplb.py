@@ -71,6 +71,9 @@ async def test_models(model: str) -> None:
         "cudagraph_mode": "FULL_DECODE_ONLY"
     }
     additional_config: dict[str, Any] = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
         "torchair_graph_config": {
             "enabled": True
         },
