@@ -1,4 +1,4 @@
-# Multi-NPU (Qwen2.5-VL-32B-Instruct)
+# Multi-NPU (Qwen2.5-VL-32B-Instruct-W8A8)
 
 ## Introduction
 
@@ -27,7 +27,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 - A sample Qwen2.5-VL quantization script can be found in the modelslim code repository. [Qwen2.5-VL Quantization Script Example](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen2.5-VL/README.md)
 
-- `Qwen2.5-VL-32B-Instruct-w8a8`(Quantized version): require 1 Atlas 800 A2 (64G × 8) node. 
+- `Qwen2.5-VL-32B-Instruct-w8a8`(Quantized version): require 1 Atlas 800 A2 (64G × 8) node.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -77,19 +77,14 @@ vllm serve /data/Qwen2.5-VL-32B-Instruct-w8a8 \
     --quantization ascend \
     --async-scheduling \
     --tensor-parallel-size 2 \
-    --max-model-len 15000 \
-    --max-num-batched-tokens 30000 \
+    --max-model-len 30000 \
+    --max-num-batched-tokens 50000 \
     --max-num-seqs 30 \
     --no-enable-prefix-caching \
     --trust-remote-code \
     --additional-config '{"enable_weight_nz_layout":true}'
 
 ```
-
-
-### Prefill-Decode Disaggregation
-
-Not supported yet.
 
 ## Functional Verification
 
