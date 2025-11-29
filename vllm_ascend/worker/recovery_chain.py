@@ -52,6 +52,7 @@ class RecoveryHandler(ABC):
             return self.next_handler.handle(ctx)
         else:
             logger.warning("No handler can process the exception")
+            #TODO: 需要添加入队或其他逻辑，单独返回失败状态会导致其余的卡hang住，没有装饰器能处理，或者干脆raise Exception（非目标故障场景）
             return RecoveryStatus.FAILED
 
 

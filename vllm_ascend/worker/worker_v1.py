@@ -319,6 +319,7 @@ class NPUWorker(WorkerBase):
                 level=FaultToleranceLevel.BASIC
             )
             self.execute_model = self.fault_tolerance.fault_tolerance_decorator(self.execute_model)
+            self.execute_dummy_batch = self.fault_tolerance.fault_tolerance_decorator(self.execute_dummy_batch)
 
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.

@@ -136,10 +136,12 @@ class FaultTolerance:
             else:
                 return FaultAction.RAISE_EXCEPTION
         #TODO:Should refactor codes below
+        """
+        dummy_forward = {"hidden_states":torch.tensor([0])}
         if self.vllm_config.parallel_config.distributed_executor_backend != (
             "external_launcher") and not get_pp_group().is_last_rank:
-            get_pp_group().send_tensor_dict(torch.tensor([0]),all_gather_group=get_tp_group())
-
+            get_pp_group().send_tensor_dict(dummy_forward,all_gather_group=get_tp_group())
+        """
         all_recovery_status = self._gather_statuses(local_recovery_status)
         reinit_status = self._restart_and_reinit(ctx)
         all_reinit_status = self._gather_statuses(reinit_status)
