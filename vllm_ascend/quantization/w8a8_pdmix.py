@@ -1,10 +1,7 @@
 from typing import Any, Dict
 
 import torch
-import torch_npu
 from vllm.config import get_current_vllm_config
-
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 from .w8a8 import AscendW8A8LinearMethod
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
@@ -52,7 +49,9 @@ class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
                                 intermediate_size_per_partition: int,
                                 hidden_sizes: int,
                                 params_dtype: torch.dtype) -> Dict[str, Any]:
-        param_dict = AscendW8A8DynamicFusedMoEMethod.get_dynamic_quant_param(num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype)
+        param_dict = AscendW8A8DynamicFusedMoEMethod.get_dynamic_quant_param(
+            num_experts, intermediate_size_per_partition, hidden_sizes,
+            params_dtype)
         param_dict["w2_deq_scale"] = torch.empty(num_experts,
                                                  hidden_sizes,
                                                  dtype=torch.float32)
