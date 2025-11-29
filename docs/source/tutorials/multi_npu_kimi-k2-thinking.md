@@ -43,8 +43,8 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-##  Verify the Quantized Model
-The original model downloaded from [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking) lacks necessary `quant_model_description.json` file required by inference quantized models with vllm-ascend. To resovle this, please execute the following scripts to generate it.
+## Verify the Quantized Model
+The original model downloaded from [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking  ) lacks necessary `quant_model_description.json` file required by inference quantized models with vllm-ascend. To resolve this, please execute the following scripts to generate it.
 
 ```python
 import os
@@ -66,7 +66,7 @@ with open(desc_file, "w", encoding="utf-8") as f:
     json.dump(quant_desc, f, indent=2, ensure_ascii=False)
 ```
 
-Additionaly, please be advised that the `"quantization_config"` key in `config.json` will cause error in loading quantized weights. It is recommanded to remove this key.
+Additionally, please be advised that the `"quantization_config"` key in `config.json` will cause error in loading quantized weights. It is recommended to remove this key.
 
 After these modifications, your model files look like:
 

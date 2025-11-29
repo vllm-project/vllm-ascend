@@ -3,8 +3,8 @@ from unittest.mock import Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w4a16 import (
-    AscendW4A16FusedMoEMethod, unpack_from_int32, pack_to_int32)
+from vllm_ascend.quantization.w4a16 import (AscendW4A16FusedMoEMethod,
+                                            pack_to_int32, unpack_from_int32)
 
 
 class TestUnpackFromInt32(TestBase):
@@ -41,7 +41,9 @@ class TestUnpackFromInt32(TestBase):
 
 class TestPackToInt32(TestBase):
 
-    @patch("vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack")
+    @patch(
+        "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
+    )
     def test_pack_to_int32_int8(self, mock_npu_convert_weight_to_int4pack):
         mock_npu_convert_weight_to_int4pack.return_value = torch.zeros(
             (2, 4), dtype=torch.int32)
@@ -54,7 +56,9 @@ class TestPackToInt32(TestBase):
 
         self.assertEqual(result.shape, torch.Size([2, 8, 4]))
 
-    @patch("vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack")
+    @patch(
+        "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
+    )
     def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
 
         def mock_convert_weight(weight):
@@ -102,10 +106,9 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()
-        mock_vllm_config.quant_config = Mock(
-            quant_description={
-                "group_size": self.group_size,
-            })
+        mock_vllm_config.quant_config = Mock(quant_description={
+            "group_size": self.group_size,
+        })
         mock_get_current_vllm_config.return_value = mock_vllm_config
 
         self.quant_method = AscendW4A16FusedMoEMethod()
@@ -125,7 +128,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
 
         self.assertEqual(param_dict["w13_weight_packed"].dtype, torch.int32)
         expected_w13_shape = (self.experts, 2 * self.input_size,
-                              self.output_size // self.quant_method.pack_factor)
+                              self.output_size //
+                              self.quant_method.pack_factor)
         self.assertEqual(param_dict["w13_weight_packed"].shape,
                          expected_w13_shape)
 
@@ -152,13 +156,14 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
                          expected_w2_scale_shape)
 
         self.assertEqual(param_dict["w13_weight_shape"].dtype, torch.int32)
-        self.assertEqual(param_dict["w13_weight_shape"].shape, (self.experts, 2))
+        self.assertEqual(param_dict["w13_weight_shape"].shape,
+                         (self.experts, 2))
 
         self.assertEqual(param_dict["w2_weight_shape"].dtype, torch.int32)
-        self.assertEqual(param_dict["w2_weight_shape"].shape, (self.experts, 2))
+        self.assertEqual(param_dict["w2_weight_shape"].shape,
+                         (self.experts, 2))
 
-        self.assertEqual(param_dict["w13_weight_offset"].dtype,
-                         torch.bfloat16)
+        self.assertEqual(param_dict["w13_weight_offset"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight_offset"].shape,
                          expected_w13_scale_shape)
 
@@ -201,17 +206,23 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             w2_scale_shape, dtype=torch.bfloat16),
                                                     requires_grad=False)
 
-        layer.w13_weight_shape = torch.nn.Parameter(
-            torch.tensor([[2 * self.input_size, self.output_size]] * self.experts, dtype=torch.int32),
-            requires_grad=False)
-        layer.w2_weight_shape = torch.nn.Parameter(
-            torch.tensor([[self.output_size, self.input_size]] * self.experts, dtype=torch.int32),
-            requires_grad=False)
+        layer.w13_weight_shape = torch.nn.Parameter(torch.tensor(
+            [[2 * self.input_size, self.output_size]] * self.experts,
+            dtype=torch.int32),
+                                                    requires_grad=False)
+        layer.w2_weight_shape = torch.nn.Parameter(torch.tensor(
+            [[self.output_size, self.input_size]] * self.experts,
+            dtype=torch.int32),
+                                                   requires_grad=False)
 
         return layer
 
-    @patch("vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_weights_after_loading_with_transpose(self, mock_npu_convert_weight_to_int4pack):
+    @patch(
+        "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
+    )
+    def test_process_weights_after_loading_with_transpose(
+            self, mock_npu_convert_weight_to_int4pack):
+
         def mock_convert_weight(weight):
             new_shape = list(weight.shape)
             new_shape[-1] = new_shape[-1] // 8
@@ -224,13 +235,19 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
 
         self.quant_method.process_weights_after_loading(layer)
 
-        self.assertEqual(layer.w13_weight_packed.data.shape, torch.Size([8, 128, 8]))
-        self.assertEqual(layer.w2_weight_packed.data.shape, torch.Size([8, 32, 16]))
+        self.assertEqual(layer.w13_weight_packed.data.shape,
+                         torch.Size([8, 128, 8]))
+        self.assertEqual(layer.w2_weight_packed.data.shape,
+                         torch.Size([8, 32, 16]))
 
-        self.assertEqual(layer.w13_weight_scale.data.shape, torch.Size([8, 4, 64]))
-        self.assertEqual(layer.w2_weight_scale.data.shape, torch.Size([8, 1, 128]))
-        self.assertEqual(layer.w13_weight_offset.data.shape, torch.Size([8, 4, 64]))
-        self.assertEqual(layer.w2_weight_offset.data.shape, torch.Size([8, 1, 128]))
+        self.assertEqual(layer.w13_weight_scale.data.shape,
+                         torch.Size([8, 4, 64]))
+        self.assertEqual(layer.w2_weight_scale.data.shape,
+                         torch.Size([8, 1, 128]))
+        self.assertEqual(layer.w13_weight_offset.data.shape,
+                         torch.Size([8, 4, 64]))
+        self.assertEqual(layer.w2_weight_offset.data.shape,
+                         torch.Size([8, 1, 128]))
 
         self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
         self.assertTrue(layer.w2_weight_scale.data.is_contiguous())
