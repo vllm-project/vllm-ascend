@@ -1,4 +1,4 @@
-# Qwen-VL(Dense)
+# Qwen3-VL-Dense
 
 ## Introduction
 
