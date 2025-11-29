@@ -15,6 +15,10 @@ Key Enhancements:
 
 This document will demonstrate the main validation steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
+## **Attention**
+
+This example requires version **v0.11.0rc1**.Earlier versions may lack certain features.
+
 ## Supported Features
 
 Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -36,14 +40,21 @@ It is recommended to download the model weight to the shared directory of multip
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
 
 ## Deployment
+
+The specific example scenario is as follows:
+- The machine environment is an Atlas 800 A2 (64G*8)
+- The LLM is Qwen2.5-VL-32B-Instruct-W8A8
+
 ### Run docker container
 
-```shell
-export IMAGE=quay.io/ascend/vllm-ascend:0.11.0rc1
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --shm-size=1g \
 --net=host \
---name vllm-ascend-qwen25_VL \
+--name vllm-ascend \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci_manager \
@@ -65,9 +76,21 @@ Run the following script to execute online inference. Recommend two NPU cards fo
 
 ```shell
 #!/bin/sh
-# apt install libjemalloc2 or yum install jemalloc
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+# if os is Ubuntu
+apt install libjemalloc2 
+# if os is openEuler
+yum install jemalloc
+# Add the LD_PRELOAD environment variable
+if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
+    # On Ubuntu, first install with `apt install libjemalloc2`
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+elif [ -f /usr/lib64/libjemalloc.so.2 ]; then
+    # On openEuler, first install with `yum install jemalloc`
+    export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD
+fi
+# Enable the AIVector core to directly schedule ROCE communication
 export HCCL_OP_EXPANSION_MODE="AIV"
+# Set vLLM to Engine V1
 export VLLM_USE_V1=1
 
 vllm serve /data/Qwen2.5-VL-32B-Instruct-w8a8 \
