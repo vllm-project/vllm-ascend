@@ -237,8 +237,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    key,
                                    value,
                                    kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+                                   metadata)
 
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
