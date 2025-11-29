@@ -161,6 +161,10 @@ def register_torchair_model():
         "DeepSeekMTPModel",
         "vllm_ascend.torchair.models.torchair_deepseek_mtp:TorchairDeepSeekMTP"
     )
+    ModelRegistry.register_model(
+        "OpenPanguMTPModel",
+        "vllm_ascend.torchair.models.torchair_openpangu_mtp:TorchairOpenPanguModel"
+    )
 
     ModelRegistry.register_model(
         "DeepseekV2ForCausalLM",
@@ -188,6 +192,10 @@ def register_torchair_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
+    )
+    ModelRegistry.register_model(
+        "PanguUltraMoEForCausalLM",
+        "vllm_ascend.torchair.models.torchair_openpangu:TorchairPanguUltraMoEForCausalLM"
     )
 
 
