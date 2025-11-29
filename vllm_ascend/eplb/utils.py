@@ -36,7 +36,7 @@ def get_log2phy_map(self, layer_id):
         return self.layers[str(layer_id)].mtp_block.mlp.experts.get_log2phy_map()
 
 
-def get_all_expert_map(self, num_moe_layers):
+def get_all_expert_map(self, num_moe_layers=None):
     if not isinstance(self, DeepSeekMultiTokenPredictor):
         all_loads = []
         num_dense_layers = self.num_dense_layers if hasattr(
