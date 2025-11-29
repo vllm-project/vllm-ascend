@@ -171,8 +171,9 @@ class KVPoolWorker:
             if self.kv_role in ['kv_producer', 'kv_both']:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
-                    self.m_store, self.token_database, self.tp_rank, self.dcp_size,
-                    self.put_step, ready_event_sending, self.num_layers)
+                    self.m_store, self.token_database, self.tp_rank,
+                    self.dcp_size, self.put_step, ready_event_sending,
+                    self.num_layers)
                 self.kv_send_thread.start()
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
@@ -184,8 +185,8 @@ class KVPoolWorker:
             if self.kv_role in ['kv_producer', 'kv_both']:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreSendingThread(
-                    self.m_store, self.token_database, self.tp_rank, self.dcp_size,
-                    self.put_step, ready_event_sending)
+                    self.m_store, self.token_database, self.tp_rank,
+                    self.dcp_size, self.put_step, ready_event_sending)
                 self.kv_send_thread.start()
             if self.load_async:
                 ready_event = threading.Event()
