@@ -43,8 +43,6 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
-        self._block_size = vllm_config.cache_config.block_size
-
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
