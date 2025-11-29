@@ -235,43 +235,34 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         moe_comm_method = get_forward_context().moe_comm_method
         if self.dynamic_eplb:
-            return moe_comm_method.fused_experts(
-                hidden_states=x,
-                pertoken_scale=pertoken_scale,
-                w1=layer.w13_weight_list,
-                w1_scale=layer.w13_weight_scale_fp32_list,
-                w2=layer.w2_weight_list,
-                w2_scale=layer.w2_weight_scale_list,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                use_int8_w8a8=True,
-                expert_map=expert_map,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts,
-                quantized_x_for_share=quantized_x_for_share,
-                dynamic_scale_for_share=dynamic_scale_for_share,
-                dynamic_eplb=self.dynamic_eplb,
-                mc2_mask=kwargs.get("mc2_mask", None))
+            w1 = layer.w13_weight_list
+            w1_scale = layer.w13_weight_scale_fp32_list
+            w2 = layer.w2_weight_list
+            w2_scale = layer.w2_weight_scale_list
         else:
-            return moe_comm_method.fused_experts(
-                hidden_states=x,
-                pertoken_scale=pertoken_scale,
-                w1=layer.w13_weight,
-                w1_scale=layer.w13_weight_scale_fp32,
-                w2=layer.w2_weight,
-                w2_scale=layer.w2_weight_scale,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                use_int8_w8a8=True,
-                expert_map=expert_map,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts,
-                quantized_x_for_share=quantized_x_for_share,
-                dynamic_scale_for_share=dynamic_scale_for_share,
-                dynamic_eplb=self.dynamic_eplb,
-                mc2_mask=kwargs.get("mc2_mask", None))
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale_fp32]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+
+        return moe_comm_method.fused_experts(
+            hidden_states=x,
+            pertoken_scale=pertoken_scale,
+            w1=w1,
+            w1_scale=w1_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            use_int8_w8a8=True,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            shared_experts=shared_experts,
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share,
+            dynamic_eplb=self.dynamic_eplb,
+            mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
