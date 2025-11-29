@@ -2510,9 +2510,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_gen_len = sampled_token_ids.shape[-1]
                 if max_gen_len == 1:
                     # No spec decode tokens. It's a tensor.
-                    valid_sampled_token_ids: list[np.ndarray] = [
-                        row for row in sampled_token_ids.cpu().numpy()
-                    ]
+                    valid_sampled_token_ids = sampled_token_ids.tolist()
                 else:
                     # Includes spec decode tokens. It's a numpy array
                     valid_sampled_token_ids = self.rejection_sampler.parse_output(
@@ -2521,7 +2519,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)] = np.array([])
+                    valid_sampled_token_ids[int(i)].clear()
             else:
                 valid_sampled_token_ids = []
                 invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
@@ -2547,17 +2545,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # the sampled tokens back, because there's no direct communication
             # between the first-stage worker and the last-stage worker.
             for req_idx in range(num_sampled_tokens):
-                sampled_ids: np.ndarray | None
                 if self.use_async_scheduling:
-                    sampled_ids = (np.array([-1]) if req_idx
-                                   not in invalid_req_indices_set else None)
+                    sampled_ids = [-1] * 1 if \
+                        req_idx not in invalid_req_indices_set else None
                 else:
                     sampled_ids = valid_sampled_token_ids[req_idx]
-                if sampled_ids is None or sampled_ids.shape[0] == 0:
+                if not sampled_ids:
                     continue
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                end_idx = start_idx + sampled_ids.shape[0]
+                end_idx = start_idx + len(sampled_ids)
                 assert end_idx <= self.model_config.max_model_len, (
                     "Sampled token IDs exceed the max model length. "
                     f"Total number of tokens: {end_idx} > max_model_len: "
@@ -2571,7 +2568,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.num_tokens[req_idx] = end_idx
                 req_id = self.input_batch.req_ids[req_idx]
                 req_state = self.requests[req_id]
-                req_state.output_token_ids.extend(sampled_ids.tolist())
+                req_state.output_token_ids.extend(sampled_ids)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
@@ -2935,14 +2932,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
-        num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens,
-                                            num_sampled_tokens):
+                                            num_scheduled_tokens):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
