@@ -1049,7 +1049,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.local_num_experts, self.expert_map = (
                     self.expert_load_balancer.get_rank_placement_map(
                         self.moe_instance_id, self.ep_rank))
-                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
+                self.logical_to_physical_map = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
             except Exception as e:
                 logger.warning(
@@ -1057,7 +1057,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num)
-                self.log2phy = determine_default_log2phy_map(
+                self.logical_to_physical_map = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num).npu()
             if self.expert_map is not None and isinstance(
@@ -1078,7 +1078,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num)
-                self.log2phy = determine_default_log2phy_map(
+                self.logical_to_physical_map = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num).npu()
             if self.expert_map is not None and isinstance(
@@ -1309,7 +1309,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
+            log2phy=self.logical_to_physical_map,
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=shared_experts if self.torchair_graph_enabled
             and self.multistream_overlap_shared_expert and not is_prefill else
