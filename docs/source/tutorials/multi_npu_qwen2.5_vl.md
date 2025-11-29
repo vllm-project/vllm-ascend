@@ -29,6 +29,8 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
+- `Qwen2.5-VL-32B-Instruct`(BF16 version): [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)
+
 - A sample Qwen2.5-VL quantization script can be found in the modelslim code repository. [Qwen2.5-VL Quantization Script Example](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen2.5-VL/README.md)
 
 - `Qwen2.5-VL-32B-Instruct-w8a8`(Quantized version): require 1 Atlas 800 A2 (64G × 8) node.
