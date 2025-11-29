@@ -33,8 +33,7 @@ from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
-                                              determine_default_log2phy_map)
+from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
@@ -149,10 +148,8 @@ class AscendFusedMoE(FusedMoE):
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
-        self.global_num_experts = num_experts
         self.expert_map = None
         self.log2phy = None
-        self.global_redundant_expert_num = 0
 
         if self.quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(
@@ -181,10 +178,11 @@ class AscendFusedMoE(FusedMoE):
                 self.expert_map_path) and os.access(self.expert_map_path,
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
-                self.expert_map_path, self.global_num_experts)
+                self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
+            self.global_num_experts = num_experts + self.global_redundant_expert_num
             try:
                 self.local_num_experts, self.expert_map = (
                     self.expert_load_balancer.get_rank_placement_map(
@@ -194,41 +192,26 @@ class AscendFusedMoE(FusedMoE):
             except Exception as e:
                 logger.warning(
                     f"Init expert map of mtp/eagle when using sample.{e}")
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
-            if self.expert_map is not None and isinstance(
-                    self.expert_map, torch.Tensor):
-                logger.info_once(
-                    "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                    " number of experts: %s/%s. Experts local to global index map:"
-                    " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                    self.global_num_experts,
-                    get_compressed_expert_map(self.expert_map))
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
         else:
             # init moe.
             self.local_num_experts, self.expert_map = determine_expert_map(
                 self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
-                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num).npu()
-            if self.expert_map is not None and isinstance(
-                    self.expert_map, torch.Tensor):
-                logger.info_once(
-                    "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                    " number of experts: %s/%s. Experts local to global index map:"
-                    " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                    self.global_num_experts,
-                    get_compressed_expert_map(self.expert_map))
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
+        if self.expert_map is not None and isinstance(self.expert_map,
+                                                      torch.Tensor):
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         local_num_experts = (torch.sum(
             self.expert_map != -1) if self.expert_map is not None else
                              self.global_num_experts)
@@ -302,7 +285,6 @@ class AscendFusedMoE(FusedMoE):
         # This approach may overlook some extreme scenarios.
         enable_force_load_balance = forward_context.in_profile_run
 
-        forward_context = get_forward_context()
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
