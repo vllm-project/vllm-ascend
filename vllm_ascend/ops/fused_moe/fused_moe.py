@@ -183,8 +183,8 @@ class AscendFusedMoE(FusedMoE):
         # init moe.
         self.local_num_experts, self.expert_map, _ = determine_expert_map(
             self.ep_size, self.ep_rank, self.global_num_experts)
-        #Todo init_eplb_enable is a flag to judge whether enable eplb in drafter or not enable,
-        # this flag will be remove when eplb supporting mtp and fload weights.
+        # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
+        # workaround to bypass a quantization check that fails with float weights.
         init_eplb_enable = False
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
