@@ -137,6 +137,9 @@ def gen_build_info():
 
     # TODO(zzzzwwjj): Add A5 case
     soc_to_device = {
+        "910b": "_910B",
+        "910c": "_910_93",
+        "310p": "_310P",
         "ascend910b1": "_910B",
         "ascend910b2": "_910B",
         "ascend910b2c": "_910B",
@@ -307,7 +310,14 @@ class cmake_build_ext(build_ext):
 
         cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
 
-        cmake_args += [f"-DSOC_VERSION={envs.SOC_VERSION}"]
+        soc_version_map = {
+            "910b": "ascend910b1",
+            "910c": "ascend910_9392",
+            "310p": "ascend310p1",
+        }
+        CANN_SOC_VERSION = soc_version_map.get(envs.SOC_VERSION,
+                                               envs.SOC_VERSION)
+        cmake_args += [f"-DSOC_VERSION={CANN_SOC_VERSION}"]
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
