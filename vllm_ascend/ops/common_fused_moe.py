@@ -172,9 +172,9 @@ class AscendFusedMoE(FusedMoE):
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num
-        #Todo: init_eplb_enable is a flag of whether enable when using mtp and float weights or
-        # not enable. It will be remove when eplb supporting mtp and float weights
-        init_eplb_enable = False
+        # TODO: Flag for static expert placement. This is a temporary workaround
+        # to allow dynamic EPLB with float weights by skipping quantization checks.
+        self.static_eplb_enabled = False
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
             vllm_config = get_current_vllm_config()
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
