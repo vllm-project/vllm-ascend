@@ -92,7 +92,6 @@ async def test_models(model: str, tp_size: int, dp_size: int,
         "--gpu-memory-utilization",
         "0.9",
         "--additional-config",
-        '{"ascend_scheduler_config":{"enabled":true},'
         '"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}',
     ]
     if full_graph:
