@@ -84,18 +84,8 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         # Convert cumulative tensor to intervals and move it to cpu.
         cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
-        cos = rotary_pos_emb_cos
-        sin = rotary_pos_emb_sin
-        cos = einops.rearrange(
-            torch.stack((cos, cos), dim=-1),
-            "... d two -> ...(d two)",
-            two=2,
-        )
-        sin = einops.rearrange(
-            torch.stack((sin, sin), dim=-1),
-            "... d two -> ...(d two)",
-            two=2,
-        )
+        cos = torch.cat((rotary_pos_emb_cos, rotary_pos_emb_cos), dim=-1)
+        sin = torch.cat((rotary_pos_emb_sin, rotary_pos_emb_sin), dim=-1)
         cos = cos.reshape(1, -1, 1, self.hidden_size_per_attention_head)
         sin = sin.reshape(1, -1, 1, self.hidden_size_per_attention_head)
         q = torch_npu.npu_rotary_mul(q, cos, sin)
