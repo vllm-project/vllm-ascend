@@ -183,7 +183,7 @@ class AscendFusedMoE(FusedMoE):
         # init moe.
         self.local_num_experts, self.expert_map, _ = determine_expert_map(
             self.ep_size, self.ep_rank, self.global_num_experts)
-        eplb_enable = self.dynamic_eplb or (self.expert_map_path is not None)
+        init_eplb_enable = False
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -200,12 +200,12 @@ class AscendFusedMoE(FusedMoE):
                         self.moe_instance_id, self.ep_rank))
                 self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
+                init_eplb_enable = True
             except Exception as e:
                 logger.warning(
                     f"Init expert map of mtp/eagle when using sample.{e}")
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank).npu()
-                eplb_enable = False
         else:
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
@@ -226,7 +226,7 @@ class AscendFusedMoE(FusedMoE):
             self.moe_load = torch.zeros(local_num_experts,
                                         dtype=torch.int64).npu()
 
-        if eplb_enable and (not hasattr(self.quant_method, "quant_method") or
+        if init_eplb_enable and (not hasattr(self.quant_method, "quant_method") or
                             not isinstance(self.quant_method.quant_method,
                                            AscendW8A8DynamicFusedMoEMethod)):
             raise ValueError("Eplb supports only w8a8_dynamic quantization.")
