@@ -2674,34 +2674,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): As an exception, when using PP, the scheduler sends
             # the sampled tokens back, because there's no direct communication
             # between the first-stage worker and the last-stage worker.
-            if not self.use_async_scheduling:
-                for req_idx in range(num_sampled_tokens):
-                    sampled_ids: np.ndarray | None
-                    if self.use_async_scheduling:
-                        sampled_ids = (np.array([
-                            -1
-                        ]) if req_idx not in invalid_req_indices_set else None)
-                    else:
-                        sampled_ids = valid_sampled_token_ids[req_idx]
-                    if sampled_ids is None or sampled_ids.shape[0] == 0:
-                        continue
+            for req_idx in range(num_sampled_tokens):
+                sampled_ids: np.ndarray | None
+                if self.use_async_scheduling:
+                    sampled_ids = (np.array([-1]) if req_idx
+                                   not in invalid_req_indices_set else None)
+                else:
+                    sampled_ids = valid_sampled_token_ids[req_idx]
+                if sampled_ids is None or sampled_ids.shape[0] == 0:
+                    continue
 
-                    start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                    end_idx = start_idx + sampled_ids.shape[0]
-                    assert end_idx <= self.model_config.max_model_len, (
-                        "Sampled token IDs exceed the max model length. "
-                        f"Total number of tokens: {end_idx} > max_model_len: "
-                        f"{self.model_config.max_model_len}")
+                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + sampled_ids.shape[0]
+                assert end_idx <= self.model_config.max_model_len, (
+                    "Sampled token IDs exceed the max model length. "
+                    f"Total number of tokens: {end_idx} > max_model_len: "
+                    f"{self.model_config.max_model_len}")
 
-                    self.input_batch.token_ids_cpu[
-                        req_idx, start_idx:end_idx] = sampled_ids
-                    self.input_batch.is_token_ids[req_idx,
-                                                  start_idx:end_idx] = True
-                    self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-                    self.input_batch.num_tokens[req_idx] = end_idx
-                    req_id = self.input_batch.req_ids[req_idx]
-                    req_state = self.requests[req_id]
-                    req_state.output_token_ids.extend(sampled_ids.tolist())
+                self.input_batch.token_ids_cpu[req_idx,
+                                               start_idx:end_idx] = sampled_ids
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx] = True
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
+                req_id = self.input_batch.req_ids[req_idx]
+                req_state = self.requests[req_id]
+                req_state.output_token_ids.extend(sampled_ids.tolist())
         self.input_batch.prev_sampled_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
