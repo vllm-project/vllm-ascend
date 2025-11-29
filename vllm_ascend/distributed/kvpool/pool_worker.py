@@ -177,8 +177,8 @@ class KVPoolWorker:
                 self.kv_send_thread.start()
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
-                self.m_store, self.token_database, self.tp_rank, ready_event,
-                self.dcp_size, self.get_event)
+                self.m_store, self.token_database, self.tp_rank, self.dcp_size,
+                ready_event, self.get_event)
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
