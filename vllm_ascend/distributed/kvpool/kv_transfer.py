@@ -116,7 +116,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         addr_list_tp = addr_list[self.tp_rank % self.put_step::self.put_step]
         size_list_tp = size_list[self.tp_rank % self.put_step::self.put_step]
         if key_list_tp:
-            torch.npu.current_stream().synchronize()
             self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
         if is_last_chunk:
             self.set_finished_request(req_id)
@@ -196,7 +195,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         addr_list_tp = addr_list[self.tp_rank % self.put_step::self.put_step]
         size_list_tp = size_list[self.tp_rank % self.put_step::self.put_step]
         if key_list_tp:
-            torch.npu.current_stream().synchronize()
             self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
         if req_meta.layer_id == self.final_layer_id and req_meta.is_last_chunk:
             self.set_finished_request(req_meta.req_id)
