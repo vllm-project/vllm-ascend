@@ -82,9 +82,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
                     "enabled": True,
                 },
                 "enable_multistream_moe": True,
-                "ascend_scheduler_config": {
-                    "enabled": True,
-                },
                 "refresh": True,
             },
     ) as vllm_model:
@@ -154,14 +151,9 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
             quantization="ascend",
             enforce_eager=True,
             enable_expert_parallel=True,
-            additional_config={
-                "torchair_graph_config": {
-                    "enabled": False,
-                },
-                "ascend_scheduler_config": {
-                    "enabled": True,
-                }
-            },
+            additional_config={"torchair_graph_config": {
+                "enabled": False,
+            }},
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
 
