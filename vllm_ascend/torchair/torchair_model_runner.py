@@ -39,8 +39,8 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.torchair.utils import (
     TORCHAIR_CACHE_DIR, TorchairCommonAttentionMetadata,
     check_torchair_cache_exist, converting_weight_acl_format,
-    register_torchair_model, torchair_ops_patch,
-    torchair_quant_method_register, write_kv_cache_bytes_to_file)
+    torchair_ops_patch, torchair_quant_method_register,
+    write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, get_ascend_device_type)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -60,7 +60,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
             None, None, vllm_config, device)
         self.use_sparse = hasattr(self.model_config.hf_config, "index_topk")
 
-        register_torchair_model()
         torchair_ops_patch()
         torchair_quant_method_register()
         if self.enable_shared_expert_dp:
