@@ -21,8 +21,6 @@ _EMBED_TP: Optional[GroupCoordinator] = None
 _P_TP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
-_FC3_QUANT_X: Optional[GroupCoordinator] = None
-
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -325,16 +323,3 @@ def destroy_ascend_model_parallel():
     ).flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
-<<<<<<< HEAD
-=======
-    
-    global _FC3_QUANT_X
-    if _FC3_QUANT_X:
-        _FC3_QUANT_X.destroy()
-    _FC3_QUANT_X = None
-
-    global _EMBED_TP
-    if _EMBED_TP:
-        _EMBED_TP.destroy()
-    _EMBED_TP = None
->>>>>>> 8d2b4e79 (PullRequest: 691 [Feat] Add embedding tensor parallel in decode scenario)
