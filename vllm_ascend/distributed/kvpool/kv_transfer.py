@@ -19,7 +19,8 @@ from vllm_ascend.distributed.kvpool.config_data import (ChunkedTokenDatabase,
 class KVTransferThread(threading.Thread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, dcp_size: int, ready_event: threading.Event, name: str):
+                 tp_rank: int, dcp_size: int, ready_event: threading.Event,
+                 name: str):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
         self.ready_event = ready_event
@@ -88,7 +89,8 @@ class KVTransferThread(threading.Thread):
 class KVCacheStoreSendingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, dcp_size: int, put_step: int, ready_event: threading.Event):
+                 tp_rank: int, dcp_size: int, put_step: int, 
+                 ready_event: threading.Event):
         super().__init__(m_store,
                          token_database,
                          tp_rank,
@@ -114,13 +116,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        if self.dcp_size > 1 :
+        if self.dcp_size > 1:
             torch.npu.current_stream().synchronize()
             self.m_store.put(key_list, addr_list, size_list)
         else:
             key_list_tp = key_list[self.tp_rank % self.put_step::self.put_step]
-            addr_list_tp = addr_list[self.tp_rank % self.put_step::self.put_step]
-            size_list_tp = size_list[self.tp_rank % self.put_step::self.put_step]
+            addr_list_tp = addr_list[self.tp_rank % 
+                                     self.put_step::self.put_step]
+            size_list_tp = size_list[self.tp_rank % 
+                                     self.put_step::self.put_step]
             if key_list_tp:
                 torch.npu.current_stream().synchronize()
                 self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
@@ -173,8 +177,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, dcp_size: int, put_step: int, ready_event: threading.Event,
-                 num_layers: int):
+                 tp_rank: int, dcp_size: int, put_step: int,
+                 ready_event: threading.Event, num_layers: int):
         super().__init__(m_store,
                          token_database,
                          tp_rank,
@@ -200,13 +204,15 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        if self.dcp_size > 1 :
+        if self.dcp_size > 1:
             torch.npu.current_stream().synchronize()
             self.m_store.put(key_list, addr_list, size_list)
         else:
             key_list_tp = key_list[self.tp_rank % self.put_step::self.put_step]
-            addr_list_tp = addr_list[self.tp_rank % self.put_step::self.put_step]
-            size_list_tp = size_list[self.tp_rank % self.put_step::self.put_step]
+            addr_list_tp = addr_list[self.tp_rank % 
+                                     self.put_step::self.put_step]
+            size_list_tp = size_list[self.tp_rank % 
+                                     self.put_step::self.put_step]
             if key_list_tp:
                 torch.npu.current_stream().synchronize()
                 self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
