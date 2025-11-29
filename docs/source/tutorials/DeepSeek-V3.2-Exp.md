@@ -108,7 +108,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ### Multi-node Deployment
@@ -160,7 +160,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 **Node 1**
@@ -204,7 +204,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::
@@ -252,7 +252,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --quantization ascend \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 **Node 1**
@@ -299,7 +299,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --quantization ascend \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::

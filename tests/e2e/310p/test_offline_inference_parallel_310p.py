@@ -24,15 +24,12 @@ from tests.e2e.conftest import VllmRunner
 MODELS = [
     "IntervitensInc/pangu-pro-moe-model",
 ]
-# set additional config for ascend scheduler and torchair graph
+# set additional config for torchair graph
 ADDITIONAL_CONFIG = [{
     "additional_config": {
         "torchair_graph_config": {
             "enabled": True
         },
-        "ascend_scheduler_config": {
-            "enabled": True,
-        }
     }
 }]
 
