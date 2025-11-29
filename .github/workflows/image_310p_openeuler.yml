@@ -132,5 +132,4 @@ jobs:
         file: Dockerfile.310p.openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
-          SOC_VERSION=ascend310p1
         provenance: false

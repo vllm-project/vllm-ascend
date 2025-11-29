@@ -29,7 +29,16 @@ class KVPoolScheduler:
             "load_async", False)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
+        self.pcp_size = getattr(vllm_config.parallel_config,
+                                "prefill_context_parallel_size", 1)
+        self.dcp_size = getattr(vllm_config.parallel_config,
+                                "decode_context_parallel_size", 1)
+
         self._block_size = vllm_config.cache_config.block_size
+        if self.pcp_size > 1:
+            self._block_size *= self.pcp_size
+        if self.dcp_size > 1:
+            self._block_size *= self.dcp_size
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         # Whether to discard partial chunks

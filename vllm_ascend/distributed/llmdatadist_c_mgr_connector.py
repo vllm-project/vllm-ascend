@@ -107,6 +107,7 @@ class LLMDataDistCMgrConnector(KVConnectorBase_V1):
                  kv_cache_config: Optional[KVCacheConfig] = None):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self._connector_metadata = LLMDataDistCMgrConnectorMetadata()
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: Optional[
                 LLMDataDistCMgrConnectorScheduler] = LLMDataDistCMgrConnectorScheduler(
