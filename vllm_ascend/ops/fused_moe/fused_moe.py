@@ -306,11 +306,12 @@ class AscendFusedMoE(FusedMoE):
                 mode="constant",
                 value=0.0,
             )
-        fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits, self.layer_name)
+        fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                                  self.layer_name)
         return fused_output[..., :og_hidden_states]
 
     def forward_impl(self, hidden_states: torch.Tensor,
-                    router_logits: torch.Tensor):
+                     router_logits: torch.Tensor):
         assert self.quant_method is not None
 
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
