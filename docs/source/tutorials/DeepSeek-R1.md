@@ -1,8 +1,9 @@
-# DeepSeek-R1-w8a8
+# DeepSeek-R1
 
 ## Introduction
 
 DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language model developed by DeepSeek Company. It excels in complex logical reasoning, mathematical problem-solving, and code generation. By dynamically activating its expert networks, it delivers exceptional performance while maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs 8-bit integer (INT8) quantization for both weights and activations, which significantly reduces the model's memory footprint and computational requirements, enabling more efficient deployment and application in resource-constrained environments.
+This article takes the deepseek- R1-w8a8 version as an example to introduce the deployment of the R1 series models.
 
 ## Supported Features
 
@@ -38,38 +39,6 @@ Only AArch64 architecture are supported currently due to extra operator's instal
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
-2. Install the package `custom-ops` to make the kernels available.
-
-```shell
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
-chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-```
-
-::::
-::::{tab-item} A2 series
-:sync: A2
-
-1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
-
-2. Install the package `custom-ops` to make the kernels available.
-
-```shell
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/CANN-custom_ops-sfa-linux.aarch64.run
-chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-```
-
-::::
-:::::
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
@@ -143,6 +112,7 @@ vllm serve path/DeepSeek-R1-W8A8 \
 Run the following scripts on two nodes respectively.
 
 **Node 0**
+
 ```shell
 #!/bin/sh
 
@@ -191,6 +161,7 @@ vllm serve path/DeepSeek-R1-W8A8 \
 ```
 
 **Node 1**
+
 ```shell
 #!/bin/sh
 
