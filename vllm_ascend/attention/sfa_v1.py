@@ -15,7 +15,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         wait_for_kv_layer_from_connector)
+                                         wait_for_kv_layer_from_connector,
+                                         split_decodes_and_prefills)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_enable_nz)
@@ -72,6 +73,7 @@ class AscendSFAMetadata:
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
+    num_decode_tokens: int = 0
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -147,6 +149,8 @@ class AscendSFAMetadataBuilder:
         query_start_loc = common_attn_metadata.query_start_loc
         query_lens = query_start_loc[1:] - query_start_loc[:-1]
         has_prefill = any(query_lens > self.decode_threshold)
+        _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata, decode_threshold=self.decode_threshold)
 
         if self.cos_cache is None:
             self.cos_cache = model.model.layers[
@@ -172,6 +176,7 @@ class AscendSFAMetadataBuilder:
         return self.metadata_cls(  # type: ignore
             has_prefill=has_prefill,
             num_input_tokens=common_attn_metadata.num_input_tokens,
+            num_decode_tokens=num_decode_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
