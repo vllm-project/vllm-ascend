@@ -306,9 +306,17 @@ class AscendFusedMoE(FusedMoE):
                 mode="constant",
                 value=0.0,
             )
-        fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                                  self.layer_name)
-        return fused_output[..., :og_hidden_states]
+        if self.shared_experts is None:
+            fused_output = torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                                      self.layer_name)
+            return fused_output[..., :og_hidden_states]
+        else:
+            shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
+                hidden_states, router_logits, self.layer_name)
+            return (
+                shared_output[..., :og_hidden_states],
+                fused_output[..., :og_hidden_states],
+            )
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
