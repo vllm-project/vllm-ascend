@@ -175,10 +175,11 @@ class AscendQwen3_VisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        cos_h = cos[pos_ids[:, 0]]  # (num_tokens, rotary_dim // 2)
-        cos_w = cos[pos_ids[:, 1]]
-        sin_h = sin[pos_ids[:, 0]]
-        sin_w = sin[pos_ids[:, 1]]
+        # (num_tokens, rotary_dim // 2)
+        cos_h = cos[pos_ids[:, 0]]  # type: ignore
+        cos_w = cos[pos_ids[:, 1]]  # type: ignore
+        sin_h = sin[pos_ids[:, 0]]  # type: ignore
+        sin_w = sin[pos_ids[:, 1]]  # type: ignore
 
         cos_combined = torch.cat([cos_h, cos_w], dim=-1)
         sin_combined = torch.cat([sin_h, sin_w], dim=-1)
