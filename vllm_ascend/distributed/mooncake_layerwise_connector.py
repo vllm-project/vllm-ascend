@@ -32,8 +32,8 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import (align_memory,
                                            get_transfer_timeout_value,
                                            kv_alltoall_and_rearrange)
@@ -484,8 +484,6 @@ class MooncakeLayerwiseConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
-        self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
-                             vllm_config.parallel_config.data_parallel_size
 
         # Handshake base port
         self.side_channel_port = (
@@ -639,7 +637,6 @@ class MooncakeLayerwiseConnectorWorker:
         if TransferEngine is None:
             raise RuntimeError("mooncake is not available")
         logger.info("Initializing Mooncake work %s", engine_id)
-        self.engine = TransferEngine()
 
         # Metadata.
         self.vllm_config = vllm_config
@@ -648,11 +645,8 @@ class MooncakeLayerwiseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.max_device_id = self.tp_size * self.dp_size
         self.total_layers = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
@@ -668,34 +662,8 @@ class MooncakeLayerwiseConnectorWorker:
             vllm_config.parallel_config.tensor_parallel_size)
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
-
-        # get tp device id
-        # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
-        # introducing some changes
-        device_ids_str = envs_ascend.PHYSICAL_DEVICES
-        if device_ids_str is None:
-            device_ids = list(
-                range(self.dp_rank * self.tp_size,
-                      (self.dp_rank + 1) * self.tp_size))
-        else:
-            device_ids = list(map(int, device_ids_str.split(',')))
-            start_index = self.dp_rank * self.tp_size
-            end_index = start_index + self.tp_size
-            if len(device_ids) < end_index:
-                raise ValueError(
-                    f"Not enough physical devices available for DP rank {self.dp_rank}. "
-                    f"Expected at least {end_index} devices, but found {len(device_ids)} "
-                    "in PHYSICAL_DEVICES.")
-            device_ids = device_ids[start_index:end_index]
-        assert len(device_ids) > self.tp_rank  # type: ignore
-        self.device_id = device_ids[self.tp_rank]  # type: ignore
-
-        if vllm_config.kv_transfer_config.get_from_extra_config(
-                'use_ascend_direct', True):
-            hostname = self.side_channel_host
-        else:
-            hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
-        self._initialize(hostname=hostname, device_name=None)
+        logger.info("Initializing Mooncake work %s", engine_id)
+        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -747,19 +715,6 @@ class MooncakeLayerwiseConnectorWorker:
         assert "dp_size" in decode_parallel_config.keys()
         self._decode_dp_size = decode_parallel_config["dp_size"]
 
-    def _initialize(
-        self,
-        hostname: str,
-        device_name: Optional[str],
-    ) -> None:
-        """Initialize the mooncake instance."""
-        device_name = device_name if device_name is not None else ""
-        ret_value = self.engine.initialize(hostname, "P2PHANDSHAKE", "ascend",
-                                           device_name)
-        if ret_value != 0:
-            raise RuntimeError(
-                f"Mooncake initialization failed with ret_value: {ret_value}")
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
 
@@ -798,6 +753,8 @@ class MooncakeLayerwiseConnectorWorker:
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
+        ptrs = []
+        lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
             if self.use_mla:
@@ -805,7 +762,8 @@ class MooncakeLayerwiseConnectorWorker:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[i % 2]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             else:
                 cache_list = [cache_or_caches
                               ] if self.use_mla else cache_or_caches
@@ -813,7 +771,9 @@ class MooncakeLayerwiseConnectorWorker:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+        global_te.register_buffer(ptrs, lengths)
         self.kv_caches_base_addr = kv_caches_base_addr
 
         # After KV Caches registered, start the sending or receiving thread.
@@ -845,14 +805,6 @@ class MooncakeLayerwiseConnectorWorker:
                 self.pd_head_ratio, self.engine_id, metadata, ready_event)
             self.kv_recv_layer_thread.start()
             ready_event.wait()
-
-    def _register(self, ptr, length):
-        logger.info(
-            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
-            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
-        ret_value = self.engine.register_memory(ptr, length)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake memory registration failed.")
 
     def _access_metaserver(self, url, message):
         success = False
