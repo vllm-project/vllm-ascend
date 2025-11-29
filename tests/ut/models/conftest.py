@@ -92,7 +92,7 @@ def mock_distributed():
 
     with patch("vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch("vllm_ascend.ops.fused_moe.token_dispatcher.torch.distributed.get_rank", return_value=0), \
-            patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_soc_version", return_value=None), \
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type", return_value=None), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
                        _PP=pp_group), \
             patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group), \

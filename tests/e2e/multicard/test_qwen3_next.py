@@ -20,6 +20,12 @@
 
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
+
+import os
+from unittest.mock import patch
+
+from modelscope import snapshot_download  # type: ignore
+
 from tests.e2e.conftest import VllmRunner
 
 
@@ -66,11 +72,14 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     ]
     max_tokens = 20
 
-    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp") as vllm_model:
+    with VllmRunner(
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            tensor_parallel_size=4,
+            max_model_len=4096,
+            gpu_memory_utilization=0.8,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+    ) as vllm_model:
         ref_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
@@ -79,6 +88,7 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
+                    enforce_eager=True,
                     additional_config={
                         "ascend_scheduler_config": {
                             "enabled": True,
@@ -106,3 +116,23 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
             print(f"spec_output: {spec_output[1]}")
 
     assert matches > int(0.66 * len(ref_outputs))
+
+
+# TODO: will conduct accuracy verification after the subsequent version becomes stable
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_models_distributed_Qwen3_NEXT_W8A8DYNAMIC_WITH_EP():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download(
+                "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8-Pruning"),
+            max_model_len=4096,
+            tensor_parallel_size=2,
+            gpu_memory_utilization=0.4,
+            max_num_seqs=1,
+            enable_expert_parallel=True,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
