@@ -140,7 +140,7 @@ vllm serve path/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --data-parallel-size 4 \
-  --data-parallel-size_local 2 \
+  --data-parallel-size-local 2 \
   --data-parallel-address $local_ip \
   --data-parallel-rpc-port 13389 \
   --tensor-parallel-size 4 \
