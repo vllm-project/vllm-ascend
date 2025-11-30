@@ -10,3 +10,4 @@ Qwen3-VL-8B-Instruct.yaml
 Qwen2.5-Omni-7B.yaml
 Meta-Llama-3.1-8B-Instruct.yaml
 InternVL3_5-8B.yaml
+MiniCPM3-4B.yaml
