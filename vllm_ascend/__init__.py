@@ -23,8 +23,8 @@ def register():
 
 
 def register_model():
-    from .models import register_model
-    register_model()
+    from vllm_ascend.torchair.utils import register_torchair_model
+    register_torchair_model()
 
 
 def register_connector():
