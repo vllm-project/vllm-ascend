@@ -51,6 +51,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
+                               is_enable_xlite,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
@@ -84,6 +85,7 @@ class NPUWorker(WorkerBase):
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
+        is_enable_xlite(rank, vllm_config)
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
