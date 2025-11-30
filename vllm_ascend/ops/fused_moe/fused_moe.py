@@ -103,6 +103,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               global_num_experts: int = -1,
               expert_map: Optional[torch.Tensor] = None,
               apply_router_weight_on_input: bool = False,
+              activation: str = "silu",
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
@@ -133,6 +134,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
+            w1_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            activation=activation,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             global_num_experts=global_num_experts,
