@@ -614,7 +614,7 @@ def _get_column_parallel_op(
             return SequenceColumnParallelOp(layer)
         if "in_proj" in prefix:
             return SequenceColumnParallelOp(layer)
-        if "qkv_proj" in prefix or "conv1d" in prefix:
+        if "qkv_proj" in prefix or "conv1d" in prefix or "query_key_value" in prefix:
             return SequenceColumnParallelOp(layer)
 
     return None
@@ -637,7 +637,7 @@ def _get_row_parallel_op(
     if enable_sp():
         if "shared_expert" in prefix:
             return None
-        if "o_proj" in prefix or "out_proj" in prefix or "down_proj" in prefix:
+        if "o_proj" in prefix or "out_proj" in prefix or "down_proj" in prefix or "attention.dense" in prefix:
             return SequenceRowParallelOp(layer)
 
     return None
