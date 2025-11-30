@@ -1,8 +1,39 @@
-# Single NPU (Qwen2.5-VL-7B)
+# Qwen3-VL-Dense
 
-## Run vllm-ascend on Single NPU
+## Introduction
 
-### Offline Inference on Single NPU
+The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
+
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
+
+The steps and configurations in this document apply to the following models:
+- Single NPU Support:
+  - `Qwen2.5-VL-7B-Instruct`
+  - `Qwen3-VL-2B-Instruct`
+  - `Qwen3-VL-4B-Instruct`
+  - `Qwen3-VL-8B-Instruct`
+- Multi-NPU Support (Requires 4 NPUs):
+  - `Qwen3-VL-32B-Instruct`
+
+This guide uses `Qwen3-VL-8B-Instruct` as an example to demonstrate the deployment and inference process.
+
+## Supported Features
+
+Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## Environment Preparation
+
+### Model Weight
+
+- `Qwen2.5-VL-7B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)
+- `Qwen3-VL-2B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
+- `Qwen3-VL-4B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
+- `Qwen3-VL-8B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-32B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+
+### Installation
 
 Run docker container:
 
@@ -10,6 +41,7 @@ Run docker container:
    :substitutions:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
@@ -41,23 +73,26 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 `max_split_size_mb` prevents the native allocator from splitting blocks larger than this size (in MB). This can reduce fragmentation and may allow some borderline workloads to complete without running out of memory. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
 :::
 
+## Deployment
+
+### Offline Inference
+
 Run the following script to execute offline inference on a single NPU:
 
 ```bash
 pip install qwen_vl_utils --extra-index-url https://download.pytorch.org/whl/cpu/
 ```
 
-Create a python script with the following content:
-
 ```python
 from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 from qwen_vl_utils import process_vision_info
 
-MODEL_PATH = "Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_PATH = "Qwen/Qwen3-VL-8B-Instruct"
 
 llm = LLM(
     model=MODEL_PATH,
+    tensor_parallel_size=1,
     max_model_len=16384,
     limit_mm_per_prompt={"image": 10},
 )
@@ -120,40 +155,21 @@ The image displays a logo consisting of two main elements: a stylized geometric 
 The overall design is modern and minimalist, with a clear contrast between the geometric and textual elements. The use of blue for the geometric design could suggest themes of technology, connectivity, or innovation, which are common associations with the color blue in branding. The simplicity of the design makes it easily recognizable and memorable.
 ```
 
-### Online Serving on Single NPU
+### Online Serving
 
 Run docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
    :substitutions:
-
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
---name vllm-ascend \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
--e VLLM_USE_MODELSCOPE=True \
--e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
--it $IMAGE \
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+--tensor-parallel-size 1 \
 --dtype bfloat16 \
 --max_model_len 16384 \
---max-num-batched-tokens 16384 
+--max-num-batched-tokens 16384
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-7B-Instruct model's max seq len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
@@ -170,7 +186,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -184,7 +200,7 @@ curl http://localhost:8000/v1/chat/completions \
 If you query the server successfully, you can see the info shown below (client):
 
 ```bash
-{"id":"chatcmpl-f04fb20e79bb40b39b8ed7fdf5bd613a","object":"chat.completion","created":1741749149,"model":"Qwen/Qwen2.5-VL-7B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"The text in the illustration reads \"TONGYI Qwen.\"","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":74,"total_tokens":89,"completion_tokens":15,"prompt_tokens_details":null},"prompt_logprobs":null}
+{"id":"chatcmpl-f04fb20e79bb40b39b8ed7fdf5bd613a","object":"chat.completion","created":1741749149,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"The text in the illustration reads \"TONGYI Qwen.\"","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":74,"total_tokens":89,"completion_tokens":15,"prompt_tokens_details":null},"prompt_logprobs":null}
 ```
 
 Logs of the vllm server:
@@ -194,3 +210,57 @@ INFO 03-12 11:16:50 logger.py:39] Received request chatcmpl-92148a41eca64b6d82d3
 INFO 03-12 11:16:50 engine.py:280] Added request chatcmpl-92148a41eca64b6d82d3d7cfa5723aeb.
 INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 ```
+
+## Accuracy Evaluation
+
+### Using Language Model Evaluation Harness
+
+The accuracy of some models is already within our CI monitoring scope, including:
+- `Qwen2.5-VL-7B-Instruct`
+- `Qwen3-VL-8B-Instruct`
+
+You can refer to the [monitoring configuration](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml).
+
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
+
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+lm_eval \
+    --model vllm-vlm \
+    --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7,tensor_parallel_size=1 \
+    --tasks mmmu_val \
+    --batch_size 32 \
+    --apply_chat_template \
+    --trust_remote_code \
+    --output_path ./results
+```
+
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+
+|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+|---------|------:|------|-----:|------|---|-----:|---|-----:|
+|mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
+
+## Performance
+
+### Using vLLM Benchmark
+
+Run performance evaluation of `Qwen3-VL-8B-Instruct` as an example.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+There are three `vllm bench` subcommand:
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+Take the `serve` as an example. Run the code as follows.
+
+```shell
+vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the performance evaluation result.
