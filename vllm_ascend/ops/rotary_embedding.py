@@ -16,11 +16,13 @@
 #
 
 import math
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
@@ -29,6 +31,30 @@ from vllm.platforms import CpuArchEnum
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
                                get_ascend_device_type)
+
+
+@lru_cache(maxsize=128)
+def maybe_exceed_ub_size(q_n: int, k_n: int, dtype: torch.dtype,
+                         ascend_device_type: AscendDeviceType) -> bool:
+    if ascend_device_type in {
+            AscendDeviceType._910B, AscendDeviceType._910_93
+    }:
+        ub_size = 192 * 1024
+    elif ascend_device_type in {
+            AscendDeviceType._310P, AscendDeviceType._910_95
+    }:
+        ub_size = 248 * 1024
+    else:
+        logger.warning(
+            "Cannot get correct UB size, may fail to run rotary_embedding")
+        return False
+    dtype_size = dtype.itemsize
+    cast_size = 4 if dtype == torch.bfloat16 else dtype_size
+    cast = 1 if dtype == torch.bfloat16 else 0
+    ub_required = (q_n + k_n) * 128 * cast_size * 2 + 128 * dtype_size * 4 + (
+        q_n + k_n) * 128 * cast_size + (
+            q_n + k_n) * 128 * cast_size * 2 + cast * 128 * 4 * 2
+    return ub_required > ub_size
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -45,10 +71,13 @@ def _rope_forward_oot(
     offsets: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
+
+    # unify device and dtype
     if self.cos_sin_cache.device != query.device:
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(
             query, is_neox_style, self.head_size) and get_ascend_device_type(
@@ -62,54 +91,65 @@ def _rope_forward_oot(
             is_neox_style,
         )
         return query.view(query_shape), key.view(key_shape)
+
+    # check whether supports batched rotary embedding
     if offsets is not None:
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
-    else:
-        if self.cos is not None and \
-            self.sin is not None:
-            # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
-            # This method requires head_size and rotary_dim equal 128 and neox_style is True
+
+    if self.cos is not None and self.sin is not None:
+        # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
+        # This method requires head_size and rotary_dim equal 128 and neox_style is True
+        query_head_num = query.numel() // (query.shape[0] * self.head_size)
+        key_head_num = key.numel() // (key.shape[0] * self.head_size)
+        if not maybe_exceed_ub_size(
+                q_n=query_head_num,
+                k_n=key_head_num,
+                dtype=query.dtype,
+                ascend_device_type=get_ascend_device_type(),
+        ):
             query = query.contiguous().view(1, query.shape[0], -1,
                                             self.head_size)
             key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
             torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
-        elif self.rotary_dim < self.head_size:
-            num_tokens = query.shape[0]
-            query = query.view(num_tokens, -1, self.head_size)
-            key = key.view(num_tokens, -1, self.head_size)
-            q_rot = query[..., :self.rotary_dim]
-            q_pass = query[..., self.rotary_dim:]
-            k_rot = key[..., :self.rotary_dim]
-            k_pass = key[..., self.rotary_dim:]
-            q_rot = q_rot.contiguous().view(num_tokens, -1)
-            k_rot = k_rot.contiguous().view(num_tokens, -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                q_rot,
-                k_rot,
-                self.head_size,
-                self.cos_sin_cache,
-                is_neox_style,
-            )
-            q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
-            k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
-            q = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
-            k = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-            return q, k
-        else:
-            # TODO: Remove the contiguous in the future.
-            query = query.contiguous().view(query.shape[0], -1)
-            key = key.contiguous().view(key.shape[0], -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.cos_sin_cache,
-                is_neox_style,
-            )
-        return query.view(query_shape), key.view(key_shape)
+            return query.view(query_shape), key.view(key_shape)
+
+    if self.rotary_dim < self.head_size:
+        num_tokens = query.shape[0]
+        query = query.view(num_tokens, -1, self.head_size)
+        key = key.view(num_tokens, -1, self.head_size)
+        q_rot = query[..., :self.rotary_dim]
+        q_pass = query[..., self.rotary_dim:]
+        k_rot = key[..., :self.rotary_dim]
+        k_pass = key[..., self.rotary_dim:]
+        q_rot = q_rot.contiguous().view(num_tokens, -1)
+        k_rot = k_rot.contiguous().view(num_tokens, -1)
+        torch_npu._npu_rotary_embedding(
+            positions,
+            q_rot,
+            k_rot,
+            self.head_size,
+            self.cos_sin_cache,
+            is_neox_style,
+        )
+        q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
+        k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
+        q = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
+        k = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
+        return q, k
+
+    # TODO: Remove the contiguous in the future.
+    query = query.contiguous().view(query.shape[0], -1)
+    key = key.contiguous().view(key.shape[0], -1)
+    torch_npu._npu_rotary_embedding(
+        positions,
+        query,
+        key,
+        self.head_size,
+        self.cos_sin_cache,
+        is_neox_style,
+    )
+    return query.view(query_shape), key.view(key_shape)
 
 
 class AscendRotaryEmbedding(RotaryEmbedding):
