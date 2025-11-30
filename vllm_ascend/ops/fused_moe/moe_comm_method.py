@@ -83,8 +83,8 @@ class MoECommMethod(ABC):
     def fused_experts(
             self,
             hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
+            w1: torch.Tensor | list[torch.Tensor],
+            w2: torch.Tensor | list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
@@ -93,8 +93,8 @@ class MoECommMethod(ABC):
             use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[torch.Tensor] = None,
-            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale: Optional[list[torch.Tensor]] = None,
+            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
             # For TorchAir graph
