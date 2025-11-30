@@ -496,7 +496,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.int32,
             device=self.device)
         self.num_actual_tokens_pcp_padded = 0
-        if self.speculative_config and self.pcp_size > 1:
+        if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.input_ids_pcp_full = torch.zeros(self.max_num_tokens,
                                                   dtype=torch.int32,
                                                   device=self.device)
@@ -1738,7 +1738,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
-        if self.speculative_config and self.pcp_size > 1:
+        if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self._generate_pcp_mtp_input(
                 num_reqs, scheduler_output.total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens)
@@ -1820,7 +1820,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 prefill_context_parallel_metadata=long_seq_metadata,
             )
 
-            if self.speculative_config and self.pcp_size > 1:
+            if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
                 # to avoid irregular spec_attn_mask shape, e.g.,
                 # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
@@ -1828,12 +1828,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
-                    self.query_start_loc_pcp_full_cpu[:num_reqs]
+                ori_query_lens = self.query_start_loc_pcp_full[1:num_reqs+1] - \
+                    self.query_start_loc_pcp_full[:num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
                 num_decode_reqs = num_reqs - num_prefill_reqs
-                num_decode_reqs_flatten = num_decode_reqs * self.decode_threshold
+                num_decode_reqs_flatten = ori_query_lens[:num_decode_reqs].sum().item()
                 blk_table_tensor[
                     num_decode_reqs_flatten:num_decode_reqs_flatten +
                     num_prefill_reqs].copy_(
@@ -1841,7 +1841,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                          num_prefill_reqs].clone())
                 blk_table_tensor[:num_decode_reqs_flatten].copy_(
                     blk_table_tensor[:num_decode_reqs].repeat_interleave(
-                        self.decode_threshold, dim=0))
+                        ori_query_lens[:num_decode_reqs], dim=0))
                 common_attn_metadata.block_table_tensor = \
                     blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
 
@@ -2787,7 +2787,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     sin=self.sin,
                     prefill_context_parallel_metadata=long_seq_metadata,
                 )
-                if self.pcp_size > 1:
+                if self.pcp_size * self.dcp_size > 1:
                     common_attn_metadata.block_table_tensor = \
                         block_table_tensor[:num_reqs * self.decode_threshold]
                 attn_state = AscendAttentionState.DecodeOnly
@@ -4249,8 +4249,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _generate_pcp_metadata(self, total_num_scheduled_tokens):
         # In dummy run num_reqs == 0, update it from seq_lens
         num_reqs = self.input_batch.num_reqs or self.query_lens.size(0)
-        num_decodes = sum(self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                          >= self.input_batch.num_prompt_tokens[:num_reqs])
+        num_decodes = (self.query_lens <= self.decode_threshold).sum().item()
+        num_prefills = num_reqs - num_decodes
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
@@ -4268,16 +4268,38 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int32,
             )
             # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular spec_attn_mask shape
+            # to avoid irregular spec_attn_mask shape.
+            # Same as block_table, we flatten decode seq_lens to query_lens,
+            # and keep prefill seq_lens unchanged.
             for decode_idx in range(self.decode_threshold):
                 num_computed_tokens_of_pcp_dcp[
                     self.decode_threshold - 1 - decode_idx::self.decode_threshold] = \
                     self._get_cp_local_seq_lens(
-                        torch.tensor(context_lens),
+                        torch.tensor(context_lens) - decode_idx,
                         self.pcp_size,
                         self.dcp_size,
                         self.parallel_config.cp_kv_cache_interleave_size,
                     )
+            if self.decode_threshold > 1:
+                num_computed_tokens_of_pcp_dcp_list = []
+                if num_decodes:
+                    num_decodes_flatten = self.query_lens[:num_decodes].sum().item()
+                    if self.query_lens[:num_decodes].min().item() == self.decode_threshold:
+                        decode_flatten_idx = list(range(num_decodes_flatten))
+                    else:
+                        decode_flatten_idx = []
+                        for req_id in range(num_decodes):
+                            offset = (req_id + 1) * self.decode_threshold
+                            decode_flatten_idx += \
+                                list(range(offset - self.query_lens[req_id], offset))
+                    num_computed_tokens_of_pcp_dcp_list.append(
+                        num_computed_tokens_of_pcp_dcp[decode_flatten_idx])
+                if num_prefills:
+                    num_computed_tokens_of_pcp_dcp_list.append(
+                        num_computed_tokens_of_pcp_dcp[
+                            num_decodes * self.decode_threshold + 1::self.decode_threshold])
+                num_computed_tokens_of_pcp_dcp = torch.cat(
+                    num_computed_tokens_of_pcp_dcp_list, dim=0)
             long_seq_metadata = AscendPrefillContextParallelMetadata(
                 num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.

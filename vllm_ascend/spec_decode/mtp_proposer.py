@@ -253,6 +253,13 @@ class MtpProposer(Proposer):
                     cos=self.runner.cos,
                     sin=self.runner.sin,
                 )
+                if self.pcp_size * self.dcp_size > 1:
+                    # update long_seq related params and flatten block_table
+                    common_attn_metadata.prefill_context_parallel_metadata=\
+                        self.runner.long_seq_metadata
+                    common_attn_metadata.block_table_tensor = \
+                        self.runner.input_batch.block_table[0].get_device_tensor()[
+                            :num_reqs * self.decode_threshold]
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
                 attn_metadata_mtp = builder.build_for_graph_capture(
@@ -342,7 +349,7 @@ class MtpProposer(Proposer):
                 )
 
         req_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        if self.pcp_size > 1:
+        if self.pcp_size * self.dcp_size > 1:
             long_seq_metadata = self.runner.long_seq_metadata
             input_ids_pcp_full = self.runner.input_ids_pcp_full
             query_start_loc_pcp_full = self.runner.query_start_loc_pcp_full
@@ -379,7 +386,6 @@ class MtpProposer(Proposer):
                     query_start_loc_pcp_full[:num_reqs + 1]
             if self.speculative_config.disable_padded_drafter_batch:
                 assert isinstance(sampled_token_ids, list)
-                # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                 token_indices_to_sample = None
                 common_attn_metadata, token_indices =\
                     self._prepare_inputs(
@@ -590,15 +596,17 @@ class MtpProposer(Proposer):
         self.input_ids[last_token_indices] = next_token_ids
 
         # update pcp related params
-        if self.pcp_size > 1:
+        if self.pcp_size * self.dcp_size > 1:
             assert long_seq_metadata is not None
             common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
+        if self.pcp_size > 1:
             # 1. preprocess decode/prefill input_ids & target_hidden_states
             # decode input_ids: keep unchanged
             # decode target_hidden_states: remove padding
             # prefill input_ids: add padding and pcp split
             # prefill target_hidden_states: pcp split
-            num_tokens_d = num_decode_reqs * self.decode_threshold
+            query_lens_d = self.runner.query_lens[:num_decode_reqs]
+            num_tokens_d = query_lens_d.sum().item()
             num_tokens_d_padded = num_tokens_d * self.pcp_size
             input_ids_d = self.input_ids[:num_tokens_d]
             input_ids_p = self.input_ids[num_tokens_d:num_tokens]
@@ -606,12 +614,16 @@ class MtpProposer(Proposer):
                 target_hidden_states[:num_tokens_d_padded]
             if num_tokens_d:
                 # remove padding (from pcp all-gather) in decode part
-                target_hidden_states_d = target_hidden_states_d_padded.reshape(
-                    [
-                        num_decode_reqs, self.decode_threshold * self.pcp_size,
-                        -1
-                    ])[:, :self.decode_threshold, :].reshape(
-                        [num_tokens_d, -1])
+                mask_start_loc = torch.cat(
+                    [torch.tensor([0], dtype=torch.int32),
+                     torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]])
+                mask_len = query_lens_d
+                mask = []
+                for req_id in range(num_decode_reqs):
+                    mask += list(range(
+                        mask_start_loc[req_id],
+                        mask_start_loc[req_id] + mask_len[req_id]))
+                target_hidden_states_d = target_hidden_states_d_padded[mask]
             else:
                 target_hidden_states_d = target_hidden_states_d_padded
             target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -747,6 +759,8 @@ class MtpProposer(Proposer):
                     (0, max_num_reqs_across_dp - num_indices))
 
             if self.pcp_size > 1:
+                # remove graph padding before all_gather
+                hidden_states = hidden_states[:num_tokens]
                 hidden_states = get_pcp_group().all_gather(hidden_states, 0)
                 hidden_states = torch.index_select(
                     hidden_states, 0, self.runner.
