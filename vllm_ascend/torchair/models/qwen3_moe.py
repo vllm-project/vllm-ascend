@@ -188,8 +188,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
