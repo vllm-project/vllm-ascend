@@ -2632,6 +2632,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
             sampled_token_ids = sampler_output.sampled_token_ids
+            self.input_batch.prev_sampled_token_ids = None
             if not self.use_async_scheduling:
                 # Get the valid generated tokens.
                 max_gen_len = sampled_token_ids.shape[-1]
@@ -2700,7 +2701,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_id = self.input_batch.req_ids[req_idx]
                 req_state = self.requests[req_id]
                 req_state.output_token_ids.extend(sampled_ids.tolist())
-        self.input_batch.prev_sampled_token_ids = None
+        
 
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
