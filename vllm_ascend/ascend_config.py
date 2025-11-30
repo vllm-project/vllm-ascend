@@ -80,22 +80,14 @@ class AscendConfig:
             "lmhead_tensor_parallel_size", None)
         if self.lmhead_tensor_parallel_size is not None:
             logger.info(
-                f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario"
+                f"Enable lmhead_tensor_parallel_size = {self.lmhead_tensor_parallel_size}"
             )
-            if vllm_config.parallel_config.tensor_parallel_size != 1:
-                raise AssertionError(
-                    "lmhead_tensor_parallel_size is only supported in the pure DP scenario"
-                )
         self.oproj_tensor_parallel_size = additional_config.get(
             "oproj_tensor_parallel_size", None)
         if self.oproj_tensor_parallel_size is not None:
             logger.info(
-                f"Enable oproj_tensor_parallel_size={self.oproj_tensor_parallel_size} in pure DP scenario"
+                f"Enable oproj_tensor_parallel_size = {self.oproj_tensor_parallel_size} "
             )
-            if vllm_config.parallel_config.tensor_parallel_size != 1:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in the pure DP scenario"
-                )
             if vllm_config.model_config.enforce_eager is True:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in graph mode"
@@ -138,6 +130,13 @@ class AscendConfig:
             get_flashcomm2_oproj_tp_size_and_validate_config
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
             self, vllm_config)
+
+        self.embedding_tensor_parallel_size = additional_config.get(
+            "embedding_tensor_parallel_size", None)
+        if self.embedding_tensor_parallel_size is not None:
+            logger.info(
+                f"Enable embedding_tensor_parallel_size = {self.embedding_tensor_parallel_size}"
+            )
 
 
 class TorchairGraphConfig:
