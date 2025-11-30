@@ -319,10 +319,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def _forward_prefill(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
                          output: torch.Tensor):
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            key = key[:num_tokens]
+            value = value[:num_tokens]
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.query_lens.shape[0]
@@ -343,8 +348,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        query = query[:num_tokens]
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
 
