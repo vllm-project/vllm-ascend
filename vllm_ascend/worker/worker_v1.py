@@ -30,6 +30,7 @@ from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
@@ -429,6 +430,7 @@ class NPUWorker(WorkerBase):
                 self.parallel_config.decode_context_parallel_size)
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
+        ensure_ec_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
