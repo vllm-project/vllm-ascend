@@ -272,6 +272,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
+        torch.Tensor.pin_memory = lambda x: x  # noqa
 
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
@@ -459,6 +460,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         if not torch.npu.is_available():
             self.skipTest("NPU not available, skipping NPU-dependent tests")
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 3, 7]),
@@ -511,6 +513,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         if not torch.npu.is_available():
             self.skipTest("NPU not available, skipping NPU-dependent tests")
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
@@ -561,6 +564,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def test_build_decode_only_metadata(self, mock_get_ascend_config,
                                         mock_dcp_world_size):
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
@@ -610,6 +614,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def test_build_for_graph_capture_decode_only(self, mock_get_ascend_config,
                                                  mock_dcp_world_size):
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
@@ -660,7 +665,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def test_build_for_graph_capture_prefill(self, mock_get_ascend_config,
                                              mock_dcp_world_size):
         mock_dcp_world_size.return_value = 1
-
+        torch.Tensor.pin_memory = lambda x: x  # noqa
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 3, 7]),
             query_start_loc_cpu=torch.tensor([0, 3, 7]),
