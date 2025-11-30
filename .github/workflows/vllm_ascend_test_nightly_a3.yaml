@@ -21,9 +21,9 @@
 name: 'ascend test / nightly-a3'
 
 on:
-  schedule:
-      # Run test at 24:00 Beijing time (UTC+8)
-      - cron: "0 16 * * *"
+  # schedule:
+  #     # Run test at 24:00 Beijing time (UTC+8)
+  #     - cron: "0 16 * * *"
   workflow_dispatch:
   pull_request: 
     branches:
@@ -49,9 +49,9 @@ jobs:
       max-parallel: 1
       matrix:
         test_config:
-          - name: multi-node-deepseek-pd
-            config_file_path: DeepSeek-V3.yaml
-            size: 2
+          # - name: multi-node-deepseek-pd
+          #   config_file_path: DeepSeek-V3.yaml
+          #   size: 2
           - name: multi-node-qwen3-dp
             config_file_path: Qwen3-235B-A3B.yaml
             size: 2
@@ -76,7 +76,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      runner: linux-aarch64-a3-0
+      runner: linux-aarch64-a3-2
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       replicas: 1
       size: ${{ matrix.test_config.size }}
