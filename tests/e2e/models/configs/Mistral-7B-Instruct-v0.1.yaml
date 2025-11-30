@@ -1,0 +1,11 @@
+model_name: "mistralai/Mistral-7B-Instruct-v0.1"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.35
+  - name: "exact_match,flexible-extract"
+    value: 0.38
+trust_remote_code: True
+num_fewshot: 5
