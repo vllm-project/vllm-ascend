@@ -379,10 +379,10 @@ class AscendW4A8DynamicFusedMoEMethod:
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w1=[layer.w13_weight],
+            w2=[layer.w2_weight],
+            w1_scale=[layer.w13_weight_scale],
+            w2_scale=[layer.w2_weight_scale],
             w1_scale_bias=layer.w13_scale_bias,
             w2_scale_bias=layer.w2_scale_bias,
             topk_weights=topk_weights,
