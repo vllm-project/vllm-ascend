@@ -3,12 +3,13 @@ from typing import Optional
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
-                                             get_tp_group, get_world_group,
+                                             get_pp_group, get_tp_group,
+                                             get_world_group,
                                              init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import (flashcomm2_enable,
+from vllm_ascend.utils import (flashcomm2_enable, flashcomm2_o_shared_enabled,
                                prefill_context_parallel_enable)
 
 # Currently, mc2 op need their own group coordinator.
@@ -19,6 +20,7 @@ _LMTP: Optional[GroupCoordinator] = None
 _P_TP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
+_FLASHCOMM2_O_SHARED: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -46,6 +48,13 @@ def get_flashcomm2_odp_group() -> GroupCoordinator:
     assert _FLASHCOMM2_ODP is not None, (
         "output data parallel group for flashcomm2 is not initialized")
     return _FLASHCOMM2_ODP
+
+
+def get_flashcomm2_o_shared_group() -> GroupCoordinator:
+    assert _FLASHCOMM2_O_SHARED is not None, (
+        "output shared weight parallel group for flashcomm2 is not initialized"
+    )
+    return _FLASHCOMM2_O_SHARED
 
 
 def get_mlp_tp_group() -> GroupCoordinator:
@@ -185,6 +194,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         ).flashcomm2_oproj_tensor_parallel_size
         global_tp_size = get_tp_group().world_size
         global_dp_size = get_dp_group().world_size
+        global_pp_size = get_pp_group().world_size
         num_fc2_oproj_tensor_parallel_groups: int = (global_tp_size //
                                                      flashcomm2_otp_size)
 
@@ -220,6 +230,33 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 get_world_group().local_rank,
                 backend,
                 group_name="flashcomm2_odp")
+
+        if flashcomm2_o_shared_enabled():
+            global _FLASHCOMM2_O_SHARED
+            _FLASHCOMM2_O_SHARED = _FLASHCOMM2_ODP
+
+            if global_dp_size > 1:
+                num_fc2_oproj_tensor_parallel_groups = global_tp_size // flashcomm2_otp_size
+                group_ranks = []
+
+                for pp_idx in range(global_pp_size):
+                    for j in range(flashcomm2_otp_size):
+                        group = []
+                        for dp_idx in range(global_dp_size):
+                            base = (dp_idx * global_pp_size +
+                                    pp_idx) * global_tp_size
+                            for i in range(
+                                    num_fc2_oproj_tensor_parallel_groups):
+                                tp_local = i + j * num_fc2_oproj_tensor_parallel_groups
+                                global_rank = base + tp_local
+                                group.append(global_rank)
+                        group_ranks.append(group)
+
+                _FLASHCOMM2_O_SHARED = init_model_parallel_group(
+                    group_ranks,
+                    get_world_group().local_rank,
+                    backend,
+                    group_name="flashcomm2_o_shared")
 
 
 def get_mlp_tensor_model_parallel_world_size():
@@ -269,3 +306,8 @@ def destroy_ascend_model_parallel():
     ).flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
+
+    global _FLASHCOMM2_O_SHARED
+    if _FLASHCOMM2_O_SHARED:
+        _FLASHCOMM2_O_SHARED.destroy()
+    _FLASHCOMM2_O_SHARED = None
