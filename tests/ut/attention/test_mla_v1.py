@@ -454,12 +454,20 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
     )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def test_build_prefix_no_cache_metadata(self, mock_get_ascend_config,
+    @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.npu.is_available")
+    def test_build_prefix_no_cache_metadata(self, mock_npu_available,
+                                            mock_zeros, mock_get_ascend_config,
                                             mock_dcp_world_size):
-        if not torch.npu.is_available():
-            self.skipTest("NPU not available, skipping NPU-dependent tests")
+        mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
 
+        def zeros_override(*args, **kwargs):
+            kwargs.pop('pin_memory', None)
+            return mock_zeros._mock_wraps(*args, **kwargs)
+
+        mock_zeros.side_effect = zeros_override
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 3, 7]),
             query_start_loc_cpu=torch.tensor([0, 3, 7]),
@@ -506,11 +514,20 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
     )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def test_build_chunked_prefix_metadata(self, mock_get_ascend_config,
+    @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.npu.is_available")
+    def test_build_chunked_prefix_metadata(self, mock_npu_available,
+                                           mock_zeros, mock_get_ascend_config,
                                            mock_dcp_world_size):
-        if not torch.npu.is_available():
-            self.skipTest("NPU not available, skipping NPU-dependent tests")
+        mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
+
+        def zeros_override(*args, **kwargs):
+            kwargs.pop('pin_memory', None)
+            return mock_zeros._mock_wraps(*args, **kwargs)
+
+        mock_zeros.side_effect = zeros_override
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
