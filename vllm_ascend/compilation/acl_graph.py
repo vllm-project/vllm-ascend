@@ -18,7 +18,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
-from ..utils import weak_ref_tensors
+from vllm_ascend.attention.utils import PAGED_ATTENTION_LIST
+from vllm_ascend.utils import weak_ref_tensors
 
 
 @dataclasses.dataclass
@@ -190,6 +191,13 @@ class ACLGraphWrapper:
 
 
 def update_attn_params(update_stream, forward_context, runtime_shape):
+    if runtime_shape in PAGED_ATTENTION_LIST:
+        _update_attn_pa_params(update_stream, forward_context, runtime_shape)
+    else:
+        _update_attn_fia_params(update_stream, forward_context, runtime_shape)
+
+
+def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
     graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
@@ -242,6 +250,45 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                                            context_lens=seq_lens,
                                            out=output,
                                            workspace=workspace)
+            torch.npu.graph_task_update_end(update_stream)
+
+            event.record(update_stream)
+
+
+def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
+    graph_params = get_graph_params()
+    with torch.npu.stream(update_stream):
+        for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[runtime_shape],
+                graph_params.handles[runtime_shape],
+                graph_params.events[runtime_shape],
+        ):
+            (query, key_cache, value, block_tables, attn_mask, block_size,
+             actual_seq_lengths_kv, actual_seq_lengths_q, num_kv_heads, num_heads, scale,
+             attn_output, softmax_lse) = param
+
+            actual_seq_lengths_kv = forward_context.attn_metadata[key].seq_lens_list
+            actual_seq_lengths_q = forward_context.attn_metadata[
+                key].actual_seq_lengths_q
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch_npu.npu_fused_infer_attention_score.out(
+                query=query,
+                key=key_cache,
+                value=value,
+                block_table=block_tables,
+                atten_mask=attn_mask,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                num_key_value_heads=num_kv_heads,
+                num_heads=num_heads,
+                scale=scale,
+                sparse_mode=3,
+                workspace=graph_params.workspaces.get(runtime_shape),
+                out=[attn_output, softmax_lse],
+            )
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
@@ -336,7 +383,7 @@ def set_graph_params(aclgraph_capture_sizes: set[int]):
 def update_graph_params_workspaces(num_tokens: int, workspace: Any):
     global _graph_params
     if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+        _graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
 
 
 def get_graph_params():

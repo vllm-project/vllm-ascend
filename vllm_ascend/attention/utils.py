@@ -9,6 +9,13 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.forward_context import ForwardContext, get_forward_context
 
 
+# We find that _npu_paged_attention still performes better than
+# npu_fused_infer_attention_score in some cases. We allow to execute
+# _npu_paged_attention in this cases. This should be removed once
+# npu_fused_infer_attention_score performes better on all scenarios.
+PAGED_ATTENTION_LIST = [1, 2, 3, 4]
+
+
 @dataclass
 class AscendCommonAttentionMetadata:
     """
@@ -53,6 +60,8 @@ class AscendCommonAttentionMetadata:
     positions: torch.Tensor = None
 
     attn_mask: torch.Tensor = None
+
+    fia_attn_mask: torch.Tensor = None
 
     spec_attn_mask: torch.Tensor = None
 
