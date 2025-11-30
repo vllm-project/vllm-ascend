@@ -158,11 +158,11 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
     const at::Tensor &gmm1_permuted_weight_scale,
     const at::Tensor &gmm2_weight,
     const at::Tensor &gmm2_weight_scale,
-    const at::Tensor &expert_smooth_scales_optional,
-    const at::Tensor &expert_scales_optional,
-    c10::string_view hcom_ep_name,
-    int64_t num_ranks,
-    int64_t rank,
+    const c10::optional<at::Tensor> &expert_smooth_scales,
+    const c10::optional<at::Tensor> &expert_scales,
+    c10::string_view group_ep,
+    int64_t ep_rank_size,
+    int64_t ep_rank_id,
     int64_t moe_expert_num,
     int64_t shared_expert_num,
     int64_t shared_expert_rank_num,
@@ -175,9 +175,9 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
 
     at::Tensor output = at::empty({bs, h}, x.options().device(at::kMeta));
 
-    bool is_shared_expert = (rank < shared_expert_rank_num);
-    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (num_ranks - shared_expert_rank_num);
-    at::Tensor ep_recv_count = at::empty({num_local_experts * num_ranks}, expert_ids.options().device(at::kMeta));
+    bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
+    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
+    at::Tensor ep_recv_count = at::empty({num_local_experts * ep_rank_size}, expert_ids.options().device(at::kMeta));
 
     return {output, ep_recv_count};
 }
