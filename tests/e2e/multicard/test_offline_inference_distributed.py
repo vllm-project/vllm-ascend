@@ -49,6 +49,10 @@ DEEPSEEK_W4A8_MODELS = [
     "vllm-ascend/DeepSeek-V3.1-W4A8-puring"
 ]
 
+KIMI_W4A16_MODELS = [
+    "vllm-ascend/Kimi-K2-Thinking-Pruning",
+]
+
 
 def test_models_distributed_QwQ():
     example_prompts = [
@@ -264,5 +268,27 @@ def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", KIMI_W4A16_MODELS)
+def test_models_distributed_Kimi_K2_Thinking_W4A16(model):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            model,
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            quantization="ascend",
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1],
+            },
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
