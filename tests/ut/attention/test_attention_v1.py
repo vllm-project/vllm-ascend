@@ -217,9 +217,9 @@ class TestAscendAttentionBackendImpl(TestBase):
                              mock_npu_fused_infer_attention_score,
                              mock_npu_reshape_and_cache):
         """Test forward pass in PrefillCacheHit state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
         metadata = self.attn_metadata
@@ -243,7 +243,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    metadata, output)
 
         mock_npu_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (10, 8, 64)
 
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
