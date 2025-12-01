@@ -12,11 +12,6 @@ MODEL = "Qwen/Qwen3-0.6B"
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_concurrent_partial_prefill(enforce_eager):
     with VllmRunner(MODEL,
-                    additional_config={
-                        'ascend_scheduler_config': {
-                            'enabled': True,
-                        },
-                    },
                     max_num_seqs=3,
                     max_num_batched_tokens=8192,
                     enforce_eager=enforce_eager,
@@ -31,11 +26,6 @@ def test_concurrent_partial_prefill(enforce_eager):
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_prefix_cache_stats_is_recorded(enforce_eager):
     with VllmRunner(MODEL,
-                    additional_config={
-                        'ascend_scheduler_config': {
-                            'enabled': True,
-                        },
-                    },
                     max_num_seqs=3,
                     max_num_batched_tokens=8192,
                     enforce_eager=enforce_eager,
@@ -45,48 +35,6 @@ def test_prefix_cache_stats_is_recorded(enforce_eager):
         _ = vllm_model.model.generate([input_tokens])
         outputs = vllm_model.model.generate([input_tokens])
         assert outputs[0].num_cached_tokens == 128
-
-
-@pytest.mark.parametrize("max_tokens",
-                         [4])  # cannot align results when max_tokens > 4
-@pytest.mark.parametrize("chunked_prefill_token_size", [2048])
-def test_chunked_prefill_with_ascend_scheduler(
-        max_tokens: int, chunked_prefill_token_size: int) -> None:
-    example_prompts = [
-        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
-    ]
-    max_num_seqs = chunked_prefill_token_size
-    max_num_batched_tokens = chunked_prefill_token_size
-    with VllmRunner(MODEL,
-                    additional_config={
-                        'ascend_scheduler_config': {
-                            'enabled': True,
-                            'enable_chunked_prefill': True,
-                        },
-                    },
-                    max_num_seqs=max_num_seqs,
-                    max_num_batched_tokens=max_num_batched_tokens,
-                    max_model_len=2048,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        chunked_prefill_output = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
-
-    with VllmRunner(MODEL,
-                    additional_config={
-                        'ascend_scheduler_config': {
-                            'enabled': True,
-                        },
-                    },
-                    max_model_len=2048,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_output,
-        outputs_1_lst=chunked_prefill_output,
-        name_0="vllm_output",
-        name_1="chunked_prefill_output",
-    )
 
 
 @pytest.mark.parametrize("max_tokens",
