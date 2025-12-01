@@ -27,9 +27,10 @@ from unittest.mock import patch
 import pytest
 
 MODELS = ["Qwen/Qwen3-30B-A3B"]
+
+
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-
 def test_offline_weight_load_and_sleepmode(model):
     script = Path(
         __file__
