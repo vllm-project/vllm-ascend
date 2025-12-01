@@ -680,7 +680,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ):
-        num_tokens = query.shape[0]
         forward_context: ForwardContext = get_forward_context()
         if not forward_context.capturing:
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
