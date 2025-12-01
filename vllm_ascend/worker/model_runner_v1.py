@@ -991,8 +991,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
-            return self.attn_mask_builder.get_attn_mask(
-                2048, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask().to(
+                torch.bool)
         # Decode-only situation.
         else:
             return None
@@ -2339,7 +2339,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata, self.with_prefill, maybe_padded_num_tokens,
                     input_ids, positions, intermediate_tensors, inputs_embeds)
 
-            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
                 scheduler_output)
 
@@ -2603,7 +2602,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
-
+            self.maybe_wait_for_kv_save()
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 

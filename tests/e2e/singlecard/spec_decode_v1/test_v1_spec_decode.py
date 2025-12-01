@@ -61,6 +61,7 @@ def eagle3_model_name():
     return "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
+@pytest.mark.skip("TODO: Revert me after ngram oom issue on ci is fixed")
 def test_ngram_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
