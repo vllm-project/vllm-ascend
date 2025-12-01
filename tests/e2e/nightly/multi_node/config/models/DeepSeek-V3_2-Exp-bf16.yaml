@@ -34,8 +34,6 @@ deployment:
   -
     server_cmd: >
         vllm serve Yanguan/DeepSeek-V3.2-Exp-bf16 \
-        --host 0.0.0.0 
-        --port $SERVER_PORT 
         --headless
         --data-parallel-size 2 
         --data-parallel-size-local 1 

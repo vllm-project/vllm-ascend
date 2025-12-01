@@ -27,14 +27,10 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast, QuantType)
+    PrepareAndFinalizeWithMC2, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2, TokenDispatcherWithMoge)
-from vllm_ascend.quantization.w4a8_dynamic import \
-    AscendW4A8DynamicFusedMoEMethod
-from vllm_ascend.quantization.w8a8_dynamic import \
-    AscendW8A8DynamicFusedMoEMethod
 
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
@@ -44,54 +40,35 @@ def get_moe_comm_method(
     return _MoECommMethods.get(moe_comm_type, None)
 
 
-def setup_moe_comm_method(moe_config, quant_method):
-    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(
-        moe_config, quant_method)
-    _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(
-        moe_config, quant_method)
-    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config, quant_method)
-    _MoECommMethods[MoECommType.NAIVE_MULTICAST] = NaiveMulticastCommImpl(
-        moe_config, quant_method)
+def setup_moe_comm_method(moe_config):
+    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+    _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
 
 
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_method=None):
+    def __init__(self, moe_config: FusedMoEConfig):
         self.model_type = get_current_vllm_config(
         ).model_config.hf_config.model_type
         self.moe_config = moe_config
 
         self.token_dispatcher = self._get_token_dispatcher()
-        self.quant_type = self._get_quant_type(quant_method)
-        self.with_quant = self.quant_type != QuantType.NONE
         self.prepare_finalize = self._get_prepare_finalize()
-
-    def _get_quant_type(self, quant_method) -> QuantType:
-        if not hasattr(quant_method,
-                       "quant_method") or quant_method.quant_method is None:
-            return QuantType.NONE
-
-        method = quant_method.quant_method
-
-        if isinstance(method, AscendW8A8DynamicFusedMoEMethod):
-            return QuantType.W8A8
-        elif isinstance(method, AscendW4A8DynamicFusedMoEMethod):
-            return QuantType.W4A8
-        else:
-            return QuantType.NONE
 
     def prepare(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type: QuantType = QuantType.NONE,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         hidden_states, router_logits, mc2_mask, context_metadata = self.prepare_finalize.prepare(
             hidden_states, router_logits, enable_shared_expert_dp,
-            replace_allreduce)
+            replace_allreduce, quant_type)
         return hidden_states, router_logits, mc2_mask, context_metadata
 
     def finalize(self,
@@ -106,16 +83,18 @@ class MoECommMethod(ABC):
     def fused_experts(
             self,
             hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
+            w1: torch.Tensor | list[torch.Tensor],
+            w2: torch.Tensor | list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
             apply_router_weight_on_input: bool = False,
+            use_int8_w8a8: bool = False,
+            use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[torch.Tensor] = None,
-            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale: Optional[list[torch.Tensor]] = None,
+            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
             # For TorchAir graph
@@ -151,29 +130,29 @@ class MoECommMethod(ABC):
             dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            with_quant=self.with_quant,
+            with_quant=use_int8_w8a8 or use_int4_w4a8,
             dynamic_eplb=dynamic_eplb,
             pertoken_scale=pertoken_scale)
 
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
 
-        mlp_output = unified_apply_mlp(
-            hidden_states=permuted_hidden_states,
-            w1=w1,
-            w1_scale=w1_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            group_list=expert_tokens,
-            dynamic_scale=dynamic_scale,
-            group_list_type=group_list_type,
-            w1_scale_bias=w1_scale_bias,
-            w2_scale_bias=w2_scale_bias,
-            topk_scales=topk_scales,
-            with_quant=self.with_quant,
-            fusion=self.quant_type == QuantType.W8A8,
-            need_trans=need_trans,
-            dynamic_eplb=dynamic_eplb)
+        mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
+                                       w1=w1,
+                                       w1_scale=w1_scale,
+                                       w2=w2,
+                                       w2_scale=w2_scale,
+                                       group_list=expert_tokens,
+                                       dynamic_scale=dynamic_scale,
+                                       group_list_type=group_list_type,
+                                       w1_scale_bias=w1_scale_bias,
+                                       w2_scale_bias=w2_scale_bias,
+                                       topk_scales=topk_scales,
+                                       with_quant=use_int8_w8a8
+                                       or use_int4_w4a8,
+                                       fusion=use_int8_w8a8,
+                                       need_trans=need_trans,
+                                       dynamic_eplb=dynamic_eplb)
 
         final_hidden_states = self.token_dispatcher.token_combine(
             hidden_states=mlp_output, context_metadata=context_metadata)
@@ -226,8 +205,7 @@ class AllGatherCommImpl(MoECommMethod):
                 num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAllGather(self.moe_config,
-                                               self.quant_type)
+        return PrepareAndFinalizeWithAllGather(self.moe_config)
 
 
 class MC2CommImpl(MoECommMethod):
@@ -244,7 +222,7 @@ class MC2CommImpl(MoECommMethod):
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithMC2(self.moe_config, self.quant_type)
+        return PrepareAndFinalizeWithMC2(self.moe_config)
 
 
 class AlltoAllCommImpl(MoECommMethod):
@@ -264,34 +242,4 @@ class AlltoAllCommImpl(MoECommMethod):
             num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAll2All(self.moe_config, self.quant_type)
-
-
-class NaiveMulticastCommImpl(MoECommMethod):
-    """This implementation is the same as NativeAllGatherCommImpl,
-    but uses NPU-specific ops for better performance.
-
-    This implementation should be compatible with all scenarios, and
-    thus it is the default implementation for MoE communication methods.
-    It uses `torch_npu.npu_moe_init_routing_v2` for pre-processing
-    and `torch_npu.npu_moe_token_unpermute` for post-processing
-    to handle the token-to-expert mapping and communication efficiently.
-
-    NOTE(Yizhou): TBH, it is really weird that we were supposed to use
-    `torch_npu.npu_moe_init_routing_v2` and `torch_npu.npu_moe_finalize_routing`
-    or `torch_npu.npu_moe_token_permute` and `torch_npu.npu_moe_token_unpermute`
-    for pre-processing and post-processing, respectively.
-    But `npu_moe_finalize_routing` will lead to accuracy issues so we have to
-    use `torch_npu.npu_moe_token_unpermute` instead.
-    This is a workaround and should be removed after the issue is fixed.
-    """
-
-    def _get_token_dispatcher(self):
-        return TokenDispatcherWithAllGather(
-            top_k=self.moe_config.experts_per_token,
-            num_experts=self.moe_config.num_experts,
-            num_local_experts=self.moe_config.num_local_experts)
-
-    def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithNaiveMulticast(self.moe_config,
-                                                    self.quant_type)
+        return PrepareAndFinalizeWithAll2All(self.moe_config)

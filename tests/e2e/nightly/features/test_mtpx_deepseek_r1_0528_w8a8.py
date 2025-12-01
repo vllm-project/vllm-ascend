@@ -38,14 +38,25 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
+aisbench_gsm8k = [{
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "baseline": 95,
+    "threshold": 5
+}]
+
+aisbench_aime = [{
     "case_type": "accuracy",
     "dataset_path": "vllm-ascend/aime2024",
     "request_conf": "vllm_api_general_chat",
     "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "baseline": 80,
+    "baseline": 86.67,
     "threshold": 7
 }]
 
@@ -101,6 +112,7 @@ async def test_models(model: str, mode: str) -> None:
              json.dumps(speculative_config)])
         server_args.extend(["--gpu-memory-utilization", "0.92"])
         additional_config["torchair_graph_config"] = {"enabled": True}
+        aisbench_cases = aisbench_gsm8k
     if mode == "mtp3":
         env_dict["HCCL_OP_EXPANSION_MODE"] = "AIV"
         server_args.extend(["--max-num-batched-tokens", "2048"])
@@ -113,6 +125,7 @@ async def test_models(model: str, mode: str) -> None:
             ["--compilation-config",
              json.dumps(compilation_config)])
         additional_config["torchair_graph_config"] = {"enabled": False}
+        aisbench_cases = aisbench_aime
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

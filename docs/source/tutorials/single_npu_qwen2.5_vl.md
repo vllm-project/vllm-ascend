@@ -47,6 +47,8 @@ Run the following script to execute offline inference on a single NPU:
 pip install qwen_vl_utils --extra-index-url https://download.pytorch.org/whl/cpu/
 ```
 
+Create a python script with the following content:
+
 ```python
 from transformers import AutoProcessor
 from vllm import LLM, SamplingParams

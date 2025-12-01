@@ -21,10 +21,6 @@ class TestAscendMLATorchairBackend(TestBase):
         self.assertEqual(AscendMLATorchairBackend.get_name(),
                          "ASCEND_MLA_TORCHAIR")
 
-    def test_get_metadata_cls(self):
-        self.assertEqual(AscendMLATorchairBackend.get_metadata_cls(),
-                         AscendMLATorchairMetadata)
-
     def test_get_builder_cls(self):
         self.assertEqual(AscendMLATorchairBackend.get_builder_cls(),
                          AscendMLATorchairMetadataBuilder)

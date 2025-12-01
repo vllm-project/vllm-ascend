@@ -45,7 +45,8 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if (is_enable_nz() and layer.weight.data.dtype
+        if "conv1d" not in layer.prefix and (
+                is_enable_nz() and layer.weight.data.dtype
                 in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
@@ -276,18 +277,20 @@ class AscendRowParallelLinear(RowParallelLinear):
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
                 in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+        bias_initialized_by_quant = ("bias" in self._parameters
+                                     and self._parameters["bias"] is not None)
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")
 
-        if bias:
+        if bias and not bias_initialized_by_quant:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
             })
-        else:
+        elif not bias and not bias_initialized_by_quant:
             self.register_parameter("bias", None)
 
         if self.custom_op is not None:
@@ -365,7 +368,9 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
                 in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
-        if bias:
+        bias_initialized_by_quant = ("bias" in self._parameters
+                                     and self._parameters["bias"] is not None)
+        if bias and not bias_initialized_by_quant:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
                             dtype=params_dtype))
@@ -373,7 +378,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
             })
-        else:
+        elif not bias and not bias_initialized_by_quant:
             self.register_parameter("bias", None)
 
         if self.custom_op is not None:
@@ -444,14 +449,16 @@ class AscendReplicatedLinear(ReplicatedLinear):
                                          self.params_dtype,
                                          weight_loader=self.weight_loader)
 
-        if bias:
+        bias_initialized_by_quant = ("bias" in self._parameters
+                                     and self._parameters["bias"] is not None)
+        if bias and not bias_initialized_by_quant:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=self.params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
             })
-        else:
+        elif not bias and not bias_initialized_by_quant:
             self.register_parameter("bias", None)
 
         if self.custom_op is not None:

@@ -30,6 +30,7 @@ from vllm.multimodal.inputs import (MultiModalFeatureSpec,
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
@@ -39,13 +40,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import swap_dict_values
-else:
-    from vllm.utils.collection_utils import swap_dict_values
 
 
 @dataclass
@@ -72,12 +67,6 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
     prompt_embeds: Optional[torch.Tensor] = None
-
-    # pcp/dcp param
-    local_chunked_kv_lens: Optional[list[Optional[list[Optional[
-        list[int]]]]]] = None  # Records computed tokens for each chunk
-    next_pcp_dcp_start_rank: int = 0  # Tracks next starting rank for round-robin distribution
-    token_blank_in_last_blk: int = 0  # if the last block is not full, how many future tokens can be stored
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -319,10 +308,6 @@ class InputBatch:
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
 
-        # pcp/dcp parameters
-        self.local_chunked_kv_lens: list[Optional[list[Optional[list[Optional[
-            list[int]]]]]]] = [None] * max_num_reqs
-
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -394,9 +379,6 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
-
-        # Add PCP/DCP tracking fields
-        self.local_chunked_kv_lens[req_index] = request.local_chunked_kv_lens
 
         if sampling_params := request.sampling_params:
             if (self.is_spec_decode
@@ -693,8 +675,6 @@ class InputBatch:
                 last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
-            self.local_chunked_kv_lens[
-                empty_index] = self.local_chunked_kv_lens[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
@@ -849,7 +829,7 @@ class InputBatch:
                                               non_blocking=True)
 
     def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
+        self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return

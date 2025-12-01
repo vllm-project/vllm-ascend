@@ -30,7 +30,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
-from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                is_hierarchical_communication_enabled)
 
 
@@ -98,11 +98,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.enable_dispatch_v2 = hasattr(torch_npu,
                                           "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = (
-            get_ascend_soc_version() == AscendSocVersion.A3)
+            get_ascend_device_type() == AscendDeviceType._910_93)
 
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = \
-            get_ascend_soc_version() == AscendSocVersion.A3
+            get_ascend_device_type() == AscendDeviceType._910_93
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
@@ -701,33 +701,16 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         if self.with_quant:
             assert global_input_tokens_local_experts_indices is not None, \
                 "global_input_tokens_local_experts_indices must be provided"
-            expert_idx_2d = global_input_tokens_local_experts_indices.unsqueeze(
+            dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
+                dynamic_scale_after_all2all.unsqueeze(-1),
+                global_input_tokens_local_experts_indices)
+            dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(
                 -1)
-            active_num = global_input_tokens_local_experts_indices.numel()
-
-            if active_num <= 0:
-                reversed_global_input_permutation_mapping = global_input_tokens_local_experts_indices
-                return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
-
-            global_input_tokens, reversed_global_input_permutation_mapping, _, expanded_scale = torch_npu.npu_moe_init_routing_v2(
-                global_input_tokens,
-                expert_idx_2d,
-                scale=dynamic_scale_after_all2all,
-                active_num=active_num,
-                expert_capacity=0,
-                expert_num=self.num_local_experts,
-                expert_tokens_num_type=1,
-                expert_tokens_num_flag=True,
-                active_expert_range=[0, self.num_local_experts],
-                quant_mode=-1,
-                row_idx_type=0,
-            )
-            return global_input_tokens, expanded_scale, reversed_global_input_permutation_mapping
 
         # Non-quantized case
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices)
-        return global_input_tokens, None, reversed_global_input_permutation_mapping
+        return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(self, hidden_states: torch.Tensor,
                             context_metadata: dict) -> torch.Tensor:
