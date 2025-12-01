@@ -68,15 +68,17 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
-        if (prefill_context_parallel_enable() or
-                get_current_vllm_config().parallel_config.decode_context_parallel_size):
+        prefill_config = get_current_vllm_config().parallel_config
+        if (prefill_config.prefill_context_parallel_size > 1 or
+                prefill_config.decode_context_parallel_size > 1):
             return AscendAttentionCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if (prefill_context_parallel_enable() or
-                get_current_vllm_config().parallel_config.decode_context_parallel_size):
+        prefill_config = get_current_vllm_config().parallel_config
+        if (prefill_config.prefill_context_parallel_size > 1 or
+                prefill_config.decode_context_parallel_size > 1):
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
