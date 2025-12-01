@@ -29,6 +29,10 @@ class KVPoolScheduler:
             "load_async", False)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
+        self.pcp_size = getattr(vllm_config.parallel_config,
+                                "prefill_context_parallel_size", 1)
+        self.dcp_size = getattr(vllm_config.parallel_config,
+                                "decode_context_parallel_size", 1)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
 
