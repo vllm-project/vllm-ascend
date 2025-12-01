@@ -126,7 +126,7 @@ async def test_models(model: str, mode: str) -> None:
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         print(choices)
-        if mode in ["single", "no_chunkprefill"]:
+        if mode in ["single"]:
             return
         # aisbench test
         run_aisbench_cases(model,

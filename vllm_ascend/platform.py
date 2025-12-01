@@ -153,6 +153,7 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+        ascend_scheduler_config = ascend_config.ascend_scheduler_config
 
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)
@@ -282,7 +283,7 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
+            if ascend_config.torchair_graph_config.enabled:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -290,23 +291,35 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-            # ignore block size check if model is qwen3-next
-            # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-            if not (model_config
-                    and model_config.hf_config.model_type == "qwen3_next"):
-                # we must set block size to 128 if prefix caching is enabled or chunked prefill is enabled
-                if cache_config.enable_prefix_caching or \
-                    (vllm_config.scheduler_config and vllm_config.scheduler_config.enable_chunked_prefill):
-                    if cache_config.block_size != 128:
-                        logger.warning(
-                            "block size must be set to 128 on NPU platform.")
-                        cache_config.block_size = 128
+
+            if cache_config.enable_prefix_caching or \
+                not ascend_scheduler_config.enabled or \
+                getattr(ascend_scheduler_config, "enable_chunked_prefill", False):
+                logger.warning(
+                    "If chunked prefill or prefix caching is enabled, block size must be set to 128."
+                )
+                origin_block_size = cache_config.block_size
+                cache_config.block_size = 128
+                # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
+                if model_config and model_config.hf_config.model_type == "qwen3_next":
+                    logger.warning(
+                        "When running qwen3-next model, block_size needs to be restored to its original value."
+                    )
+                    cache_config.block_size = origin_block_size
 
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if ascend_config.recompute_scheduler_enable:
+        # If ascend_scheduler_config is enabled,
+        # extents original scheduler_config to use AscendScheduler.
+        if ascend_config.ascend_scheduler_config.enabled:
+            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
+            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config,
+                ascend_config.ascend_scheduler_config)
+            vllm_config.scheduler_config = ascend_scheduler_config
+        elif ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_schedule_config import \
                 RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
@@ -366,8 +379,6 @@ class NPUPlatform(Platform):
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
-            if use_mla and not use_sparse:
-                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
             if use_mla and use_sparse:
                 return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 

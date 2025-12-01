@@ -32,7 +32,8 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               prefill_context_parallel_enable)
+                               prefill_context_parallel_enable,
+                               shared_expert_dp_enabled)
 
 if prefill_context_parallel_enable():
     from vllm.distributed import get_pcp_group
@@ -46,9 +47,7 @@ PADDING_SLOT_ID = -1
 
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
-    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
-    "Qwen3NextForCausalLM":
-    ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP")
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP")
 }
 
 _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
@@ -96,6 +95,7 @@ class MtpProposer(Proposer):
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.enable_shared_expert_dp = shared_expert_dp_enabled()
 
         self.pcp_size = self.runner.pcp_size
         self.dcp_size = self.runner.dcp_size
@@ -215,7 +215,8 @@ class MtpProposer(Proposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None) -> None:
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None) -> None:
 
         (
             num_tokens,
@@ -287,6 +288,12 @@ class MtpProposer(Proposer):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     is_mtp_model=True):
+                if self.enable_shared_expert_dp:
+                    positions = positions.unsqueeze(-1)
+                    positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                    positions = positions.squeeze(-1)
+                    previous_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                        previous_hidden_states)
                 self.model(input_ids=input_ids,
                            positions=positions,
                            hidden_states=previous_hidden_states)
@@ -295,9 +302,14 @@ class MtpProposer(Proposer):
                     not forward_context.capturing:
                     if self.vllm_config.model_config.use_mla:
                         update_mla_attn_params(
-                            self.update_stream, forward_context,
-                            positions.shape[0],
+                            self.update_stream, forward_context, num_tokens,
                             self.vllm_config.speculative_config)
+                if self.enable_shared_expert_dp:
+                    positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        positions, True)
+                    previous_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        previous_hidden_states, True)
+                dummy_compute_logits(previous_hidden_states)
             if with_prefill:
                 break
 
@@ -675,7 +687,8 @@ class MtpProposer(Proposer):
 
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
-        if scheduler_output:
+        # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
+        if scheduler_output and not self.enable_shared_expert_dp:
             max_query_len = common_attn_metadata.max_query_len
             uniform_decode = (max_query_len in list(
                 range(1, self.num_speculative_tokens +
@@ -725,11 +738,22 @@ class MtpProposer(Proposer):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
+                    input_ids = self.input_ids[:num_input_tokens]
+                    positions = self.positions[:num_input_tokens]
+                    hidden_states = self.hidden_states[:num_input_tokens]
 
-                    hidden_states = self.model(
-                        input_ids=self.input_ids[:num_input_tokens],
-                        positions=self.positions[:num_input_tokens],
-                        hidden_states=self.hidden_states[:num_input_tokens])
+                    if self.enable_shared_expert_dp:
+                        # positions [N] -> [N, 1] for padding
+                        positions = positions.unsqueeze(-1)
+                        positions = torch.ops.vllm.maybe_pad_and_reduce(
+                            positions)
+                        positions = positions.squeeze(-1)
+                        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                            hidden_states)
+
+                    hidden_states = self.model(input_ids=input_ids,
+                                               positions=positions,
+                                               hidden_states=hidden_states)
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                         if self.vllm_config.model_config.use_mla:
@@ -737,6 +761,12 @@ class MtpProposer(Proposer):
                                 self.update_stream, forward_context,
                                 num_input_tokens,
                                 self.vllm_config.speculative_config)
+
+                    if self.enable_shared_expert_dp:
+                        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                            hidden_states.contiguous(), True)
+                        positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                            positions.contiguous(), True)
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
@@ -758,6 +788,7 @@ class MtpProposer(Proposer):
             logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
+                last_token_indices = last_token_indices[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)
 
             if self.num_speculative_tokens == 1:
@@ -804,26 +835,27 @@ class MtpProposer(Proposer):
                             batch_size,
                             attn_metadata_i.decode.actual_seq_lengths_q)
                 attn_metadata_i.decode.cos = builder.cos_cache[
-                    positions].unsqueeze(1).unsqueeze(2)
+                    positions[:batch_size]].unsqueeze(1).unsqueeze(2)
                 attn_metadata_i.decode.sin = builder.sin_cache[
-                    positions].unsqueeze(1).unsqueeze(2)
+                    positions[:batch_size]].unsqueeze(1).unsqueeze(2)
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
             # to remove such requests from the batch, we keep them in the batch
             # but adjust the position ids and slot mappings to avoid the
             # out-of-range access during the model execution. The draft tokens
             # generated with this adjustment should be ignored.
-            exceeds_max_model_len = positions >= self.runner.model_config.max_model_len
+            exceeds_max_model_len = positions[:
+                                              batch_size] >= self.runner.model_config.max_model_len
             # Mask out the position ids that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
             clamped_positions = torch.where(exceeds_max_model_len, 0,
-                                            positions)
+                                            positions[:batch_size])
             # Increment the sequence lengths.
             attn_metadata_i.seq_lens[:batch_size] += 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
             exceeds_max_model_len_cpu = exceeds_max_model_len.to(
-                attn_metadata_i.seq_lens.device, non_blocking=True)
+                attn_metadata_i.seq_lens.device, non_blocking=False)
             attn_metadata_i.seq_lens[:batch_size].masked_fill_(
                 exceeds_max_model_len_cpu, 1)
             # Mask out the slot mappings that exceed the max model length.

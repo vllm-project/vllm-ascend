@@ -39,6 +39,11 @@ class AscendConfig:
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
 
+        ascend_scheduler_config = additional_config.get(
+            "ascend_scheduler_config", {})
+        self.ascend_scheduler_config = AscendSchedulerConfig(
+            ascend_scheduler_config)
+
         # Dump / PrecisionDebugger configuration
         dump_config_path = additional_config.get("dump_config", None)
         self.dump_config = DumpConfig(dump_config_path)
@@ -67,6 +72,10 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        if self.enable_shared_expert_dp:
+            from vllm_ascend.utils import enable_sp
+            assert enable_sp(vllm_config=vllm_config,
+                             enable_shared_expert_dp=True)
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
         self.recompute_scheduler_enable = additional_config.get(
@@ -213,6 +222,20 @@ class TorchairGraphConfig:
             raise RuntimeError(
                 "use_cached_kv_cache_bytes is valid only when Torchair graph mode and use_cached_graph are enabled"
             )
+
+
+class AscendSchedulerConfig:
+    """
+    Configuration Object for ascend_scheduler_config from additional_config
+    """
+
+    def __init__(self, ascend_scheduler_config: dict):
+        self.enabled = ascend_scheduler_config.get("enabled", False)
+        # Ascend scheduler is based on vllm v0 scheduler, so we should support
+        # all vllm v0 scheduler configs as well.
+        for k, v in ascend_scheduler_config.items():
+            if not hasattr(self, k):
+                setattr(self, k, v)
 
 
 class DumpConfig:

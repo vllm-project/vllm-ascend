@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
@@ -60,6 +60,7 @@ class AscendW8A8DynamicLinearMethod:
         params_dict["weight_offset"] = torch.empty(output_size,
                                                    1,
                                                    dtype=params_dtype)
+        params_dict["bias"] = torch.zeros(output_size, dtype=torch.float32)
         return params_dict
 
     def get_pergroup_param(self,
@@ -72,33 +73,20 @@ class AscendW8A8DynamicLinearMethod:
     @staticmethod
     def apply(
         layer: torch.nn.Module,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        config = getattr(layer, "_ascend_quant_config", {})
-        if not isinstance(x, tuple):
-            output_dtype = config.get("output_dtype", x.dtype)
-            quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-        else:
-            assert "output_dtype" in config.keys(), (
-                f"DynamicLinearMethod needs explicitly specified `output_dtype`"
-                f"for pre-quantized input, got config [{config}]")
-            output_dtype = config["output_dtype"]
-            quantized_x, dynamic_scale = x
-        pertoken_scale = (dynamic_scale
-                          if config.get("pertoken_scale", True) else None)
-
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias,
-            output_dtype=output_dtype,
+            output_dtype=x.dtype,
         )
-        return ((output, dynamic_scale)
-                if config.get("return_scale", False) else output)
+        return output
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
@@ -110,6 +98,7 @@ class AscendW8A8DynamicLinearMethod:
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+        layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
 
 
 class AscendW8A8DynamicFusedMoEMethod:
@@ -234,13 +223,24 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
+        if self.dynamic_eplb:
+            w1 = layer.w13_weight_list
+            w1_scale = layer.w13_weight_scale_fp32_list
+            w2 = layer.w2_weight_list
+            w2_scale = layer.w2_weight_scale_list
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale_fp32]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+
         return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
-            w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
+            w1=w1,
+            w1_scale=w1_scale,
+            w2=w2,
+            w2_scale=w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
@@ -272,3 +272,25 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [
+                weight.clone()
+                for weight in layer.w13_weight.data.unbind(dim=0)
+            ]
+            layer.w2_weight_list = [
+                weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)
+            ]
+            layer.w13_weight_scale_fp32_list = [
+                weight.clone()
+                for weight in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.w2_weight_scale_list = [
+                weight.clone()
+                for weight in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w13_weight_scale_fp32
+            del layer.w2_weight_scale
+            torch.npu.empty_cache()

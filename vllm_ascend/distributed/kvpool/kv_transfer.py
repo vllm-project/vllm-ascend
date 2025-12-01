@@ -19,11 +19,13 @@ from vllm_ascend.distributed.kvpool.config_data import (ChunkedTokenDatabase,
 class KVTransferThread(threading.Thread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, ready_event: threading.Event, name: str):
+                 tp_rank: int, dcp_size: int, ready_event: threading.Event,
+                 name: str):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
         self.ready_event = ready_event
         self.tp_rank = tp_rank
+        self.dcp_size = dcp_size
         self.token_database = token_database
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -87,10 +89,12 @@ class KVTransferThread(threading.Thread):
 class KVCacheStoreSendingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, put_step: int, ready_event: threading.Event):
+                 tp_rank: int, dcp_size: int, put_step: int,
+                 ready_event: threading.Event):
         super().__init__(m_store,
                          token_database,
                          tp_rank,
+                         dcp_size,
                          ready_event,
                          name="KVCacheSendingThread")
         self.put_step = put_step
@@ -112,12 +116,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_tp = key_list[self.tp_rank % self.put_step::self.put_step]
-        addr_list_tp = addr_list[self.tp_rank % self.put_step::self.put_step]
-        size_list_tp = size_list[self.tp_rank % self.put_step::self.put_step]
-        if key_list_tp:
-            torch.npu.current_stream().synchronize()
-            self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
+        if self.dcp_size > 1:
+            self.m_store.put(key_list, addr_list, size_list)
+        else:
+            key_list_tp = key_list[self.tp_rank % self.put_step::self.put_step]
+            addr_list_tp = addr_list[self.tp_rank %
+                                     self.put_step::self.put_step]
+            size_list_tp = size_list[self.tp_rank %
+                                     self.put_step::self.put_step]
+            if key_list_tp:
+                self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
         if is_last_chunk:
             self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -126,10 +134,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
 class KVCacheStoreRecvingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, ready_event: threading.Event):
+                 tp_rank: int, dcp_size: int, ready_event: threading.Event):
         super().__init__(m_store,
                          token_database,
                          tp_rank,
+                         dcp_size,
                          ready_event,
                          name="KVCacheStoreRecvingThread")
 
@@ -166,11 +175,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, put_step: int, ready_event: threading.Event,
-                 num_layers: int):
+                 tp_rank: int, dcp_size: int, put_step: int,
+                 ready_event: threading.Event, num_layers: int):
         super().__init__(m_store,
                          token_database,
                          tp_rank,
+                         dcp_size,
                          ready_event,
                          name="KVCacheStoreLayerSendingThread")
         self.final_layer_id = num_layers - 1
@@ -192,12 +202,16 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_tp = key_list[self.tp_rank % self.put_step::self.put_step]
-        addr_list_tp = addr_list[self.tp_rank % self.put_step::self.put_step]
-        size_list_tp = size_list[self.tp_rank % self.put_step::self.put_step]
-        if key_list_tp:
-            torch.npu.current_stream().synchronize()
-            self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
+        if self.dcp_size > 1:
+            self.m_store.put(key_list, addr_list, size_list)
+        else:
+            key_list_tp = key_list[self.tp_rank % self.put_step::self.put_step]
+            addr_list_tp = addr_list[self.tp_rank %
+                                     self.put_step::self.put_step]
+            size_list_tp = size_list[self.tp_rank %
+                                     self.put_step::self.put_step]
+            if key_list_tp:
+                self.m_store.put(key_list_tp, addr_list_tp, size_list_tp)
         if req_meta.layer_id == self.final_layer_id and req_meta.is_last_chunk:
             self.set_finished_request(req_meta.req_id)
         self.request_queue.task_done()
@@ -206,11 +220,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 tp_rank: int, ready_event: threading.Event,
+                 tp_rank: int, dcp_size: int, ready_event: threading.Event,
                  get_event: threading.Event):
         super().__init__(m_store,
                          token_database,
                          tp_rank,
+                         dcp_size,
                          ready_event,
                          name="KVCacheStoreLayerRecvingThread")
         self.get_event = get_event

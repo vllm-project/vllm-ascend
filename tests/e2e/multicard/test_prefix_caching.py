@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare the with and without prefix caching on V1 scheduler."""
+"""Compare the with and without prefix caching on V1 scheduler or AscendScheduler."""
 
 import pytest
 
