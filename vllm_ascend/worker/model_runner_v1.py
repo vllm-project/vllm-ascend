@@ -273,7 +273,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_configi
+        self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
         self.load_config = vllm_config.load_config
