@@ -138,9 +138,8 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               AscendDeviceType, BatchDescriptor,
-                               ProfileExecuteDuration, enable_sp,
-                               get_ascend_device_type, is_enable_nz,
+                               AscendDeviceType, ProfileExecuteDuration,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
                                is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
@@ -2970,9 +2969,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # filter out the valid batch descriptor
             _ag_mode, batch_descriptor = \
-                self.aclgraph_dispatcher.dispatch(
-                    BatchDescriptor(num_tokens=num_tokens,
-                                    uniform_decode=uniform_decode), uniform_decode=uniform_decode, has_lora=self.lora_config)
+                self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=self.lora_config)
             if aclgraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for aclgraph capture
