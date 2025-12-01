@@ -683,11 +683,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         forward_context: ForwardContext = get_forward_context()
         if not forward_context.capturing:
-            if self.attn_type == AttentionType.ENCODER_ONLY:
-                attn_output = self._forward_encode(query, key, value,
-                                                   attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
                                                    output)
@@ -736,9 +731,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
-
+        num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
         key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
+        if self.attn_type == AttentionType.ENCODER_ONLY:
+            attn_output = self._forward_encode(query, key, value,
+                                               attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
         output = self.forward_impl(query, key, value, attn_metadata, output)
         return output
