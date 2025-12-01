@@ -74,9 +74,6 @@ async def test_models(model: str) -> None:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
     additional_config = {
-        "ascend_scheduler_config": {
-            "enabled": False
-        },
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_moe": False,
