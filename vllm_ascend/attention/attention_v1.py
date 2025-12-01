@@ -350,8 +350,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: float | None,
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
-        sinks: torch.Tensor = None,
-        **kwargs,
+            sinks: torch.Tensor = None,
+            **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
         self.num_heads = num_heads
