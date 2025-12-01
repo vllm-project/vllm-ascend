@@ -120,7 +120,7 @@ def set_ascend_forward_context(
             mmrs_fusion = False
         else:
             sp_enabled = enable_sp(vllm_config) and \
-                num_tokens is not None and num_tokens > 1000
+                num_tokens is not None
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.sp_enabled = sp_enabled
