@@ -283,7 +283,7 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
+            if ascend_config.torchair_graph_config.enabled:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -379,8 +379,6 @@ class NPUPlatform(Platform):
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
-            if use_mla and not use_sparse:
-                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
             if use_mla and use_sparse:
                 return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 
