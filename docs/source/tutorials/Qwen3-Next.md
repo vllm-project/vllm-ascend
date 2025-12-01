@@ -157,15 +157,11 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 ::::
 :::::
 
-
 ## Accuracy Evaluation
-
 
 ### Using AISBench
 
  Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
-
-
 
 ## Performance
 
