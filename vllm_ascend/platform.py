@@ -148,6 +148,10 @@ class NPUPlatform(Platform):
         ascend_config = init_ascend_config(vllm_config)
 
         from vllm.config import CompilationMode  # noqa: E402
+        if vllm_config.compilation_config:
+            logger.warning(
+                "NPU platform does not support fusion optimization. ")
+            vllm_config.compilation_config.pass_config.enable_fusion = False
 
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config

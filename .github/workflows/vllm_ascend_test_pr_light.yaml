@@ -120,12 +120,12 @@ jobs:
   #         TORCH_DEVICE_BACKEND_AUTOLOAD: 0
   #       run: |
   #         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-  #         pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
-  #           --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
-  #           --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
-  #           --ignore tests/ut/models/test_qwen2_vl.py \
-  #           --ignore tests/ut/models/test_qwen2_5_vl.py \
-  #           --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py
+          # pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
+          #   --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
+          #   --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+          #   --ignore tests/ut/models/test_qwen2_vl.py \
+          #   --ignore tests/ut/models/test_qwen2_5_vl.py \
+          #   --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py
 
   #     - name: Upload coverage to Codecov
   #       # only upload coverage when commits merged
