@@ -80,12 +80,15 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
+            # mtp drafter 关联模型
             if self.torchair_graph_enabled or (
                     self.enable_shared_expert_dp
                     and self.vllm_config.model_config.use_mla):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
+                # BING 继承自DeepSeekMTP（vllm/vllm/model_executor/models/deepseek_mtp.py）
+                # BING CustomDeepSeekMTP没有重写load_weights方法
                 self.model = CustomDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
 
@@ -95,7 +98,7 @@ class MtpProposer(Proposer):
 
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_name = list(draft_attn_layer_names)
-
+        # BING MTP模型权重加载的调用点在此
         self.model.load_weights(
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,

@@ -186,6 +186,7 @@ def _select_experts_with_fusion_ops(
     # NOTE: now npu_moe_gating_top_k can only support 'group_count=256' pattern
     is_deepseek_v3_r1 = global_num_experts == 256
     if is_deepseek_v3_r1:
+        e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             router_logits,
             k=top_k,  # topk currently 8

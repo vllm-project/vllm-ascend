@@ -458,13 +458,13 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
+        self.is_mtp_layer = layer_idx >= config.num_hidden_layers
         self.layers = config.num_hidden_layers
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         self.first_k_dense_replace = config.first_k_dense_replace
-
-        if self.role is None or self.role == "attention":
+        if self.role is None or self.role == "attention" or self.is_mtp_layer:
             # TODO: enable mla in vllm-ascend
             if model_config.use_mla:
                 if ascend_config.use_sfa:
@@ -491,10 +491,11 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 prefix=f"{prefix}.self_attn",
             )
         
-        if self.role is None or self.role == "ffn":
+        if self.role is None or self.role == "ffn" or self.is_mtp_layer:
             if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
+                # 稀疏：是MOE层
                 self.mlp = DeepseekV2MoE(
                     config=config,
                     parallel_config=parallel_config,
@@ -506,15 +507,16 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 #         self.mlp.gate.e_score_correction_bias.data.to(
                 #             dtype=torch.get_default_dtype()))
             else:
+                # dense：MLP
                 self.mlp = DeepseekV2MLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     hidden_act=config.hidden_act,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp",
-                )
+              )
         
-        if self.role is not None and self.role == "attention":
+        if self.role is not None or self.role == "attention" or self.is_mtp_layer:
             # if layer_idx < config.first_k_dense_replace:
             #     print('开始加载attn侧的mlp')
             #     self.mlp = DeepseekV2MLP(
@@ -712,7 +714,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 continue
             if "module" in name:
                 continue
-
+            # BING 原始流程 atten和ffn分别加载权重
             if self.role == "attention" and self.is_moe_weight(name):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)

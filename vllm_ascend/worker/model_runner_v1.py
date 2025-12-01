@@ -359,6 +359,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                         dtype=torch.bool),
                                              diagonal=1).to(self.device)
             if get_pp_group().is_last_rank:
+                # 开启mtp的模型drafter
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
                     self.device, self)
@@ -2870,6 +2871,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
+            # 主模型加载 任何情况都会进入
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
@@ -2884,8 +2886,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         module.weight.data = self._convert_torch_format(
                             module.weight.data)
             if self.drafter:
+                # BING here add
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+                # BING 这里注册模型，加入逻辑判断
                 if self.drafter.name == SpecDcodeType.EAGLE3:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
