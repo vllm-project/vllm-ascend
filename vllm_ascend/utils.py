@@ -24,7 +24,7 @@ import os
 from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch_npu  # noqa: F401
@@ -63,34 +63,6 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
-
-
-class BatchDescriptor(NamedTuple):
-    """
-    Batch descriptor for cudagraph dispatching. We should keep the num of
-    items as minimal as possible to properly and uniquely describe the padded
-    batch for cudagraph.
-    """
-
-    num_tokens: int
-    uniform_decode: bool = False
-    """
-    False can also be used for an uniform decode batch to dispatch to the 
-    cudagraph supporting non-uniform batches.
-    """
-    has_lora: bool = False
-    """
-    Whether this batch has active LoRA adapters.
-    """
-
-    @property
-    def non_uniform(self) -> "BatchDescriptor":
-        """
-        Return a non-uniform version of current batch descriptor.
-        """
-        return BatchDescriptor(self.num_tokens,
-                               uniform_decode=False,
-                               has_lora=self.has_lora)
 
 
 def _print_callback_on_stream(*args):

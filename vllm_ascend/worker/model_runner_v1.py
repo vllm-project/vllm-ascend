@@ -2307,8 +2307,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
+        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
-            self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=self.lora_config)
+            self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -2963,17 +2964,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k: v[:num_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
-
+            has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
             # filter out the valid batch descriptor
             _ag_mode, batch_descriptor = \
-                self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=self.lora_config)
+                self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
             if aclgraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for aclgraph capture
-                assert aclgraph_runtime_mode == CUDAGraphMode.NONE or \
-                    aclgraph_runtime_mode == _ag_mode, (
-                    f"Aclgraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
+                if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
+                    raise ValueError(
+                        f"Aclgraph runtime mode mismatch at dummy_run. "
+                        f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}."
+                    )
             else:
                 aclgraph_runtime_mode = _ag_mode
 
