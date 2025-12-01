@@ -1,6 +1,5 @@
 import types
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torchair
@@ -149,7 +148,8 @@ class TorchairMtpProposer(MtpProposer):
                 break
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[np.ndarray],
+                           valid_sampled_token_ids: torch.Tensor
+                           | list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -189,7 +189,7 @@ class TorchairMtpProposer(MtpProposer):
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
