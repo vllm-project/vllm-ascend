@@ -24,20 +24,17 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl, AscendAttentionState, \
-    AscendAttentionMetadataBuilder, AscendAttentionBackend, AscendMetadata
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
+                                                AscendAttentionMetadataBuilder,
+                                                AscendMetadata)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)

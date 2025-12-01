@@ -32,15 +32,15 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-from vllm_ascend.attention.attention_cp import (AscendAttentionCPImpl, AscendMetadataForDecode, \
-    AscendAttentionCPMetadataBuilder, AscendMetadataForPrefill)
+from vllm_ascend.attention.attention_cp import (AscendAttentionCPImpl,
+                                                AscendMetadataForDecode,
+                                                AscendAttentionCPMetadataBuilder,
+                                                AscendMetadataForPrefill)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
-
 from vllm.attention.backends.registry import (AttentionBackendEnum,
                                               register_backend)
 
