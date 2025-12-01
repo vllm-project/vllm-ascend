@@ -227,8 +227,6 @@ def main(
         gpu_memory_utilization = 0.95,
         enable_sleep_mode=enable_sleep_mode,
     )
-
-
     outputs = llm.generate(prompts, sampling_params)
 
     if enable_sleep_mode:

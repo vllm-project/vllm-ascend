@@ -215,7 +215,6 @@ class NPUWorker(WorkerBase):
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
-            model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
