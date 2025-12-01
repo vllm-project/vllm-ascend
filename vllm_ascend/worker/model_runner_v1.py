@@ -62,6 +62,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
                                                    supports_transcription)
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -294,6 +295,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                       'decode_max_num_seqs', 0)
         self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
                                 decode_max_num_seqs)
+        self.mtp_instance = None
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
@@ -3042,6 +3044,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     dummy_compute_logits=dummy_drafter_compute_logits)
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
+                if self.mtp_instance is not None:
+                    self.drafter.model.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
@@ -3164,9 +3168,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
-            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            num_mtp_layers = self.mtp_instance.model.num_mtp_layers if self.mtp_instance is not None else 0
+            self.eplb_adaptor = VllmEplbAdaptor(
+                model=self.model, 
+                mtp_instance=self.mtp_instance, 
+                num_mtp_layers=num_mtp_layers
+                )
             self.eplb_loader.set_adator(self.eplb_adaptor)
-            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor, num_mtp_layers)
             self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
@@ -3189,6 +3198,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+                if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                    assert isinstance(self.drafter, MtpProposer), \
+                        f"drafter type wrong: {type(self.drafter)}"
+                    assert isinstance(self.drafter.model, (DeepSeekMTP, ACLGraphWrapper)), \
+                        f"drafter type wrong: {type(self.drafter)}, only suport DeepSeekMTP or ACLGraphWrapper"
+                    if isinstance(self.drafter.model, DeepSeekMTP):
+                        self.mtp_instance = self.drafter.model
+                    elif isinstance(self.drafter.model, ACLGraphWrapper):
+                        self.mtp_instance = self.drafter.model.unwrap()
+                    model_register(self.mtp_instance.model, self.vllm_config)
+
                 if self.drafter.name == SpecDcodeType.EAGLE3:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
