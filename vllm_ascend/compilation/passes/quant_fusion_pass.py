@@ -85,6 +85,12 @@ class AscendQuantFusionPass(VllmInductorPass):
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
             pass_name="rmsnorm_quant_fusion_pass")
 
+        dtype = vllm_config.model_config.dtype
+        if dtype not in (torch.bfloat16, torch.float16):
+            logging.info("Quant fusion not enabled: unsupported dtype %s",
+                         dtype)
+            return
+
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
             AddRMSNormQuantPattern(vllm_config,
