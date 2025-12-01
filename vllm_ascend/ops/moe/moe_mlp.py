@@ -54,10 +54,10 @@ def cumsum_group_list(group_list: torch.Tensor,
 
 
 def quant_apply_mlp(hidden_states: torch.Tensor,
-                    w1: torch.Tensor,
-                    w1_scale: torch.Tensor,
-                    w2: torch.Tensor,
-                    w2_scale: torch.Tensor,
+                    w1: torch.Tensor | list[torch.Tensor],
+                    w1_scale: torch.Tensor | list[torch.Tensor],
+                    w2: torch.Tensor | list[torch.Tensor],
+                    w2_scale: torch.Tensor | list[torch.Tensor],
                     group_list: torch.Tensor,
                     group_list_type: int = 1,
                     dynamic_scale: torch.Tensor = None,
@@ -76,7 +76,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         pertoken_scale = dynamic_scale
 
     bias1, bias2 = None, None
-    _output_dtype = w2_scale.dtype
+    _output_dtype = w2_scale[0].dtype
 
     weight_prefetch_method = get_forward_context().weight_prefetch_method
     if weight_prefetch_method:
@@ -93,21 +93,22 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale)
         else:
-            if w1_scale.dtype != torch.float32:
-                w1_scale = w1_scale.to(torch.float32)
+            if w1_scale[0].dtype != torch.float32:
+                w1_scale[0] = w1_scale[0].to(torch.float32)
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
-                weight=[w1],
+                weight=w1,
                 split_item=3,
                 group_list_type=group_list_type,
                 group_type=0,
                 group_list=group_list,
                 output_dtype=torch.int32)[0]
             # act_fn: swiglu
+            w1_scale_tensor = torch.cat(w1_scale, dim=0)
             hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
                 x=hidden_states,
-                weight_scale=w1_scale,
+                weight_scale=w1_scale_tensor,
                 activation_scale=pertoken_scale,
                 bias=None,
                 quant_scale=None,
@@ -116,17 +117,20 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 activate_left=True,
                 quant_mode=1,
             )
+            # hidden_states = torch_npu.npu_swiglu(hidden_states)
+            # hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
+            #     hidden_states)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[w2],
-            scale=[w2_scale],
+            weight=w2,
+            scale=w2_scale,
             per_token_scale=[swiglu_out_scale],
             split_item=2,
             group_list_type=group_list_type,
             group_type=0,
             group_list=group_list,
-            output_dtype=w2_scale.dtype)[0]
+            output_dtype=w2_scale[0].dtype)[0]
     else:
         if w1_scale_bias is not None:
             if group_list_type == 0:
@@ -152,8 +156,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
-                weight=[w1],
-                scale=[w1_scale.to(w2_scale.dtype)],
+                weight=w1,
+                scale=w1_scale,
                 bias=bias1,
                 per_token_scale=[pertoken_scale],
                 split_item=2,
@@ -168,8 +172,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
-            weight=[w2],
-            scale=[w2_scale],
+            weight=w2,
+            scale=w2_scale,
             bias=bias2,
             per_token_scale=[swiglu_out_scale],
             split_item=2,

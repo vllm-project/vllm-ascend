@@ -44,11 +44,22 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
 
+        for i in range(self.num_dense_layers,
+                       self.model.config.num_hidden_layers):
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_list"] = \
+                self.model.model.layers[i].mlp.experts.w13_weight_list
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_list"] = \
+                self.model.model.layers[i].mlp.experts.w2_weight_list
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_scale_fp32_list"] = \
+                self.model.model.layers[i].mlp.experts.w13_weight_scale_fp32_list
+            self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_scale_list"] = \
+                self.model.model.layers[i].mlp.experts.w2_weight_scale_list
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
         if self.model.quant_config is not None:
             self.expert_weight_names = [
-                "w13_weight", "w2_weight", "w13_weight_scale",
-                "w13_weight_offset", "w2_weight_scale", "w2_weight_offset"
+                "w13_weight_list", "w2_weight_list",
+                "w13_weight_scale_fp32_list", "w13_weight_offset",
+                "w2_weight_scale_list", "w2_weight_offset"
             ]
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
@@ -85,8 +96,14 @@ class VllmEplbAdaptor(EplbAdaptor):
                 complete_name = "model.layers." + str(
                     self.num_dense_layers) + ".mlp.experts." + name
                 expert_tensor = self.param_dict[complete_name].data[0]
-                if name in ["w13_weight", "w2_weight"]:
+                if name in [
+                        "w13_weight_list", "w2_weight_list",
+                        "w13_weight_scale_fp32_list", "w2_weight_scale_list"
+                ]:
+                    expert_tensor = self.param_dict[complete_name][0]
                     expert_tensor = expert_tensor.clone()
+                else:
+                    expert_tensor = self.param_dict[complete_name][0].data[0]
                 buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
@@ -97,12 +114,23 @@ class VllmEplbAdaptor(EplbAdaptor):
             layer_idx = self.num_dense_layers + moe_layer_id
             self.expert_param_per_layer[layer_idx] = list()
             for local_expert_id in range(num_local_expert):
-                self.expert_param_per_layer[layer_idx].append([
-                    self.param_dict["model.layers." + str(layer_idx) +
-                                    ".mlp.experts." +
-                                    name].data[local_expert_id]
-                    for name in self.expert_weight_names
-                ])
+                per_expert_param = list()
+                for name in self.expert_weight_names:
+                    if name in [
+                            "w13_weight_list", "w2_weight_list",
+                            "w13_weight_scale_fp32_list",
+                            "w2_weight_scale_list"
+                    ]:
+                        per_expert_param.append(
+                            self.param_dict["model.layers." + str(layer_idx) +
+                                            ".mlp.experts." +
+                                            name][local_expert_id])
+                    else:
+                        per_expert_param.append(
+                            self.param_dict["model.layers." + str(layer_idx) +
+                                            ".mlp.experts." +
+                                            name][0].data[local_expert_id])
+                self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
         self.moe_load = self.model.get_all_moe_loads()
@@ -219,7 +247,9 @@ class VllmEplbAdaptor(EplbAdaptor):
         for i,_ in enumerate(self.expert_param_per_layer[layer_id][local_expert_to_replace]):
             # expert_tensor = buffer_tensor.clone()
             # expert_tensor.copy_(buffer_tensor)
-            self.expert_param_per_layer[layer_id][local_expert_to_replace][i].data = self.buffer_tensor_list[buffer_tensor_id][i].data
+            self.expert_param_per_layer[layer_id][local_expert_to_replace][i].set_(self.buffer_tensor_list[buffer_tensor_id][i])
+            # new_buffer = torch.empty_like(self.buffer_tensor_list[buffer_tensor_id][i])
+            # self.buffer_tensor_list[buffer_tensor_id][i] = new_buffer
 
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
