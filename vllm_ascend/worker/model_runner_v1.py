@@ -2974,7 +2974,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             _ag_mode, batch_descriptor = \
                 self.aclgraph_dispatcher.dispatch(
                     BatchDescriptor(num_tokens=num_tokens,
-                                    uniform_decode=uniform_decode))
+                                    uniform_decode=uniform_decode), uniform_decode=uniform_decode, has_lora=self.lora_config)
             if aclgraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for aclgraph capture
