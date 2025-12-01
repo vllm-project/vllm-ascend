@@ -283,7 +283,7 @@ class AscendAttentionMetadataBuilder:
         AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
