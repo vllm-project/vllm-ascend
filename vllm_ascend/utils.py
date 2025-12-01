@@ -471,9 +471,11 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
-        logger.warning("Got empty model config, This occurs in scenarios \
-            where an empty config needs to be initialized, eg: unit tests, \
-                where updates are skipped.")
+        logger.warning(
+            "Got empty model config. This typically occurs when an empty vllm_config is "
+            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+        )
+
         return
     hf_config = vllm_config.model_config.hf_config
     if hasattr(hf_config, 'num_hidden_layers'):
