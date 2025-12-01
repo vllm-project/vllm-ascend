@@ -232,11 +232,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
+        output = self.impl.forward(layer, query, key, value, kv_cache,
                                    metadata)
 
         mock_npu_fused_infer_attention_score.assert_called_once()
