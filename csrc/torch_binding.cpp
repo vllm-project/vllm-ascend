@@ -568,9 +568,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     int m = x_size[0];
     int k = x_size[1];
 
-    at::Tensor output = at::zeros({m, n/2}, x.options().dtype(at::kChar));
-    at::Tensor output_scale = at::zeros({m}, x.options().dtype(at::kFloat));
-    at::Tensor output_offset = at::zeros({m}, x.options().dtype(at::kFloat));
+    at::Tensor output = at::empty({m, n/2}, x.options().dtype(at::kChar));
+    at::Tensor output_scale = at::empty({m}, x.options().dtype(at::kFloat));
+    at::Tensor output_offset = at::empty({m}, x.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(
         aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
