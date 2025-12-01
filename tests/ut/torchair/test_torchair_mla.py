@@ -185,6 +185,7 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.get_head_size = lambda: 8
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
@@ -211,6 +212,7 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
     def test_reorder_batch_with_torchair_graph(self, ascend_config):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.get_head_size = lambda: 8
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
@@ -250,6 +252,7 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
 
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.get_head_size = lambda: 8
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
