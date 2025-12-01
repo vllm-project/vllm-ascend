@@ -287,4 +287,4 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          #pytest -sv tests/e2e/multicard/test_qwen3_next.py
+          pytest -sv tests/e2e/multicard/test_qwen3_next.py
