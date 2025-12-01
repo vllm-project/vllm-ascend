@@ -84,7 +84,7 @@ jobs:
   #       SOC_VERSION: ascend910b1
   #   strategy:
   #     matrix:
-  #       vllm_version: [888152bf87d62c9f5929d06f386068990b618db7, v0.11.2]
+  #       vllm_version: [f72a817bdf6bd04b223a9da3af6c4ad1a676a98e, v0.11.2]
   #   steps:
   #     - name: Install packages
   #       run: |
@@ -142,7 +142,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [888152bf87d62c9f5929d06f386068990b618db7]
+        vllm_version: [f72a817bdf6bd04b223a9da3af6c4ad1a676a98e]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     # needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
