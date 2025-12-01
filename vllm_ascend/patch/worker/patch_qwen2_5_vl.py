@@ -379,7 +379,6 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
             is_neox_style=True,
         )
 
-        use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
@@ -404,7 +403,6 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
                     attn_backend=self.attn_backend,
-                    use_upstream_fa=use_upstream_fa,
                     attn_backend_override=attn_backend_override,
                 ) for layer_idx in range(depth)
             ])
