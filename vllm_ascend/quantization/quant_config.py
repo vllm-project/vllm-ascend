@@ -408,11 +408,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self,
-                 quant_config: AscendQuantConfig,
-                 prefix: str,
-                 packed_modules_mapping: Dict[str, Any],
-                 layer: torch.nn.Module = None):
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str,
+                                              Any], layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,
