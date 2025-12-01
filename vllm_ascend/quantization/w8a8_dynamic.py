@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
@@ -73,33 +73,20 @@ class AscendW8A8DynamicLinearMethod:
     @staticmethod
     def apply(
         layer: torch.nn.Module,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        config = getattr(layer, "_ascend_quant_config", {})
-        if not isinstance(x, tuple):
-            output_dtype = config.get("output_dtype", x.dtype)
-            quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-        else:
-            assert "output_dtype" in config.keys(), (
-                f"DynamicLinearMethod needs explicitly specified `output_dtype`"
-                f"for pre-quantized input, got config [{config}]")
-            output_dtype = config["output_dtype"]
-            quantized_x, dynamic_scale = x
-        pertoken_scale = (dynamic_scale
-                          if config.get("pertoken_scale", True) else None)
-
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias,
-            output_dtype=output_dtype,
+            output_dtype=x.dtype,
         )
-        return ((output, dynamic_scale)
-                if config.get("return_scale", False) else output)
+        return output
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
