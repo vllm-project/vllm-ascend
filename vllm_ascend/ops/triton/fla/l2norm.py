@@ -2,13 +2,10 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
+
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 USE_DEFAULT_FLA_NORM = False
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
 
 @triton.autotune(
     configs=[
@@ -106,7 +103,7 @@ def l2norm_fwd(
     if not USE_DEFAULT_FLA_NORM:
         MBLOCK = 69
         # M, N = x.shape
-        num_core = get_npu_properties()["num_vectorcore"]
+        num_core = get_vectorcore_num()
         main_bs = triton.cdiv(T, num_core)
         num_sub_blocks = triton.cdiv(main_bs, MBLOCK)
         grid = (num_core, )
