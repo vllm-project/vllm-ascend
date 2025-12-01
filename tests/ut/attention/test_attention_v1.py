@@ -230,6 +230,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.num_decode_tokens = 0
+        metadata.num_decodes = 0
+        metadata.num_prefills = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
