@@ -27,32 +27,19 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (get_dcp_group,
-                              get_decode_context_model_parallel_rank,
-                              get_decode_context_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.attention_cp import AscendAttentionCPImpl, AscendPCPMetadata, AscendMetadataForDecode, \
-    AscendAttentionCPMetadataBuilder
+from vllm_ascend.attention.attention_cp import (AscendAttentionCPImpl, AscendMetadataForDecode, \
+    AscendAttentionCPMetadataBuilder, AscendMetadataForPrefill)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         filter_chunked_req_indices,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
-
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-
-# isort: on
+from vllm_ascend.utils import weak_ref_tensors
 
 from vllm.attention.backends.registry import (AttentionBackendEnum,
                                               register_backend)
@@ -144,29 +131,6 @@ class AscendAttentionState(Enum):
 
 
 @dataclass
-class AscendMetadataForPrefill:
-
-    @dataclass
-    class ChunkedContextMetadata:
-        actual_chunk_seq_lengths: list[int]
-        actual_seq_lengths_kv: list[int]
-        starts: torch.Tensor
-        chunk_seq_mask_filtered_indices: torch.Tensor
-        chunked_req_mask: Optional[list[bool]] = None
-        local_context_lens_allranks: Optional[list[list[int]]] = None
-        cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
-        kv_inverse_idx_for_chunk: Optional[list[int]] = None
-        batch_chunk_seq_mask: Optional[list[bool]] = None
-
-    """ Prefill Specific Metadata for Ascend"""
-    pcp_metadata: Optional[AscendPCPMetadata] = None
-    pcp_allgather_restore_idx: Optional[List[int]] = None
-    chunked_context: Optional[ChunkedContextMetadata] = None
-    block_tables: torch.Tensor = None
-    actual_seq_lengths_q: torch.Tensor = None
-
-
-@dataclass
 class AscendMetadata:
     # **************************** Basic Properties ************************** #
     attn_mask: Optional[torch.Tensor] = None
@@ -239,17 +203,6 @@ class AscendAttentionMetadataBuilder:
         self.max_num_blocks_per_req = cdiv(
             self.model_config.max_model_len,
             AscendAttentionBackend.get_supported_block_size()[0])
-        self.batch_seq_mask_buf = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            dtype=torch.uint8,
-            device=device)
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank(
-        ) if self.dcp_size > 1 else 0
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1

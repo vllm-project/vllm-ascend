@@ -117,13 +117,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.compilation_config = vllm_config.compilation_config
-        self.device = device
-        self.max_num_blocks_per_req = cdiv(
-            self.model_config.max_model_len,
-            AscendAttentionBackend.get_supported_block_size()[0])
+        super.__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.batch_seq_mask_buf = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.uint8,
@@ -135,24 +129,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
-
-        self.speculative_config = vllm_config.speculative_config
-        self.decode_threshold = 1
-        if self.speculative_config:
-            spec_token_num = self.speculative_config.num_speculative_tokens
-            self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
-                npu_fused_infer_attention_score TND layout's limit of 16, \
-                got {self.decode_threshold}"
-
-        AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
-
-        scheduler_config = vllm_config.scheduler_config
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
-
-    def reorder_batch(self, input_batch,
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
 
     def build(
         self,
