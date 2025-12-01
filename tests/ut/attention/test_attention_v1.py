@@ -221,6 +221,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         key = torch.randn(10, 8 * 64)
         value = torch.randn(10, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
+        output = torch.empty_like(query)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillCacheHit
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
@@ -233,7 +234,7 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         output = self.impl.forward(layer, query, key, value, kv_cache,
-                                   metadata)
+                                   metadata, output)
 
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
