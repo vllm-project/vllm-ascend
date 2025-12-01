@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import os
+
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -30,3 +32,6 @@ import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
 import vllm_ascend.patch.worker.patch_minicpm  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_attention_layer  # noqa
+
+if os.getenv("SHM_BARRIER", "true") == "true":
+    import vllm_ascend.patch.platform.patch_message_queue  # noqa
