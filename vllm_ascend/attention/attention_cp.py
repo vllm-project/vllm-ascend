@@ -99,13 +99,6 @@ class AscendMetadataForDecode:
     batch_seq_mask: torch.Tensor = None
     block_tables: torch.Tensor = None
 
-@dataclass
-class AscendCPMetadata:
-
-    prefill: Optional[AscendMetadataForPrefill] = None
-
-    decode_meta: Optional[AscendMetadataForDecode] = None
-
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
