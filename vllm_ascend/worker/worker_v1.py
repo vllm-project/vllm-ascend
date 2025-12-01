@@ -337,6 +337,7 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.load_model()
+            self.model_runner.aclgraph_wrapper()
 
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.

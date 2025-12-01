@@ -58,7 +58,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
                                                    supports_transcription)
@@ -103,6 +103,7 @@ from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
                                   gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -269,7 +270,7 @@ class ExecuteModelState(NamedTuple):
     positions: torch.Tensor
 
 
-class NPUModelRunner(LoRAModelRunnerMixin):
+class NPUModelRunner(GPUModelRunner, LoRAModelRunnerMixin):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -386,6 +387,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.device)
 
         self._set_up_drafter()
+        self.use_aux_hidden_state_outputs = False
 
         # kv role
         self.is_kv_producer = False
@@ -3179,36 +3181,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
-    def load_model(self) -> None:
-        logger.info("Starting to load model %s...", self.model_config.model)
-
-        with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
-            if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                from vllm.model_executor.layers.linear import (
-                    MergedColumnParallelLinear, QKVParallelLinear,
-                    RowParallelLinear)
-                for module in self.model.modules():
-                    if isinstance(module,
-                                  (MergedColumnParallelLinear,
-                                   QKVParallelLinear, RowParallelLinear)):
-                        module.weight.data = self._convert_torch_format(
-                            module.weight.data)
-            if self.drafter:
-                logger.info("Loading drafter model...")
-                self.drafter.load_model(self.model)
-                if self.drafter.name == SpecDcodeType.EAGLE3:
-                    self.model.set_aux_hidden_state_layers(
-                        self.model.get_eagle3_aux_hidden_state_layers())
-
-            if self.lora_config:
-                self.model = self.load_lora_model(self.model, self.vllm_config,
-                                                  self.device)
-        logger.info("Loading model weights took %.4f GB",
-                    m.consumed_memory / float(2**30))
-
+    def aclgraph_wrapper(self):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
