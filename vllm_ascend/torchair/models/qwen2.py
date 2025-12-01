@@ -23,7 +23,7 @@ import torch.nn.functional as F
 import vllm
 from torch import nn
 from transformers import Qwen2Config
-from vllm.attention import AttentionMetadata, AttentionType
+from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, tensor_model_parallel_all_gather,

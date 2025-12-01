@@ -27,8 +27,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
 from transformers.models.qwen2_vl.configuration_qwen2_vl import \
     Qwen2VLVisionConfig
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import (check_upstream_fa_availability,
-                                  maybe_get_vit_flash_attn_backend)
+from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -223,10 +222,6 @@ class AscendQwen2VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-
-        if (self.attn_backend != AttentionBackendEnum.FLASH_ATTN
-                and check_upstream_fa_availability(torch.get_default_dtype())):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     def rot_pos_emb(
             self,
