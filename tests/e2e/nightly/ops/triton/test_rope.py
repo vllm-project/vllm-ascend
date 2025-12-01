@@ -1,5 +1,4 @@
 import gc
-from typing import Optional
 
 import pytest
 import torch
@@ -82,7 +81,7 @@ def test_rotary_embedding_triton_kernel(
     num_q_heads: int,
     num_k_heads: int,
     head_size: int,
-    rotary_dim: Optional[int],
+    rotary_dim: int,
     dtype: torch.dtype,
     seed: int,
     device: str,

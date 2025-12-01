@@ -14,8 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import torch_npu._inductor  # noqa: F401
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
+
+if HAS_TRITON:
+    import torch_npu._inductor  # noqa: F401
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
