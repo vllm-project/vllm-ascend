@@ -55,16 +55,36 @@ include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 file(GLOB KERNEL_FILES
 ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
-ascendc_library(vllm_ascend_kernels SHARED
+set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+)
+
+set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+)
+
+if(SOC_VERSION STREQUAL "ASCEND310P3")
+    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE})
+endif()
+
+ascendc_library(vllm_ascend_kernels SHARED
+    ${VLLM_ASCEND_CUSTOM_OP}
 )
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
-file(GLOB VLLM_ASCEND_SRC
-${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
+if(SOC_VERSION STREQUAL "ASCEND310P3")
+    file(GLOB VLLM_ASCEND_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
+else()
+    file(GLOB VLLM_ASCEND_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
+endif()
 
 include_directories(
   ${pybind11_INCLUDE_DIRS}
@@ -74,6 +94,7 @@ include_directories(
   ${ASCEND_HOME_PATH}/include
   ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
   ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
 )
 
 set(
@@ -82,6 +103,7 @@ set(
   ${TORCH_NPU_INCLUDE_DIRS}
   ${ASCEND_HOME_PATH}/include
   ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
+  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})

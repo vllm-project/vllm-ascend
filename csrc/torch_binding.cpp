@@ -27,6 +27,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "mla_preprocess/op_host/mla_preprocess.h"
+#include "batch_matmul_transpose/op_host/batch_matmul_transpose.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 
 #include <c10/core/Device.h>
@@ -552,6 +553,73 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
         output_offset);
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+    const at::Tensor & x,
+    const at::TensorList & weight,
+    const at::TensorList & weight_scale,
+    const at::Tensor & x_scale,
+    const at::Tensor & group_list,
+    const c10::optional<at::Tensor> & bias,
+    const c10::optional<at::Tensor> & offset)
+{
+    auto x_size = x.sizes();
+    int n = weight[0].sizes()[1];
+    int m = x_size[0];
+    int k = x_size[1];
+
+    at::Tensor output = at::zeros({m, n/2}, x.options().dtype(at::kChar));
+    at::Tensor output_scale = at::zeros({m}, x.options().dtype(at::kFloat));
+    at::Tensor output_offset = at::zeros({m}, x.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(
+        aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
+        x,
+        weight,
+        bias,
+        offset,
+        weight_scale,
+        x_scale,
+        group_list,
+        output,
+        output_scale,
+        output_offset);
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
+}
+
+void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
+                                    c10::optional<c10::string_view> format_mode,
+                                    c10::optional<c10::string_view> quant_mode)
+{
+    auto [tiling_tensor, block_dim] = bmm_trans::batch_matmul_transpose_tiling(
+        tensor_a,
+        tensor_b,
+        tensor_c,
+        format_mode,
+        quant_mode
+    );
+
+    void *gm_a = tensor_a.data_ptr();
+    void *gm_b = tensor_b.data_ptr();
+    void *gm_c = tensor_c.data_ptr();
+    void *gm_tiling_data = tiling_tensor.data_ptr();
+
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("batch_matmul_transpose");
+
+    cmd.SetCustomHandler([stream, gm_a, gm_b, gm_c, gm_tiling_data,
+                          block_dim]() -> int {
+        batch_matmul_transpose_impl(stream, gm_a, gm_b, gm_c, gm_tiling_data,
+                            block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return;
+
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -606,6 +674,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
+    //batch_matmul ops refer to sgl-kernel-npu
+    ops.def(
+            "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");    
+    ops.impl("batch_matmul_transpose", torch::kPrivateUse1, &vllm_ascend::batch_matmul_transpose);
+
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
@@ -614,4 +687,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            Tensor group_list, *, Tensor? bias=None,"
         "                            Tensor? offset=None) -> (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant);
+
+    ops.def(
+        "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
+        "                                                  Tensor group_list, *,"
+        "                                                  Tensor? bias=None, Tensor? offset=None) ->"
+        "                                                  (Tensor output, Tensor output_scale, Tensor output_offset)"
+    );
+    ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz_tensor_list);
 }

@@ -69,7 +69,6 @@ jobs:
         ls
         docker build -f ./.github/Dockerfile.buildwheel \
         --build-arg PY_VERSION=${{ matrix.python-version }} \
-        --build-arg SOC_VERSION=ascend910b1 \
         -t wheel:v1 .
         docker run --rm \
         -u $(id -u):$(id -g) \
@@ -96,6 +95,11 @@ jobs:
           --exclude libge_common_base.so \
           --exclude libc10.so \
           --exclude libc_sec.so \
+          --exclude libnnopbase.so \
+          --exclude libprofapi.so \
+          --exclude libgraph_base.so \
+          --exclude libgraph.so \
+          --exclude libexe_graph.so \
           --exclude "libascend*.so" \
           --exclude "libtorch*.so" \
           --exclude "libopapi.so" \
