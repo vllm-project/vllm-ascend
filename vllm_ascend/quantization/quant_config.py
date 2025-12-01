@@ -413,6 +413,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
                  prefix: str,
                  packed_modules_mapping: Dict[str, Any],
                  layer: torch.nn.Module = None):
+        super().__init__(layer.moe_config)
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,
                                              "moe",
