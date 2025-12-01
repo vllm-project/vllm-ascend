@@ -948,7 +948,7 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     if not flashcomm2_enable():
-        logger.info("FLASHCOMM2 not enable.")
+        logger.debug("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size
 
     logger.info(

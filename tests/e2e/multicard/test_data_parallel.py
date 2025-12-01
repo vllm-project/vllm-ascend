@@ -70,7 +70,7 @@ def test_data_parallel_inference(model, max_tokens):
                           stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT,
                           timeout=600)
-    output = proc.stdout.decode(errors="replace")
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
