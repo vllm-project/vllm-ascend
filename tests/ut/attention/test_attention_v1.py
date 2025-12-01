@@ -227,6 +227,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
         metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
+        metadata.actual_seq_lengths_q = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.num_decode_tokens = 0
