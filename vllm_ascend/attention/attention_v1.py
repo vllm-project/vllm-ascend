@@ -657,7 +657,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
-        num_actual_tokens: int,
     ):
 
         if len(kv_cache) > 1:
@@ -665,12 +664,42 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
             torch_npu._npu_reshape_and_cache(
-                key=key[:num_actual_tokens],
-                value=value[:num_actual_tokens],
+                key=key[:attn_metadata.num_actual_tokens],
+                value=value[:attn_metadata.num_actual_tokens],
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
                 slot_indices=slots)
         return key, value
+
+    def forward_impl(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: Optional[torch.Tensor] = None,
+    ):
+        num_tokens = query.shape[0]
+        forward_context: ForwardContext = get_forward_context()
+        if not forward_context.capturing:
+            if self.attn_type == AttentionType.ENCODER_ONLY:
+                attn_output = self._forward_encode(query, key, value,
+                                                   attn_metadata, output)
+                output[:num_tokens] = attn_output[:num_tokens]
+                return output
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                output = self._forward_decode_only(query, attn_metadata,
+                                                   output)
+            else:
+                output = self._forward_prefill(query, key, value,
+                                               attn_metadata, output)
+        else:
+            attn_output, num_tokens = self.full_graph_attention(
+                query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+
+        return output
 
     def forward(
         self,
@@ -708,26 +737,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
 
-        num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
         key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
-        forward_context: ForwardContext = get_forward_context()
-        if not forward_context.capturing:
-            if self.attn_type == AttentionType.ENCODER_ONLY:
-                attn_output = self._forward_encode(query, key, value,
-                                                   attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
-            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
-            else:
-                output = self._forward_prefill(query, key, value,
-                                               attn_metadata, output)
-        else:
-            attn_output, num_tokens = self.full_graph_attention(
-                query, key, value, attn_metadata, output)
-            output[:num_tokens] = attn_output[:num_tokens]
-
+        output = self.forward_impl(query, key, value, attn_metadata, output)
         return output
