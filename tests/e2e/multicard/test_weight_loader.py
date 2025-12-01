@@ -61,7 +61,7 @@ def test_external_launcher(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -99,7 +99,7 @@ def test_external_launcher_dense(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
