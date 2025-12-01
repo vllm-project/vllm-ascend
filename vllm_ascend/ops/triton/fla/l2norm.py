@@ -77,9 +77,9 @@ def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr,
         row_idx = base_row + chunk * MBLOCK + tl.arange(0, MBLOCK)[:, None]
         xmask = row_idx < M
 
-        xs = tl.load(X + (rindex + N * row_idx), xmask).to(tl.float32)
+        xs = tl.load(X + (rindex + N * row_idx), mask=xmask, other=0.0).to(tl.float32)
         square = xs * xs
-        square_sum = tl.sum(tl.where(xmask, square, 0), 1)[:, None]
+        square_sum = tl.sum(square, 1)[:, None]
         rsqrt = tl.rsqrt(square_sum + eps)
 
         tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
