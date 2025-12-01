@@ -2310,10 +2310,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
-        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=uniform_decode)
         aclgraph_runtime_mode, batch_descriptor = \
-            self.aclgraph_dispatcher.dispatch(batch_descriptor, uniform_decode=uniform_decode, has_lora=self.lora_config)
+            self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=self.lora_config)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
