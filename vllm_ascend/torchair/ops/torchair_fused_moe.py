@@ -16,7 +16,7 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -45,7 +45,9 @@ from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
+from vllm_ascend.quantization.quant_config import (AscendFusedMoEMethod,
+                                                   AscendQuantConfig)
+from vllm_ascend.quantization.utils import get_quant_method
 from vllm_ascend.torchair.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         get_rm_router_logits_state,
@@ -936,6 +938,15 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 ep_group=get_ep_group())
 
 
+class TorchairAscendFusedMoEMethod(AscendFusedMoEMethod):
+
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str, Any]):
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "moe",
+                                             packed_modules_mapping)
+
+
 class TorchairAscendFusedMoE(FusedMoE):
 
     # The moe_counter parameter is required during the initialization of EPLB
@@ -1115,7 +1126,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.quant_method = TorchairAscendUnquantizedFusedMoEMethod(
                     self.moe)
             else:
-                self.quant_method = AscendFusedMoEMethod(
+                self.quant_method = TorchairAscendFusedMoEMethod(
                     quant_config, prefix, quant_config.packed_modules_mapping)
 
         assert self.quant_method is not None
