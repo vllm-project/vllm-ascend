@@ -1000,6 +1000,8 @@ class TorchairAscendFusedMoE(FusedMoE):
         self.moe_parallel_config = FusedMoEParallelConfig.make(
             tp_size_=(tp_size if tp_size is not None else
                       get_tensor_model_parallel_world_size()),
+            # TODO: support pcp
+            pcp_size_=1,
             dp_size_=(dp_size
                       if dp_size is not None else get_dp_group().world_size),
             vllm_parallel_config=vllm_config.parallel_config)
