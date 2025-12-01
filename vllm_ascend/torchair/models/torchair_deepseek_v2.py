@@ -492,8 +492,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         v_head_dim: int,
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -518,7 +516,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.first_k_dense_replace = config.first_k_dense_replace
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.prefix = prefix
@@ -921,8 +918,6 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # DecoderLayers are created with `make_layers` which passes the prefix
@@ -955,8 +950,6 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             q_lora_rank=config.q_lora_rank
             if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
