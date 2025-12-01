@@ -2872,7 +2872,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
-
+        logger.debug(f"aclgraph runtime : {aclgraph_runtime_mode}, ")
         # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
         # If sequence parallelism is enabled, it is essential to ensure that num_tokens is divisible by tp_size.
         if self.use_aclgraph and enable_sp(self.vllm_config):
