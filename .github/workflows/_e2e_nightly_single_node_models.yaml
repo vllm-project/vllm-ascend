@@ -59,7 +59,7 @@ jobs:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      image: "${{ inputs.image }}"
       env:
         VLLM_USE_MODELSCOPE: True
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
@@ -110,6 +110,12 @@ jobs:
         run: |
           . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
           python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
+      - name: Install tensorflow (for Molmo-7B-D-0924)
+        if: ${{ inputs.runner == 'linux-aarch64-a2-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
+        shell: bash -l {0}
+        run: |
+          pip install tensorflow --no-cache-dir
 
       - name: Resolve vllm-ascend version
         run: |
@@ -172,6 +178,7 @@ jobs:
         id: report
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          HF_DATASETS_OFFLINE: True
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}

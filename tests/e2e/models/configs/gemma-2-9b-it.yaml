@@ -1,0 +1,11 @@
+model_name: "LLM-Research/gemma-2-9b-it"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.46
+  - name: "exact_match,flexible-extract"
+    value: 0.79
+num_fewshot: 5
+gpu_memory_utilization: 0.8
