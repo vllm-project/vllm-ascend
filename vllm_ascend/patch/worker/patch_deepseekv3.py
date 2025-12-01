@@ -175,7 +175,6 @@ class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self.vllm_config=get_current_vllm_config()
         ascend_config = get_ascend_config()
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
