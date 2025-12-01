@@ -28,7 +28,7 @@ def test_embed_models_correctness():
     model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
     with VllmRunner(
             model_name,
-            task="embed",
+            runner="pooling",
             enforce_eager=False,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)

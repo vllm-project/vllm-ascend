@@ -67,7 +67,7 @@ def test_external_launcher(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -99,7 +99,7 @@ def test_moe_external_launcher(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -144,7 +144,7 @@ def test_external_launcher_and_sleepmode():
         stderr=subprocess.STDOUT,
         timeout=300,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -192,7 +192,7 @@ def test_external_launcher_and_sleepmode_level2():
         stderr=subprocess.STDOUT,
         timeout=300,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -232,7 +232,7 @@ def test_mm_allreduce(model):
         timeout=600,
     )
 
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
     print(output)
 
     assert "Generated text:" in output
