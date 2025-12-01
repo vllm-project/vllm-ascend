@@ -8,7 +8,7 @@ from vllm.distributed import (get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend

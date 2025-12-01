@@ -150,7 +150,8 @@ class NPUPlatform(Platform):
         from vllm.config import CompilationMode  # noqa: E402
         if vllm_config.compilation_config:
             logger.warning(
-                "NPU platform does not support fusion optimization. ")
+                "NPU platform does not support fusion optimization. disabling it."
+            )
             vllm_config.compilation_config.pass_config.enable_fusion = False
 
         compilation_config = vllm_config.compilation_config
