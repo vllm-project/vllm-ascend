@@ -114,12 +114,15 @@ jobs:
               - Qwen3-VL-8B-Instruct
               - Qwen2.5-Omni-7B
               - Meta-Llama-3.1-8B-Instruct
+              - Mistral-7B-Instruct-v0.1
+              - Phi-4-mini-instruct
           - os: linux-aarch64-a2-2
             model_list:
               - Qwen3-30B-A3B
               - Qwen3-VL-30B-A3B-Instruct
               - DeepSeek-V2-Lite
               - Qwen3-30B-A3B-W8A8
+              - ERNIE-4.5-21B-A3B-PT
           - os: linux-aarch64-a2-4
             model_list:
               - Qwen3-Next-80B-A3B-Instruct
