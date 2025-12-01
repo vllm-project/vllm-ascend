@@ -993,6 +993,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
+            pcp_size=1,
             prefix=prefix,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
