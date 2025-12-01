@@ -236,6 +236,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64),
+                                                             torch.ones(10, 8, 64))
         output = self.impl.forward(layer, query, key, value, kv_cache,
                                    metadata, output)
 
