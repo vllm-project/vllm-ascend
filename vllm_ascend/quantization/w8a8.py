@@ -25,7 +25,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
                                get_ascend_device_type, is_enable_nz)
 
 
@@ -86,6 +87,7 @@ class AscendW8A8LinearMethod:
         params_dict["weight_offset"] = torch.empty(output_size,
                                                    1,
                                                    dtype=params_dtype)
+        params_dict["bias"] = torch.zeros(output_size, dtype=torch.float32)
         return params_dict
 
     def get_pergroup_param(self,
@@ -149,6 +151,10 @@ class AscendW8A8LinearMethod:
                 )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
+        if getattr(layer, "ascend_quant_method",
+                   "") == COMPRESSED_TENSORS_METHOD:
+            quant_bias = bias
+
         if get_ascend_device_type() == AscendDeviceType._310P:
             # On 300I Duo platform, we need transpose again if
             # using nz. This transpose can be skipped in torchair.
@@ -187,6 +193,12 @@ class AscendW8A8LinearMethod:
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
+        layer.bias.data = layer.bias.data.to(layer.weight_scale.data.dtype)
+        if getattr(layer, "ascend_quant_method",
+                   "") == COMPRESSED_TENSORS_METHOD:
+            deq_scale = layer.input_scale.data * layer.weight_scale.data
+            layer.deq_scale = torch.nn.Parameter(deq_scale,
+                                                 requires_grad=False)
 
 
 class AscendW8A8FusedMoEMethod:

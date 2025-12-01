@@ -58,7 +58,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -100,7 +100,6 @@ jobs:
         run: |
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          export SOC_VERSION=ASCEND310P3 
           pip install -r requirements-dev.txt
           pip install -v -e .
 

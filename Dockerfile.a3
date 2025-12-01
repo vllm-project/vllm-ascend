@@ -15,12 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
 ARG MOONCAKE_TAG=v0.3.7.post2
-ARG SOC_VERSION
+ARG SOC_VERSION="ascend910_9391"
 
 COPY . /vllm-workspace/vllm-ascend/
 # Define environments
