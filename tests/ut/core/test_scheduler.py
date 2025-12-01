@@ -3,7 +3,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import torch
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
