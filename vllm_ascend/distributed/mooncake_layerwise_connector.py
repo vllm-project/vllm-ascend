@@ -601,7 +601,7 @@ class MooncakeLayerwiseConnectorScheduler:
                     req_id]
                 current_tokens = computed_tokens.get(req_id,
                                                      0) + scheduled_tokens
-                if current_tokens == total_tokens:
+                if current_tokens >= total_tokens:
                     meta.add_new_req(request_id=req_id,
                                      local_block_ids=block_ids,
                                      kv_transfer_params=req.kv_transfer_params,
