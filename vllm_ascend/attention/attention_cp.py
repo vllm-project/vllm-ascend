@@ -36,7 +36,8 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl, AscendAttentionState, \
+    AscendAttentionMetadataBuilder, AscendAttentionBackend, AscendMetadata
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)
@@ -52,87 +53,6 @@ if prefill_context_parallel_enable():
                                   )
 
 # isort: on
-
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
-
-
-@register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
-class AscendAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
-
-    @staticmethod
-    def get_name() -> str:
-        return "CUSTOM"
-
-    @staticmethod
-    def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
-        return AscendAttentionBackendImpl
-
-    @staticmethod
-    def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        return AscendAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
-
-    @staticmethod
-    def get_bsh_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads * head_size)
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: List[torch.Tensor],
-        dst_kv_cache: List[torch.Tensor],
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
-        src_indices = src_to_dst[:, 0]
-        dst_indices = src_to_dst[:, 1]
-
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(
-            dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(
-            dst_key_cache.device)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
-        src_indices = src_to_dists[:, 0]
-        dst_indices = src_to_dists[:, 1]
-
-        for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
-
-    @staticmethod
-    def get_supported_block_size() -> list[int]:
-        return [128]
-
-
-class AscendAttentionState(Enum):
-    PrefillNoCache = 0
-    PrefillCacheHit = 1
-    DecodeOnly = 2
-    ChunkedPrefill = 3
-    SpecDecoding = 4
-
 
 @dataclass
 class AscendPCPMetadata:
@@ -180,56 +100,7 @@ class AscendMetadataForDecode:
     block_tables: torch.Tensor = None
 
 
-@dataclass
-class AscendMetadata:
-    # **************************** Basic Properties ************************** #
-    attn_mask: Optional[torch.Tensor] = None
-    fia_attn_mask: Optional[torch.Tensor] = None
-    # Current state of this attention run.
-    attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
-
-    # Number of tokens excluding padding.
-    num_actual_tokens_pcp_padded: int = 0
-    num_actual_tokens: int = 0
-    num_decode_tokens: int = 0
-    num_prefills: int = 0
-    num_decodes: int = 0
-
-    # The sequence length per sequence. Sequence length means the computed
-    # tokens + new tokens (is None if it is a decoding).
-    # (batch_size,)
-    # TODO(Angazenn): The following parameters are quite redundant and
-    # contains similar information (such as seq_lens seq_lens_list). We
-    # should simplified these parameters once attention schema in vLLM-Ascend
-    # is unified.
-    seq_lens: torch.Tensor = None
-    seq_lens_list: List[int] = None  # type: ignore
-    actual_seq_lengths_q: List[int] = None  # type: ignore
-    query_start_loc_list: List[int] = None  # type: ignore
-
-    query_start_loc: torch.Tensor = None
-    query_lens: torch.Tensor = None
-    # Maximum query length in the batch (None for decoding).
-    max_query_len: Optional[int] = None
-
-    # ********************** KV Cache Related Properties ********************* #
-    # Block addresses per sequence (Seq id -> list of physical block).
-    # (batch_size, max_blocks_per_seq)
-    block_tables: torch.Tensor = None
-
-    # The indices of the token slots that input tokens will be stored into.
-    # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the
-    # three tokens are stored in the 3rd slot in block 2, 2nd slot in block 0,
-    # and 1st slot in block 1, respectively.
-    # (num_tokens,)
-    slot_mapping: torch.Tensor = None
-
-    prefill: Optional[AscendMetadataForPrefill] = None
-
-    decode_meta: Optional[AscendMetadataForDecode] = None
-
-
-class AscendAttentionMetadataBuilder:
+class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.ALWAYS
