@@ -299,7 +299,7 @@ class AscendRowParallelLinear(RowParallelLinear):
     def forward(
         self,
         input_,
-        is_prefill: bool = True,
+        **kwargs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
