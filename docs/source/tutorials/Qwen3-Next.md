@@ -14,15 +14,9 @@ Refer to [supported features](../user_guide/support_matrix/supported_models.md) 
 
 Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-
 ## Weight Preparation
 
-
-
  Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-Next-80B-A3B-Instruct/tree/main)
-
-
-
 
 ## Deployment
 ### Run docker container
@@ -49,6 +43,7 @@ docker run --rm \
 -p 8000:8000 \
 -it $IMAGE bash
 ```
+
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
 ### Install Triton Ascend
@@ -83,10 +78,7 @@ Coming soon ...
 ::::
 :::::
 
-
 ### Inference
-
-
 
 :::::{tab-set}
 ::::{tab-item} Online Inference
@@ -166,8 +158,6 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 :::::
 
 
-
-
 ## Accuracy Evaluation
 
 
@@ -202,6 +192,3 @@ vllm bench serve --model vllm-ascend/Qwen3-Next-80B-A3B-Instruct  --dataset-name
 ```
 
 After about several minutes, you can get the performance evaluation result.
-
-
-

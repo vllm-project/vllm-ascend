@@ -10,7 +10,7 @@ single_npu_qwen3_embedding
 single_npu_qwen3_quantization
 single_npu_qwen3_w4a4
 single_node_pd_disaggregation_llmdatadist
-multi_npu_qwen3_next
+Qwen3-Next
 multi_npu
 multi_npu_moge
 multi_npu_qwen3_moe
