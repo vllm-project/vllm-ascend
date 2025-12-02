@@ -357,9 +357,7 @@ private:
 
 // declare all dtype kernel
 SGMV_EXPAND_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
-    SGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
-#endif
+SGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
 
 namespace vllm_ascend {
 extern void sgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, 
@@ -375,12 +373,10 @@ extern void sgmv_expand_impl(AscendType type, void* stream, void* x, void* weigh
                                                         numTokensPerCore, maxLoRARank, outputHiddenDim, sliceOffset, 
                                                         outputFullDim);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
-            sgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
-                                                                  seqLen, seqLenSize, yIn, yOut, batchSize,
-                                                                  numTokensPerCore, maxLoRARank, outputHiddenDim,
-                                                                  sliceOffset, outputFullDim);
-        #endif
+        sgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize,
+                                                              seqLen, seqLenSize, yIn, yOut, batchSize,
+                                                              numTokensPerCore, maxLoRARank, outputHiddenDim,
+                                                              sliceOffset, outputFullDim);
     } else {
         return;
     }
