@@ -1394,6 +1394,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
+
+        total_num_pcp_pads = 0
         if self.pcp_size > 1:
             if not self.vllm_config.model_config.use_mla:
                 self.generate_kv_idx(scheduler_output)
@@ -1401,18 +1403,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 tokens)
             num_scheduled_tokens = np.array(tokens, dtype=np.int32)
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
+            total_num_pcp_pads = torch.sum(self.num_pcp_pads).item()
         else:
             position_pcp, pcp_unpad_mask = None, None
             self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
 
-        total_num_pcp_pads = sum(self.num_pcp_pads)
         max_num_scheduled_tokens = max(tokens)
-        num_valid_tokens = np.array([
-            num_tokens -
-            len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-            for num_tokens, i in zip(tokens, req_ids)
-        ],
-                                    dtype=np.int32)
+        if not scheduler_output.scheduled_spec_decode_tokens:
+            num_valid_tokens = np.array(tokens, dtype=np.int32)
+        else:
+            num_valid_tokens = np.array([
+                num_tokens -
+                len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
+                for num_tokens, i in zip(tokens, req_ids)
+            ],
+                                        dtype=np.int32)
 
         if (self.use_aclgraph and total_num_scheduled_tokens
                 <= self.aclgraph_batch_sizes[-1]):
