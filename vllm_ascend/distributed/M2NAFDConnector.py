@@ -92,7 +92,7 @@ class M2NAFDConnector(AFDConnectorBase):
         # TODO : get backend to replace hardcode
         self.afd_pg = init_afd_process_group(
             backend="hccl",
-            init_method=f"tcp://127.0.0.1:29505",
+            init_method=f"tcp://127.0.0.1:29405",
             world_size=self.ffn_size + self.attn_size,
             rank=world_rank,
             group_name="afd"

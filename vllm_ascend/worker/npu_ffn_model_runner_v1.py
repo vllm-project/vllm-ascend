@@ -264,6 +264,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     moe_comm_type = ffn_need_forward_data.moe_comm_type
                     num_input_tokens = ffn_need_forward_data.num_input_tokens
                     total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
+                    current_layer_idx = afdConnectorMetadata.layer_idx
                 # test
                 with set_ascend_forward_context(
                         attn_metadata=None,
