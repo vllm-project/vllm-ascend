@@ -71,7 +71,8 @@ def set_ascend_forward_context(
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
         weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
-        is_mtp_model=False):
+        is_mtp_model=False,
+        is_multimodal_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -136,6 +137,8 @@ def set_ascend_forward_context(
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
+
+        forward_context.is_multimodal_model = is_multimodal_model # TODO check difference between vl and multimodal model
 
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.

@@ -60,7 +60,8 @@ from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable, shared_expert_dp_enabled)
+                               oproj_tp_enable, parse_layer_idx,
+                               shared_expert_dp_enabled)
 
 
 class CustomLinearOp:
@@ -94,6 +95,10 @@ class CustomLinearOp:
         self.return_bias = self.layer.return_bias
         self.quant_method = self.layer.quant_method
         self.prefix = self.layer.prefix
+
+
+        self.layer_idx = parse_layer_idx(self.layer.prefix)
+        self.is_first_allgather = "qkv_proj" in self.prefix and self.layer_idx == 0
 
     def apply_impl(self, input_):
         raise NotImplementedError
@@ -468,7 +473,7 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True, is_first_allgather=self.is_first_allgather)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:

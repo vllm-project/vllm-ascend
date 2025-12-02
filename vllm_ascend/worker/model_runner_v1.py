@@ -2332,7 +2332,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     total_num_scheduled_tokens,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    is_multimodal_model=self.is_multimodal_model):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -3034,7 +3035,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     batch_descriptor=batch_descriptor,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    is_multimodal_model=self.is_multimodal_model):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,
