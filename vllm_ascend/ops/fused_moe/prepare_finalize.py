@@ -50,7 +50,7 @@ def fast_pad_with_buffer(buffer_ref: torch.Tensor | None, target_pad_len: int, d
         buffer_ref = torch.zeros(expect_shape, device=data_ref.device, dtype=data_ref.dtype)
     else:
         buffer_ref[num_tokens:].zero_()
-    buffer_ref[:num_tokens].copy_(data_ref)
+    buffer_ref[:num_tokens].copy_(data_ref.contiguous())
     return buffer_ref
 
 
