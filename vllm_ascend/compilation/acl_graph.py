@@ -192,7 +192,7 @@ class ACLGraphWrapper:
 
 def update_attn_params(update_stream, forward_context, runtime_shape):
     graph_params = get_graph_params()
-    
+
     if has_kv_transfer_group():
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
@@ -234,15 +234,15 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
             with torch.npu.stream(update_stream):
                 torch.npu.graph_task_update_begin(update_stream, handle)
                 torch_npu._npu_paged_attention(query=query,
-                                            key_cache=key_cache,
-                                            value_cache=value_cache,
-                                            num_kv_heads=num_kv_heads,
-                                            num_heads=num_heads,
-                                            scale_value=scale,
-                                            block_table=block_table,
-                                            context_lens=seq_lens,
-                                            out=output,
-                                            workspace=workspace)
+                                               key_cache=key_cache,
+                                               value_cache=value_cache,
+                                               num_kv_heads=num_kv_heads,
+                                               num_heads=num_heads,
+                                               scale_value=scale,
+                                               block_table=block_table,
+                                               context_lens=seq_lens,
+                                               out=output,
+                                               workspace=workspace)
                 torch.npu.graph_task_update_end(update_stream)
 
                 event.record(update_stream)
@@ -267,7 +267,6 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                 ) = param
                 seq_lens = forward_context.attn_metadata[key].seq_lens
 
-                
                 workspace = torch_npu._npu_paged_attention_get_workspace(
                     query=query,
                     key_cache=key_cache,
@@ -280,15 +279,15 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                     out=output)
                 torch.npu.graph_task_update_begin(update_stream, handle)
                 torch_npu._npu_paged_attention(query=query,
-                                            key_cache=key_cache,
-                                            value_cache=value_cache,
-                                            num_kv_heads=num_kv_heads,
-                                            num_heads=num_heads,
-                                            scale_value=scale,
-                                            block_table=block_table,
-                                            context_lens=seq_lens,
-                                            out=output,
-                                            workspace=workspace)
+                                               key_cache=key_cache,
+                                               value_cache=value_cache,
+                                               num_kv_heads=num_kv_heads,
+                                               num_heads=num_heads,
+                                               scale_value=scale,
+                                               block_table=block_table,
+                                               context_lens=seq_lens,
+                                               out=output,
+                                               workspace=workspace)
                 torch.npu.graph_task_update_end(update_stream)
 
                 event.record(update_stream)
