@@ -623,31 +623,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         return output
 
-    def _forward_encode(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
-        cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
-        output = torch_npu.npu_fusion_attention(
-            query,
-            key,
-            value,
-            head_num=self.num_heads,
-            input_layout="TND",
-            scale=self.scale,
-            sparse_mode=4,
-            atten_mask=attn_metadata.attn_mask,
-            pre_tockens=attn_metadata.max_query_len,
-            next_tockens=attn_metadata.max_query_len,
-            actual_seq_qlen=cum_seq_len,
-            actual_seq_kvlen=cum_seq_len,
-        )[0]
-        return output
-
     def forward(
         self,
         layer: AttentionLayer,
@@ -693,5 +668,5 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        output = self.forward_impl(query, key, value, attn_metadata, output)
+        output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         return output
