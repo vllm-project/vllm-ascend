@@ -72,7 +72,7 @@ jobs:
               - DeepSeek-V2-Lite
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: 86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24
+      vllm: v0.12.0
       runner: ${{ matrix.runner }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       model_list: ${{ toJson(matrix.model_list) }}
