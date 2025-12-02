@@ -92,21 +92,6 @@ class NPUWorker(WorkerBase):
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         check_ascend_device_type()
-        use_sparse = False
-        if vllm_config.model_config is not None:
-            use_sparse = hasattr(vllm_config.model_config.hf_config,
-                                 "index_topk")
-        if use_sparse:
-            # Direct import instead of using try_register_lib to ensure proper error handling when
-            # custom_ops is necessary but not available (e.g., in DeepSeek v3.2 deployments)
-            # yapf: disable
-            import custom_ops  # type: ignore # noqa
-
-            # yapf: enable
-            logger.info(
-                "custom_ops module loaded successfully. Custom operators like "
-                "torch.ops.custom.npu_sparse_flash_attention are now available."
-            )
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
