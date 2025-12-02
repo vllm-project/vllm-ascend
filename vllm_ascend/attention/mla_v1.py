@@ -924,8 +924,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
+                try:
                     return getattr(layer, attr)
+                except AttributeError:
+                    pass
             raise AttributeError(
                 f"Layer '{layer}' has no recognized weight attribute:"
                 f" {WEIGHT_NAMES}.")
@@ -1675,6 +1677,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if (self.enable_mlapo and
             (attn_metadata is None or not forward_context.with_prefill)):
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
                 hidden_states, kv_cache, attn_metadata)
         else:

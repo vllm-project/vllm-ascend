@@ -494,16 +494,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_block, block_size, -1)
             value = self.value_cache.view(  # type: ignore
                 num_block, block_size, -1)
-            actual_seq_lengths_kv = attn_metadata.seq_lens_list
-        # chunked_prefill.
-        else:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1)
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1)
-            block_table = attn_metadata.block_tables
-            actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
@@ -645,6 +635,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
 
+        return output
+
+    def _forward_encode(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
+        output = torch_npu.npu_fusion_attention(
+            query,
+            key,
+            value,
+            head_num=self.num_heads,
+            input_layout="TND",
+            scale=self.scale,
+            sparse_mode=4,
+            atten_mask=attn_metadata.attn_mask,
+            pre_tockens=attn_metadata.max_query_len,
+            next_tockens=attn_metadata.max_query_len,
+            actual_seq_qlen=cum_seq_len,
+            actual_seq_kvlen=cum_seq_len,
+        )[0]
         return output
 
     def forward(
