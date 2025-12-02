@@ -2510,7 +2510,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     valid_sampled_token_ids = sampled_token_ids.tolist()
                 else:
                     # Includes spec decode tokens. It's a numpy array
-                    valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                    valid_sampled_token_ids, _ = self.rejection_sampler.parse_output(
                         sampled_token_ids,
                         self.input_batch.vocab_size,
                     )
