@@ -16,7 +16,6 @@
 #
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import numpy as np
