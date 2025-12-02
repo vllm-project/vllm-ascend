@@ -247,6 +247,19 @@ def enable_custom_op():
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
+
+    # set custom ops path
+    CUR_DIR = os.path.dirname(os.path.realpath(__file__))
+    CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
+                                   "vllm-ascend")
+    if os.path.exists(CUSTOM_OPP_PATH):
+        current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
+        if current_cust_opp_path:
+            os.environ[
+                "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
+        else:
+            os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
