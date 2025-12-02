@@ -100,7 +100,6 @@ class AscendQwen3_VisionTransformer(nn.Module):
             head_size=head_dim,
             rotary_dim=head_dim // 2,
             max_position=8192,
-            base=10000.0,
             is_neox_style=True,
         )
 
