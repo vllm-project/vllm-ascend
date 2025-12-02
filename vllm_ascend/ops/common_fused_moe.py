@@ -180,6 +180,7 @@ class AscendFusedMoE(FusedMoE):
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype)
         # static eplb initializing with expert_map_path
+        init_eplb_enable = False
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
                                                     os.R_OK):
