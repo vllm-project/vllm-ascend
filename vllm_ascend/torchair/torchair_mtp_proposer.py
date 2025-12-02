@@ -148,8 +148,7 @@ class TorchairMtpProposer(MtpProposer):
                 break
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: torch.Tensor
-                           | list[list[int]],
+                           valid_sampled_token_ids: list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -162,7 +161,7 @@ class TorchairMtpProposer(MtpProposer):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -173,7 +172,7 @@ class TorchairMtpProposer(MtpProposer):
                 seq_len = (req_state.num_computed_tokens +
                            scheduler_output.num_scheduled_tokens[req_id])
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id.item())
+            next_token_ids.append(next_token_id)
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
