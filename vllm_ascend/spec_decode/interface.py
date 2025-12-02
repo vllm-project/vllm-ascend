@@ -36,7 +36,7 @@ class Proposer:
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
-                  dummy_compute_logits=lambda hidden_states: None) -> None:
+                  dummy_compute_logits=lambda hidden_states: None):
         """Called by dummy_run in modle_runner"""
         raise NotImplementedError
 
