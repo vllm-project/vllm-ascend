@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.spec_decode.ngram_proposer import \
@@ -32,7 +31,7 @@ class NgramProposer(VllmNgramProposer, Proposer):
         pass
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[np.ndarray],
+                           valid_sampled_token_ids,
                            sampling_metadata=None,
                            scheduler_output=None,
                            spec_decode_metadata=None,
@@ -43,7 +42,7 @@ class NgramProposer(VllmNgramProposer, Proposer):
                            aux_hidden_states=None) -> list[list[int]]:
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(valid_sampled_token_ids):
-            num_sampled_ids = sampled_ids.shape[0]
+            num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 continue
 

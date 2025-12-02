@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 import torch
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
