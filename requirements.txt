@@ -29,5 +29,3 @@ numba
 #--pre
 #--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 torch-npu==2.8.0
-
-transformers<=4.57.1

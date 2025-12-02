@@ -17,7 +17,6 @@ requires = [
     "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "transformers<=4.57.1",
     "torch-npu==2.8.0",
     "torch==2.8.0",
     "torchvision",
