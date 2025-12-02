@@ -176,17 +176,19 @@ class TestAscendSFATorchairMetadata(TestBase):
 class TestAscendSFATorchairMetadataBuilder(TestBase):
 
     def test_ascend_sfa_metadata_builder_default(self):
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
 
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
         mock_vllm_config.speculative_config = None
 
+        mock_device = torch.device('cpu')
         ascend_config = MagicMock()
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = True
@@ -208,16 +210,21 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.torchair.torchair_sfa.get_ascend_config")
     def test_reorder_batch_with_torchair_graph(self, ascend_config):
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
+
         mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
+        mock_vllm_config.speculative_config = None
+
+        mock_device = torch.device('cpu')
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = True
-
-        mock_vllm_config.speculative_config = None
 
         builder = AscendSFATorchairMetadataBuilder(None, None,
                                                    mock_vllm_config,
@@ -270,13 +277,19 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 64
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
 
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
         mock_vllm_config.speculative_config = None
+
+        mock_device = torch.device('cpu')
 
         builder = AscendSFATorchairMetadataBuilder(None, None,
                                                    mock_vllm_config,
@@ -295,14 +308,19 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
 
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
         mock_vllm_config.speculative_config = None
 
+        mock_device = torch.device('cpu')
         builder = AscendSFATorchairMetadataBuilder(None, None,
                                                    mock_vllm_config,
                                                    mock_device)
