@@ -47,7 +47,9 @@ PADDING_SLOT_ID = -1
 
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
-    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP")
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "PanguUltraMoEForCausalLM":
+    ("vllm.model_executor.models.openpangu_mtp", "OpenPanguMTP")
 }
 
 _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
