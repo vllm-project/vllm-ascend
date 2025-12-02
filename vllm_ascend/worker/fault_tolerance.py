@@ -9,7 +9,7 @@ from datetime import timedelta
 from typing import Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
-from vllm.distributed.parallel_state import get_pp_group,get_tp_group
+from vllm.distributed.parallel_state import get_pp_group,get_tp_group,get_dp_group
 from vllm_ascend.worker.memory_block_info import MemoryBlockInfo
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
@@ -18,22 +18,24 @@ from vllm_ascend.worker.recovery_context import RecoveryContext
 
 class FaultTolerance:
     _recovery_group = None
-    def __init__(self,vllm_config:VllmConfig,model,level: FaultToleranceLevel = FaultToleranceLevel.OFF):
+    def __init__(self,vllm_config:VllmConfig,model):
         self.model = model
         self.vllm_config = vllm_config
-        self.level = level
+        #TODO: 需要确认当前启动参数里有没有additional_config
+        self.level = vllm_config.additional_config.get("fault_tolerance_level",0)
         self.fault_queue = queue.Queue()
         self.memory_info = MemoryBlockInfo(self.model)
         self.recovery_chain = self._build_recovery_chain()
 
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        # TODO:这里需要用每个dp组下的rank0做汇总，需要确认一下参数是否正确
+        self.world_size = get_dp_group().world_size
+        self.rank = get_dp_group().rank_in_group
 
         self._init_recovery_group()
         self.memory_info.initialize()
 
         self.aware_event = threading.Event()
-        if self.level != FaultToleranceLevel.OFF:
+        if self.level != FaultToleranceLevel.OFF.value:
             FaultAware(
                 self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
             ).start()
@@ -46,7 +48,8 @@ class FaultTolerance:
             return
 
         FaultTolerance._recovery_group = dist.new_group(
-            ranks=None,
+            #TODO:确认这个dp_group.ranks是否是我需要的
+            ranks=get_dp_group().ranks,
             timeout=timedelta(minutes=5),
             backend="gloo",
         )
@@ -69,7 +72,8 @@ class FaultTolerance:
         def wrapper(*args, **kwargs):
             # Level 0:disable fault tolerance
             if self.level == FaultToleranceLevel.OFF.value:
-                return func(*args, **kwargs)
+                output = func(*args,**kwargs)
+                return output
             # Enable fault tolerance
             while True:
                 try:
