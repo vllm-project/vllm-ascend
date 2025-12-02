@@ -15,7 +15,7 @@ multi_npu
 multi_npu_moge
 multi_npu_qwen3_moe
 multi_npu_quantization
-multi_npu_qwen2.5_vl
+Qwen2.5-VL
 single_node_300i
 DeepSeek-V3.2-Exp.md
 multi_node

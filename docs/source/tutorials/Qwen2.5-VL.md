@@ -1,17 +1,18 @@
-# Multi-NPU (Qwen2.5-VL-32B-Instruct-W8A8)
+# Qwen2.5-VL
 
 ## Introduction
 
-Key Enhancements:
-- Understand things visually: Qwen2.5-VL is not only proficient in recognizing common objects such as flowers, birds, fish, and insects, but it is highly capable of analyzing texts, charts, icons, graphics, and layouts within images.
+The key features include:
 
-- Being agentic: Qwen2.5-VL directly plays as a visual agent that can reason and dynamically direct tools, which is capable of computer use and phone use.
+- **Understand things visually**: Qwen2.5-VL is not only proficient in recognizing common objects such as flowers, birds, fish, and insects, but it is highly capable of analyzing texts, charts, icons, graphics, and layouts within images.
 
-- Understanding long videos and capturing events: Qwen2.5-VL can comprehend videos of over 1 hour, and this time it has a new ability of capturing event by pinpointing the relevant video segments.
+- **Being agentic**: Qwen2.5-VL directly plays as a visual agent that can reason and dynamically direct tools, which is capable of computer use and phone use.
 
-- Capable of visual localization in different formats: Qwen2.5-VL can accurately localize objects in an image by generating bounding boxes or points, and it can provide stable JSON outputs for coordinates and attributes.
+- **Understanding long videos and capturing events**: Qwen2.5-VL can comprehend videos of over 1 hour, and this time it has a new ability of capturing event by pinpointing the relevant video segments.
 
-- Generating structured outputs: for data like scans of invoices, forms, tables, etc. Qwen2.5-VL supports structured outputs of their contents, benefiting usages in finance, commerce, etc.
+- **Capable of visual localization in different formats**: Qwen2.5-VL can accurately localize objects in an image by generating bounding boxes or points, and it can provide stable JSON outputs for coordinates and attributes.
+
+- **Generating structured outputs**: for data like scans of invoices, forms, tables, etc. Qwen2.5-VL supports structured outputs of their contents, benefiting usages in finance, commerce, etc.
 
 This document will demonstrate the main validation steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
@@ -29,11 +30,17 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen2.5-VL-32B-Instruct`(BF16 version): [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)
+- `Qwen2.5-VL-3B-Instruct`(BF16 version): require 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct)
+
+- `Qwen2.5-VL-7B-Instruct`(BF16 version): require 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)
+
+- `Qwen2.5-VL-32B-Instruct`(BF16 version): require 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)
+
+- `Qwen2.5-VL-72B-Instruct`(BF16 version): require 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-72B-Instruct)
+
+- `Qwen2.5-VL-32B-Instruct-w8a8`(Quantized version): require 1 Atlas 800I A2 (64G × 8) node.
 
 - A sample Qwen2.5-VL quantization script can be found in the modelslim code repository. [Qwen2.5-VL Quantization Script Example](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen2.5-VL/README.md)
-
-- `Qwen2.5-VL-32B-Instruct-w8a8`(Quantized version): require 1 Atlas 800 A2 (64G × 8) node.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -44,7 +51,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ## Deployment
 
 The specific example scenario is as follows:
-- The machine environment is an Atlas 800 A2 (64G*8)
+- The machine environment is an Atlas 800I A2 (64G × 8)
 - The LLM is Qwen2.5-VL-32B-Instruct-W8A8
 
 ### Run docker container
@@ -132,7 +139,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
+Here is one accuracy evaluation methods.
 
 ### Using AISBench
 
