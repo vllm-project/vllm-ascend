@@ -1001,5 +1001,5 @@ def parse_layer_idx(prefix: str) -> Optional[int]:
         layer_idx = int(match.group(1))
     else:
         layer_idx = None
-    
+
     return layer_idx

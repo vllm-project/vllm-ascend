@@ -138,7 +138,7 @@ def set_ascend_forward_context(
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
 
-        forward_context.is_multimodal_model = is_multimodal_model # TODO check difference between vl and multimodal model
+        forward_context.is_multimodal_model = is_multimodal_model  # TODO check difference between vl and multimodal model
 
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.

@@ -34,9 +34,9 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
 # isort: off
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-    enable_sp, get_ascend_device_type,
-    prefill_context_parallel_enable, update_aclgraph_sizes,
-    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
+    enable_sp, get_ascend_device_type, prefill_context_parallel_enable,
+    update_aclgraph_sizes, update_cudagraph_capture_sizes,
+    update_default_aclgraph_sizes)
 
 # set custom ops path
 CUR_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -343,7 +343,6 @@ class NPUPlatform(Platform):
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
             )
-
 
     @classmethod
     def import_kernels(cls) -> None:

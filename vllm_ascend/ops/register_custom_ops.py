@@ -23,7 +23,8 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
     except AssertionError:
         return residual
 
-    if forward_context.is_multimodal_model and forward_context.sp_enabled and x.size(0) != residual.size(0):
+    if forward_context.is_multimodal_model and forward_context.sp_enabled and x.size(
+            0) != residual.size(0):
         pad_size = forward_context.pad_size
         if pad_size > 0:
             residual = F.pad(residual, (0, 0, 0, pad_size))

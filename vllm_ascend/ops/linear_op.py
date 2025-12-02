@@ -96,7 +96,6 @@ class CustomLinearOp:
         self.quant_method = self.layer.quant_method
         self.prefix = self.layer.prefix
 
-
         self.layer_idx = parse_layer_idx(self.layer.prefix)
         self.is_first_allgather = "qkv_proj" in self.prefix and self.layer_idx == 0
 
@@ -473,7 +472,8 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True, is_first_allgather=self.is_first_allgather)
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            input_, True, is_first_allgather=self.is_first_allgather)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
