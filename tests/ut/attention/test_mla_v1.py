@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -215,7 +215,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
                              mock_vllm_config.cache_config.block_size)
             self.assertEqual(
                 builder.chunked_prefill_enabled,
-                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
+                mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
     @patch('vllm.distributed.parallel_state.get_dcp_group')
     @patch('vllm.distributed.parallel_state._DCP',
@@ -447,15 +447,20 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     def setUp(self):
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
-        self.mock_vllm_config.model_config = ModelConfig(max_model_len=2048)
-        self.mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 32
-        self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
-        mock_scheduler_config = MagicMock(spec=SchedulerConfig)
-        mock_scheduler_config.max_num_seqs = 8  # 设置为整数，不是 MagicMock
-        mock_scheduler_config.chunked_prefill_enabled = True
-        self.mock_vllm_config.scheduler_config = mock_scheduler_config
+        # NOTE: Do not init the ModelConfig from constructor
+        # Which will try to download a model
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
+
+        self.mock_vllm_config.model_config = mock_model_config
+        self.mock_vllm_config.cache_config = MagicMock(block_size=16)
+        self.mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
         self.mock_vllm_config.speculative_config = None
-        self.mock_device = torch.device("cpu")
+
+        self.mock_device = torch.device('cpu')
 
         self.kv_cache_spec = MagicMock()
         self.kv_cache_spec.num_layers = 32
