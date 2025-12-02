@@ -15,12 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.3.rc1-310p-openeuler24.03-py3.11
+FROM quay.io/ascend/cann:8.3.rc2-310p-openeuler24.03-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
+ARG SOC_VERSION="ascend310p1"
 
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+ENV SOC_VERSION=$SOC_VERSION
 
 RUN yum update -y && \
     yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \

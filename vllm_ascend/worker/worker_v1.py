@@ -208,12 +208,18 @@ class NPUWorker(WorkerBase):
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
 
-        visible_device_count = (torch.npu.device_count()
-                                if torch.npu.is_available() else 0)
-        assert self.parallel_config.local_world_size <= visible_device_count, (
-            f"local_world_size ({self.parallel_config.local_world_size}) must be "
-            f"less than or equal to the number of visible devices "
-            f"({visible_device_count}).")
+        if (self.parallel_config.data_parallel_size > 1
+                and self.parallel_config.data_parallel_size_local > 0
+                and self.parallel_config.distributed_executor_backend
+                not in ["ray", "external_launcher"] and
+                self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1):
+            visible_device_count = (torch.npu.device_count()
+                                    if torch.npu.is_available() else 0)
+            assert self.parallel_config.local_world_size <= visible_device_count, (
+                f"local_world_size ({self.parallel_config.local_world_size}) must "
+                f"be less than or equal to the number of visible devices "
+                f"({visible_device_count}).")
 
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         # Initialize the distributed environment.
@@ -362,6 +368,9 @@ class NPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
+        return None
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

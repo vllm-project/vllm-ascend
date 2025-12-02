@@ -25,7 +25,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
                                get_ascend_device_type, is_enable_nz)
 
 
@@ -117,8 +118,10 @@ class AscendW8A8LinearMethod:
                     weight=layer.weight,
                     start_flag=x,
                 )
-
-            quant_comm_config = getattr(layer, "_quant_comm_config", {})
+            try:
+                quant_comm_config = getattr(layer, "_quant_comm_config")
+            except AttributeError:
+                quant_comm_config = {}
             comm_fn = quant_comm_config.get("communication_fn")
             enable_flashcomm2_quant_comm = comm_fn is not None and (
                 "o_proj" in layer.prefix or "out_proj" in layer.prefix)
@@ -149,6 +152,14 @@ class AscendW8A8LinearMethod:
                 )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
+
+        try:
+            ascend_quant_method = getattr(layer, "ascend_quant_method")
+        except AttributeError:
+            ascend_quant_method = ""
+        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
+            quant_bias = bias
+
         if get_ascend_device_type() == AscendDeviceType._310P:
             # On 300I Duo platform, we need transpose again if
             # using nz. This transpose can be skipped in torchair.
@@ -187,6 +198,11 @@ class AscendW8A8LinearMethod:
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
+        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
+        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
+            deq_scale = layer.input_scale.data * layer.weight_scale.data
+            layer.deq_scale = torch.nn.Parameter(deq_scale,
+                                                 requires_grad=False)
 
 
 class AscendW8A8FusedMoEMethod:

@@ -15,14 +15,16 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.3.rc1-310p-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:8.3.rc2-310p-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
+ARG SOC_VERSION="ascend310p1"
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+ENV SOC_VERSION=$SOC_VERSION
 
 RUN apt-get update -y && \
     apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev && \

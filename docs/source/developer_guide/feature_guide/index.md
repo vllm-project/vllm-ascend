@@ -12,4 +12,5 @@ eplb_swift_balancer.md
 Multi_Token_Prediction
 ACL_Graph
 KV_Cache_Pool_Guide
+add_custom_aclnn_op
 :::
