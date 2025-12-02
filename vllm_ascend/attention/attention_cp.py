@@ -874,7 +874,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
-        attn_metadata: AscendCPMetadata,
+        attn_metadata: AscendMetadata,
     ):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -928,7 +928,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
-        attn_metadata: AscendCPMetadata,
+        attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert attn_metadata is not None
