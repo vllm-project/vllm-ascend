@@ -19,7 +19,6 @@
 
 import copy
 import gc
-import inspect
 import itertools
 import math
 import re
@@ -1395,8 +1394,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:total_num_scheduled_tokens]
-            has_is_multimodal = 'is_multimodal' in inspect.signature(self.model.get_input_embeddings).parameters
-            if has_is_multimodal:
+            model_type = self.vllm_config.model_config.hf_config.model_type
+            if model_type == "qwen2_5_vl":
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids,
                     multimodal_embeddings=mm_embeds,
