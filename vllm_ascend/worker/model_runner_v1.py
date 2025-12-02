@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import inspect
 import itertools
 import math
 import re
@@ -1394,11 +1395,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:total_num_scheduled_tokens]
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids,
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
+            has_is_multimodal = 'is_multimodal' in inspect.signature(self.model.get_input_embeddings).parameters
+            if has_is_multimodal:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids,
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+            else:
+                if mm_embeds:
+                    inputs_embeds = self.model.get_input_embeddings(
+                        input_ids, mm_embeds)
+                else:
+                    inputs_embeds = self.model.get_input_embeddings(input_ids)
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:total_num_scheduled_tokens].copy_(
                 inputs_embeds)
