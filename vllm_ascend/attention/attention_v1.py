@@ -256,8 +256,6 @@ class AscendAttentionMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
-        num_computed_tokens_cpu = (seq_lens - query_lens)
-
         if attn_state == AscendAttentionState.DecodeOnly and \
                 common_attn_metadata.num_input_tokens > num_actual_tokens:
             padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
@@ -302,19 +300,6 @@ class AscendAttentionMetadataBuilder:
             num_prefills=num_prefills,
             num_decodes=num_decodes)
         return attn_metadata
-
-    def _get_chunked_req_mask(self, local_context_lens_allranks) -> List[bool]:
-        """
-        given 4-d list [req][pcp][dcp], return:
-        1. if each req has any chunk (list[bool])
-        """
-        assert local_context_lens_allranks is not None
-        if len(local_context_lens_allranks) == 0:
-            return []
-        chunked_req_mask = [(req.sum() > 0).item()
-                            for req in local_context_lens_allranks
-                            if req is not None]
-        return chunked_req_mask
 
     def build_for_graph_capture(
         self,

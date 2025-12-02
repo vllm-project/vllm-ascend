@@ -96,6 +96,12 @@ class AscendMetadataForDecode:
     block_tables: torch.Tensor = None
 
 
+@dataclass
+class AscendCPMetadata(AscendMetadata):
+    prefill: Optional[AscendMetadataForPrefill] = None
+    decode_meta: Optional[AscendMetadataForDecode] = None
+
+
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
@@ -125,6 +131,19 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
+
+    def _get_chunked_req_mask(self, local_context_lens_allranks) -> List[bool]:
+        """
+        given 4-d list [req][pcp][dcp], return:
+        1. if each req has any chunk (list[bool])
+        """
+        assert local_context_lens_allranks is not None
+        if len(local_context_lens_allranks) == 0:
+            return []
+        chunked_req_mask = [(req.sum() > 0).item()
+                            for req in local_context_lens_allranks
+                            if req is not None]
+        return chunked_req_mask
 
     def build(
         self,
@@ -277,7 +296,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                                                        shape[0]],
                 block_tables=block_table[:num_decodes])
 
-        attn_metadata = AscendMetadata(
+        attn_metadata = AscendCPMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
@@ -423,7 +442,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
     def _forward_prefill_cp(self, query: torch.Tensor, key: torch.Tensor,
                             value: torch.Tensor,
-                            attn_metadata: AscendMetadata) -> torch.Tensor:
+                            attn_metadata: AscendCPMetadata) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.prefill is not None
         assert attn_metadata.prefill.pcp_metadata is not None
@@ -510,7 +529,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         return attn_out
 
     def _forward_decode_pcp_dcp(self, query: torch.Tensor,
-                                attn_metadata: AscendMetadata) -> torch.Tensor:
+                                attn_metadata: AscendCPMetadata) -> torch.Tensor:
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -721,7 +740,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
     def _compute_prefill_context(self, query: torch.Tensor,
                                  kv_cache: Tuple[torch.Tensor],
-                                 attn_metadata: AscendMetadata):
+                                 attn_metadata: AscendCPMetadata):
         assert len(kv_cache) > 1
         assert attn_metadata is not None
         assert attn_metadata.prefill is not None
@@ -867,7 +886,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
-        attn_metadata: AscendMetadata,
+        attn_metadata: AscendCPMetadata,
     ):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -907,8 +926,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                 num_actual_tokens_pcp_padded],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=attn_metadata.
-                    slot_mapping[self.pcp_size *
+                    slot_indices=attn_metadata.slot_mapping[self.pcp_size *
                                  num_decode_tokens:attn_metadata.
                                  num_actual_tokens_pcp_padded])
         return key, value
@@ -919,7 +937,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
-        attn_metadata: AscendMetadata,
+        attn_metadata: AscendCPMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert attn_metadata is not None
