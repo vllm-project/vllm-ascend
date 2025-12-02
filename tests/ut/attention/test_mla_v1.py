@@ -184,15 +184,19 @@ class TestAscendMLAMetadataBuilder(TestBase):
            return_value=1)
     def test_ascend_mla_metadata_builder_default(self, mock_get_dcp_size,
                                                  mock_dcp, mock_get_dcp_group):
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
+
         mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
+        mock_vllm_config.speculative_config = None
+
+        mock_device = torch.device('cpu')
 
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
@@ -200,8 +204,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         dcp_group.world_size = 1
         dcp_group.device_group = MagicMock()
         mock_get_dcp_group.return_value = dcp_group
-
-        mock_vllm_config.speculative_config = None
 
         ascend_config = MagicMock()
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
@@ -223,15 +225,19 @@ class TestAscendMLAMetadataBuilder(TestBase):
     def test_ascend_mla_metadata_builder_spec_decode(self, mock_get_dcp_size,
                                                      mock_dcp,
                                                      mock_get_dcp_group):
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
+
         mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
+        mock_vllm_config.speculative_config = None
+
+        mock_device = torch.device('cpu')
 
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
@@ -316,13 +322,19 @@ class TestAscendMLAMetadataBuilder(TestBase):
                            mock_get_dcp_group):
         ascend_config = MagicMock()
 
+        mock_model_config = MagicMock()
+        mock_model_config.max_model_len = 1024
+        mock_model_config.get_head_size.return_value = 64
+        mock_model_config.dtype = torch.float16
+
         mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_device = 'cpu'
+        mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.cache_config = MagicMock(block_size=16)
+        mock_vllm_config.scheduler_config = MagicMock(
+            max_num_seqs=4, enable_chunked_prefill=False)
+        mock_vllm_config.speculative_config = None
+
+        mock_device = torch.device('cpu')
 
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
@@ -330,8 +342,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         dcp_group.world_size = 1
         dcp_group.device_group = MagicMock()
         mock_get_dcp_group.return_value = dcp_group
-
-        mock_vllm_config.speculative_config = None
 
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):

@@ -300,6 +300,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
                                                    mock_vllm_config,
                                                    mock_device)
 
+        builder.max_blocks = 4
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
         result = builder._get_graph_runner_block_tables(3, block_tables)

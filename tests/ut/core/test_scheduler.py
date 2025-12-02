@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
@@ -95,6 +96,7 @@ def make_output(scheduler):
     return modelrunner_output
 
 
+@pytest.mark.skip("Ascend Scheduler has been deprecated")
 class TestAscendScheduler(TestBase):
 
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
