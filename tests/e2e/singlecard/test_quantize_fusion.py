@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from collections.abc import Callable, Sequence
 from copy import deepcopy
 from typing import Any, Callable, List, Optional, Sequence
 
@@ -135,8 +134,7 @@ class TestBackend:
         )
         return compiled_fn, None
 
-    def __call__(self, gm: fx.GraphModule,
-                 example_inputs: List[Any]) -> callable:
+    def __call__(self, gm: fx.GraphModule, example_inputs: List[Any]):
         """
         Make the backend callable by torch.compile().
         Returns a compiled executable function.
