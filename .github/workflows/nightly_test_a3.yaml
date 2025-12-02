@@ -62,16 +62,15 @@ jobs:
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
             size: 2
-          # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
-          # - name: multi-node-dpsk3.2-exp-2node
-          #   config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
-          #   size: 2
           - name: multi-node-deepseek-r1-w8a8-eplb
             config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
             size: 4
           - name: multi-node-qwenw8a8-2node-eplb
             config_file_path: Qwen3-235B-W8A8-EPLB.yaml
             size: 2
+          - name: multi-node-dpsk3.2-w8a8-4node
+            config_file_path: DeepSeek-V3.2-W8A8-A3-pd.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -130,10 +129,9 @@ jobs:
           - name: qwen3-235b-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_qwen3_235b_w8a8.py
-          # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
-          # - name: deepseek3_2-exp-w8a8
-          #   os: linux-aarch64-a3-16
-          #   tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
+          - name: deepseek3_2-w8a8
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_deepseek_v3_2_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.13.0

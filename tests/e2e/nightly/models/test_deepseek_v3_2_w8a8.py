@@ -23,13 +23,10 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
-MODELS = [
-    "vllm-ascend/DeepSeek-V3.2-Exp-W8A8",
-]
+MODELS = ["vllm-ascend/DeepSeek-V3.2-W8A8"]
 
 TENSOR_PARALLELS = [8]
 DATA_PARALLELS = [2]
-FULL_GRAPH = [True, False]
 
 prompts = [
     "San Francisco is a",
@@ -66,25 +63,21 @@ aisbench_cases = [{
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
-@pytest.mark.parametrize("full_graph", FULL_GRAPH)
-async def test_models(model: str, tp_size: int, dp_size: int,
-                      full_graph: bool) -> None:
+async def test_models(model: str, tp_size: int, dp_size: int) -> None:
     port = get_open_port()
-    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "0"}
+    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "1"}
     server_args = [
-        "--no-enable-prefix-caching", "--enable-expert-parallel",
-        "--tensor-parallel-size",
+        "--enable-expert-parallel", "--tensor-parallel-size",
         str(tp_size), "--data-parallel-size",
         str(dp_size), "--port",
-        str(port), "--max-model-len", "16384", "--max-num-batched-tokens",
-        "16384", "--block-size", "16", "--trust-remote-code", "--quantization",
-        "ascend", "--gpu-memory-utilization", "0.9"
+        str(port), "--max-model-len", "8192", "--max-num-batched-tokens",
+        "4096", "--max-num-seqs", "16", "--trust-remote-code",
+        "--quantization", "ascend", "--gpu-memory-utilization", "0.9",
+        "--compilation-config",
+        '{"cudagraph_capture_sizes":[2, 4, 6, 8], "cudagraph_mode":"FULL_DECODE_ONLY"}',
+        "--chat-template",
+        """{% if messages[0]['role'] == 'system' %}{% set system_message = messages[0]['content'] %}{% set messages = messages[1:] %}{% else %}{% set system_message = false %}{% endif %}{% for message in messages %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' ' + message['content'] + eos_token }}{% endif %}{% endfor %}"""
     ]
-    if full_graph:
-        server_args += [
-            "--compilation-config",
-            '{"cudagraph_capture": [16], "cudagraph_model":"FULL_DECODE_ONLY"}'
-        ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
