@@ -135,7 +135,6 @@ class AscendQwen3_VisionTransformer(nn.Module):
         if self.attn_backend not in {
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TORCH_SDPA,
-                AttentionBackendEnum.XFORMERS,
                 AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
