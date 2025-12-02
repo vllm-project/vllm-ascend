@@ -191,7 +191,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
 
         mock_dcp.world_size = 1
@@ -213,7 +213,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
                              mock_vllm_config.cache_config.block_size)
             self.assertEqual(
                 builder.chunked_prefill_enabled,
-                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
+                mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
     @patch('vllm.distributed.parallel_state.get_dcp_group')
     @patch('vllm.distributed.parallel_state._DCP',
@@ -230,7 +230,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
 
         mock_dcp.world_size = 1
@@ -254,7 +254,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
                              mock_vllm_config.cache_config.block_size)
             self.assertEqual(
                 builder.chunked_prefill_enabled,
-                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
+                mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
     @patch('vllm.distributed.parallel_state.get_dcp_group')
     @patch('vllm.distributed.parallel_state._DCP',
@@ -321,7 +321,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
 
         mock_dcp.world_size = 1
@@ -440,8 +440,10 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.model_config = ModelConfig(max_model_len=2048)
         self.mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
-        self.mock_vllm_config.scheduler_config = SchedulerConfig(
-            max_num_seqs=8, chunked_prefill_enabled=True)
+        mock_scheduler_config = MagicMock(spec=SchedulerConfig)
+        mock_scheduler_config.max_num_seqs = 8
+        mock_scheduler_config.chunked_prefill_enabled = True
+        self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
 
@@ -454,12 +456,20 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
     )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def test_build_prefix_no_cache_metadata(self, mock_get_ascend_config,
+    @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.npu.is_available")
+    def test_build_prefix_no_cache_metadata(self, mock_npu_available,
+                                            mock_zeros, mock_get_ascend_config,
                                             mock_dcp_world_size):
-        if not torch.npu.is_available():
-            self.skipTest("NPU not available, skipping NPU-dependent tests")
+        mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
 
+        def zeros_override(*args, **kwargs):
+            kwargs.pop('pin_memory', None)
+            return mock_zeros._mock_wraps(*args, **kwargs)
+
+        mock_zeros.side_effect = zeros_override
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 3, 7]),
             query_start_loc_cpu=torch.tensor([0, 3, 7]),
@@ -506,11 +516,20 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
     )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def test_build_chunked_prefix_metadata(self, mock_get_ascend_config,
+    @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.npu.is_available")
+    def test_build_chunked_prefix_metadata(self, mock_npu_available,
+                                           mock_zeros, mock_get_ascend_config,
                                            mock_dcp_world_size):
-        if not torch.npu.is_available():
-            self.skipTest("NPU not available, skipping NPU-dependent tests")
+        mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
+
+        def zeros_override(*args, **kwargs):
+            kwargs.pop('pin_memory', None)
+            return mock_zeros._mock_wraps(*args, **kwargs)
+
+        mock_zeros.side_effect = zeros_override
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),

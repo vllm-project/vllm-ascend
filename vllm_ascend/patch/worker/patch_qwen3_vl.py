@@ -23,7 +23,6 @@ import torch.nn as nn
 from transformers.models.qwen3_vl.configuration_qwen3_vl import \
     Qwen3VLVisionConfig
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import check_upstream_fa_availability
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -101,7 +100,6 @@ class AscendQwen3_VisionTransformer(nn.Module):
             head_size=head_dim,
             rotary_dim=head_dim // 2,
             max_position=8192,
-            base=10000.0,
             is_neox_style=True,
         )
 
@@ -133,17 +131,10 @@ class AscendQwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        use_upstream_fa = False
-        if (self.attn_backend != AttentionBackendEnum.FLASH_ATTN
-                and self.attn_backend != AttentionBackendEnum.ROCM_AITER_FA
-                and check_upstream_fa_availability(torch.get_default_dtype())):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
-            use_upstream_fa = True
 
         if self.attn_backend not in {
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TORCH_SDPA,
-                AttentionBackendEnum.XFORMERS,
                 AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -159,7 +150,6 @@ class AscendQwen3_VisionTransformer(nn.Module):
                 prefix=f"{prefix}.blocks.{layer_idx}",
                 use_data_parallel=use_data_parallel,
                 attn_backend=self.attn_backend,
-                use_upstream_fa=use_upstream_fa,
             ) for layer_idx in range(vision_config.depth)
         ])
 

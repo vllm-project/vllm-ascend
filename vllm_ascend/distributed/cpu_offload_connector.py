@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
-from vllm.attention import AttentionType
+from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         MLAAttentionSpec)

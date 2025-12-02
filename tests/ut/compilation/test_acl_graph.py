@@ -32,7 +32,7 @@ class TestACLGraphEntry(TestBase):
         """Test ACLGraphEntry initialization with default values"""
         batch_descriptor = BatchDescriptor(
             num_tokens=30,
-            uniform_decode=False,
+            uniform=False,
         )
 
         entry = ACLGraphEntry(batch_descriptor=batch_descriptor)
@@ -46,7 +46,7 @@ class TestACLGraphEntry(TestBase):
         """Test ACLGraphEntry initialization with specified values"""
         batch_descriptor = BatchDescriptor(
             num_tokens=30,
-            uniform_decode=False,
+            uniform=False,
         )
 
         mock_graph = MagicMock()
@@ -89,7 +89,7 @@ class TestACLGraphWrapper(TestBase):
         # Mock BatchDescriptor
         self.mock_batch_descriptor = BatchDescriptor(
             num_tokens=30,
-            uniform_decode=False,
+            uniform=False,
         )
 
         # Mock ForwardContext
