@@ -14,7 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import json
 from typing import Any
 
 import openai
@@ -25,10 +24,11 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/Qwen3-235B-A22B-W8A8",
+    "ZhipuAI/GLM-4.5",
 ]
 
-MODES = ["full_graph", "piecewise"]
+TENSOR_PARALLELS = [8]
+DATA_PARALLELS = [2]
 
 prompts = [
     "San Francisco is a",
@@ -43,40 +43,54 @@ aisbench_cases = [{
     "dataset_path": "vllm-ascend/gsm8k-lite",
     "request_conf": "vllm_api_general_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "top_k": 20,
+    "max_out_len": 4096,
+    "batch_size": 8,
     "baseline": 95,
     "threshold": 5
+}, {
+    "case_type": "performance",
+    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+    "request_conf": "vllm_api_stream_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+    "num_prompts": 16,
+    "max_out_len": 1500,
+    "batch_size": 8,
+    "request_rate": 0,
+    "baseline": 1,
+    "threshold": 0.97
 }]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("mode", MODES)
-async def test_models(model: str, mode: str) -> None:
+@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
+@pytest.mark.parametrize("dp_size", DATA_PARALLELS)
+async def test_models(
+    model: str,
+    tp_size: int,
+    dp_size: int,
+) -> None:
     port = get_open_port()
-    env_dict = {
-        "OMP_NUM_THREADS": "10",
-        "OMP_PROC_BIND": "false",
-        "HCCL_BUFFSIZE": "1024",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"
-    }
-    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
+    env_dict = {"HCCL_BUFFSIZE": "1024"}
     server_args = [
-        "--quantization", "ascend", "--async-scheduling",
-        "--data-parallel-size", "4", "--tensor-parallel-size", "4",
-        "--enable-expert-parallel", "--port",
-        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
-        "8192", "--max-num-seqs", "12", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9"
+        "--no-enable-prefix-caching",
+        "--enable-expert-parallel",
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--data-parallel-size",
+        str(dp_size),
+        "--port",
+        str(port),
+        "--max-model-len",
+        "8192",
+        "--max-num-batched-tokens",
+        "8192",
+        "--block-size",
+        "16",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.9",
     ]
-    if mode == "piecewise":
-        compilation_config["cudagraph_mode"] = "PIECEWISE"
-    server_args.extend(
-        ["--compilation-config",
-         json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -93,9 +107,5 @@ async def test_models(model: str, mode: str) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
-        print(choices)
         # aisbench test
-        run_aisbench_cases(model,
-                           port,
-                           aisbench_cases,
-                           server_args=server_args)
+        run_aisbench_cases(model, port, aisbench_cases)

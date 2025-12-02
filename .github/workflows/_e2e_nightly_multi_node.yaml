@@ -106,7 +106,7 @@ jobs:
             echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
 
         - name: Checkout code
-          uses: actions/checkout@v6
+          uses: actions/checkout@v6.0.0
 
         - name: Prepare scripts
           run: |
