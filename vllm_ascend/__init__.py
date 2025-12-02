@@ -22,11 +22,6 @@ def register():
     return "vllm_ascend.platform.NPUPlatform"
 
 
-def register_model():
-    from .models import register_model
-    register_model()
-
-
 def register_connector():
     from vllm_ascend.distributed import register_connector
     register_connector()
