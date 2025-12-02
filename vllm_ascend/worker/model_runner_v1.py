@@ -330,7 +330,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         if self.ascend_config.ascend_scheduler_config.enabled:
-            self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
+            self.chunked_prefill_enabled = self.scheduler_config.enable_chunked_prefill
         else:
             self.chunked_prefill_enabled = True
         self.weight_prefetch_method = WeightPrefetchMethod(
