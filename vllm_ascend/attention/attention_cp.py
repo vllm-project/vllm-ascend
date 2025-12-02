@@ -97,12 +97,6 @@ class AscendMetadataForDecode:
     block_tables: torch.Tensor = None
 
 
-@dataclass
-class AscendCPMetadata(AscendMetadata):
-    prefill: Optional[AscendMetadataForPrefill] = None
-    decode_meta: Optional[AscendMetadataForDecode] = None
-
-
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
@@ -290,7 +284,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                                                        shape[0]],
                 block_tables=block_table[:num_decodes])
 
-        attn_metadata = AscendCPMetadata(
+        attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
@@ -429,7 +423,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
     def _forward_prefill_cp(self, query: torch.Tensor, key: torch.Tensor,
                             value: torch.Tensor,
-                            attn_metadata: AscendCPMetadata) -> torch.Tensor:
+                            attn_metadata: AscendMetadata) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.prefill is not None
         assert attn_metadata.prefill.pcp_metadata is not None
@@ -515,9 +509,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         return attn_out
 
-    def _forward_decode_pcp_dcp(
-            self, query: torch.Tensor,
-            attn_metadata: AscendCPMetadata) -> torch.Tensor:
+    def _forward_decode_pcp_dcp(self, query: torch.Tensor,
+                                attn_metadata: AscendMetadata) -> torch.Tensor:
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -728,7 +721,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
     def _compute_prefill_context(self, query: torch.Tensor,
                                  kv_cache: Tuple[torch.Tensor],
-                                 attn_metadata: AscendCPMetadata):
+                                 attn_metadata: AscendMetadata):
         assert len(kv_cache) > 1
         assert attn_metadata is not None
         assert attn_metadata.prefill is not None
