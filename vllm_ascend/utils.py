@@ -1041,3 +1041,29 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+
+def refresh_block_size(vllm_config):
+    """
+    Refresh the block size in cache config.
+    """
+    cache_config = vllm_config.cache_config
+    scheduler_config = vllm_config.scheduler_config
+    model_config = vllm_config.model_config
+
+    if not cache_config:
+        return
+
+    if cache_config.block_size is None:
+        cache_config.block_size = 128
+
+    if not scheduler_config or not model_config:
+        return
+
+    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
+    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
+            logger.info(
+                "Block size is set to 128 if prefix cache or chunked prefill is enabled."
+            )
+            cache_config.block_size = 128
