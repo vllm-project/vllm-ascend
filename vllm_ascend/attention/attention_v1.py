@@ -19,9 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, List, Optional, Tuple, Type
 
-import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,

@@ -16,7 +16,7 @@
 #
 
 from dataclasses import dataclass
-from typing import ClassVar, List, Optional, Tuple, Type
+from typing import ClassVar, List, Optional, Tuple
 
 import numpy as np
 import torch
