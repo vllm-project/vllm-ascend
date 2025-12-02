@@ -1986,7 +1986,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if num_pooling_reqs == 0:
             return model_kwargs
 
-        pooling_params = self.input_batch.pooling_metadata.pooling_params
+        pooling_params = self.input_batch.get_pooling_params()
 
         assert num_pooling_reqs == num_reqs
 
@@ -2301,7 +2301,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         " a batch must be pooling request"
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-        pooling_metadata = self.input_batch.pooling_metadata
+        pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
                                               device=hidden_states.device)
         seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
