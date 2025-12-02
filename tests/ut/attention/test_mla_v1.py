@@ -454,10 +454,11 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         mock_model_config.get_head_size.return_value = 64
         mock_model_config.dtype = torch.float16
 
+        from vllm.config.scheduler import SchedulerConfig
+        self.mock_vllm_config.scheduler_config = SchedulerConfig()
+
         self.mock_vllm_config.model_config = mock_model_config
         self.mock_vllm_config.cache_config = MagicMock(block_size=16)
-        self.mock_vllm_config.scheduler_config = MagicMock(
-            max_num_seqs=4, enable_chunked_prefill=False)
         self.mock_vllm_config.speculative_config = None
 
         self.mock_device = torch.device('cpu')
