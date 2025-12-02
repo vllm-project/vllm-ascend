@@ -24,6 +24,8 @@ import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
+from vllm.attention.backends.registry import (AttentionBackendEnum,
+                                              register_backend)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
@@ -36,8 +38,6 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -51,18 +51,20 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
         prefill_config = get_current_vllm_config().parallel_config
-        if (prefill_config.prefill_context_parallel_size > 1 or
-                prefill_config.decode_context_parallel_size > 1):
-            from vllm_ascend.attention.attention_cp import AscendAttentionCPImpl
+        if (prefill_config.prefill_context_parallel_size > 1
+                or prefill_config.decode_context_parallel_size > 1):
+            from vllm_ascend.attention.attention_cp import \
+                AscendAttentionCPImpl
             return AscendAttentionCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
         prefill_config = get_current_vllm_config().parallel_config
-        if (prefill_config.prefill_context_parallel_size > 1 or
-                prefill_config.decode_context_parallel_size > 1):
-            from vllm_ascend.attention.attention_cp import AscendAttentionCPMetadataBuilder
+        if (prefill_config.prefill_context_parallel_size > 1
+                or prefill_config.decode_context_parallel_size > 1):
+            from vllm_ascend.attention.attention_cp import \
+                AscendAttentionCPMetadataBuilder
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
@@ -171,7 +173,8 @@ class AscendMetadata:
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
 
-    from vllm_ascend.attention.attention_cp import AscendMetadataForPrefill, AscendMetadataForDecode
+    from vllm_ascend.attention.attention_cp import (AscendMetadataForDecode,
+                                                    AscendMetadataForPrefill)
     prefill: Optional[AscendMetadataForPrefill] = None
     decode_meta: Optional[AscendMetadataForDecode] = None
 
@@ -683,7 +686,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
-        key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
+        key, value = self.reshape_and_cache(key, value, kv_cache,
+                                            attn_metadata)
         if self.attn_type == AttentionType.ENCODER_ONLY:
             attn_output = self._forward_encode(query, key, value,
                                                attn_metadata, output)

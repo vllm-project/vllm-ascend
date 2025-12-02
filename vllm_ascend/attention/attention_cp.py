@@ -50,6 +50,7 @@ if prefill_context_parallel_enable():
 
 # isort: on
 
+
 @dataclass
 class AscendPCPMetadata:
     q_head_idx: torch.Tensor = None
@@ -185,29 +186,24 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         decode_metadata = None
         if common_long_seq_metadata is None:
             raise AssertionError(
-                "common_long_seq_metadata should not be None."
-            )
+                "common_long_seq_metadata should not be None.")
         num_computed_tokens_of_pcp_dcp = common_long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         chunked_context_metadata = None
         if num_prefills > 0:
             query_lens = query_lens[num_decode_tokens:]
-            context_lens_cpu = num_computed_tokens_cpu[
-                num_decodes:num_reqs]
+            context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             pcp_size = get_prefill_context_model_parallel_world_size(
             ) if prefill_context_parallel_enable() else 1
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                 local_context_lens_allranks = torch.tensor(
-                    num_computed_tokens_of_pcp_dcp
-                )[num_decodes:num_reqs].to(
-                    self.device).to(dtype=torch.int32)
+                    num_computed_tokens_of_pcp_dcp)[num_decodes:num_reqs].to(
+                        self.device).to(dtype=torch.int32)
                 local_chunked_kv_lens_rank = local_context_lens_allranks[:,
-                                                                         self
-                                                                         .
+                                                                         self.
                                                                          pcp_rank,
-                                                                         self
-                                                                         .
+                                                                         self.
                                                                          dcp_rank]
                 actual_seq_lengths_kv = torch.cumsum(
                     local_chunked_kv_lens_rank, dim=0).tolist()
@@ -282,11 +278,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         if num_decodes > 0:
             num_computed_tokens_array = np.array(
                 num_computed_tokens_of_pcp_dcp)
-            num_computed_tokens_array = num_computed_tokens_array[:
-                                                                  num_decodes]
-            batch_seq_mask = (
-                num_computed_tokens_array[:, self.pcp_rank,
-                                          self.dcp_rank] == 0)
+            num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
+            batch_seq_mask = (num_computed_tokens_array[:, self.pcp_rank,
+                                                        self.dcp_rank] == 0)
             # TODO: numpy array mode of the shared memory is used to improve performance
             self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
                 torch.from_numpy(batch_seq_mask), non_blocking=True)
@@ -334,17 +328,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         kv_sharing_target_layer_name: Optional[str],
         **kwargs,
     ) -> None:
-        super().__init__(num_heads,
-                         head_size,
-                         scale,
-                         num_kv_heads,
-                         alibi_slopes,
-                         sliding_window,
-                         kv_cache_dtype,
-                         logits_soft_cap,
-                         attn_type,
-                         kv_sharing_target_layer_name,
-                         **kwargs)
+        super().__init__(num_heads, head_size, scale, num_kv_heads,
+                         alibi_slopes, sliding_window, kv_cache_dtype,
+                         logits_soft_cap, attn_type,
+                         kv_sharing_target_layer_name, **kwargs)
         self.pcp_size = get_prefill_context_model_parallel_world_size(
         ) if prefill_context_parallel_enable() else 1
         self.pcp_rank = get_prefill_context_model_parallel_rank(
@@ -528,8 +515,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         return attn_out
 
-    def _forward_decode_pcp_dcp(self, query: torch.Tensor,
-                                attn_metadata: AscendCPMetadata) -> torch.Tensor:
+    def _forward_decode_pcp_dcp(
+            self, query: torch.Tensor,
+            attn_metadata: AscendCPMetadata) -> torch.Tensor:
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -898,7 +886,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             if has_decode:
-                slot_mapping = attn_metadata.slot_mapping[:num_decode_tokens * self.pcp_size: self.pcp_size]
+                slot_mapping = attn_metadata.slot_mapping[:num_decode_tokens *
+                                                          self.pcp_size:self.
+                                                          pcp_size]
                 torch_npu._npu_reshape_and_cache(
                     key=key[:num_decode_tokens],
                     value=value[:num_decode_tokens],
@@ -926,7 +916,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                 num_actual_tokens_pcp_padded],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=attn_metadata.slot_mapping[self.pcp_size *
+                    slot_indices=attn_metadata.
+                    slot_mapping[self.pcp_size *
                                  num_decode_tokens:attn_metadata.
                                  num_actual_tokens_pcp_padded])
         return key, value
