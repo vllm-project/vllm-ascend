@@ -118,7 +118,6 @@ def test_eagle_correctness(
     spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
     with VllmRunner(
             model_name,
-            enable_chunked_prefill=True,
             max_num_seqs=1,
             max_num_batched_tokens=2048,
             gpu_memory_utilization=0.6,
