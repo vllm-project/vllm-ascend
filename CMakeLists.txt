@@ -62,6 +62,7 @@ set(VLLM_ASCEND_CUSTOM_OP
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
+    ${KERNEL_FILES}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
