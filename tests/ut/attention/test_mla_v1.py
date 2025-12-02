@@ -441,7 +441,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
         mock_scheduler_config = MagicMock(spec=SchedulerConfig)
-        mock_scheduler_config.max_num_seqs = 8  # 设置为整数，不是 MagicMock
+        mock_scheduler_config.max_num_seqs = 8
         mock_scheduler_config.chunked_prefill_enabled = True
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
