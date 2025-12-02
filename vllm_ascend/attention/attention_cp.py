@@ -70,8 +70,8 @@ class AscendMetadataForPrefill:
 
     @dataclass
     class ChunkedContextMetadata:
-        actual_chunk_seq_lengths: list[int]
-        actual_seq_lengths_kv: list[int]
+        actual_chunk_seq_lengths: torch.Tensor
+        actual_seq_lengths_kv: torch.Tensor
         starts: torch.Tensor
         chunk_seq_mask_filtered_indices: torch.Tensor
         chunked_req_mask: Optional[list[bool]] = None
@@ -119,7 +119,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super.__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.batch_seq_mask_buf = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.uint8,
