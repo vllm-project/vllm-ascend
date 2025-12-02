@@ -34,6 +34,25 @@ from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
 if prefill_context_parallel_enable():
     from vllm.distributed import get_pcp_group
 
+# Optimization for NPU small-batch padding: Pad cache threshold set to 128 to cover typical TP/EP padding requirements in decode.
+PAD_CACHE_THRESHOLD = 128  
+
+
+def fast_pad_with_buffer(buffer_ref: torch.Tensor | None, target_pad_len: int, data_ref: torch.Tensor):
+    """
+    Optimization for NPU small-batch padding:
+    We cache a small buffer to avoid overhead from nn.functional.pad (~50us)
+    and memory allocation during the decode phase.
+    """
+    num_tokens, dim = data_ref.shape
+    expect_shape = (target_pad_len, dim)
+    if buffer_ref is None or buffer_ref.shape != expect_shape:
+        buffer_ref = torch.zeros(expect_shape, device=data_ref.device, dtype=data_ref.dtype)
+    else:
+        buffer_ref[num_tokens:].zero_()
+    buffer_ref[:num_tokens].copy_(data_ref)
+    return buffer_ref
+
 
 class QuantType(Enum):
     NONE = 0
@@ -212,6 +231,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
         self._restore_tp_across_dp()
+        self.pad_buffer_hidden = None
+        self.pad_buffer_logits = None
 
     def _restore_tp_across_dp(self):
         """
@@ -260,10 +281,16 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
 
             # Pad if necessary (unless shared expert DP is enabled)
             if pad_size > 0 and not self.enable_shared_expert_dp:
-                hidden_states = nn.functional.pad(hidden_states,
-                                                  (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits,
-                                                  (0, 0, 0, pad_size))
+                if target_pad_length <= PAD_CACHE_THRESHOLD:
+                    hidden_states = self.pad_buffer_hidden = fast_pad_with_buffer(self.pad_buffer_hidden, 
+                                                                                  target_pad_length, hidden_states)
+                    router_logits = self.pad_buffer_logits = fast_pad_with_buffer(self.pad_buffer_logits, 
+                                                                                  target_pad_length, router_logits)
+                else:
+                    hidden_states = nn.functional.pad(hidden_states,
+                                                      (0, 0, 0, pad_size))
+                    router_logits = nn.functional.pad(router_logits,
+                                                      (0, 0, 0, pad_size))
 
             # Slice across TP ranks
             if self.tp_size > 1 and not self.enable_shared_expert_dp:
@@ -454,3 +481,4 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
+
