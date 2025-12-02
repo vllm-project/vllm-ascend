@@ -65,7 +65,7 @@ def test_offline_weight_load_and_sleepmode(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
