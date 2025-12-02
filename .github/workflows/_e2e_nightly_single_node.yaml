@@ -65,6 +65,22 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+      
+      - name: Sync from vllm-Ascend main branch
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          git config --global --add safe.directory "$(pwd)"
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+          git fetch origin pull/4633/head:pr-4633
+          git checkout pr-4633
+          cd .. 
+          pip uninstall -y vllm-ascend
+          cd /vllm-workspace/vllm-ascend
+          export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
 
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace
@@ -109,19 +125,6 @@ jobs:
             echo "No .git directory found in vllm-ascend"
           fi
           cd ..
-
-      - name: Install custom-ops (for DeepSeek-V3.2-Exp)
-        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
-        shell: bash -l {0}
-        run: |
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
-          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
       - name: Install triton-ascend
         if: ${{ inputs.name == 'test_custom_op' }}
