@@ -23,7 +23,7 @@ from typing import Optional
 
 import torch
 from torch import nn
-from vllm.attention import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size

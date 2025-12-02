@@ -70,7 +70,7 @@ class AscendScheduler(Scheduler):
         self._initialize_common()
 
     def schedule(self) -> SchedulerOutput:
-        if self.scheduler_config.chunked_prefill_enabled:
+        if self.scheduler_config.enable_chunked_prefill:
             return super().schedule()
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -534,7 +534,7 @@ class AscendScheduler(Scheduler):
         return True
 
     def _get_prompt_limit(self, request: Request) -> int:
-        if (self.scheduler_config.chunked_prefill_enabled
+        if (self.scheduler_config.enable_chunked_prefill
                 and not self.scheduler_config.is_multi_step):
             prompt_limit = self.vllm_config.model_config.max_model_len
         else:
