@@ -568,8 +568,8 @@ class AscendMLAMetadataBuilder:
                     )
                     chunked_context_metadata = \
                     AscendMLAPrefillMetadata.ChunkedContextMetadata(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=local_chunk_starts.to(device, non_blocking=True),
+                        cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(device, non_blocking=True),
+                        starts=local_chunk_starts.pin_memory().to(device, non_blocking=True),
                         seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         chunk_seq_lens=chunk_seq_lens,
@@ -578,7 +578,7 @@ class AscendMLAMetadataBuilder:
                         padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.npu(),
                         padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
                         local_context_lens_allranks=local_context_lens_allranks.tolist(),
-                        padded_local_cu_seq_lens=padded_local_cu_chunk_seq_lens_cpu.to(
+                        padded_local_cu_seq_lens=padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(
                             device, non_blocking=True
                         ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
@@ -587,8 +587,8 @@ class AscendMLAMetadataBuilder:
                 else:
                     chunked_context_metadata = \
                         AscendMLAPrefillMetadata.ChunkedContextMetadata(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=chunk_starts.to(device, non_blocking=True),
+                        cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(device, non_blocking=True),
+                        starts=chunk_starts.pin_memory().to(device, non_blocking=True),
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         chunk_seq_lens=chunk_seq_lens,

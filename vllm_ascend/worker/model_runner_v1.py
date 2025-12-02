@@ -1356,7 +1356,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         cp_kv_recover_idx_for_chunk = torch.from_numpy(
             np.concatenate(
-                self.cp_kv_recover_idx_for_chunk)).to(device=self.device)
+                self.cp_kv_recover_idx_for_chunk)).pin_memory().to(device=self.device)
         cp_kv_recover_idx_for_chunk.copy_(torch.tensor(
             np.array(self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
                                           non_blocking=True)
@@ -2016,7 +2016,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 cu_num_scheduled_tokens - num_sampled_tokens,
                 num_sampled_tokens)
             logits_indices_pcp += arange
-            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).to(
+            logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(
                 self.device, non_blocking=True)
 
         # Compute the bonus logits indices.

@@ -378,7 +378,7 @@ class AscendAttentionMetadataBuilder:
                 if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                     local_context_lens_allranks = torch.tensor(
                         num_computed_tokens_of_pcp_dcp
-                    )[num_decodes:num_reqs].to(
+                    )[num_decodes:num_reqs].pin_memory().to(
                         self.device).to(dtype=torch.int32)
                     local_chunked_kv_lens_rank = local_context_lens_allranks[:,
                                                                              self
@@ -405,9 +405,9 @@ class AscendAttentionMetadataBuilder:
                                                     self.dcp_rank] == 0)
                     batch_chunk_seq_mask = torch.repeat_interleave(
                         batch_chunk_seq_mask,
-                        repeats=(query_lens * self.pcp_size).to(self.device))
+                        repeats=(query_lens * self.pcp_size).pin_memory().to(self.device))
                     chunk_seq_mask_filtered_indices = filter_chunked_req_indices(
-                        query_lens, chunked_req_mask).to(self.device)
+                        query_lens, chunked_req_mask).pin_memory().to(self.device)
                     chunked_context_metadata = \
                         AscendMetadataForPrefill.ChunkedContextMetadata(
                             actual_chunk_seq_lengths=torch.cumsum(query_lens * pcp_size, dim=0),
