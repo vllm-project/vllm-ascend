@@ -976,26 +976,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
             return num_tokens, None, with_prefill
-
         # Sync num_tokens, with_prefill across dp ranks
         num_tokens_tensor = torch.tensor([
             num_tokens if i == self.dp_rank else 0 for i in range(self.dp_size)
         ],
                                          dtype=torch.int32,
-                                         device="npu")
+                                         device="cpu")
 
         flags_tensor = torch.tensor([int(with_prefill)],
                                     dtype=torch.int32,
-                                    device="npu")
+                                    device="cpu")
 
         packed_tensor = torch.cat([num_tokens_tensor, flags_tensor])
-
-        dist.all_reduce(packed_tensor, group=get_dp_group().device_group)
+        # use cpu_group to avoid cpu synchronization issue.
+        # it can be overlapped with main moell execution on npu.
+        dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[:-1]
         synced_flags = packed_tensor[-1:]
-
         max_tokens_across_dp = torch.max(num_tokens_across_dp).item()
         global_with_prefill = bool(synced_flags[0])
 
