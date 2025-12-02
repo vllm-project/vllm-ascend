@@ -1035,7 +1035,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # Pooling situation.
         if self.model_config.runner_type == "pooling":
             return self.attn_mask_builder.get_attn_mask(
-                2048, self.dtype, self.device)
+                2048, torch.bool, self.device)
 
         if self.vllm_config.model_config.use_mla:
             if self.pcp_size > 1:
