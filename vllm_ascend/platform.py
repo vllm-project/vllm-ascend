@@ -157,6 +157,7 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
+        compilation_config.pass_config.enable_fusion = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -310,7 +311,7 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
-            vllm_config.scheduler_config.chunked_prefill_enabled = True
+            vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         if vllm_config.kv_transfer_config is not None and \

@@ -3,7 +3,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
-import numpy as np
+import pytest
 import torch
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
@@ -81,9 +81,7 @@ def make_output(scheduler):
         req.request_id: i
         for i, req in enumerate(scheduler.running)
     }
-    sampled_token_ids = [
-        np.array([1000], dtype=np.int64) for _ in scheduler.running
-    ]
+    sampled_token_ids = [[1000]] * len(scheduler.running)
 
     logprobs = None
 
@@ -98,6 +96,7 @@ def make_output(scheduler):
     return modelrunner_output
 
 
+@pytest.mark.skip("Ascend Scheduler has been deprecated")
 class TestAscendScheduler(TestBase):
 
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
@@ -372,8 +371,7 @@ class TestAscendScheduler(TestBase):
                 req.request_id: i
                 for i, req in enumerate(requests)
             },
-            sampled_token_ids=[np.array([EOS_TOKEN_ID]),
-                               np.array([10, 11])
+            sampled_token_ids=[[EOS_TOKEN_ID], [10, 11]
                                ],  # First request hits EOS, second continues
             logprobs=None,
             prompt_logprobs_dict={},
@@ -424,9 +422,8 @@ class TestAscendScheduler(TestBase):
                 req.request_id: i
                 for i, req in enumerate(requests)
             },
-            sampled_token_ids=[np.array([10, 42, 12]),
-                               np.array([13, 14])
-                               ],  # First request hits stop token
+            sampled_token_ids=[[10, 42, 12],
+                               [13, 14]],  # First request hits stop token
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -475,9 +472,8 @@ class TestAscendScheduler(TestBase):
                 req.request_id: i
                 for i, req in enumerate(requests)
             },
-            sampled_token_ids=[np.array([10, 11, 12]),
-                               np.array([13])
-                               ],  # First request exceeds max_tokens
+            sampled_token_ids=[[10, 11, 12],
+                               [13]],  # First request exceeds max_tokens
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -516,7 +512,7 @@ class TestAscendScheduler(TestBase):
         model_output = ModelRunnerOutput(
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},
-            sampled_token_ids=[np.array([EOS_TOKEN_ID, 10, 11])],
+            sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -573,7 +569,7 @@ class TestAscendScheduler(TestBase):
             model_runner_output = ModelRunnerOutput(
                 req_ids=[requests[0].request_id],
                 req_id_to_index={requests[0].request_id: 0},
-                sampled_token_ids=[np.array([0], dtype=np.int64)],
+                sampled_token_ids=[[0]],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -589,7 +585,7 @@ class TestAscendScheduler(TestBase):
             model_runner_output = ModelRunnerOutput(
                 req_ids=[requests[1].request_id],
                 req_id_to_index={requests[1].request_id: 0},
-                sampled_token_ids=[np.array([0], dtype=np.int64)],
+                sampled_token_ids=[[0]],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -607,12 +603,10 @@ class TestAscendScheduler(TestBase):
         spec_tokens_list: List[List[List[int]]] = [[[1, 2, 3]], [[1, 2, 3]],
                                                    [[1, 2], [3]], [[1]], [[]],
                                                    [[1, 2, 3], [4, 5, 6]]]
-        output_tokens_list: List[List[List[int]]] = [
-            [np.array([1, 2, 3, 4])], [np.array([1, 5])],
-            [np.array([1, 2, 5]), np.array([3, 4])], [np.array([1, 2])],
-            [np.array([5])], [np.array([1, 2, 7]),
-                              np.array([4, 8])]
-        ]
+        output_tokens_list: List[List[List[int]]] = [[[1, 2, 3, 4]], [[1, 5]],
+                                                     [[1, 2, 5], [3, 4]],
+                                                     [[1, 2]], [[5]],
+                                                     [[1, 2, 7], [4, 8]]]
         expected_list: List[Tuple[int, int,
                                   int, List[int]]] = [(1, 3, 3, [1, 1, 1]),
                                                       (1, 3, 1, [1, 0, 0]),
@@ -650,9 +644,7 @@ class TestAscendScheduler(TestBase):
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
                 req_id_to_index=req_to_index,
-                sampled_token_ids=[
-                    np.array([0]) for _ in range(len(requests))
-                ],
+                sampled_token_ids=[[0] for _ in range(len(requests))],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -892,11 +884,13 @@ class TestSchedulerDynamicBatch(TestBase):
                                                    torch.float32, False))
             ],
         )
+        kv_cache_config.hash_block_size = block_size
         cache_config.num_gpu_blocks = 10000
 
         scheduler = SchedulerDynamicBatch(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
+            block_size=block_size,
             log_stats=True,
             structured_output_manager=MagicMock(spec=StructuredOutputManager),
         )
@@ -1064,8 +1058,7 @@ class TestSchedulerDynamicBatch(TestBase):
                 req.request_id: i
                 for i, req in enumerate(requests)
             },
-            sampled_token_ids=[np.array([EOS_TOKEN_ID]),
-                               np.array([10, 11])
+            sampled_token_ids=[[EOS_TOKEN_ID], [10, 11]
                                ],  # First request hits EOS, second continues
             logprobs=None,
             prompt_logprobs_dict={},
@@ -1116,9 +1109,8 @@ class TestSchedulerDynamicBatch(TestBase):
                 req.request_id: i
                 for i, req in enumerate(requests)
             },
-            sampled_token_ids=[np.array([10, 42, 12]),
-                               np.array([13, 14])
-                               ],  # First request hits stop token
+            sampled_token_ids=[[10, 42, 12],
+                               [13, 14]],  # First request hits stop token
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -1167,9 +1159,8 @@ class TestSchedulerDynamicBatch(TestBase):
                 req.request_id: i
                 for i, req in enumerate(requests)
             },
-            sampled_token_ids=[np.array([10, 11, 12]),
-                               np.array([13])
-                               ],  # First request exceeds max_tokens
+            sampled_token_ids=[[10, 11, 12],
+                               [13]],  # First request exceeds max_tokens
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -1208,7 +1199,7 @@ class TestSchedulerDynamicBatch(TestBase):
         model_output = ModelRunnerOutput(
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},
-            sampled_token_ids=[np.array([EOS_TOKEN_ID, 10, 11])],
+            sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -1265,7 +1256,7 @@ class TestSchedulerDynamicBatch(TestBase):
             model_runner_output = ModelRunnerOutput(
                 req_ids=[requests[0].request_id],
                 req_id_to_index={requests[0].request_id: 0},
-                sampled_token_ids=[np.array([0])],
+                sampled_token_ids=[[0]],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -1281,7 +1272,7 @@ class TestSchedulerDynamicBatch(TestBase):
             model_runner_output = ModelRunnerOutput(
                 req_ids=[requests[1].request_id],
                 req_id_to_index={requests[1].request_id: 0},
-                sampled_token_ids=[np.array([0])],
+                sampled_token_ids=[[0]],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -1299,12 +1290,10 @@ class TestSchedulerDynamicBatch(TestBase):
         spec_tokens_list: List[List[List[int]]] = [[[1, 2, 3]], [[1, 2, 3]],
                                                    [[1, 2], [3]], [[1]], [[]],
                                                    [[1, 2, 3], [4, 5, 6]]]
-        output_tokens_list: List[List[List[int]]] = [
-            [np.array([1, 2, 3, 4])], [np.array([1, 5])],
-            [np.array([1, 2, 5]), np.array([3, 4])], [np.array([1, 2])],
-            [np.array([5])], [np.array([1, 2, 7]),
-                              np.array([4, 8])]
-        ]
+        output_tokens_list: List[List[List[int]]] = [[[1, 2, 3, 4]], [[1, 5]],
+                                                     [[1, 2, 5], [3, 4]],
+                                                     [[1, 2]], [[5]],
+                                                     [[1, 2, 7], [4, 8]]]
         expected_list: List[Tuple[int, int,
                                   int, List[int]]] = [(1, 3, 3, [1, 1, 1]),
                                                       (1, 3, 1, [1, 0, 0]),
@@ -1342,9 +1331,7 @@ class TestSchedulerDynamicBatch(TestBase):
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
                 req_id_to_index=req_to_index,
-                sampled_token_ids=[
-                    np.array([0]) for _ in range(len(requests))
-                ],
+                sampled_token_ids=[[0] for _ in range(len(requests))],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
