@@ -108,13 +108,13 @@ class AscendRMSNorm(RMSNorm):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
-
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             assert x.size(0) == residual.size(0)
+            next_need_quant_fusion_linear = getattr(
+                self, 'next_need_quant_fusion_linear', None)
             x, residual = _addrmsnorm_forward_oot(
-                self, x, residual, self.next_need_quant_fusion_linear,
-                self.bias)
+                self, x, residual, next_need_quant_fusion_linear, self.bias)
             return x, residual
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
