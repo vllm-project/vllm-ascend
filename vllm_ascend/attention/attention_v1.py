@@ -32,10 +32,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm_ascend.attention.attention_cp import (AscendAttentionCPImpl,
-                                                AscendMetadataForDecode,
-                                                AscendAttentionCPMetadataBuilder,
-                                                AscendMetadataForPrefill)
+
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
@@ -58,6 +55,7 @@ class AscendAttentionBackend(AttentionBackend):
         prefill_config = get_current_vllm_config().parallel_config
         if (prefill_config.prefill_context_parallel_size > 1 or
                 prefill_config.decode_context_parallel_size > 1):
+            from vllm_ascend.attention.attention_cp import AscendAttentionCPImpl
             return AscendAttentionCPImpl
         return AscendAttentionBackendImpl
 
@@ -66,6 +64,7 @@ class AscendAttentionBackend(AttentionBackend):
         prefill_config = get_current_vllm_config().parallel_config
         if (prefill_config.prefill_context_parallel_size > 1 or
                 prefill_config.decode_context_parallel_size > 1):
+            from vllm_ascend.attention.attention_cp import AscendAttentionCPMetadataBuilder
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
@@ -174,8 +173,8 @@ class AscendMetadata:
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
 
+    from vllm_ascend.attention.attention_cp import AscendMetadataForPrefill, AscendMetadataForDecode
     prefill: Optional[AscendMetadataForPrefill] = None
-
     decode_meta: Optional[AscendMetadataForDecode] = None
 
 
