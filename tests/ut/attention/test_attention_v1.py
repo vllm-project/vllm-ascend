@@ -217,30 +217,33 @@ class TestAscendAttentionBackendImpl(TestBase):
                              mock_npu_fused_infer_attention_score,
                              mock_npu_reshape_and_cache):
         """Test forward pass in PrefillCacheHit state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
+        output = torch.empty_like(query)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillCacheHit
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
         metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
+        metadata.actual_seq_lengths_q = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
+        metadata.num_decode_tokens = 0
+        metadata.num_decodes = 0
+        metadata.num_prefills = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata)
+        mock_npu_fused_infer_attention_score.return_value = (torch.ones(
+            10, 8, 64), torch.ones(10, 8, 64))
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata, output)
 
         mock_npu_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (10, 8, 64)
 
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
