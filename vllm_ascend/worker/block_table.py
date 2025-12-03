@@ -2,13 +2,8 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
-
-from vllm_ascend.utils import prefill_context_parallel_enable
-
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group
 
 
 class BlockTable:
@@ -31,8 +26,7 @@ class BlockTable:
         self.physical_block_size = block_size
 
         try:
-            self.pcp_world_size = get_pcp_group(
-            ).world_size if prefill_context_parallel_enable() else 1
+            self.pcp_world_size = get_pcp_group().world_size
             self.pcp_rank = get_pcp_group(
             ).rank_in_group if self.pcp_world_size > 1 else 0
             self.dcp_world_size = get_dcp_group().world_size
@@ -279,8 +273,7 @@ class MultiGroupBlockTable:
         # must be multiplied by dcp_world_size.
         try:
             dcp_world_size = get_dcp_group().world_size
-            pcp_world_size = get_pcp_group(
-            ).world_size if prefill_context_parallel_enable() else 1
+            pcp_world_size = get_pcp_group().world_size
         except AssertionError:
             # DCP might not be initialized in testing
             dcp_world_size = 1

@@ -32,11 +32,8 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               prefill_context_parallel_enable,
                                shared_expert_dp_enabled)
-
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group
+from vllm.distributed import get_pcp_group
 
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import set_default_torch_dtype
