@@ -148,7 +148,7 @@ The parameters are explained as follows:
 
 ### Prefill-Decode Disaggregation
 
-- refer to [Prefill-Decode Disaggregation Llmdatadist Verification (Qwen)](./multi_node_pd_disaggregation_llmdatadist.md) or [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](./multi_node_pd_disaggregation_mooncake.md)
+- refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](./multi_node_pd_disaggregation_mooncake.md)
 
 ## Functional Verification
 
