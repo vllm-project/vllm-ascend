@@ -10,7 +10,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 MAX_CORES = 65535
-
+UNIFIED_BUFFER_SIZE = 1572864
 
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
@@ -102,7 +102,8 @@ def layer_norm_fwd(
 
     # SUB_BLOCK_M = 128 # 1835008 when N = 128, bf16 (overflow) -> assume factor 56
     # Assume large M
-    SUB_BLOCK_M = triton.next_power_of_2(triton.cdiv(1572864, 56 * N) // x.element_size()) // 2
+    HEURISTIC_FACTOR = 56
+    SUB_BLOCK_M = triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, HEURISTIC_FACTOR * N) // x.element_size()) // 2
     import triton.runtime.driver as driver
     device = torch.npu.current_device()
     num_cores = driver.active.utils.get_device_properties(device)["num_vectorcore"]
@@ -179,8 +180,6 @@ def layer_norm_fwd_kernel(
     for sub_row_blk in range(0, BLOCK_M // SUB_BLOCK_M):
         row = row_blk_idx * BLOCK_M + sub_row_blk * SUB_BLOCK_M + tl.arange(0, SUB_BLOCK_M)
         row_mask = row < M
-        # cols = tl.arange(0, BLOCK_N)
-        # col_mask = cols < N
         blk_mask = row_mask[:, None] & col_mask[None, :]
 
         X_inner = X + row[:, None] * stride_x_row + (group * N + cols)[None, :]
@@ -190,10 +189,6 @@ def layer_norm_fwd_kernel(
         if not IS_RMS_NORM:
             Mean_inner = Mean + group * M + row[:, None]
         Rstd_inner = Rstd + group * M + row[:, None]
-        # W_inner = W + group * N + cols
-        # if HAS_BIAS:
-        #     B_inner = B + group * N + cols
-        # Compute mean and variance
 
         x = tl.load(X_inner, mask=blk_mask, other=0.).to(tl.float32)
 
@@ -204,11 +199,9 @@ def layer_norm_fwd_kernel(
         if not IS_RMS_NORM:
             mean = tl.sum(x, axis=1, keep_dims=True) / N
             tl.store(Mean_inner, mean, mask=row_mask[:, None])
-            # xbar = tl.where(cols < N, x - mean, 0.)
             xbar = x - mean
             var = tl.sum(xbar * xbar, axis=1, keep_dims=True) / N
         else:
-            # xbar = tl.where(cols < N, x, 0.)
             xbar = x
             var = tl.sum(xbar * xbar, axis=1, keep_dims=True) / N
 
