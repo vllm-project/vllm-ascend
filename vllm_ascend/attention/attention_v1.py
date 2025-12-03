@@ -357,13 +357,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
-    def full_graph_attention(self,
-                             query: torch.Tensor,
-                             key: torch.Tensor,
+    def full_graph_attention(self, query: torch.Tensor, key: torch.Tensor,
                              value: torch.Tensor,
                              attn_metadata: AscendMetadata,
-                             output: torch.Tensor
-                             ) -> torch.Tensor:
+                             output: torch.Tensor) -> torch.Tensor:
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
