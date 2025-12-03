@@ -46,6 +46,8 @@ else:
     VllmConfig = None
     FlexibleArgumentParser = None
 
+CUSTOM_OP_REGISTERED = False
+
 
 class NPUPlatform(Platform):
 
@@ -341,7 +343,22 @@ class NPUPlatform(Platform):
         # TODO: when the above issue is fixed, we can uncomment the following lines.
         # from vllm_ascend.utils import enable_custom_op
         # enable_custom_op()
-        pass
+        # set custom ops path
+        global CUSTOM_OP_REGISTERED
+        if CUSTOM_OP_REGISTERED:
+            return
+        CUR_DIR = os.path.dirname(os.path.realpath(__file__))
+        CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
+                                       "vllm-ascend")
+        if os.path.exists(CUSTOM_OPP_PATH):
+            current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH",
+                                                   "")
+            if current_cust_opp_path:
+                os.environ[
+                    "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
+            else:
+                os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+        CUSTOM_OP_REGISTERED = True
 
     @classmethod
     def get_attn_backend_cls(
