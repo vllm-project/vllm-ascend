@@ -40,7 +40,7 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
-from vllm.config.model import TaskOption, _get_and_verify_dtype
+from vllm.config.model import _get_and_verify_dtype
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -270,7 +270,7 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
-        task: TaskOption = "auto",
+        runner: str = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
         # Use smaller max model length, otherwise bigger model cannot run due
@@ -280,7 +280,7 @@ class VllmRunner:
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
-        enable_chunked_prefill: bool = False,
+        enable_chunked_prefill: bool = True,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         quantization: Optional[str] = None,
@@ -288,7 +288,7 @@ class VllmRunner:
     ) -> None:
         self.model = LLM(
             model=model_name,
-            task=task,
+            runner=runner,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,

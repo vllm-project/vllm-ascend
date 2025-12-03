@@ -34,14 +34,14 @@ def test_aclgrpah_embed_models_correctness(model_name):
 
     with VllmRunner(
             model_name,
-            task="embed",
+            runner="pooling",
             enforce_eager=False,
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.encode(queries)
 
     with VllmRunner(
             model_name,
-            task="embed",
+            runner="pooling",
             enforce_eager=True,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)

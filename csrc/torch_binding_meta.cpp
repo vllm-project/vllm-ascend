@@ -151,6 +151,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
+void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
+                                    c10::optional<c10::string_view> format_mode,
+                                    c10::optional<c10::string_view> quant_mode)
+{
+    return;
+
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -172,5 +180,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
     // Grouped matmul swiglu quant weight nz tensor list
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
+    // batch_matmul_transpose
+    ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
 }
 }

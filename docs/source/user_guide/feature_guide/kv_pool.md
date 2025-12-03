@@ -29,7 +29,7 @@
 
         Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
 
-### run mooncake master
+### Run Mooncake Master
 
 #### 1.Configure mooncake.json
 

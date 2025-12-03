@@ -224,7 +224,6 @@ class TestEagleProposerGenerateTokenIds(TestBase):
 
     def test_generate_token_ids_without_metadata(self):
         valid_sampled = [[20, 30, 40]]
-        valid_sampled = [np.array(sublist) for sublist in valid_sampled]
         scheduler_output = MagicMock()
         scheduler_output.num_scheduled_tokens = [2, 1, 3]
         positions = torch.tensor([0, 1, 2, 3, 4, 5])
@@ -251,7 +250,6 @@ class TestEagleProposerGenerateTokenIds(TestBase):
 
     def test_generate_token_ids_with_metadata(self):
         valid_sampled = [[5], [6, 7], [8, 9, 10]]
-        valid_sampled = [np.array(sublist) for sublist in valid_sampled]
         spec_metadata = MagicMock()
         spec_metadata.num_draft_tokens = [2, 3, 4]
 

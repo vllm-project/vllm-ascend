@@ -118,8 +118,10 @@ class AscendW8A8LinearMethod:
                     weight=layer.weight,
                     start_flag=x,
                 )
-
-            quant_comm_config = getattr(layer, "_quant_comm_config", {})
+            try:
+                quant_comm_config = getattr(layer, "_quant_comm_config")
+            except AttributeError:
+                quant_comm_config = {}
             comm_fn = quant_comm_config.get("communication_fn")
             enable_flashcomm2_quant_comm = comm_fn is not None and (
                 "o_proj" in layer.prefix or "out_proj" in layer.prefix)
@@ -150,8 +152,12 @@ class AscendW8A8LinearMethod:
                 )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
-        if getattr(layer, "ascend_quant_method",
-                   "") == COMPRESSED_TENSORS_METHOD:
+
+        try:
+            ascend_quant_method = getattr(layer, "ascend_quant_method")
+        except AttributeError:
+            ascend_quant_method = ""
+        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             quant_bias = bias
 
         if get_ascend_device_type() == AscendDeviceType._310P:
@@ -192,8 +198,8 @@ class AscendW8A8LinearMethod:
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
-        if getattr(layer, "ascend_quant_method",
-                   "") == COMPRESSED_TENSORS_METHOD:
+        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
+        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             deq_scale = layer.input_scale.data * layer.weight_scale.data
             layer.deq_scale = torch.nn.Parameter(deq_scale,
                                                  requires_grad=False)

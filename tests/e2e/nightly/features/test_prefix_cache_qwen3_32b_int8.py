@@ -68,12 +68,7 @@ aisbench_cases75 = [{
 async def test_models(model: str) -> None:
     port = get_open_port()
     env_dict = {"TASK_QUEUE_ENABLE": "1", "HCCL_OP_EXPANSION_MODE": "AIV"}
-    additional_config = {
-        "ascend_scheduler_config": {
-            "enabled": False
-        },
-        "enable_weight_nz_layout": True
-    }
+    additional_config = {"enable_weight_nz_layout": True}
     server_args = [
         "--quantization", "ascend", "--reasoning-parser", "qwen3",
         "--tensor-parallel-size", "4", "--port",

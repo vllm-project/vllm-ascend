@@ -89,12 +89,6 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
                     enforce_eager=True,
-                    additional_config={
-                        "ascend_scheduler_config": {
-                            "enabled": True,
-                            "enable_chunked_prefill": False
-                        }
-                    },
                     speculative_config={
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 1

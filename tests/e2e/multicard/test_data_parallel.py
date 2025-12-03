@@ -27,13 +27,17 @@ from unittest.mock import patch
 
 import pytest
 
-MODELS = ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B"]
+MODELS = [
+    "Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"
+]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 def test_data_parallel_inference(model, max_tokens):
+    moe_models = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
+    quantization_models = ["vllm-ascend/Qwen3-30B-A3B-W8A8"]
     script = "examples/offline_data_parallel.py"
 
     env = os.environ.copy()
@@ -54,8 +58,11 @@ def test_data_parallel_inference(model, max_tokens):
         "--trust-remote-code",
     ]
 
-    if model == "Qwen/Qwen3-30B-A3B":
+    if model in moe_models:
         cmd.append("--enable-expert-parallel")
+    if model in quantization_models:
+        cmd.append("--quantization")
+        cmd.append("ascend")
 
     print(f"Running subprocess: {' '.join(cmd)}")
     proc = subprocess.run(cmd,
@@ -63,7 +70,7 @@ def test_data_parallel_inference(model, max_tokens):
                           stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT,
                           timeout=600)
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 

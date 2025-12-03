@@ -226,8 +226,8 @@ class TestMoECommMethod(TestBase):
         w2 = w2.contiguous()
 
         result = comm_impl.fused_experts(hidden_states=hidden_states,
-                                         w1=w1,
-                                         w2=w2,
+                                         w1=[w1],
+                                         w2=[w2],
                                          topk_weights=topk_weights,
                                          topk_ids=topk_ids,
                                          activation="silu")

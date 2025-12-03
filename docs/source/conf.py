@@ -77,7 +77,7 @@ myst_substitutions = {
     # CANN image tag
     'cann_image_tag': "8.3.rc2-910b-ubuntu22.04-py3.11",
     # vllm version in ci
-    'ci_vllm_version': 'v0.11.2',
+    'ci_vllm_version': '86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24',
 }
 
 # For cross-file header anchors

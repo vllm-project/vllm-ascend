@@ -20,6 +20,7 @@ import torch
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.transformers_utils.config import patch_rope_parameters
 
 from vllm_ascend.torchair.models.torchair_deepseek_v2 import (
     TorchairDeepseekV2DecoderLayer, TorchairDeepseekV2ForCausalLM,
@@ -59,6 +60,7 @@ def base_config():
         topk_group=1,
         vocab_size=10000,
     )
+    patch_rope_parameters(config)
     return config
 
 
@@ -235,8 +237,6 @@ def test_torchair_deepseek_v2_mlp(mock_distributed, base_config):
                                 hidden_act="silu",
                                 quant_config=None)
     assert isinstance(mlp.act_fn, TorchairDeepseekV2SiluAndMul)
-    ascend_config = MagicMock()
-    ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
     with patch(
             "vllm_ascend.torchair.models.torchair_deepseek_v2.QuantizationConfig"
     ) as mock_quant_config:

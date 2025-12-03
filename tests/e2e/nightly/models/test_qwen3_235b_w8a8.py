@@ -63,11 +63,6 @@ async def test_models(model: str, mode: str) -> None:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"
     }
-    additional_config: dict[str, Any] = {
-        "ascend_scheduler_config": {
-            "enabled": False
-        },
-    }
     compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
         "--quantization", "ascend", "--async-scheduling",
@@ -82,7 +77,6 @@ async def test_models(model: str, mode: str) -> None:
     server_args.extend(
         ["--compilation-config",
          json.dumps(compilation_config)])
-    server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

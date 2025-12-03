@@ -83,8 +83,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "0.9", "--block-size", "128", "--max-num-seqs", "256",
         "--enforce-eager", "--max-model-len", "35840",
         "--max-num-batched-tokens", "35840", "--additional-config",
-        '{"ascend_scheduler_config":{"enabled":true},"enable_weight_nz_layout":true}',
-        "--compilation-config",
+        '{"enable_weight_nz_layout":true}', "--compilation-config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}'
     ]
     with RemoteOpenAIServer(model,

@@ -522,31 +522,6 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
         self.assertEqual(vllm_config.compilation_config.custom_ops, [])
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_ascend_scheduler_config(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_soc_version):
-        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.ascend_scheduler_config.enabled = True
-        mock_init_ascend.return_value = mock_ascend_config
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.tensor_parallel_size = 1
-        mock_init_recompute.return_value = MagicMock()
-
-        with patch("vllm_ascend.core.schedule_config.AscendSchedulerConfig"
-                   ) as mock_scheduler:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
-            mock_scheduler.initialize_from_config.assert_called_once()
-
     @patch('vllm_ascend.platform.get_ascend_config')
     def test_get_attn_backend_cls_use_v1_and_mla(self, mock_get_ascend_config):
         mock_config = MagicMock()

@@ -28,4 +28,4 @@ vllm serve Qwen/Qwen1.5-MoE-A2.7B  \
   --gpu-memory-utilization 0.9 \
   --trust-remote-code \
   --enforce-eager \
-  --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":false, "use_cached_graph":false}}'
+  --additional-config '{"torchair_graph_config":{"enabled":false, "use_cached_graph":false}}'

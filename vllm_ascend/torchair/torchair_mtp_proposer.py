@@ -1,13 +1,12 @@
 import types
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torchair
 from torchair import patch_for_hcom
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import \
@@ -81,7 +80,8 @@ class TorchairMtpProposer(MtpProposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None) -> None:
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None) -> None:
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if not with_prefill:
@@ -143,11 +143,12 @@ class TorchairMtpProposer(MtpProposer):
                     self.model(input_ids=input_ids,
                                positions=positions,
                                hidden_states=previous_hidden_states)
+                dummy_compute_logits(previous_hidden_states)
             if with_prefill:
                 break
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[np.ndarray],
+                           valid_sampled_token_ids: list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -160,7 +161,7 @@ class TorchairMtpProposer(MtpProposer):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -171,7 +172,7 @@ class TorchairMtpProposer(MtpProposer):
                 seq_len = (req_state.num_computed_tokens +
                            scheduler_output.num_scheduled_tokens[req_id])
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id.item())
+            next_token_ids.append(next_token_id)
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
@@ -187,7 +188,7 @@ class TorchairMtpProposer(MtpProposer):
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
@@ -341,12 +342,7 @@ class TorchairMtpProposer(MtpProposer):
         # torchair mode can reuse self.runner.num_tokens_across_dp
         num_tokens_across_dp = self.runner.num_tokens_across_dp
         with_prefill = self.runner.with_prefill
-
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
-        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=False)
-        aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
 
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
@@ -357,7 +353,6 @@ class TorchairMtpProposer(MtpProposer):
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):

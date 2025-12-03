@@ -1,0 +1,13 @@
+model_name: "LLM-Research/gemma-3-4b-it"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.59
+  - name: "exact_match,flexible-extract"
+    value: 0.59
+num_fewshot: 5
+apply_chat_template: False
+fewshot_as_multiturn: False
+gpu_memory_utilization: 0.7

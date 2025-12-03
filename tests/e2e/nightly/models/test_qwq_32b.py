@@ -93,8 +93,6 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         server_args.remove(
             '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 24, 48, 60]}'
         )
-        server_args.append("--additional-config")
-        server_args.append('{"ascend_scheduler_config":{"enabled":true}}')
         server_args.append("--enforce-eager")
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

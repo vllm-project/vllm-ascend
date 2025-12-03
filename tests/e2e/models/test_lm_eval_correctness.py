@@ -39,10 +39,11 @@ def env_config() -> EnvConfig:
 def build_model_args(eval_config, tp_size):
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
+    dtype = eval_config.get("dtype", "auto")
     model_args = {
         "pretrained": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
-        "dtype": "auto",
+        "dtype": dtype,
         "trust_remote_code": trust_remote_code,
         "max_model_len": max_model_len,
     }

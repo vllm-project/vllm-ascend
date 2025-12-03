@@ -1,7 +1,6 @@
 import enum
 from typing import Optional
 
-import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -14,6 +13,7 @@ class SpecDcodeType(enum.Enum):
     EAGLE = 1
     EAGLE3 = 2
     MTP = 4
+    SUFFIX = 5
 
 
 class Proposer:
@@ -41,7 +41,7 @@ class Proposer:
         raise NotImplementedError
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[np.ndarray],
+                           valid_sampled_token_ids: list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
