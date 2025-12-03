@@ -459,7 +459,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                                            kv_cache=kv_cache,
                                            attn_metadata=attn_metadata,
                                            need_gather_q_kv=need_gather_q_kv)
-        attn_output = torch.ops.custom.npu_sparse_flash_attention(
+        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=k_nope,
             value=k_nope,
@@ -554,7 +554,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         seq_lens = attn_metadata.seq_lens
         cum_query_lens = attn_metadata.cum_query_lens
 
-        topk_indices = torch.ops.custom.npu_lightning_indexer(
+        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
             query=q,
             key=kv_cache[2],
             weights=weights,
