@@ -14,7 +14,6 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -190,10 +189,11 @@ class ACLGraphWrapper:
         return entry.output
 
 
-def update_attn_params(update_stream, forward_context, runtime_shape):
+def update_attn_params(update_stream, forward_context, runtime_shape,
+                       kv_transfer_config):
     graph_params = get_graph_params()
 
-    if has_kv_transfer_group():
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
                 graph_params.attn_params[runtime_shape],
