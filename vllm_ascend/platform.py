@@ -159,7 +159,8 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
-        compilation_config.pass_config.enable_fusion = False
+        compilation_config.pass_config.fuse_norm_quant = False
+        compilation_config.pass_config.fuse_act_quant = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -194,7 +195,7 @@ class NPUPlatform(Platform):
         # to ascend ops && hardwares. We update these sizes here to improve
         # default performance.
         update_default_aclgraph_sizes(vllm_config)
-        # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
+        # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
                 enable_sp(vllm_config):
