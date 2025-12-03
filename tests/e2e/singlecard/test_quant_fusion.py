@@ -29,7 +29,7 @@ from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 
 from vllm_ascend.compilation.compiler_interface import compile_fx
 from vllm_ascend.compilation.passes.quant_fusion_pass import \
-    AscendQuantFusionPass
+    AddRMSNormQuantFusionPass
 
 
 class TestModel(nn.Module):
@@ -81,14 +81,16 @@ class TestModel(nn.Module):
 class TestBackend:
     """
     A custom compilation backend for testing operator fusion passes.
-    It applies the AscendQuantFusionPass during graph compilation and
+    It applies the AddRMSNormQuantFusionPass during graph compilation and
     records the FX graph before and after the transformation.
     """
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
         compile_config = vllm_config.compilation_config
-        self.custom_passes = [AscendQuantFusionPass(vllm_config=vllm_config)]
+        self.custom_passes = [
+            AddRMSNormQuantFusionPass(vllm_config=vllm_config)
+        ]
         self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config["graph_fusion_manager"] = self.post_pass
 
@@ -184,7 +186,7 @@ class TestBackend:
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
+def test_rmsnorm_quant_fusion(dtype, hidden_size, num_tokens, eps):
     """
     End-to-end test for AddRMSNorm+Quantize fusion.
     Compares: Operator presence/absence before and after graph transformation

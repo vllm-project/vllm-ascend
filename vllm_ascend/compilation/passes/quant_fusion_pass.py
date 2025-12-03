@@ -42,7 +42,9 @@ class AddRMSNormQuantPattern:
 
     def register(self, pm_pass: PatternMatcherPass):
 
-        def pattern(rms_norm_input, residual, rms_norm_weight, scale, offset):
+        def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
+                    rms_norm_weight: torch.Tensor, scale: torch.Tensor,
+                    offset: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
             """
@@ -54,8 +56,9 @@ class AddRMSNormQuantPattern:
                 out0, scale, offset, torch.qint8, -1, False)
             return quantized_output, out1
 
-        def replacement(rms_norm_input, residual, rms_norm_weight, scale,
-                        offset):
+        def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
+                        rms_norm_weight: torch.Tensor, scale: torch.Tensor,
+                        offset: torch.Tensor):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
@@ -75,7 +78,7 @@ class AddRMSNormQuantPattern:
                                 pm.fwd_only, pm_pass)
 
 
-class AscendQuantFusionPass(VllmInductorPass):
+class AddRMSNormQuantFusionPass(VllmInductorPass):
     """
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
     """
@@ -99,7 +102,7 @@ class AscendQuantFusionPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
-        logging.info("Replaced %s patterns", self.matched_count)
+        logging.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
     def is_applicable(self, runtime_shape):

@@ -48,6 +48,6 @@ class GraphFusionPassManager:
             "ascend_compilation_config", {})
         if self.ascend_compilation_config.get("enable_quantization_fusion",
                                               True):
-            from .passes.quant_fusion_pass import AscendQuantFusionPass
-            self.passes.append(AscendQuantFusionPass(config))
+            from .passes.quant_fusion_pass import AddRMSNormQuantFusionPass
+            self.passes.append(AddRMSNormQuantFusionPass(config))
         # Add more passes here as needed
