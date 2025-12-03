@@ -922,7 +922,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         has_decode = attn_metadata.num_decodes > 0

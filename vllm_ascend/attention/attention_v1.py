@@ -362,8 +362,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              key: torch.Tensor,
                              value: torch.Tensor,
                              attn_metadata: AscendMetadata,
-                             output: torch.Tensor,
-                             num_tokens=0):
+                             output: torch.Tensor
+                             ) -> torch.Tensor:
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
@@ -606,7 +606,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor,
     ):
         forward_context: ForwardContext = get_forward_context()
         if not forward_context.capturing:
@@ -668,5 +668,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+        output = self.forward_impl(query, key, value, kv_cache, attn_metadata,
+                                   output)
         return output
