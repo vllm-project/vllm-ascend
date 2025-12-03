@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       # fixme: vllm-ascend install failed with 8.3.rc2 on github action
-      image: quay.io/ascend/python:3.11-ubuntu22.04
+      image: quay.io/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -116,6 +116,11 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          export TMPDIR=/mnt
+          sudo rm -f /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
