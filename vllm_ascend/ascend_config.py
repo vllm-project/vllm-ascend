@@ -44,6 +44,10 @@ class AscendConfig:
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
 
+        # Dump / PrecisionDebugger configuration
+        dump_config_path = additional_config.get("dump_config", None)
+        self.dump_config = DumpConfig(dump_config_path)
+
         weight_prefetch_config = additional_config.get(
             "weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(
@@ -68,6 +72,10 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        if self.enable_shared_expert_dp:
+            from vllm_ascend.utils import enable_sp
+            assert enable_sp(vllm_config=vllm_config,
+                             enable_shared_expert_dp=True)
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
         self.recompute_scheduler_enable = additional_config.get(
@@ -228,6 +236,18 @@ class AscendSchedulerConfig:
         for k, v in ascend_scheduler_config.items():
             if not hasattr(self, k):
                 setattr(self, k, v)
+
+
+class DumpConfig:
+    """
+    Configuration object for dump/PrecisionDebugger settings.
+    """
+
+    def __init__(self, dump_config_path: Optional[str] = None):
+        # enable_dump is True when dump_cfg exists and config_path is not empty
+        self.enable_dump: bool = bool(dump_config_path)
+        # Path to msprobe config json; may be None.
+        self.config_path: Optional[str] = dump_config_path
 
 
 class WeightPrefetchConfig:

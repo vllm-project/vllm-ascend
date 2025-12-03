@@ -25,13 +25,14 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.attention import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -74,12 +75,7 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
     TorchairAscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor, oproj_tp_enable, vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.attention import Attention
-else:
-    from vllm.attention.layer import MLAAttention
+from vllm_ascend.utils import dispose_tensor, oproj_tp_enable
 
 
 class Indexer(nn.Module):
@@ -496,8 +492,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         v_head_dim: int,
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -522,7 +516,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.first_k_dense_replace = config.first_k_dense_replace
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.prefix = prefix
@@ -596,17 +589,17 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
 
-        if rope_scaling:
-            rope_scaling["rope_type"] = 'deepseek_yarn'
+        if config.rope_parameters["rope_type"] != "default":
+            config.rope_parameters["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
                                    max_position=max_position_embeddings,
-                                   base=rope_theta,
-                                   rope_scaling=rope_scaling,
+                                   rope_parameters=config.rope_parameters,
                                    is_neox_style=False)
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
+        if config.rope_parameters["rope_type"] != "default":
+            mscale_all_dim = config.rope_parameters.get(
+                "mscale_all_dim", False)
+            scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
@@ -616,67 +609,31 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
         # i.e.
         #     kv_lora_rank + qk_rope_head_dim == head_size
-        if vllm_version_is("0.11.0"):
-            self.mla_attn = Attention(
-                num_heads=self.num_local_heads,
-                head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-                scale=self.scaling,
-                num_kv_heads=1,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                use_mla=True,
-                use_sparse=False,
-                indexer=None,
-                # SFA Args
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                qk_head_dim=self.qk_head_dim,
-                v_head_dim=self.v_head_dim,
-                rotary_emb=self.rotary_emb,
-                q_a_proj=self.q_a_proj
-                if self.q_lora_rank is not None else None,
-                q_a_layernorm=self.q_a_layernorm
-                if self.q_lora_rank is not None else None,
-                q_proj=self.q_proj
-                if self.q_lora_rank is None else self.q_b_proj,
-                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-                kv_a_layernorm=self.kv_a_layernorm,
-                kv_b_proj=self.kv_b_proj,
-                o_proj=self.o_proj,
-                decoder_layer=decoder_layer,
-            )
-        else:
-            self.mla_attn = MLAAttention(
-                num_heads=self.num_local_heads,
-                scale=self.scaling,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                use_sparse=False,
-                indexer=None,
-                # MLA Args
-                rotary_emb=self.rotary_emb,
-                q_a_proj=self.q_a_proj
-                if self.q_lora_rank is not None else None,
-                q_a_layernorm=self.q_a_layernorm
-                if self.q_lora_rank is not None else None,
-                q_proj=self.q_proj
-                if self.q_lora_rank is None else self.q_b_proj,
-                q_b_proj=self.q_b_proj
-                if self.q_lora_rank is not None else None,
-                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-                kv_a_layernorm=self.kv_a_layernorm,
-                kv_b_proj=self.kv_b_proj,
-                o_proj=self.o_proj,
-            )
+        self.mla_attn = MLAAttention(
+            num_heads=self.num_local_heads,
+            scale=self.scaling,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_sparse=False,
+            indexer=None,
+            # MLA Args
+            rotary_emb=self.rotary_emb,
+            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
+            q_a_layernorm=self.q_a_layernorm
+            if self.q_lora_rank is not None else None,
+            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
+            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+            kv_a_layernorm=self.kv_a_layernorm,
+            kv_b_proj=self.kv_b_proj,
+            o_proj=self.o_proj,
+        )
 
     def forward(
             self,
@@ -748,8 +705,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         v_head_dim: int,
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -774,7 +729,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         self.first_k_dense_replace = config.first_k_dense_replace
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.prefix = prefix
@@ -854,17 +808,19 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 return_bias=False,
             )
 
-        if rope_scaling:
-            rope_scaling["rope_type"] = 'deepseek_yarn'
-        self.rotary_emb = get_rope(qk_rope_head_dim,
-                                   rotary_dim=qk_rope_head_dim,
-                                   max_position=max_position_embeddings,
-                                   base=rope_theta,
-                                   rope_scaling=rope_scaling,
-                                   is_neox_style=False)
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
+        if config.rope_parameters["rope_type"] != "default":
+            config.rope_parameters["rope_type"] = "deepseek_yarn"
+        self.rotary_emb = get_rope(
+            qk_rope_head_dim,
+            rotary_dim=qk_rope_head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+            is_neox_style=False,
+        )
+        if config.rope_parameters["rope_type"] != "default":
+            mscale_all_dim = config.rope_parameters.get(
+                "mscale_all_dim", False)
+            scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
@@ -882,66 +838,30 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             index_topk=self.index_topk,
             prefix=f"{prefix}.indexer",
         )
-
-        if vllm_version_is("0.11.0"):
-            self.sfa_attn = Attention(
-                num_heads=self.num_local_heads,
-                head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-                scale=self.scaling,
-                num_kv_heads=1,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                use_mla=True,
-                use_sparse=True,
-                indexer=self.indexer,
-                # SFA Args
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                qk_head_dim=self.qk_head_dim,
-                v_head_dim=self.v_head_dim,
-                rotary_emb=self.rotary_emb,
-                q_a_proj=self.q_a_proj
-                if self.q_lora_rank is not None else None,
-                q_a_layernorm=self.q_a_layernorm
-                if self.q_lora_rank is not None else None,
-                q_proj=self.q_proj
-                if self.q_lora_rank is None else self.q_b_proj,
-                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-                kv_a_layernorm=self.kv_a_layernorm,
-                kv_b_proj=self.kv_b_proj,
-                o_proj=self.o_proj,
-                decoder_layer=decoder_layer,
-            )
-        else:
-            self.sfa_attn = MLAAttention(
-                num_heads=self.num_local_heads,
-                scale=self.scaling,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                use_sparse=True,
-                indexer=self.indexer,
-                # MLA Args
-                rotary_emb=self.rotary_emb,
-                q_a_proj=self.q_a_proj
-                if self.q_lora_rank is not None else None,
-                q_a_layernorm=self.q_a_layernorm
-                if self.q_lora_rank is not None else None,
-                q_proj=self.q_proj
-                if self.q_lora_rank is None else self.q_b_proj,
-                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-                kv_a_layernorm=self.kv_a_layernorm,
-                kv_b_proj=self.kv_b_proj,
-                o_proj=self.o_proj,
-            )
+        self.sfa_attn = MLAAttention(
+            num_heads=self.num_local_heads,
+            scale=self.scaling,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_sparse=True,
+            indexer=self.indexer,
+            # MLA Args
+            rotary_emb=self.rotary_emb,
+            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
+            q_a_layernorm=self.q_a_layernorm
+            if self.q_lora_rank is not None else None,
+            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+            kv_a_layernorm=self.kv_a_layernorm,
+            kv_b_proj=self.kv_b_proj,
+            o_proj=self.o_proj,
+        )
 
     def forward(
             self,
@@ -997,8 +917,6 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # DecoderLayers are created with `make_layers` which passes the prefix
@@ -1031,8 +949,6 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             q_lora_rank=config.q_lora_rank
             if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -1235,7 +1151,7 @@ class TorchairDeepseekV2Model(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -1251,7 +1167,7 @@ class TorchairDeepseekV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None

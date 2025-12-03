@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
@@ -19,14 +20,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import cdiv, round_down
-else:
-    from vllm.utils.math_utils import cdiv, round_down
-
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend import envs
@@ -38,6 +32,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               get_mtp_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
@@ -231,7 +226,7 @@ class AscendMLAMetadataBuilder:
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -337,6 +332,74 @@ class AscendMLAMetadataBuilder:
         # better way of doing this
         return modified_batch
 
+    def pad_actual_seq_len_q_mtp_enable_pad(self, num_reqs_pad_size, num_reqs,
+                                            actual_seq_lengths_q,
+                                            common_attn_metadata):
+        """
+        Pads actual_seq_lengths_q evenly to not exceed 16 tokens per request 
+        in order to meet the requirement of npu_fused_infer_attention_score.
+
+        In Torchair scenario, the lengths of the queries must be padded to the same length.
+        And npu_fused_infer_attention_score constraint requires the last element must equal to batch_size(num_tokens).
+
+        For example:
+        batch_size=36, num_reqs_pad_size=2, num_reqs=16
+        By default, each request should have inference 2 token, which means actual_seq_lengths_q should be 
+        [2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36].
+
+        However, mtp torchair + PD scenario, the actual_seq_lengths_q may be 
+        [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16] before padding, since the first decode request only has 1 token.
+        In order to meet the requirement of npu_fused_infer_attention_score, we need to pad actual_seq_lengths_q evenly to not exceed 16 tokens per request.
+        after padding actual_seq_lengths_q should be similar to [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,32,36]
+        """
+        FIA_SEQ_LEN_LIMIT = 16
+        need_padding = num_reqs_pad_size != 0 and \
+            len(common_attn_metadata.actual_seq_lengths_q) > num_reqs and \
+            common_attn_metadata.actual_seq_lengths_q[num_reqs] - actual_seq_lengths_q[-1] > FIA_SEQ_LEN_LIMIT
+        if need_padding:
+            padding_seq_len_q = common_attn_metadata.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+            start_val = actual_seq_lengths_q[-1]
+            end_val = padding_seq_len_q[-1]
+
+            num_step = len(padding_seq_len_q)
+            interpolated = np.round(
+                np.linspace(start_val, end_val,
+                            num_step + 1)[1:]).astype(int).tolist()
+            assert interpolated[-1] == end_val
+            assert len(interpolated) == len(padding_seq_len_q)
+            actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+        else:
+            actual_seq_lengths_q = actual_seq_lengths_q + common_attn_metadata.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+
+        return actual_seq_lengths_q
+
+    def pad_actual_seq_len_q_mtp_disable_pad(self, num_reqs_pad_size, num_reqs,
+                                             actual_seq_lengths_q):
+        """
+        Only use for acl full graph mode.
+        Pad the last element of the actual_seq_lengths_q equal to the TND(T) and
+        the num of dimensions equal to the batch_size of main model.
+        
+        For example:
+        batch_size = 8, num_reqs = 4, num_speculative_tokens = 1
+        input actual_seq_lengths_q = [1, 2, 4, 5]  (the 3rd req was accept a token)
+        After padding the actual_seq_lengths_q will be similar to [1, 2, 4, 5, 6, 6, 7, 8]
+        """
+        need_padding = num_reqs_pad_size > 0
+        if need_padding:
+            start_val = actual_seq_lengths_q[-1]
+            end_val = num_reqs + num_reqs_pad_size
+            num_step = num_reqs_pad_size
+            interpolated = np.round(
+                np.linspace(start_val, end_val,
+                            num_step + 1)[1:]).astype(int).tolist()
+            assert interpolated[-1] == end_val
+            assert len(interpolated) == num_reqs_pad_size
+            actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+        return actual_seq_lengths_q
+
     def build(
         self,
         common_prefix_len: int,
@@ -362,17 +425,25 @@ class AscendMLAMetadataBuilder:
         # it blocks on all previous kernels.
         device = self.device
 
-        block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
+        # If graph_pad_size > -1, mean is running in fullgraph mode.
+        graph_pad_size = common_attn_metadata.graph_pad_size
+        # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
+        if graph_pad_size > num_reqs and self.speculative_config.disable_padded_drafter_batch:
+            block_table = (
+                common_attn_metadata.block_table_tensor[:graph_pad_size])
+        else:
+            block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
+        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         if self.pcp_size > 1:
             num_decodes_flatten = num_decodes * self.decode_threshold
             block_table = common_attn_metadata.block_table_tensor[:
                                                                   num_decodes_flatten
                                                                   +
                                                                   num_prefills]
-
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
 
+        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
         input_positions = common_attn_metadata.positions[:
@@ -565,6 +636,11 @@ class AscendMLAMetadataBuilder:
                 block_table = block_table[:num_decodes_flatten, ...]
             else:
                 block_table = block_table[:num_decodes, ...]
+            # NOTE: Currently, MTP-fullgraph is incompatibility pcp
+            # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
+            if graph_pad_size > num_decodes and \
+                    self.speculative_config.disable_padded_drafter_batch:
+                block_table = block_table[:graph_pad_size, ...]
             seq_lens_list = seq_lens.tolist()
 
             if num_computed_tokens_of_pcp_dcp is not None:
@@ -585,6 +661,52 @@ class AscendMLAMetadataBuilder:
                 cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
             else:
                 cp_seq_len, batch_seq_mask = None, None
+
+            if graph_pad_size > num_reqs:
+                if self.speculative_config.disable_padded_drafter_batch:
+                    num_reqs_pad_size = graph_pad_size - num_reqs
+                    actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_disable_pad(
+                        num_reqs_pad_size, num_reqs, actual_seq_lengths_q)
+                    seq_lens_list = seq_lens_list + [0] * (graph_pad_size - \
+                                                           num_decodes)
+                    num_block_pad_size = graph_pad_size - block_table.shape[0]
+                    if num_block_pad_size > 0:
+                        block_table_padding = torch.zeros(
+                            (num_block_pad_size, ) + block_table.shape[1:],
+                            dtype=block_table.dtype,
+                            device=block_table.device)
+                        block_table = torch.cat(
+                            [block_table, block_table_padding], dim=0)
+                else:
+                    num_token_pad_size = graph_pad_size - num_decode_tokens
+                    num_reqs_pad_size = (
+                        graph_pad_size //
+                        common_attn_metadata.decode_token_per_req - num_reqs)
+                    num_block_table_pad_size = (
+                        graph_pad_size //
+                        common_attn_metadata.decode_token_per_req -
+                        num_decodes)
+                    seq_lens_list = seq_lens.tolist() + [0] * num_reqs_pad_size
+                    slot_padding = torch.full((num_token_pad_size, ),
+                                              PAD_SLOT_ID,
+                                              dtype=slot_mapping.dtype,
+                                              device=slot_mapping.device)
+                    slot_mapping = torch.cat([slot_mapping, slot_padding])
+                    block_table_padding = torch.zeros(
+                        (num_block_table_pad_size, ) + block_table.shape[1:],
+                        dtype=block_table.dtype,
+                        device=block_table.device)
+                    block_table = torch.cat([block_table, block_table_padding],
+                                            dim=0)
+                    position_padding = torch.zeros(
+                        num_token_pad_size,
+                        dtype=input_positions.dtype,
+                        device=input_positions.device)
+                    input_positions = torch.cat(
+                        [input_positions, position_padding])
+                    actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
+                        num_reqs_pad_size, num_reqs, actual_seq_lengths_q,
+                        common_attn_metadata)
 
             # TODO: After the fullgraph supports MTP, the if branch needs to deleted
             assert self.cos_cache is not None
@@ -765,15 +887,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         ).device_group if self.tp_size > 1 else None
 
     def _v_up_proj(self, x):
-        if self.W_UV.shape[0] * self.W_UV.shape[
-                1] < 65536 and not self.dcp_size * self.pcp_size > 1:
+        if x.dtype in [torch.float16, torch.bfloat16] \
+                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
+                and not self.dcp_size * self.pcp_size > 1:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
-            x = torch_npu.npu_transpose_batchmatmul(x,
-                                                    self.W_UV,
-                                                    perm_x1=[1, 0, 2],
-                                                    perm_x2=[0, 1, 2],
-                                                    perm_y=[1, 0, 2])
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            b, _, _ = x.shape
+            res = torch.empty((b, self.num_heads, self.v_head_dim),
+                              dtype=x.dtype,
+                              device=x.device)
+            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
+            x = res.reshape(-1, self.num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
             x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -801,8 +924,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
+                try:
                     return getattr(layer, attr)
+                except AttributeError:
+                    pass
             raise AttributeError(
                 f"Layer '{layer}' has no recognized weight attribute:"
                 f" {WEIGHT_NAMES}.")
@@ -1267,8 +1392,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths,
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
-        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
+        if forward_context.is_mtp_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
         if forward_context.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -1549,6 +1677,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if (self.enable_mlapo and
             (attn_metadata is None or not forward_context.with_prefill)):
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
                 hidden_states, kv_cache, attn_metadata)
         else:

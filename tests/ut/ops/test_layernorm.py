@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -7,6 +8,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 from tests.ut.base import PytestBase
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.utils import AscendDeviceType
 
 
 def mock_rms_norm(x, weight, eps):
@@ -41,7 +43,9 @@ class TestAscendRMSNorm(PytestBase):
     # Test case for the most common and basic scenario
     @pytest.mark.parametrize(
         "residual", [None, torch.randn(4, 8, dtype=torch.float16)])
-    def test_forward_oot_basic(self, residual):
+    @patch("torch.ops.vllm.maybe_chunk_residual")
+    def test_forward_oot_basic(self, mock_maybe_chunk_residual, residual):
+        mock_maybe_chunk_residual.side_effect = lambda x, residual: residual
         layer = RMSNorm(hidden_size=8, eps=1e-05)
         x = torch.randn(4, 8, dtype=torch.float16)
         if residual is not None:
@@ -60,8 +64,9 @@ class TestAscendRMSNorm(PytestBase):
 
     # Test case for addrmsnorm + w8a8 quant fusion
     def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
-        mock_is_310p = mocker.patch("vllm_ascend.utils.is_310p")
-        mock_is_310p.return_value = False
+        mock_soc_version = mocker.patch(
+            "vllm_ascend.utils.get_ascend_device_type")
+        mock_soc_version.return_value = AscendDeviceType._910_93
         mock_get_forward_context = mocker.patch(
             "vllm_ascend.ops.layernorm.get_forward_context")
 
@@ -105,6 +110,8 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.num_hidden_layers = num_hidden_layers
         mock_forward_context.fusion_linear = "gate_up_dense"
         mock_forward_context.weight_prefetch_method = None
+        mocker.patch("torch.ops.vllm.maybe_chunk_residual",
+                     lambda x, residual: residual)
 
         # Ensure fusion and layer_idx increment are handled correctly
         x = torch.randn(4, 8, dtype=torch.float16)

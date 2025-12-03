@@ -51,11 +51,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: v0.11.0
+          - vllm_branch: 86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24
             vllm_ascend_branch: main
       max-parallel: 1
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
@@ -95,12 +95,12 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.0
         with:
           fetch-depth: 0
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.0
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty

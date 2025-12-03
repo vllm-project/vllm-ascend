@@ -67,8 +67,6 @@ class AttentionMaskBuilder:
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype,
                       device: torch.device):
-        if max_seq_len == 2048:
-            return self.chunked_prefill_attn_mask.to(torch.bool)
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(device, non_blocking=True)

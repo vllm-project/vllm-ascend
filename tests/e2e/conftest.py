@@ -40,11 +40,12 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
-from vllm.config.model import TaskOption, _get_and_verify_dtype
+from vllm.config.model import _get_and_verify_dtype
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
@@ -54,12 +55,6 @@ from vllm_ascend.ascend_config import clear_ascend_config
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
 from vllm_ascend.utils import adapt_patch  # noqa E402
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_open_port
-else:
-    from vllm.utils.network_utils import get_open_port
 
 adapt_patch(True)
 adapt_patch(False)
@@ -275,7 +270,7 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
-        task: TaskOption = "auto",
+        runner: str = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
         # Use smaller max model length, otherwise bigger model cannot run due
@@ -285,7 +280,7 @@ class VllmRunner:
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
-        enable_chunked_prefill: bool = False,
+        enable_chunked_prefill: bool = True,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         quantization: Optional[str] = None,
@@ -293,7 +288,7 @@ class VllmRunner:
     ) -> None:
         self.model = LLM(
             model=model_name,
-            task=task,
+            runner=runner,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
