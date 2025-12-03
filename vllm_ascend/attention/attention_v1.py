@@ -172,11 +172,10 @@ class AscendMetadata:
     # and 1st slot in block 1, respectively.
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
-
-    from vllm_ascend.attention.attention_cp import (AscendMetadataForDecode,
-                                                    AscendMetadataForPrefill)
-    prefill: Optional[AscendMetadataForPrefill] = None
-    decode_meta: Optional[AscendMetadataForDecode] = None
+    # for pcp
+    prefill = None
+    # for dcp
+    decode_meta = None
 
 
 class AscendAttentionMetadataBuilder:
