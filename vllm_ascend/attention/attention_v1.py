@@ -521,6 +521,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_block, block_size, -1)
             value = self.value_cache.view(  # type: ignore
                 num_block, block_size, -1)
+            actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        # chunked_prefill.
+        else:
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            block_table = attn_metadata.block_tables
+            actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
