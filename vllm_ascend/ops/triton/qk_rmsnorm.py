@@ -18,8 +18,7 @@
 from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 MAX_CORES = 65535
 
@@ -218,7 +217,6 @@ def qk_rmsnorm_triton(
             v_output,
             q_weight,
             k_weight,
-            bs,
             total_hidden_size,
             eps,
             num_heads,
@@ -236,7 +234,6 @@ def qk_rmsnorm_triton(
             v_output,
             q_weight,
             k_weight,
-            bs,
             total_hidden_size,
             eps,
             num_heads,
