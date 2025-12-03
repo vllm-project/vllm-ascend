@@ -85,7 +85,14 @@ jobs:
     strategy:
       matrix:
         vllm_version: [86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24]
+        
     steps:
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
       - name: Install packages
         run: |
           apt-get update -y
@@ -109,6 +116,11 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          export TMPDIR=/mnt
+          rm -f /usr/share/dotnet
+          rm -rf /opt/ghc
+          rm -rf "/usr/local/share/boost"
+          rm -rf "$AGENT_TOOLSDIRECTORY"
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
