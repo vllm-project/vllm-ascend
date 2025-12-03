@@ -17,6 +17,7 @@
 
 import torch
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+
 from vllm_ascend.ops.triton.qk_rmsnorm import qk_rmsnorm_triton
 
 
