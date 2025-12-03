@@ -7,7 +7,7 @@
 # and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # mypy: ignore-errors
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -72,6 +72,7 @@ def causal_conv1d_fn(
     conv_states: Optional[torch.Tensor] = None,
     activation: Optional[str] = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    metadata: Optional[Any] = None,
 ):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
