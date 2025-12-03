@@ -206,7 +206,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             if self.connector_name == "camconnector":
                 max_num_tokens = self.max_num_tokens * self.attn_size * (cam_afdconnector_data.moe_expert_num // self.ffn_size) * (self.attn_size // self.ffn_size)
             else:
-                max_num_tokens = self.max_num_tokens * 8 *2 # 64
+                max_num_tokens = self.max_num_tokens * self.topk * self.attn_size # 64
             self.cudagraph_batch_sizes.append(max_num_tokens)
             num_tokens = hidden_states.shape[0]
             acl_graph_info = self._find_cuda_graph(current_layer_idx,
