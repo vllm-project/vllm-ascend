@@ -86,7 +86,7 @@ jobs:
             tests: tests/e2e/nightly/ops
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.11.2
+      vllm: 86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
@@ -114,6 +114,15 @@ jobs:
               - Qwen3-VL-8B-Instruct
               - Qwen2.5-Omni-7B
               - Meta-Llama-3.1-8B-Instruct
+          - os: linux-aarch64-a2-1
+            model_list:
+              - ERNIE-4.5-21B-A3B-PT
+              - gemma-2-9b-it
+              - gemma-3-4b-it
+              - internlm-7b
+              - InternVL3_5-8B-hf
+              - llava-1.5-7b-hf
+              - Molmo-7B-D-0924
           - os: linux-aarch64-a2-2
             model_list:
               - Qwen3-30B-A3B
@@ -125,8 +134,8 @@ jobs:
               - Qwen3-Next-80B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: v0.11.2
+      vllm: 86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11'
       upload: false

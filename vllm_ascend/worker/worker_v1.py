@@ -49,6 +49,7 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
                                prefill_context_parallel_enable,
@@ -92,21 +93,6 @@ class NPUWorker(WorkerBase):
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         check_ascend_device_type()
-        use_sparse = False
-        if vllm_config.model_config is not None:
-            use_sparse = hasattr(vllm_config.model_config.hf_config,
-                                 "index_topk")
-        if use_sparse:
-            # Direct import instead of using try_register_lib to ensure proper error handling when
-            # custom_ops is necessary but not available (e.g., in DeepSeek v3.2 deployments)
-            # yapf: disable
-            import custom_ops  # type: ignore # noqa
-
-            # yapf: enable
-            logger.info(
-                "custom_ops module loaded successfully. Custom operators like "
-                "torch.ops.custom.npu_sparse_flash_attention are now available."
-            )
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -208,18 +194,26 @@ class NPUWorker(WorkerBase):
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
 
-        visible_device_count = (torch.npu.device_count()
-                                if torch.npu.is_available() else 0)
-        assert self.parallel_config.local_world_size <= visible_device_count, (
-            f"local_world_size ({self.parallel_config.local_world_size}) must be "
-            f"less than or equal to the number of visible devices "
-            f"({visible_device_count}).")
+        if (self.parallel_config.data_parallel_size > 1
+                and self.parallel_config.data_parallel_size_local > 0
+                and self.parallel_config.distributed_executor_backend
+                not in ["ray", "external_launcher"] and
+                self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1):
+            visible_device_count = (torch.npu.device_count()
+                                    if torch.npu.is_available() else 0)
+            assert self.parallel_config.local_world_size <= visible_device_count, (
+                f"local_world_size ({self.parallel_config.local_world_size}) must "
+                f"be less than or equal to the number of visible devices "
+                f"({visible_device_count}).")
 
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
         NPUPlatform.seed_everything(self.model_config.seed)
+        # Initialize device properties used by triton kernels.
+        init_device_properties_triton()
         return device
 
     def init_device(self):
@@ -362,6 +356,9 @@ class NPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
+        return None
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
