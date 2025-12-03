@@ -1,77 +1,27 @@
-# Qwen2.5-7B-Instruct Deployment and Verification Guide
+# Qwen2.5-Instruct Deployment and Verification Guide
 
 ## Introduction
 
-Qwen2.5-7B-Instruct is a 7-billion-parameter large language model pre-trained on 18 trillion tokens. It supports a maximum context window of 128K, enables generation of up to 8K tokens, and delivers enhanced capabilities in multilingual processing, instruction following, programming, mathematical computation, and structured data handling.
+Qwen2.5-Instruct is the flagship instruction-tuned variant of Alibaba Cloud’s Qwen 2.5 LLM series. It supports a maximum context window of 128K, enables generation of up to 8K tokens, and delivers enhanced capabilities in multilingual processing, instruction following, programming, mathematical computation, and structured data handling.
 
 This document details the complete deployment and verification workflow for the model, including supported features, environment preparation, single-node deployment, functional verification, accuracy and performance evaluation, and troubleshooting of common issues. It is designed to help users quickly complete model deployment and validation.
 
 ## Supported Features
 
-Qwen2.5-7B-Instruct offers the following core capabilities:
-- **Multilingual Support**: Compatible with over 29 languages (Chinese, English, French, Spanish, Russian, Japanese, etc.).
-- **Instruction Following**: Optimized through instruction tuning to accurately understand and execute user commands.
-- **Programming & Mathematical Proficiency**: Delivers excellent performance on benchmarks such as HumanEval (programming) and MATH (mathematics).
-- **Structured Data Handling**: Enhanced ability to process and generate structured data (e.g., tables, JSON formats).
-- **Long Context Processing**: Supports a maximum context length of 128K for efficient handling of ultra-long text sequences.
+Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
 ### Model Weight
+- `Qwen2.5-Instruct`(BF16 version): require 2 910B4 (32G × 2) nodes. [Qwen2.5-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-Instruct)
 
-Qwen2.5-7B-Instruct model weights can be downloaded from the official ModelScope repository (Note: Corrected from VL version to the correct language model link):
-- [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
+It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-Instruct/`) for quick access during deployment.
 
-It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment.
+### Verify Multi-node Communication(Optional)
 
-### Hardware and System Requirements
-
-| Component | Specification |
-|-----------|---------------|
-| Hardware Platform | 910B4 (8 cards × 32GB) |
-| Operating System | Ubuntu 22.04 (Corrected from non-official 22.03 version) |
-| Driver Version | 25.0.rc1.1 |
-| Python Version | 3.12 |
-
-### Software Dependencies
-
-| Component | Version Requirement | Notes |
-|-----------|---------------------|-------|
-| CANN      | 8.2.RC1             | Ascend Computing Architecture Dependency |
-| PyTorch   | 2.5.1.post0         | Base Deep Learning Framework |
-| torch-npu | 2.7.1rc1            | Ascend-adapted version |
-| vLLM      | 0.9.1               | Must match vLLM-Ascend version |
-| vLLM-Ascend | 0.9.1-dev        | Ascend-optimized version |
-
-### Environment Check and Verification
-
-Verify hardware status and network connectivity before installation:
-```bash
-# Check NPU device status
-npu-smi info
-
-# Verify network interface and connectivity
-for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-for i in {0..15}; do hccn_tool -i $i -link -g; done
-for i in {0..15}; do hccn_tool -i $i -net_health -g; done
-
-# Check IP configuration
-for i in {0..15}; do hccn_tool -i $i -ip -g; done
-```
-
-### Container Environment Setup
-
-Create a privileged container to isolate the deployment environment:
-```bash
-docker run -it --privileged --name=test_vllm_Qwen_2.5_7B --net=host --shm-size=500g \
---device=/dev/davinci{0..15} \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /home/:/home \
--w /home/<name> \
-mindie:dev-2.2.RC1.B070-800I-A2-py312-ubuntu22.03-x86_64 \
-/bin/bash
-```
-Replace `<name>` with your actual username.
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
 
 ### Installation
 
@@ -147,9 +97,9 @@ For detailed installation instructions, refer to the [AISBench Official Document
 
 ### Single-node Deployment
 
-Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
+Qwen2.5-Instruct supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
 
-1. Prepare model weights: Ensure the downloaded model weights are stored in the `./Qwen2.5-7B-Instruct/` directory.
+1. Prepare model weights: Ensure the downloaded model weights are stored in the `./Qwen2.5-Instruct/` directory.
 2. Download the gsm8k dataset (for evaluation): [gsm8k.zip](https://vision-file-storage/api/file/download/attachment-v2/WIKI202511118986704/32978033/20251111T144846Z_9658c67a0fb349f9be081ab9ab9fd2bc.zip?attachment_id=32978033)
 3. Create and execute the deployment script (save as `deploy.sh`):
 
@@ -164,7 +114,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
 # Start vLLM inference service
-vllm serve ./Qwen2.5-7B-Instruct/ \
+vllm serve ./Qwen2.5-Instruct/ \
           --host <IP> \          # Replace with server IP (e.g., 0.0.0.0 for all interfaces)
           --port <Port> \        # Replace with available port (e.g., 8080)
           --served-model-name qwen-2.5-7b-instruct \  # Standardized model name for consistency
@@ -184,7 +134,7 @@ This document currently focuses on single-node deployment. For multi-node deploy
 
 ### Prefill-Decode Disaggregation
 
-This feature is not supported at this time.
+Not supported yet.
 
 ## Functional Verification
 
@@ -203,7 +153,7 @@ curl http://<IP>:<Port>/v1/completions \
 
 A valid response (e.g., `"Beijing is a vibrant and historic capital city"`) indicates successful deployment.
 
-### Supplementary Verification Method (New)
+### Supplementary Verification Method
 If `curl` verification fails, use this Python script:
 ```python
 import requests
@@ -288,7 +238,7 @@ dict(
     attr="local",  # Change from "service" to "local"
     type=VLLMCustomAPIChat,
     abbr='vllm-api-general-chat',
-    path="./Qwen2.5-7B-Instruct/",  # Path to local model weights
+    path="./Qwen2.5-Instruct/",  # Path to local model weights
     model="qwen-2.5-7b-instruct",
     # ... (other parameters remain unchanged)
 )
@@ -313,7 +263,7 @@ vLLM includes a built-in benchmark tool for evaluating throughput and latency. E
 ```bash
 export VLLM_USE_MODELSCOPE=true
 vllm bench serve \
-  --model ./Qwen2.5-7B-Instruct/ \
+  --model ./Qwen2.5-Instruct/ \
   --dataset-name random \
   --random-input 200 \
   --num-prompt 200 \
