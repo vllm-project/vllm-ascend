@@ -16,6 +16,7 @@ multi_npu_moge
 multi_npu_qwen3_moe
 multi_npu_quantization
 single_node_300i
+DeepSeek-R1.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2-Exp.md
 Qwen3-235B-A22B.md
