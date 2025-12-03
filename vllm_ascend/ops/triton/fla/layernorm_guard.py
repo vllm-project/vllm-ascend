@@ -8,6 +8,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 MAX_CORES = 65535
 UNIFIED_BUFFER_SIZE = 1572864
@@ -104,9 +105,7 @@ def layer_norm_fwd(
     # Assume large M
     HEURISTIC_FACTOR = 56
     SUB_BLOCK_M = triton.next_power_of_2(triton.cdiv(UNIFIED_BUFFER_SIZE, HEURISTIC_FACTOR * N) // x.element_size()) // 2
-    import triton.runtime.driver as driver
-    device = torch.npu.current_device()
-    num_cores = driver.active.utils.get_device_properties(device)["num_vectorcore"]
+    num_cores = get_vectorcore_num()
     BLOCK_M = max(triton.next_power_of_2(triton.cdiv(triton.cdiv(M, SUB_BLOCK_M), num_cores)) * SUB_BLOCK_M, SUB_BLOCK_M)
 
     # heuristics for number of warps
