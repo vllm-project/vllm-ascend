@@ -23,7 +23,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner,graph_capture
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm.distributed.afd_transfer.afd_connector.metadata import (
-    AFDConnectorMetadata, FFNNeedForwardData, M2NAFDConnectorMetadata)
+    AFDConnectorMetadata, FFNNeedForwardData, M2NAFDConnectorMetadata, CAMAFDConnectorMetadata)
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -142,7 +142,11 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             torch.npu.synchronize()
             if self.use_aclgraph:
                 # replay
-                acl_graph_info = self._acl_graphs_full.get(self.max_num_tokens * self.topk * self.attn_size)
+                if self.connector_name == "camconnector":
+                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size) * (self.attn_size // self.ffn_size)
+                else:
+                    max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
+                acl_graph_info = self._acl_graphs_full.get(max_num_tokens)
                 graph = acl_graph_info['graph']
                 graph.replay()
                 self.replay_cnt += 1
@@ -169,8 +173,18 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 print(f'group_list shape is {group_list.shape},dtype is {group_list.dtype}')
                 print(f'topk_weights shape is {topk_weights.shape},dtype is {topk_weights.dtype}')
             elif self.connector_name == "camconnector":
-                output1,afdConnectorMetadata = self.connector.recv_attn_output()
-                current_layer_idx = afdConnectorMetadata.layer_idx
+                cam_afdconnector_data = CAMAFDConnectorMetadata(
+                    moe_expert_num = 64,
+                    shared_expert_num = 0,
+                    scale = None,
+                    handle = None,
+                    quant_mode = 0,
+                    aiv_num = 48,
+                    batch_size = self.max_num_tokens,
+                    h = 2048,
+                    k = 8
+                )
+                output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data)
                 hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
                 group_list = expertTokenNums.to(torch.int64)
                 topk_weights = simulateExpertScales
@@ -189,7 +203,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             # Try to use ACL graph if available
             # TODO(yxj):move layer
             # 先做成通信不如图的版本
-            max_num_tokens = self.max_num_tokens * 8 *2 # 64
+            if self.connector_name == "camconnector":
+                max_num_tokens = self.max_num_tokens * self.attn_size * (cam_afdconnector_data.moe_expert_num // self.ffn_size) * (self.attn_size // self.ffn_size)
+            else:
+                max_num_tokens = self.max_num_tokens * 8 *2 # 64
             self.cudagraph_batch_sizes.append(max_num_tokens)
             num_tokens = hidden_states.shape[0]
             acl_graph_info = self._find_cuda_graph(current_layer_idx,
@@ -286,8 +303,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
 
             if self.connector_name == "camconnector":
                 handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
-                afdConnectorMetadata.cam_afdconnector_data.handle = handle
-                self.connector.send_ffn_output(rank_ffn_output, afdConnectorMetadata)
+                cam_afdconnector_data.handle = handle
+                self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
             elif self.connector_name == "m2nconnector":
                 self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
                 print(f'send_ffn_output success ,layer id is {current_layer_idx}')
@@ -584,6 +601,22 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 # print(f'recv_attn_output success ,layer id is {layer_idx}')
                 m2n_afdconnector_data.handle = handle
                 m2n_afdconnector_data.topk_weights = topk_weights
+            elif self.connector_name == "camconnector":
+                cam_afdconnector_data = CAMAFDConnectorMetadata(
+                    moe_expert_num = 64,
+                    shared_expert_num = 0,
+                    scale = None,
+                    handle = None,
+                    quant_mode = 0,
+                    aiv_num = 48,
+                    batch_size = self.max_num_tokens,
+                    h = 2048,
+                    k = 8
+                )
+                output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data)
+                hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
+                group_list = expertTokenNums.to(torch.int64)
+                topk_weights = simulateExpertScales
                 # compute
             with set_ascend_forward_context(
                     attn_metadata=None,
@@ -601,7 +634,12 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                                                 topk_weights=topk_weights
                                                )
                 # send
-                self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
+                if self.connector_name == "m2nconnector":
+                    self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
+                elif self.connector_name == "camconnector":
+                    handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
+                    cam_afdconnector_data.handle = handle
+                    self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
                 # print(f'send_ffn_output success ,layer id is {layer_idx}')
         return rank_ffn_output
   
@@ -650,6 +688,22 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
                 m2n_afdconnector_data.handle = handle
                 m2n_afdconnector_data.topk_weights = topk_weights
+            elif self.connector_name == "camconnector":
+                cam_afdconnector_data = CAMAFDConnectorMetadata(
+                    moe_expert_num = 64,
+                    shared_expert_num = 0,
+                    scale = None,
+                    handle = None,
+                    quant_mode = 0,
+                    aiv_num = 48,
+                    batch_size = self.max_num_tokens,
+                    h = 2048,
+                    k = 8
+                )
+                output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data)
+                hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
+                group_list = expertTokenNums.to(torch.int64)
+                topk_weights = simulateExpertScales
             # compute_ffn_output ,未combine hidden
             output = self._run_ffn_computation(hidden_states = hidden_states,
                                                layer_idx=layer_idx,
@@ -660,7 +714,9 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                                                )
             # send_ffn_output
             if self.connector_name == "camconnector":
-                pass
+                handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
+                cam_afdconnector_data.handle = handle
+                self.connector.send_ffn_output(output, cam_afdconnector_data)
             elif self.connector_name == "m2nconnector":
                 self.connector.send_ffn_output(output, m2n_afdconnector_data)
             else :
@@ -688,6 +744,22 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
             m2n_afdconnector_data.handle = handle
             m2n_afdconnector_data.topk_weights = topk_weights
+        elif self.connector_name == "camconnector":
+            cam_afdconnector_data = CAMAFDConnectorMetadata(
+                moe_expert_num = 64,
+                shared_expert_num = 0,
+                scale = None,
+                handle = None,
+                quant_mode = 0,
+                aiv_num = 48,
+                batch_size = self.max_num_tokens,
+                h = 2048,
+                k = 8
+            )
+            output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data)
+            hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
+            group_list = expertTokenNums.to(torch.int64)
+            topk_weights = simulateExpertScales
         with torch.npu.graph(aclgraph, pool=self.graph_pool):
             # compute_ffn_output
             output = self._run_ffn_computation(hidden_states = hidden_states,
@@ -699,7 +771,9 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                                                )
         # send_ffn_output 暂时不入图
         if self.connector_name == "camconnector":
-            pass
+            handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
+            cam_afdconnector_data.handle = handle
+            self.connector.send_ffn_output(output, cam_afdconnector_data)
         elif self.connector_name == "m2nconnector":
             self.connector.send_ffn_output(output, m2n_afdconnector_data)
         else :

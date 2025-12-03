@@ -11,7 +11,6 @@ import torch_npu
 import torch
 
 from torch.distributed.distributed_c10d import _get_default_group
-from vllm.distributed.parallel_state import init_afd_process_group, DefaultProcessGroupSwitcher
 import re
 
 import torch
@@ -20,8 +19,10 @@ from torch.distributed.distributed_c10d import  _update_default_pg, _get_default
 from vllm.distributed.parallel_state import init_afd_process_group, init_model_parallel_group
 from vllm.logger import init_logger
 from vllm.config import VllmConfig
+from vllm.distributed.afd_transfer.afd_connector.metadata import (CAMAFDConnectorMetadata)
+from vllm.config import VllmConfig,CUDAGraphMode,CompilationLevel
+from vllm.distributed.afd_transfer.afd_connector.p2p_connector import DefaultProcessGroupSwitcher
 logger = init_logger(__name__)
-
 
 # # TODO(yxj):move to ascend ,use kwargs 
 # @dataclass
@@ -51,7 +52,12 @@ class CAMAFDConnector(AFDConnectorBase):
         self.config = config
         self.attn_size = 0
         self.ffn_size = 0
-    
+        self.use_aclgraph = self._use_aclgraph()
+        print(f'self.use_aclgraph in CAMAFDConnector is {self.use_aclgraph}')
+        
+    def _use_aclgraph(self) -> bool:
+        return self.config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.config.compilation_config.level == CompilationLevel.PIECEWISE and not self.config.model_config.enforce_eager
+
     def close(self) -> None:
         """Close the connector and release resources."""
         # destroy process group
@@ -80,6 +86,7 @@ class CAMAFDConnector(AFDConnectorBase):
             rank=self.rank,
             group_name="afd"
         )
+        self.hccl_comm_name = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank)
         ffn_ranks = [i for i in range(0, self.ffn_size)]
         attn_ranks = [i for i in range(self.ffn_size, self.ffn_size + self.attn_size)]
 
@@ -115,10 +122,11 @@ class CAMAFDConnector(AFDConnectorBase):
                          topk_weights: torch.Tensor, 
                          topk_idx:torch.Tensor, 
                          metadata: AFDConnectorMetadata) -> Any:
-        print(f'send_attn_output start rank:{self.rank}')
-        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-        print(f'send_attn_output dst is {dst}')
-        self.process_group.send_object(metadata,dst)
+        if not self.use_aclgraph:
+            print(f'send_attn_output start rank:{self.rank}')
+            dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+            print(f'send_attn_output dst is {dst}')
+            self.process_group.send_object(metadata,dst)
         
         batch_size = metadata.cam_afdconnector_data.batch_size
         h = metadata.cam_afdconnector_data.h
@@ -129,48 +137,20 @@ class CAMAFDConnector(AFDConnectorBase):
         aiv_num = metadata.cam_afdconnector_data.aiv_num
         expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
 
-        torch_npu.cam_a2e(expandX = hidden_states, expertIds = topk_idx,
+        handle_out = torch_npu.cam_a2e(expandX = hidden_states, expertIds = topk_idx,
                             scales = topk_weights, commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
                             expandXOutDType = expandXOutDType,
                             commId = 0, batchSize = batch_size, hiddenSize = h, topk = k,
                             expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
                             sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num, rank = self.rank,
                             loadBalancingRankNum=1, loadBalancingThreshold=0, dynamicQuant = quant_mode,
-                            groupEp = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank),
+                            groupEp = self.hccl_comm_name,
                             aivNum = aiv_num)
-        
-        print(f'send_attn_output end rank:{self.rank}')
-        return
+
+        return handle_out
 
     # MOE发给ATTN（ATTN接收）
-    def recv_ffn_output(self, metadata: AFDConnectorMetadata) -> torch.Tensor:
-        print(f'recv_ffn_output start rank:{self.rank}')
-        batch_size = metadata.cam_afdconnector_data.batch_size
-        h = metadata.cam_afdconnector_data.h
-        k = metadata.cam_afdconnector_data.k
-        moe_expert_num = metadata.cam_afdconnector_data.moe_expert_num
-        shared_expert_num = metadata.cam_afdconnector_data.shared_expert_num
-        aiv_num = metadata.cam_afdconnector_data.aiv_num
-        
-        output2 = torch_npu.cam_e2a(expandXOut = torch.tensor([], dtype=torch.bfloat16, device='npu'), simulateExpertIds = torch.tensor([], dtype=torch.int32, device='npu'),
-                            simulateExpertScales = torch.tensor([], dtype=torch.float, device='npu'), expandIdx = torch.tensor([], dtype=torch.int32, device='npu'),
-                            epRecvCounts = torch.tensor([], dtype=torch.int32, device='npu'),
-                            commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
-                            attenBatchSize = torch.tensor([], dtype=torch.int32, device='npu'),
-                            commId = 0,
-                            batchSize = batch_size, hiddenSize = h, topk = k,
-                            expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
-                            sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
-                            rank = self.rank,
-                            loadBalancingRankNum=1, loadBalancingThreshold=0,
-                            groupEp = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank),
-                            aivNum = aiv_num)
-        print(f'recv_ffn_output end rank:{self.rank}')
-        return output2
-    
-    # MOE发给ATTN(MOE发送) 
-    def send_ffn_output(self, ffn_output: torch.Tensor, metadata: AFDConnectorMetadata):
-        print(f'send_ffn_output start rank:{self.rank}')
+    def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata) -> torch.Tensor:
         batch_size = metadata.cam_afdconnector_data.batch_size
         h = metadata.cam_afdconnector_data.h
         k = metadata.cam_afdconnector_data.k
@@ -178,6 +158,32 @@ class CAMAFDConnector(AFDConnectorBase):
         shared_expert_num = metadata.cam_afdconnector_data.shared_expert_num
         aiv_num = metadata.cam_afdconnector_data.aiv_num
         handle = metadata.cam_afdconnector_data.handle
+        
+        output2 = torch_npu.cam_e2a(expandXOut = hidden_states, simulateExpertIds = handle[0],
+                            simulateExpertScales = handle[1], expandIdx = handle[2],
+                            epRecvCounts = handle[3],
+                            commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
+                            attenBatchSize = handle[4],
+                            commId = 0,
+                            batchSize = batch_size, hiddenSize = h, topk = k,
+                            expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
+                            sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
+                            rank = self.rank,
+                            loadBalancingRankNum=1, loadBalancingThreshold=0,
+                            groupEp = self.hccl_comm_name,
+                            aivNum = aiv_num)
+
+        return output2
+    
+    # MOE发给ATTN(MOE发送) 
+    def send_ffn_output(self, ffn_output: torch.Tensor, metadata: CAMAFDConnectorMetadata):
+        batch_size = metadata.batch_size
+        h = metadata.h
+        k = metadata.k
+        moe_expert_num = metadata.moe_expert_num
+        shared_expert_num = metadata.shared_expert_num
+        aiv_num = metadata.aiv_num
+        handle = metadata.handle
         
         torch_npu.cam_e2a(expandXOut = ffn_output, simulateExpertIds = handle[0],
                             simulateExpertScales = handle[1],
@@ -191,25 +197,27 @@ class CAMAFDConnector(AFDConnectorBase):
                             sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
                             rank = self.rank,
                             loadBalancingRankNum=1, loadBalancingThreshold=0,
-                            groupEp = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank),
+                            groupEp = self.hccl_comm_name,
                             aivNum = aiv_num)
-        print(f'send_ffn_output end rank:{self.rank}')
+
         return
     
     # ATTN发给MOE(MOE接收)
-    def recv_attn_output(self) -> Any: 
-        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-        metadata = self.process_group.recv_object(src)
+    def recv_attn_output(self, metadata: CAMAFDConnectorMetadata) -> Any: 
+        afdmetadata = None
+        if not self.use_aclgraph:
+            src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
+            afdmetadata = self.process_group.recv_object(src)
 
-        print(f'recv_attn_output start rank:{self.rank}')
+            print(f'recv_attn_output start rank:{self.rank}')
 
-        batch_size = metadata.cam_afdconnector_data.batch_size
-        h = metadata.cam_afdconnector_data.h
-        k = metadata.cam_afdconnector_data.k
-        moe_expert_num = metadata.cam_afdconnector_data.moe_expert_num
-        shared_expert_num = metadata.cam_afdconnector_data.shared_expert_num
-        quant_mode = metadata.cam_afdconnector_data.quant_mode
-        aiv_num = metadata.cam_afdconnector_data.aiv_num
+        batch_size = metadata.batch_size
+        h = metadata.h
+        k = metadata.k
+        moe_expert_num = metadata.moe_expert_num
+        shared_expert_num = metadata.shared_expert_num
+        quant_mode = metadata.quant_mode
+        aiv_num = metadata.aiv_num
         expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
 
         output1 = torch_npu.cam_a2e(expandX = torch.tensor([], dtype=torch.bfloat16, device='npu'), expertIds = torch.tensor([], dtype=torch.int32, device='npu'),
@@ -219,9 +227,7 @@ class CAMAFDConnector(AFDConnectorBase):
                             expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
                             sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num, rank = self.rank,
                             loadBalancingRankNum=1, loadBalancingThreshold=0, dynamicQuant = quant_mode,
-                            groupEp = self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank),
+                            groupEp = self.hccl_comm_name,
                             aivNum = aiv_num)
         
-        print(f'recv_attn_output end rank:{self.rank}')
-
-        return output1, metadata
+        return output1, afdmetadata
