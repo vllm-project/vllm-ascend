@@ -150,6 +150,11 @@ class TestAscendRMSNorm(PytestBase):
 
         assert mock_get_forward_context.call_count == 7
         assert mock_forward_context.fusion_linear == "qkv_moe"
+
+        x_out, residual_out = layer.forward_oot(x, residual)
+
+        assert mock_get_forward_context.call_count == 8
+        assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 
 
