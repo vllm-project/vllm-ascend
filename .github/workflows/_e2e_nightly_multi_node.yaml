@@ -32,7 +32,7 @@ on:
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
       vllm_version:
         required: false
-        default: "v0.11.2"
+        default: "86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24"
         type: string
         description: vllm version to use
       vllm_ascend_remote_url:
@@ -106,7 +106,7 @@ jobs:
             echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
 
         - name: Checkout code
-          uses: actions/checkout@v6
+          uses: actions/checkout@v6.0.0
 
         - name: Prepare scripts
           run: |

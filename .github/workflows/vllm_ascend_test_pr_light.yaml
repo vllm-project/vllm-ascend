@@ -42,14 +42,14 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: v0.11.2
+      vllm: 86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24
   changes:
     runs-on: ubuntu-latest
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -84,7 +84,7 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24]
     steps:
       - name: Install packages
         run: |
@@ -92,7 +92,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.0
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -105,7 +105,7 @@ jobs:
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.0
 
       - name: Install vllm-project/vllm-ascend
         run: |
@@ -142,7 +142,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.

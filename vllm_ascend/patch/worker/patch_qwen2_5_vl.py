@@ -27,8 +27,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
 from transformers.models.qwen2_vl.configuration_qwen2_vl import \
     Qwen2VLVisionConfig
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import (check_upstream_fa_availability,
-                                  maybe_get_vit_flash_attn_backend)
+from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -65,7 +64,6 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,
-        seqlens: torch.Tensor,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -141,7 +139,6 @@ class AscendQwen2VisionBlock(nn.Module):
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
             max_seqlen: int | None = None,  # Only used for Flash Attention
-            seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -149,7 +146,6 @@ class AscendQwen2VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
         x = x + self.mlp(self.norm2(x))
         return x
@@ -198,7 +194,6 @@ class AscendQwen2VisionTransformer(nn.Module):
             head_size=head_dim,
             rotary_dim=head_dim // 2,
             max_position=8192,
-            base=10000.0,
             is_neox_style=True,
         )
 
@@ -227,10 +222,6 @@ class AscendQwen2VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-
-        if (self.attn_backend != AttentionBackendEnum.FLASH_ATTN
-                and check_upstream_fa_availability(torch.get_default_dtype())):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     def rot_pos_emb(
             self,
@@ -300,7 +291,7 @@ class AscendQwen2VisionTransformer(nn.Module):
         x = x.unsqueeze(1)
 
         # pre-compute seqlens for attn mask to reduce cuMemcpy operations
-        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         for blk in self.blocks:
             x = blk(
                 x,
@@ -308,7 +299,6 @@ class AscendQwen2VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
 
         # adapter
@@ -326,7 +316,6 @@ class AscendQwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos: torch.Tensor,
             rotary_pos_emb_sin: torch.Tensor,
             max_seqlen: torch.Tensor,  # Only used for Flash Attention
-            seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -334,7 +323,6 @@ class AscendQwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -388,11 +376,9 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
             head_size=head_dim,
             rotary_dim=head_dim // 2,
             max_position=8192,
-            base=10000.0,
             is_neox_style=True,
         )
 
-        use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
@@ -402,7 +388,6 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             ))
 
@@ -418,7 +403,6 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
                     attn_backend=self.attn_backend,
-                    use_upstream_fa=use_upstream_fa,
                     attn_backend_override=attn_backend_override,
                 ) for layer_idx in range(depth)
             ])
@@ -553,10 +537,8 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
 
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
-            cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens)
+        max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
 
         cu_seqlens = cu_seqlens.to(  # type: ignore[attr-defined]
             device=self.device,
@@ -587,11 +569,9 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
                 max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
             else:
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
 
             hidden_states = blk(
                 hidden_states,
@@ -599,7 +579,6 @@ class AscendQwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
-                seqlens=seqlens_now,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
