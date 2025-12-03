@@ -1928,6 +1928,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
         ascend_config = get_ascend_config()
+        if self.shared_kv_cache_layers is not None:
+            # sharing kv across layers need to read the kvcache,
+            # directly return chunked prefill in this scenario
+            return AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
