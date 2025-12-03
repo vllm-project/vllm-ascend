@@ -1395,7 +1395,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:total_num_scheduled_tokens]
             model_type = self.vllm_config.model_config.hf_config.model_type
-            if model_type == "qwen2_5_vl":
+            if model_type == "qwen2_5_vl" or model_type == "qwen3_vl_moe":
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids,
                     multimodal_embeddings=mm_embeds,
