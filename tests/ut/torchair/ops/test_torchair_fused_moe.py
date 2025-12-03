@@ -383,15 +383,19 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             else:
                 assert result.shape == x.shape
 
+    @patch('torch_npu.npu_moe_gating_top_k')
     @pytest.mark.parametrize("others_param", [16, 1, 4])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
-                                   mock_moe_env, others_param):
+                                   mock_moe_env, others_param, mock_topk):
         """
         1 test use_select_experts and use fused_expters_with_mc2
         2 test use_select_experts and fused_experts_with_all2all_buffer
         3 test use_select_experts and fused_experts_with_all2all
         4 test use_select_experts and fused_experts
         """
+        mock_topk.return_value = (torch.randn(8,
+                                              2), torch.randint(0, 8,
+                                                                (8, 2)), None)
         ep_size = others_param
         is_prefill = False
         forward_context = MagicMock(
