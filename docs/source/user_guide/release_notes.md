@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.11.0rc2 - 2025.12.03
+## v0.11.0rc3 - 2025.12.03
 This is the third release candidate of v0.11.0 for vLLM Ascend. For quality reasons, we released a new rc before the official release. Thanks for all your feedback. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev) to get started.
 
 ### Highlights
