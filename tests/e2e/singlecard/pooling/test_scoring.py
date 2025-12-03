@@ -43,6 +43,7 @@ def test_cross_encoder_1_to_1(model_name):
     with VllmRunner(model_name,
                     runner="pooling",
                     dtype=DTYPE,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
@@ -64,6 +65,7 @@ def test_cross_encoder_1_to_N(model_name):
     with VllmRunner(model_name,
                     runner="pooling",
                     dtype=DTYPE,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
@@ -86,6 +88,7 @@ def test_cross_encoder_N_to_N(model_name):
     with VllmRunner(model_name,
                     runner="pooling",
                     dtype=DTYPE,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 
@@ -114,6 +117,7 @@ def test_embedding_1_to_1(emb_model_name):
     with VllmRunner(emb_model_name,
                     runner="pooling",
                     dtype=DTYPE,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
@@ -142,6 +146,7 @@ def test_embedding_1_to_N(emb_model_name):
     with VllmRunner(emb_model_name,
                     runner="pooling",
                     dtype=DTYPE,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
@@ -171,6 +176,7 @@ def test_embedding_N_to_N(emb_model_name):
     with VllmRunner(emb_model_name,
                     runner="pooling",
                     dtype=DTYPE,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 

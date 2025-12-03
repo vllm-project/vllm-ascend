@@ -19,6 +19,7 @@ def test_classify_correctness() -> None:
             model_name,
             runner="pooling",
             max_model_len=None,
+            cudagraph_capture_sizes=[4],
     ) as vllm_runner:
         vllm_outputs = vllm_runner.classify(prompts)
 
