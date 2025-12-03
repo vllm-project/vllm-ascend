@@ -51,22 +51,71 @@ class AscendQwen2_5_VisionAttention(nn.Module):
             three=3,
             head=self.num_attention_heads_per_partition,
         )
-        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
 
-        cos = torch.cat((rotary_pos_emb_cos, rotary_pos_emb_cos), dim=-1)
-        sin = torch.cat((rotary_pos_emb_sin, rotary_pos_emb_sin), dim=-1)
-        cos = cos.reshape(1, -1, 1, self.hidden_size_per_attention_head)
-        sin = sin.reshape(1, -1, 1, self.hidden_size_per_attention_head)
-        q = torch_npu.npu_rotary_mul(q, cos, sin)
-        k = torch_npu.npu_rotary_mul(k, cos, sin)
+        # Convert cumulative tensor to intervals and move it to cpu.
+        cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
-        context_layer = self.attn(
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+            qk, v = qkv[:, :, :2], qkv[:, :, 2]
+
+            qk_reshaped = einops.rearrange(
+                qk, "b s two head head_dim -> (two b) s head head_dim", two=2)
+            qk_rotated = self.apply_rotary_emb(
+                qk_reshaped,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
+            )
+            qk_rotated = qk_rotated.view(
+                2,
+                batch_size,
+                seq_len,
+                self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+            q, k = qk_rotated.unbind(dim=0)
+        else:
+            q, k, v = qkv.unbind(dim=2)
+
+        # TODO(shen-shanshan): Move codes below to MMEncoderAttention CustomOp
+        # ----------------------------------------------------------------------
+        enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
+                      and self.hidden_size_per_attention_head > MIN_PAD_SIZE
+                      and self.hidden_size_per_attention_head < MAX_PAD_SIZE)
+
+        q, k, v = [
+            einops.rearrange(x, "b s h d -> (b s) h d").contiguous()
+            for x in (q, k, v)
+        ]
+
+        if enable_pad:
+            origin_shape = q.shape[-1]
+            pad_len = MAX_PAD_SIZE - origin_shape
+            # q/k/v: [b * s, head, head_dim] -> [b * s, head, MAX_PAD_SIZE]
+            q = F.pad(q, (0, pad_len), mode="constant", value=0)
+            k = F.pad(k, (0, pad_len), mode="constant", value=0)
+            v = F.pad(v, (0, pad_len), mode="constant", value=0)
+
+        context_layer = torch.empty_like(q)
+
+        # operator requires pta version >= 2.5.1
+        torch_npu._npu_flash_attention_unpad(
             query=q,
             key=k,
             value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            seq_len=cu_seqlens,
+            scale_value=self.hidden_size_per_attention_head**-0.5,
+            num_heads=self.num_attention_heads_per_partition,
+            num_kv_heads=self.num_attention_heads_per_partition,
+            out=context_layer,
         )
+
+        if enable_pad:
+            context_layer = context_layer[..., :origin_shape]
+
+        context_layer = einops.rearrange(context_layer,
+                                         "(b s) h d -> s b (h d)",
+                                         b=batch_size).contiguous()
+        # ----------------------------------------------------------------------
 
         output, _ = self.proj(context_layer)
         return output

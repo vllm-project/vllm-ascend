@@ -16,14 +16,17 @@
 #
 
 import math
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
+import einops
 import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
@@ -524,3 +527,40 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
                                          rotary_mode='half')
 
         return query, key
+
+
+class AscendApplyRotaryEmb(ApplyRotaryEmb):
+
+    def __init__(
+        self,
+        is_neox_style: bool = False,
+        is_unsqueeze: bool = False,
+        default: Callable[..., torch.Tensor] | None = None,
+    ) -> None:
+        super().__init__(is_neox_style, is_unsqueeze, default)
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        # x: [2 * b, s, head, head_dim]
+        qk = einops.rearrange(
+            x, "(two b) s head head_dim -> b s two head head_dim", two=2)
+        # q/k: [b, s, head, head_dim]
+        q, k = qk[:, :, 0], qk[:, :, 1]
+        head_dim = q.shape[-1]
+
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+        cos = cos.reshape(1, -1, 1, head_dim)
+        sin = sin.reshape(1, -1, 1, head_dim)
+        # cos/sin: [1, s, 1, 2 * head_dim]
+
+        q = torch_npu.npu_rotary_mul(q, cos, sin)
+        k = torch_npu.npu_rotary_mul(k, cos, sin)
+
+        # output: []
+        output = torch.cat([q, k], dim=0)
+        return output
