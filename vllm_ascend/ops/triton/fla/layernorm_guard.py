@@ -12,86 +12,6 @@ from vllm.triton_utils import tl, triton
 MAX_CORES = 65535
 
 
-@triton.heuristics({
-    "HAS_BIAS": lambda args: args["B"] is not None,
-    "HAS_Z": lambda args: args["Z"] is not None,
-})
-@triton.jit
-def layer_norm_fwd_kernel(
-    X,  # pointer to the input
-    Y,  # pointer to the output
-    W,  # pointer to the weights
-    B,  # pointer to the biases
-    Z,  # pointer to the other branch
-    Mean,  # pointer to the mean
-    Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_y_row,
-    stride_z_row,
-    M,  # number of rows in X_base
-    N,  # number of columns in X_base
-    eps,  # epsilon to avoid division by zero
-    BLOCK_N: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    HAS_Z: tl.constexpr,
-    NORM_BEFORE_GATE: tl.constexpr,
-    IS_RMS_NORM: tl.constexpr,
-    N_CORES: tl.constexpr,
-):
-    # Map the program id to the row of X_base and Y_base it should compute.
-    row = tl.program_id(0)
-    group = tl.program_id(1)
-
-    BLOCK_ROWS = M if M < N_CORES else N_CORES
-    n_iters = M // BLOCK_ROWS
-    remain = M % BLOCK_ROWS
-    if row < remain:
-        n_iters = n_iters + 1
-
-    for i in tl.range(n_iters):
-        X_base = X + (i * BLOCK_ROWS *
-                      stride_x_row) + row * stride_x_row + group * N
-        Y_base = Y + (i * BLOCK_ROWS *
-                      stride_y_row) + row * stride_y_row + group * N
-        if HAS_Z:
-            Z_base = Z + (i * BLOCK_ROWS *
-                          stride_z_row) + row * stride_z_row + group * N
-        if not IS_RMS_NORM:
-            Mean_base = Mean + (i * BLOCK_ROWS) + group * M
-        Rstd_base = Rstd + (i * BLOCK_ROWS) + group * M
-        W_base = W + group * N
-        if HAS_BIAS:
-            B_base = B + group * N
-        # Compute mean and variance
-        cols = tl.arange(0, BLOCK_N)
-        x = tl.load(X_base + cols, mask=cols < N, other=0.).to(tl.float32)
-        if HAS_Z and not NORM_BEFORE_GATE:
-            z = tl.load(Z_base + cols, mask=cols < N).to(tl.float32)
-            x *= z * tl.sigmoid(z)
-        if not IS_RMS_NORM:
-            mean = tl.sum(x, axis=0) / N
-            tl.store(Mean_base + row, mean)
-            xbar = tl.where(cols < N, x - mean, 0.)
-            var = tl.sum(xbar * xbar, axis=0) / N
-        else:
-            xbar = tl.where(cols < N, x, 0.)
-            var = tl.sum(xbar * xbar, axis=0) / N
-        rstd = 1 / tl.sqrt(var + eps)
-        tl.store(Rstd_base + row, rstd)
-        # Normalize and apply linear transformation
-        mask = cols < N
-        w = tl.load(W_base + cols, mask=mask).to(tl.float32)
-        if HAS_BIAS:
-            b = tl.load(B_base + cols, mask=mask).to(tl.float32)
-        x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
-        y = x_hat * w + b if HAS_BIAS else x_hat * w
-        if HAS_Z and NORM_BEFORE_GATE:
-            z = tl.load(Z_base + cols, mask=mask).to(tl.float32)
-            y *= z * tl.sigmoid(z)
-        # Write output
-        tl.store(Y_base + cols, y, mask=mask)
-
-
 def _layer_norm_fwd(
     x,
     weight,
@@ -160,20 +80,18 @@ def _layer_norm_fwd(
 
 
 class LayerNormFn(torch.autograd.Function):
-
     @staticmethod
-    def forward(
-        ctx,
-        x,
-        weight,
-        bias,
-        z=None,
-        eps=1e-6,
-        group_size=None,
-        norm_before_gate=True,
-        is_rms_norm=False,
-    ):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
+    def forward(ctx,
+                x,
+                weight,
+                bias,
+                z=None,
+                eps=1e-6,
+                group_size=None,
+                norm_before_gate=True,
+                is_rms_norm=False):
+        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
+        """
 
         x_shape_og = x.shape
         # reshape input data into 2D tensor
@@ -188,7 +106,7 @@ class LayerNormFn(torch.autograd.Function):
         weight = weight.contiguous()
         if bias is not None:
             bias = bias.contiguous()
-        y, mean, rstd = _layer_norm_fwd(
+        y, mean, rstd = layer_norm_fwd(
             x,
             weight,
             bias,
@@ -198,4 +116,179 @@ class LayerNormFn(torch.autograd.Function):
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
         )
+        ctx.save_for_backward(x, weight, bias, mean, rstd, z)
+        ctx.x_shape_og = x_shape_og
+        ctx.eps = eps
+        ctx.group_size = group_size
+        ctx.norm_before_gate = norm_before_gate
+        ctx.is_rms_norm = is_rms_norm
         return y.reshape(x_shape_og)
+    
+
+def layer_norm_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    z: torch.Tensor = None,
+    out: torch.Tensor = None,
+    group_size: int = None,
+    norm_before_gate: bool = True,
+    is_rms_norm: bool = False,
+):
+    M, N = x.shape
+    if group_size is None:
+        group_size = N
+    assert N % group_size == 0
+    ngroups = N // group_size
+    assert x.stride(-1) == 1
+    if z is not None:
+        assert z.stride(-1) == 1
+        assert z.shape == (M, N)
+    assert weight.shape == (N, )
+    assert weight.stride(-1) == 1
+    if bias is not None:
+        assert bias.stride(-1) == 1
+        assert bias.shape == (N, )
+    # allocate output
+    if out is not None:
+        assert out.shape == x.shape
+    else:
+        out = torch.empty_like(x)
+    assert out.stride(-1) == 1
+    mean = torch.empty((ngroups * M, ), dtype=torch.float32,
+                       device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((ngroups * M, ), dtype=torch.float32, device=x.device)
+    # Less than 64KB per feature: enqueue fused kernel
+    MAX_FUSED_SIZE = 65536 // x.element_size()
+
+    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+    if group_size > BLOCK_N:
+        raise RuntimeError(
+            "This layer norm doesn't support feature dim >= 64KB.")
+
+    # SUB_BLOCK_M = 128 # 1835008 when N = 128, bf16 (overflow) -> assume factor 56
+    # Assume large M
+    SUB_BLOCK_M = triton.next_power_of_2(triton.cdiv(1572864, 56 * N) // x.element_size()) // 2
+    import triton.runtime.driver as driver
+    device = torch.npu.current_device()
+    num_cores = driver.active.utils.get_device_properties(device)["num_vectorcore"]
+    BLOCK_M = max(triton.next_power_of_2(triton.cdiv(triton.cdiv(M, SUB_BLOCK_M), num_cores)) * SUB_BLOCK_M, SUB_BLOCK_M)
+
+    # heuristics for number of warps
+    num_warps = min(max(BLOCK_N // 256, 1), 8)
+    grid = (triton.cdiv(M, BLOCK_M), ngroups)
+    layer_norm_fwd_kernel[grid](x,
+                                out,
+                                weight,
+                                bias,
+                                z,
+                                mean,
+                                rstd,
+                                x.stride(0),
+                                out.stride(0),
+                                z.stride(0) if z is not None else 0,
+                                M,
+                                group_size,
+                                eps,
+                                BLOCK_N=BLOCK_N,
+                                BLOCK_M=BLOCK_M,
+                                SUB_BLOCK_M=SUB_BLOCK_M,
+                                HAS_BIAS=bias is not None,
+                                HAS_Z=z is not None,
+                                NORM_BEFORE_GATE=norm_before_gate,
+                                IS_RMS_NORM=is_rms_norm,
+                                num_warps=num_warps)
+    return out, mean, rstd
+
+
+@triton.heuristics({
+    "HAS_BIAS": lambda args: args["B"] is not None,
+    "HAS_Z": lambda args: args["Z"] is not None,
+})
+@triton.jit
+def layer_norm_fwd_kernel(
+    X,  # pointer to the input
+    Y,  # pointer to the output
+    W,  # pointer to the weights
+    B,  # pointer to the biases
+    Z,  # pointer to the other branch
+    Mean,  # pointer to the mean
+    Rstd,  # pointer to the 1/std
+    stride_x_row,  # how much to increase the pointer when moving by 1 row
+    stride_y_row,
+    stride_z_row,
+    M,  # number of rows in X
+    N,  # number of columns in X
+    eps,  # epsilon to avoid division by zero
+    BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    SUB_BLOCK_M: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_Z: tl.constexpr,
+    NORM_BEFORE_GATE: tl.constexpr,
+    IS_RMS_NORM: tl.constexpr,
+):
+    # Map the program id to the row of X and Y it should compute.
+    row_blk_idx = tl.program_id(0)
+    group = tl.program_id(1)
+
+    cols = tl.arange(0, BLOCK_N)
+    col_mask = cols < N
+    W_inner = W + group * N + cols
+    if HAS_BIAS:
+        B_inner = B + group * N + cols
+
+    w = tl.load(W_inner, mask=col_mask).to(tl.float32)
+    if HAS_BIAS:
+        b = tl.load(B_inner, mask=col_mask).to(tl.float32)
+
+    for sub_row_blk in range(0, BLOCK_M // SUB_BLOCK_M):
+        row = row_blk_idx * BLOCK_M + sub_row_blk * SUB_BLOCK_M + tl.arange(0, SUB_BLOCK_M)
+        row_mask = row < M
+        # cols = tl.arange(0, BLOCK_N)
+        # col_mask = cols < N
+        blk_mask = row_mask[:, None] & col_mask[None, :]
+
+        X_inner = X + row[:, None] * stride_x_row + (group * N + cols)[None, :]
+        Y_inner = Y + row[:, None] * stride_y_row + (group * N + cols)[None, :]
+        if HAS_Z:
+            Z_inner = Z + row[:, None] * stride_z_row + (group * N + cols)[None, :]
+        if not IS_RMS_NORM:
+            Mean_inner = Mean + group * M + row[:, None]
+        Rstd_inner = Rstd + group * M + row[:, None]
+        # W_inner = W + group * N + cols
+        # if HAS_BIAS:
+        #     B_inner = B + group * N + cols
+        # Compute mean and variance
+
+        x = tl.load(X_inner, mask=blk_mask, other=0.).to(tl.float32)
+
+        if HAS_Z and not NORM_BEFORE_GATE:
+            z = tl.load(Z_inner, mask=blk_mask).to(tl.float32)
+            x *= z * tl.sigmoid(z)
+
+        if not IS_RMS_NORM:
+            mean = tl.sum(x, axis=1, keep_dims=True) / N
+            tl.store(Mean_inner, mean, mask=row_mask[:, None])
+            # xbar = tl.where(cols < N, x - mean, 0.)
+            xbar = x - mean
+            var = tl.sum(xbar * xbar, axis=1, keep_dims=True) / N
+        else:
+            # xbar = tl.where(cols < N, x, 0.)
+            xbar = x
+            var = tl.sum(xbar * xbar, axis=1, keep_dims=True) / N
+
+        rstd = 1 / tl.sqrt(var + eps)
+        tl.store(Rstd_inner, rstd, mask=row_mask[:, None])
+        # Normalize and apply linear transformation
+
+        x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
+
+        y = x_hat * w + b if HAS_BIAS else x_hat * w
+
+        if HAS_Z and NORM_BEFORE_GATE:
+            z = tl.load(Z_inner, mask=blk_mask).to(tl.float32)
+            y *= z * tl.sigmoid(z)
+        # Write output
+        tl.store(Y_inner, y, mask=blk_mask)
