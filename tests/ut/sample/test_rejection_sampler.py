@@ -27,10 +27,13 @@ GREEDY_TEMPERATURE = 0.0
 MAX_SPEC_LEN = 8  # Used as MAX_NUM_TOKENS in expand_batch_to_tokens
 
 original_tensor = torch.tensor
+
+
 def mock_tensor_pin_memory(*args, **kwargs):
     if kwargs.get('pin_memory', False):
-         kwargs['pin_memory'] = False
+        kwargs['pin_memory'] = False
     return original_tensor(*args, **kwargs)
+
 
 class TestAscendRejectionSampler(TestBase):
 
