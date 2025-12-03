@@ -25,13 +25,13 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.attention import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -492,8 +492,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         v_head_dim: int,
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -518,7 +516,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.first_k_dense_replace = config.first_k_dense_replace
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.prefix = prefix
@@ -592,17 +589,17 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
 
-        if rope_scaling:
-            rope_scaling["rope_type"] = 'deepseek_yarn'
+        if config.rope_parameters["rope_type"] != "default":
+            config.rope_parameters["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
                                    max_position=max_position_embeddings,
-                                   base=rope_theta,
-                                   rope_scaling=rope_scaling,
+                                   rope_parameters=config.rope_parameters,
                                    is_neox_style=False)
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
+        if config.rope_parameters["rope_type"] != "default":
+            mscale_all_dim = config.rope_parameters.get(
+                "mscale_all_dim", False)
+            scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
@@ -708,8 +705,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         v_head_dim: int,
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -734,7 +729,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         self.first_k_dense_replace = config.first_k_dense_replace
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.prefix = prefix
@@ -814,17 +808,19 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 return_bias=False,
             )
 
-        if rope_scaling:
-            rope_scaling["rope_type"] = 'deepseek_yarn'
-        self.rotary_emb = get_rope(qk_rope_head_dim,
-                                   rotary_dim=qk_rope_head_dim,
-                                   max_position=max_position_embeddings,
-                                   base=rope_theta,
-                                   rope_scaling=rope_scaling,
-                                   is_neox_style=False)
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
+        if config.rope_parameters["rope_type"] != "default":
+            config.rope_parameters["rope_type"] = "deepseek_yarn"
+        self.rotary_emb = get_rope(
+            qk_rope_head_dim,
+            rotary_dim=qk_rope_head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+            is_neox_style=False,
+        )
+        if config.rope_parameters["rope_type"] != "default":
+            mscale_all_dim = config.rope_parameters.get(
+                "mscale_all_dim", False)
+            scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
@@ -921,8 +917,6 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # DecoderLayers are created with `make_layers` which passes the prefix
@@ -955,8 +949,6 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             q_lora_rank=config.q_lora_rank
             if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,

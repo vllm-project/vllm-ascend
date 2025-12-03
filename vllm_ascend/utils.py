@@ -247,6 +247,19 @@ def enable_custom_op():
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
+
+    # set custom ops path
+    CUR_DIR = os.path.dirname(os.path.realpath(__file__))
+    CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
+                                   "vllm-ascend")
+    if os.path.exists(CUSTOM_OPP_PATH):
+        current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
+        if current_cust_opp_path:
+            os.environ[
+                "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
+        else:
+            os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
@@ -470,6 +483,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
+    if not vllm_config.model_config:
+        logger.warning(
+            "Got empty model config. This typically occurs when an empty vllm_config is "
+            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+        )
+
+        return
     hf_config = vllm_config.model_config.hf_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
