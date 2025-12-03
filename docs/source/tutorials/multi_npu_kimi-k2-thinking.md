@@ -48,20 +48,15 @@ Please be advised to edit the value of `"quantization_config.config_groups.group
 
 ```json
 {
-  ...,
   "quantization_config": {
     "config_groups": {
       "group_0": {
-        ...,
         "targets": [
           "MoE"
-        ],
-        ...
+        ]
       }
-    },
-    ...
-  },
-  ...
+    }
+  }
 }
 ```
 

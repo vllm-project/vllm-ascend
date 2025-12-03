@@ -4,8 +4,8 @@ import torch
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import (
     QUANTIZATION_METHODS, register_quantization_config)
@@ -146,7 +146,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
 
             # choose quantization method
-            quant_method: LinearMethodBase = UnquantizedLinearMethod()
+            quant_method = UnquantizedLinearMethod()
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
                 ascend_quant_config = AscendQuantConfig(self.quant_description
@@ -160,8 +160,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
 
             # choose quantization method
-            quant_method: FusedMoEMethodBase = AscendUnquantizedFusedMoEMethod(
-                layer.moe_config)
+            quant_method = AscendUnquantizedFusedMoEMethod(layer.moe_config)
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
                 ascend_quant_config = AscendQuantConfig(self.quant_description
