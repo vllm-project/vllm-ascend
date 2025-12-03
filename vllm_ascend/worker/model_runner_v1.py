@@ -321,7 +321,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups: list[list[AttentionGroup]] = []
         self.encoder_cache: Dict[str, torch.Tensor] = {}
         self.attn_mask = None
-        self.fia_attn_mask = None
         self.attn_state = None
         self.requests: Dict[str, CachedRequestState] = {}
         self.intermediate_tensors: Optional[IntermediateTensors] = None
@@ -982,23 +981,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
-        # fia prefill situation.
-        if attn_state in [
-                AscendAttentionState.PrefillNoCache,
-                AscendAttentionState.PrefillCacheHit,
-                AscendAttentionState.ChunkedPrefill
-        ]:
-            return self.attn_mask_builder.get_splitfuse_attn_mask()
-
-        # Decode-only situation.
-        return None
-
-    def _make_fia_attention_mask(self) -> torch.Tensor:
-        # pcp situation.
-        if self.pcp_size > 1:
-            return None
-        if self.attn_mask_builder is None:
-            raise ValueError("Attn mask builder is None")
         return self.attn_mask_builder.get_splitfuse_attn_mask()
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
@@ -1579,7 +1561,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
                                                    position=positions_cpu,
                                                    attn_state=attn_state)
-        self.fia_attn_mask = self._make_fia_attention_mask()
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -1804,7 +1785,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
-                fia_attn_mask=self.fia_attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
                 is_only_prefill=bool(np.all(num_valid_tokens != 1)),
@@ -2723,10 +2703,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
             assigned_mask_dim = 2048
-            self.fia_attn_mask = torch.triu(torch.ones(assigned_mask_dim,
-                                                       assigned_mask_dim),
-                                            diagonal=1).to(torch.int8).to(
-                                                self.device)
+            self.attn_mask = torch.triu(torch.ones(assigned_mask_dim,
+                                                   assigned_mask_dim),
+                                        diagonal=1).to(torch.int8).to(
+                                            self.device)
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -2770,7 +2750,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     positions=self.positions,
                     attn_mask=self.attn_mask,
-                    fia_attn_mask=self.fia_attn_mask,
                     spec_attn_mask=self.spec_attn_mask,
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
