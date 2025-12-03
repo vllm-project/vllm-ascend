@@ -530,6 +530,35 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             torch.npu.current_stream().wait_stream(self.shared_expert_stream)
         return shared_out, fused_output
 
+    def _detect_quantization_and_get_params(self, layer: torch.nn.Module):
+        # detect weight dtype（INT8）
+        is_w1_int8 = layer.w13_weight.dtype in [torch.int8, torch.uint8]
+        is_w2_int8 = layer.w2_weight.dtype in [torch.int8, torch.uint8]
+
+        # Detect the existence of scale parameter（INT8 W8A8）
+        has_w1_scale = hasattr(layer, 'w13_weight_scale') and layer.w13_weight_scale is not None
+        has_w2_scale = hasattr(layer, 'w2_weight_scale') and layer.w2_weight_scale is not None
+
+        # Detect the existence of scale_second parameter（INT4 W4A8）
+        has_w1_scale_second = hasattr(layer, 'w13_weight_scale_second') and \
+                            getattr(layer, 'w13_weight_scale_second', None) is not None
+        has_w2_scale_second = hasattr(layer, 'w2_weight_scale_second') and \
+                            getattr(layer, 'w2_weight_scale_second', None) is not None
+
+        # Determine quantization type
+        use_int8_w8a8 = (is_w1_int8 or is_w2_int8) or (has_w1_scale or has_w2_scale)
+        use_int4_w4a8 = has_w1_scale_second or has_w2_scale_second
+
+        # get scale param（INT8）
+        w1_scale = getattr(layer, 'w13_weight_scale', None) if has_w1_scale else None
+        w2_scale = getattr(layer, 'w2_weight_scale', None) if has_w2_scale else None
+
+        # get scale_bias param（INT4)
+        w1_scale_bias = getattr(layer, 'w13_weight_scale_bias', None) if \
+                        hasattr(layer, 'w13_weight_scale_bias') else None
+        w2_scale_bias = getattr(layer, 'w2_weight_scale_bias', None) if \
+                        hasattr(layer, 'w2_weight_scale_bias') else None
+        return use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias
 
     # TODO 这里的weight的传入有问题，目测是没加载对
     def afd_ffn_compute(
@@ -597,6 +626,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp)
         
+        use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
+                        self._detect_quantization_and_get_params(layer)
+
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=hidden_states,
             w1=layer.w13_weight,
@@ -608,8 +640,14 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             expert_map=self.expert_map,
             shared_experts=None,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            dynamic_eplb=self.dynamic_eplb)
-    
+            dynamic_eplb=self.dynamic_eplb,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int4_w4a8=use_int4_w4a8,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias)
+
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
 

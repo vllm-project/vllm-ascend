@@ -501,6 +501,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                     parallel_config=parallel_config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp",
+                    is_mtp=self.is_mtp_layer,
                 )
                 # if self.mlp.gate.e_score_correction_bias is not None:
                 #     self.mlp.gate.e_score_correction_bias.data = (
