@@ -252,7 +252,7 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
             for i in self._invalid_req_indices:
                 valid_sampled_token_ids[i].clear()
         else:
-            valid_sampled_token_ids = RejectionSampler.parse_output(
+            valid_sampled_token_ids, _ = RejectionSampler.parse_output(
                 self._sampled_token_ids_cpu,
                 self.vocab_size,
                 self._invalid_req_indices,

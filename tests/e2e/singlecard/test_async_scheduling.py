@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from itertools import repeat
 from typing import Any
+import os
 
 import pytest
 import torch._dynamo.config as dynamo_config
@@ -169,10 +170,11 @@ def run_test(
     spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
 ):
+    os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
         # Force preemptions
-        dict(num_gpu_blocks_override=32) if test_preemption else dict(
+        dict(num_gpu_blocks_override=2) if test_preemption else dict(
             gpu_memory_utilization=0.9))
     spec_mml = (spec_config or {}).get("max_model_len")
     test_config = (f"executor={executor}, preemption={test_preemption}, "
@@ -199,7 +201,7 @@ def run_test(
         results = []
         acceptance_rates: list[float] | None = [] if spec_decoding else None
         for override_params in sampling_param_tests:
-            metrics_before = vllm_model.llm.get_metrics()
+            metrics_before = vllm_model.model.get_metrics()
             print(f"----------- RUNNING PARAMS: {override_params}")
             results.append(
                 vllm_model.generate(
@@ -208,7 +210,7 @@ def run_test(
                                                    **override_params),
                     return_logprobs=True,
                 ))
-            metrics_after = vllm_model.llm.get_metrics()
+            metrics_after = vllm_model.model.get_metrics()
             if acceptance_rates is not None:
                 acceptance_rate = _get_acceptance_rate(metrics_before,
                                                        metrics_after)
