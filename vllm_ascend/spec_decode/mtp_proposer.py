@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -16,6 +17,8 @@ from vllm.model_executor.model_loader.utils import \
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -33,10 +36,6 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
                                shared_expert_dp_enabled)
-from vllm.distributed import get_pcp_group
-
-from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 

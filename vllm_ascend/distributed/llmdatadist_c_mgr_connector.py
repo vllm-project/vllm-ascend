@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (get_dcp_group, get_tp_group,
                                              get_world_group)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
+from vllm.utils.network_utils import get_ip
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -33,9 +34,7 @@ from vllm.v1.request import Request, RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type)
-
-from vllm.utils.network_utils import get_ip
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -339,7 +338,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tp_group().rank_in_group
         self.rank = get_world_group().rank
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size 
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group
         self.dcp_size = get_dcp_group().world_size
         self.local_ip = get_ip()
