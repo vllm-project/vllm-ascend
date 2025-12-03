@@ -4,6 +4,7 @@ import torch
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import (
@@ -16,8 +17,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 
-from vllm_ascend.quantization.quant_config import (AscendLinearMethod,
+from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.quantization.quant_config import (AscendFusedMoEMethod,
+                                                   AscendLinearMethod,
                                                    AscendQuantConfig)
+from vllm_ascend.quantization.w4a16 import AscendW4A16FusedMoEMethod
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
@@ -150,6 +154,22 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 quant_method = AscendLinearMethod(ascend_quant_config, prefix,
                                                   None, layer)
             return quant_method
+        if isinstance(layer, FusedMoE):
+            layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
+            # collect schemes
+            quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+
+            # choose quantization method
+            quant_method: FusedMoEMethodBase = AscendUnquantizedFusedMoEMethod(
+                layer.moe_config)
+            if quant_scheme is not None:
+                layer.scheme = quant_scheme
+                ascend_quant_config = AscendQuantConfig(self.quant_description
+                                                        or {})
+                quant_method = AscendFusedMoEMethod(
+                    ascend_quant_config, prefix,
+                    ascend_quant_config.packed_modules_mapping, layer)
+            return quant_method
         return None
 
     def get_scheme(self,
@@ -215,6 +235,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 return AscendW8A8DynamicLinearMethod()
 
+        if weight_quant is not None:
+            if self._is_w4a16(weight_quant):
+                return AscendW4A16FusedMoEMethod()
+
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
 
@@ -245,6 +269,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         # Only symmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_8_bits and is_token and is_symmetric and is_dynamic
+
+    def _is_w4a16(self, weight_quant: QuantizationArgs) -> bool:
+        is_4_bits = weight_quant.num_bits == 4
+        return is_4_bits
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         self.target_scheme_map = hf_to_vllm_mapper.apply_dict(

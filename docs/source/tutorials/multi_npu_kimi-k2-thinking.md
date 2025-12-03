@@ -44,31 +44,28 @@ docker run --rm \
 ```
 
 ## Verify the Quantized Model
-The original model downloaded from [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking  ) lacks necessary `quant_model_description.json` file required by inference quantized models with vllm-ascend. To resolve this, please execute the following scripts to generate it.
+Please be advised to edit the value of `"quantization_config.config_groups.group_0.targets"` from `["Linear"]` into `["MoE"]` in `config.json` of original model downloaded from [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
 
-```python
-import os
-import json
-
-model_dir = "/path/to/your/model"
-index_file = "model.safetensors.index.json"
-desc_file = "quant_model_description.json"
-
-with open(os.path.join(model_dir, index_file), "r", encoding="utf-8") as f:
-    safetensors_index = list(json.load(f)["weight_map"].keys())
-
-quant_desc = {
-    prefix: "W4A16" if prefix.endswith("weight_packed") or prefix.endswith("weight_shape") else "FLOAT"
-    for prefix in safetensors_index
+```json
+{
+  ...,
+  "quantization_config": {
+    "config_groups": {
+      "group_0": {
+        ...,
+        "targets": [
+          "MoE"
+        ],
+        ...
+      }
+    },
+    ...
+  },
+  ...
 }
-
-with open(desc_file, "w", encoding="utf-8") as f:
-    json.dump(quant_desc, f, indent=2, ensure_ascii=False)
 ```
 
-Additionally, please be advised that the `"quantization_config"` key in `config.json` will cause error in loading quantized weights. It is recommended to remove this key.
-
-After these modifications, your model files look like:
+Your model files look like:
 
 ```bash
 .
@@ -82,7 +79,6 @@ After these modifications, your model files look like:
 |-- model-00062-of-000062.safetensors
 |-- model.safetensors.index.json
 |-- modeling_deepseek.py
-|-- quant_model_description.json
 |-- tiktoken.model
 |-- tokenization_kimi.py
 `-- tokenizer_config.json
@@ -96,7 +92,6 @@ For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 
 ```bash
 vllm serve Kimi-K2-Thinking \
---quantization ascend \
 --served-model-name kimi-k2-thinking \
 --tensor-parallel-size 16 \
 --enable_expert_parallel \
