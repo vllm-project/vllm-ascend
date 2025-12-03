@@ -30,12 +30,13 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_vl_model,
-                               prefill_context_parallel_enable,
-                               update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes,
-                               update_default_aclgraph_sizes)
+
+# isort: off
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+    enable_sp, get_ascend_device_type, is_vl_model,
+    prefill_context_parallel_enable, update_aclgraph_sizes,
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -56,7 +57,9 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD]
+    supported_quantization: list[str] = [
+        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+    ]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -79,6 +82,8 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
+        from vllm_ascend.quantization.compressed_tensors.compressed_tensors import \
+            AscendCompressedTensorsConfig  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
@@ -152,6 +157,7 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
+        compilation_config.pass_config.enable_fusion = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -257,7 +263,7 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
+            if ascend_config.torchair_graph_config.enabled:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -305,7 +311,7 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
-            vllm_config.scheduler_config.chunked_prefill_enabled = True
+            vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         if vllm_config.kv_transfer_config is not None and \
@@ -353,8 +359,6 @@ class NPUPlatform(Platform):
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
-            if use_mla and not use_sparse:
-                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
             if use_mla and use_sparse:
                 return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 

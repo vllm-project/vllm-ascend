@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
-from vllm.attention import AttentionType
+from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         MLAAttentionSpec)
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -58,7 +59,10 @@ class CPUOffloadingConnectorMetadata(KVConnectorMetadata):
 
 class CPUOffloadingConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         if not vllm_config.cache_config.enable_prefix_caching:
             self.connector_scheduler: Optional[
                 CPUOffloadingConnectorScheduler] = None

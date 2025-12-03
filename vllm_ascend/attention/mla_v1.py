@@ -226,7 +226,7 @@ class AscendMLAMetadataBuilder:
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -896,15 +896,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         ).device_group if self.tp_size > 1 else None
 
     def _v_up_proj(self, x):
-        if self.W_UV.shape[0] * self.W_UV.shape[
-                1] < 65536 and not self.dcp_size * self.pcp_size > 1:
+        if x.dtype in [torch.float16, torch.bfloat16] \
+                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
+                and not self.dcp_size * self.pcp_size > 1:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
-            x = torch_npu.npu_transpose_batchmatmul(x,
-                                                    self.W_UV,
-                                                    perm_x1=[1, 0, 2],
-                                                    perm_x2=[0, 1, 2],
-                                                    perm_y=[1, 0, 2])
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            b, _, _ = x.shape
+            res = torch.empty((b, self.num_heads, self.v_head_dim),
+                              dtype=x.dtype,
+                              device=x.device)
+            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
+            x = res.reshape(-1, self.num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
             x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -932,8 +933,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
+                try:
                     return getattr(layer, attr)
+                except AttributeError:
+                    pass
             raise AttributeError(
                 f"Layer '{layer}' has no recognized weight attribute:"
                 f" {WEIGHT_NAMES}.")
@@ -1683,6 +1686,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if (self.enable_mlapo and
             (attn_metadata is None or not forward_context.with_prefill)):
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
                 hidden_states, kv_cache, attn_metadata)
         else:

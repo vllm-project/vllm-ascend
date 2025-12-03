@@ -123,7 +123,8 @@ class EagleProposer(Proposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None):
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None):
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
@@ -134,9 +135,11 @@ class EagleProposer(Proposer):
                 positions=self.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
+            dummy_compute_logits(self.hidden_states)
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[np.ndarray],
+                           valid_sampled_token_ids: torch.Tensor
+                           | list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -149,7 +152,7 @@ class EagleProposer(Proposer):
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -161,7 +164,7 @@ class EagleProposer(Proposer):
                            scheduler_output.num_scheduled_tokens[req_id])
 
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id.item())
+            next_token_ids.append(next_token_id)
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
@@ -181,7 +184,7 @@ class EagleProposer(Proposer):
         else:
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(

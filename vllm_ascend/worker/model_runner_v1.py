@@ -39,9 +39,9 @@ import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
-from vllm.attention import AttentionType, get_attn_backend
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention, MLAAttention
+from vllm.attention.selector import get_attn_backend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
@@ -53,7 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
                                              get_pp_group, get_tp_group,
                                              is_global_first_rank)
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -97,6 +97,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -247,17 +248,16 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         max_gen_len = self._sampled_token_ids_cpu.shape[-1]
         if max_gen_len == 1:
-            valid_sampled_token_ids: list[np.ndarray] = [
-                row for row in self._sampled_token_ids_cpu.numpy()
-            ]
+            valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+            for i in self._invalid_req_indices:
+                valid_sampled_token_ids[i].clear()
         else:
             valid_sampled_token_ids = RejectionSampler.parse_output(
                 self._sampled_token_ids_cpu,
                 self.vocab_size,
+                self._invalid_req_indices,
+                return_cu_num_tokens=False
             )
-        for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i] = np.array([])
-
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         return output
@@ -340,7 +340,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         if self.ascend_config.ascend_scheduler_config.enabled:
-            self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
+            self.chunked_prefill_enabled = self.scheduler_config.enable_chunked_prefill
         else:
             self.chunked_prefill_enabled = True
         self.weight_prefetch_method = WeightPrefetchMethod(
@@ -653,7 +653,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     TorchairMtpProposer]] = None
+                                     TorchairMtpProposer,
+                                     SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -1047,25 +1048,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # dcp situation.
         if self.dcp_size > 1:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
+        if self.vllm_config.model_config.use_mla:
+            return None
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
-        # Chunk Prefill situation.
-        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
+        # fia prefill situation.
+        if attn_state in [
+                AscendAttentionState.PrefillNoCache,
+                AscendAttentionState.PrefillCacheHit,
+                AscendAttentionState.ChunkedPrefill
+        ]:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
 
-        # Prefill without cache situation.
-        elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens.max().item(), 0)
-            return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
-        # Prefill with cache hit.
-        elif attn_state == AscendAttentionState.PrefillCacheHit:
-            return self.attn_mask_builder.get_attn_mask(
-                2048, self.dtype, self.device)
         # Decode-only situation.
-        else:
-            return None
+        return None
 
     def _make_fia_attention_mask(self) -> torch.Tensor:
         # pcp situation.
@@ -2256,7 +2253,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def propose_draft_token_ids(
         self,
-        valid_sampled_token_ids: Union[torch.Tensor, list[np.ndarray]],
+        valid_sampled_token_ids: torch.Tensor | list[list[int]],
         sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
         spec_decode_metadata: SpecDecodeMetadata,
@@ -2435,10 +2432,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
-        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=uniform_decode)
+        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
-            self.aclgraph_dispatcher.dispatch(batch_descriptor)
+            self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -2463,7 +2459,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata, self.with_prefill, maybe_padded_num_tokens,
                     input_ids, positions, intermediate_tensors, inputs_embeds)
 
-            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
                 scheduler_output)
 
@@ -2637,18 +2632,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_gen_len = sampled_token_ids.shape[-1]
                 if max_gen_len == 1:
                     # No spec decode tokens. It's a tensor.
-                    valid_sampled_token_ids: list[np.ndarray] = [
-                        row for row in sampled_token_ids.cpu().numpy()
-                    ]
+                    valid_sampled_token_ids = sampled_token_ids.tolist()
                 else:
                     # Includes spec decode tokens. It's a numpy array
-                    valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                    valid_sampled_token_ids, _ = self.rejection_sampler.parse_output(
                         sampled_token_ids,
                         self.input_batch.vocab_size,
                     )
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)] = np.array([])
+                    valid_sampled_token_ids[int(i)].clear()
             else:
                 valid_sampled_token_ids = []
                 invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
@@ -2675,17 +2668,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # the sampled tokens back, because there's no direct communication
             # between the first-stage worker and the last-stage worker.
             for req_idx in range(num_sampled_tokens):
-                sampled_ids: np.ndarray | None
                 if self.use_async_scheduling:
-                    sampled_ids = (np.array([-1]) if req_idx
-                                   not in invalid_req_indices_set else None)
+                    sampled_ids = [-1] * 1 if \
+                        req_idx not in invalid_req_indices_set else None
                 else:
                     sampled_ids = valid_sampled_token_ids[req_idx]
-                if sampled_ids is None or sampled_ids.shape[0] == 0:
+                if not sampled_ids:
                     continue
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                end_idx = start_idx + sampled_ids.shape[0]
+                end_idx = start_idx + len(sampled_ids)
                 assert end_idx <= self.model_config.max_model_len, (
                     "Sampled token IDs exceed the max model length. "
                     f"Total number of tokens: {end_idx} > max_model_len: "
@@ -2699,7 +2691,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.num_tokens[req_idx] = end_idx
                 req_id = self.input_batch.req_ids[req_idx]
                 req_state = self.requests[req_id]
-                req_state.output_token_ids.extend(sampled_ids.tolist())
+                req_state.output_token_ids.extend(sampled_ids)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
@@ -2728,7 +2720,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
-
+            self.maybe_wait_for_kv_save()
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
@@ -3006,7 +2998,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
-
         # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
         # If sequence parallelism is enabled, it is essential to ensure that num_tokens is divisible by tp_size.
         if self.use_aclgraph and enable_sp(self.vllm_config):
@@ -3100,19 +3091,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k: v[:num_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
-
+            has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
             # filter out the valid batch descriptor
             _ag_mode, batch_descriptor = \
-                self.aclgraph_dispatcher.dispatch(
-                    BatchDescriptor(num_tokens=num_tokens,
-                                    uniform_decode=uniform_decode))
+                self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
             if aclgraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for aclgraph capture
-                assert aclgraph_runtime_mode == CUDAGraphMode.NONE or \
-                    aclgraph_runtime_mode == _ag_mode, (
-                    f"Aclgraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
+                if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
+                    raise ValueError(
+                        f"Aclgraph runtime mode mismatch at dummy_run. "
+                        f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}."
+                    )
             else:
                 aclgraph_runtime_mode = _ag_mode
 
@@ -3130,14 +3120,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
+            max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
+            dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                        dtype=torch.int32)
 
-            if need_dummy_logits:
-                max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
-                dummy_indices = torch.zeros(max_num_reqs_across_dp,
-                                            dtype=torch.int32)
+            def dummy_compute_logits(hidden_states):
+                if not need_dummy_logits:
+                    return None
+                return self.model.compute_logits(hidden_states[dummy_indices])
 
-                def dummy_compute_logits(hidden_states):
-                    return self.model.compute_logits(
+            def dummy_drafter_compute_logits(hidden_states):
+                if not need_dummy_logits or self.drafter is None:
+                    return
+                if hasattr(self.drafter, "model") and hasattr(
+                        self.drafter.model, "compute_logits"):
+                    return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
 
             with set_ascend_forward_context(
@@ -3159,8 +3156,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,
                     inputs_embeds)
-                if need_dummy_logits:
-                    dummy_compute_logits(hidden_states)
+                dummy_compute_logits(hidden_states)
 
             if self.drafter:
                 self.drafter.dummy_run(
@@ -3169,10 +3165,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    batch_descriptor=batch_descriptor)
-                if need_dummy_logits:
-                    self.drafter.model.compute_logits(
-                        hidden_states[dummy_indices])
+                    batch_descriptor=batch_descriptor,
+                    dummy_compute_logits=dummy_drafter_compute_logits)
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
@@ -4591,18 +4585,3 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
-
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[np.ndarray]:
-        # This is a short term mitigation for issue mentioned in
-        # https://github.com/vllm-project/vllm/issues/22754.
-        # `tolist` would trigger a cuda wise stream sync, which
-        # would block other copy ops from other cuda streams.
-        # A cuda event sync would avoid such a situation. Since
-        # this is in the critical path of every single model
-        # forward loop, this has caused perf issue for a disagg
-        # setup.
-        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
-        pinned.copy_(sampled_token_ids, non_blocking=True)
-        self.transfer_event.record()
-        self.transfer_event.synchronize()
-        return [row for row in pinned.numpy()]

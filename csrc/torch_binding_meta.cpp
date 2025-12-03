@@ -35,7 +35,7 @@
 
 namespace vllm_ascend {
 namespace meta {
-
+const int64_t INT4_NUMS_IN_INT32 = 8;
 std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
   at::Tensor &positions,
   at::Tensor &query,
@@ -114,14 +114,116 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1};
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
+    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
+    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset)
+{
+    int m = x.sizes()[0];
+    int n = weight.sizes()[2];
+    bool is_a8w4 = x.dtype() == at::kChar && weight.dtype() == at::kInt;
+    if (is_a8w4) {
+        n *= INT4_NUMS_IN_INT32;
+    }
+    at::Tensor output = at::empty({m, n/2}, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::empty({m}, x.options().dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at::empty({}, x.options().dtype(c10::ScalarType::Float));
+    return {output, output_scale, output_offset};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta(
+    const at::Tensor & x,
+    const at::TensorList & weight,
+    const at::TensorList & weight_scale,
+    const at::Tensor & x_scale,
+    const at::Tensor & group_list,
+    const c10::optional<at::Tensor> & bias,
+    const c10::optional<at::Tensor> & offset)
+{
+    auto x_size = x.sizes();
+    int n = weight[0].sizes()[1];
+    int m = x_size[0];
+    int k = x_size[1];
+
+    at::Tensor output = at::zeros({m, n/2}, c10::dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
+}
+
+void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
+                                    c10::optional<c10::string_view> format_mode,
+                                    c10::optional<c10::string_view> quant_mode)
+{
+    return;
+
+}
+
+at::Tensor npu_lightning_indexer_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_key,
+    const c10::optional<at::Tensor> &block_table, c10::string_view layout_query,
+    c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
+{
+    // npu tensor max size
+    constexpr int32_t SIZE = 8;
+    constexpr int32_t DIM_0 = 0;
+    constexpr int32_t DIM_1 = 1;
+    constexpr int32_t DIM_2 = 2;
+    constexpr int32_t DIM_3 = 3;
+
+    TORCH_CHECK(query.numel() > 0, "Query is empty.");
+    TORCH_CHECK(key.numel() > 0, "Key is empty.");
+    TORCH_CHECK(weights.numel() > 0, "Weights is empty.");
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+
+    std::string query_layout_str = std::string(layout_query);
+    std::string key_layout_str = std::string(layout_key);
+    at::SmallVector<int64_t, SIZE> output_size;
+    if (query_layout_str == "BSND") {
+        output_size = {query.size(DIM_0), query.size(DIM_1), key.size(DIM_2), sparse_count};
+    } else {
+        int n_dim_index = 0;
+        n_dim_index = (key_layout_str == "TND") ? DIM_1 : DIM_2;
+        output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
+    }
+    // construct the output tensor
+    at::Tensor lightning_indexer_output = at::empty(output_size, query.options().dtype(at::kInt));
+    return lightning_indexer_output;
+}
+
+at::Tensor npu_sparse_flash_attention_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &sparse_indices, double scale_value, int64_t sparse_block_size,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &query_rope,
+    const c10::optional<at::Tensor> &key_rope, c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode)
+{
+    std::string layout_query_str = std::string(layout_query);
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+    return output;
+}
 
 } // namespace meta
 } // namespace vllm_ascend
 
 namespace {
-  // Register the meta implementations of the custom kernels for symbolic tracing, this will also
-  // the custom kernel been captured into aclgraph
-  TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+// Register the meta implementations of the custom kernels for symbolic tracing, this will also
+// the custom kernel been captured into aclgraph
+TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Rotary embedding meta implementation
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
@@ -132,5 +234,15 @@ namespace {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    // grouped_matmul_swiglu_quant meta implementation
+    ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
+    // Grouped matmul swiglu quant weight nz tensor list
+    ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
+    // batch_matmul_transpose
+    ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
+    // Lightning indexer
+    ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
+    // Sparse flash attention
+    ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
 }
 }
