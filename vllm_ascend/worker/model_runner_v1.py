@@ -4469,7 +4469,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             non_blocking=True,
         )
 
-
     def _do_async_exponential(self, default_stream, logits_indices):
         # Calculating exponential randoms in a different stream
         # and overlapping with model executing.
