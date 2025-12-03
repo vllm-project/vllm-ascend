@@ -35,7 +35,8 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
+from vllm_ascend.eplb.core.eplb_utils import (determine_default_log2phy_map,
+                                              generate_experts_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
@@ -182,8 +183,8 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe.
-        self.local_num_experts, self.expert_map, _ = determine_expert_map(
-            self.ep_size, self.ep_rank, self.global_num_experts)
+        self.local_num_experts, self.expert_map = generate_experts_map(
+            self.ep_size, self.ep_rank, num_experts, self.global_redundant_expert_num)
         # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
         # workaround to bypass a quantization check that fails with float weights.
         init_eplb_enable = False
