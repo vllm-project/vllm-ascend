@@ -186,7 +186,8 @@ class TestBackend:
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-def test_rmsnorm_quant_fusion(dtype, hidden_size, num_tokens, eps):
+def test_rmsnorm_quant_fusion(dtype: torch.dtype, hidden_size: int,
+                              num_tokens: int, eps: float):
     """
     End-to-end test for AddRMSNorm+Quantize fusion.
     Compares: Operator presence/absence before and after graph transformation

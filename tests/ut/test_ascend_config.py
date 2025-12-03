@@ -59,9 +59,6 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_quantization_fusion)
 
-        ascend_scheduler_config = ascend_config.ascend_scheduler_config
-        self.assertFalse(ascend_scheduler_config.enabled)
-
     @_clean_up_ascend_config
     def test_init_ascend_config_with_additional_config(self):
         test_vllm_config = VllmConfig()

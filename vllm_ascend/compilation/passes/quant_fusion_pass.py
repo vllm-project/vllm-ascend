@@ -21,11 +21,12 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.config import VllmConfig
 
 
 class AddRMSNormQuantPattern:
 
-    def __init__(self, vllm_config, eps=1e-6):
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
         self.eps = eps
 
@@ -83,7 +84,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
     """
 
-    def __init__(self, vllm_config):
+    def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
             pass_name="rmsnorm_quant_fusion_pass")
@@ -105,7 +106,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         logging.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
-    def is_applicable(self, runtime_shape):
+    def is_applicable(self, runtime_shape: int | None = None) -> bool:
         """
         Check if the pass is applicable for the current configuration.
         """
