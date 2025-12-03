@@ -35,9 +35,9 @@ This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can swap i
 
     The Resources corresponding to different NPU Drivers may vary slightly. For example:
 
-    *  If using [MindCluster](https://gitee.com/ascend/mind-cluster#https://gitee.com/link?target=https%3A%2F%2Fgitcode.com%2FAscend%2Fmind-cluster), please use `huawei.com/Ascend310P` or `huawei.com/Ascend910`.
+    - If using [MindCluster](https://gitee.com/ascend/mind-cluster#https://gitee.com/link?target=https%3A%2F%2Fgitcode.com%2FAscend%2Fmind-cluster), please use `huawei.com/Ascend310P` or `huawei.com/Ascend910`.
 
-    * If running on CCE (Cloud Container Engine) of Huawei Cloud and the [CCE AI Suite Plugin (Ascend NPU)](https://support.huaweicloud.com/intl/en-us/usermanual-cce/cce_10_0239.html) is installed, please use `huawei.com/ascend-310` or `huawei.com/ascend-1980`.
+    - If running on CCE (Cloud Container Engine) of Huawei Cloud and the [CCE AI Suite Plugin (Ascend NPU)](https://support.huaweicloud.com/intl/en-us/usermanual-cce/cce_10_0239.html) is installed, please use `huawei.com/ascend-310` or `huawei.com/ascend-1980`.
 
 - Kthena installed. Please follow the [Kthena installation guide](https://kthena.volcano.sh/docs/getting-started/installation).
 
@@ -50,6 +50,7 @@ Deploy it with below command:
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/prefill-decode-disaggregation.yaml
 ```
+
 or
 
 ```bash
@@ -70,6 +71,18 @@ spec:
         replicas: 1
         entryTemplate:
           spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: Always
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - deepseek-ai/DeepSeek-V2-Lite
+                  - --output-dir
+                  - /mnt/cache/deepseek-ai/DeepSeek-V2-Lite/
+                volumeMounts:
+                  - name: models
+                    mountPath: /mnt/cache/deepseek-ai/DeepSeek-V2-Lite/
             containers:
               - name: runtime
                 image: ghcr.io/volcano-sh/runtime:latest
@@ -282,7 +295,6 @@ You should see Pods such as:
 - `deepseek-v2-lite-0-prefill-0-0`
 - `deepseek-v2-lite-0-decode-0-0`
 
-
 To enable the llm access, we still need to configure the routing layer with `ModelServer` and `ModelRoute`.
 
 ### 2.3 ModelServer: PD Group Management
@@ -294,13 +306,13 @@ The `ModelServer` resource:
 - Configures KV connector details and timeouts.
 - Exposes an internal gRPC/HTTP interface.
 
-
 Create modelServer with below command:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/kthena-router/ModelServer-prefill-decode-disaggregation.yaml
 ```
-or 
+
+or
 
 ```bash
 cat << EOF | kubectl apply -f -
@@ -327,6 +339,7 @@ spec:
   inferenceEngine: "vLLM"
   trafficPolicy:
     timeout: 10s
+EOF
 ```
 
 ### 2.4 ModelRoute: User-Facing Endpoint
