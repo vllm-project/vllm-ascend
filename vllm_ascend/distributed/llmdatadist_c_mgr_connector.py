@@ -22,8 +22,8 @@ from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import (get_dcp_group, get_tp_group,
-                                             get_world_group)
+from vllm.distributed.parallel_state import (get_dcp_group, get_pcp_group,
+                                             get_tp_group, get_world_group)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
