@@ -16,4 +16,5 @@ netloader
 dynamic_batch
 kv_pool
 external_dp
+ucm_deployment
 :::
