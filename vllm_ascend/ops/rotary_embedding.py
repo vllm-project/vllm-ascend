@@ -25,6 +25,11 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import torch_npu._inductor
+    from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
@@ -527,12 +532,79 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
 class AscendMRotaryEmbedding(MRotaryEmbedding):
 
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+        mrope_section: list[int] | None = None,
+        mrope_interleaved: bool = False,
+        *,
+        scaling_factor: float | None = None,
+        extrapolation_factor: float = 1,
+        attn_factor: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+    ) -> None:
+        self.cos = None
+        self.sin = None
+        extra_kwargs = {
+            "scaling_factor": scaling_factor,
+            "extrapolation_factor": extrapolation_factor,
+            "attn_factor": attn_factor,
+            "beta_fast": beta_fast,
+            "beta_slow": beta_slow
+        }
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, dtype, mrope_section,
+                         mrope_interleaved, **extra_kwargs)
+
+    def forward_triton(self,
+                       positions: torch.Tensor,
+                       query: torch.Tensor,
+                       key: torch.Tensor | None = None,
+                       offsets: torch.Tensor | None = None):
+        assert positions.ndim == 2
+        assert key is not None
+
+        self._match_cos_sin_cache_dtype(query)
+
+        if self.cos is None and self.sin is None:
+            cos_sin = self.cos_sin_cache[positions]  # type: ignore
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            self.cos = cos.contiguous()
+            self.sin = sin.contiguous()
+        query_shape = query.shape
+        key_shape = key.shape
+
+        assert self.mrope_section
+
+        q, k = triton_mrope(
+            query,
+            key,
+            self.cos,
+            self.sin,
+            self.mrope_section,
+            self.head_size,
+            self.rotary_dim,
+            self.mrope_interleaved,
+        )
+
+        return q.reshape(query_shape), k.reshape(key_shape)
+
     def forward_oot(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
     ):
+        if HAS_TRITON and positions.ndim == 2:
+            # todo: need cann update in 8.5.0
+            return self.forward_triton(positions, query, key)
+
         if self.mrope_section != [16, 24, 24] or \
             get_ascend_device_type() == AscendDeviceType.A5:
             return super().forward_oot(positions, query, key)

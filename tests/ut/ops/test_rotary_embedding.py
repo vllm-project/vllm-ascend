@@ -432,6 +432,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
 
     @patch('torch_npu.npu_mrope')
     @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
+    @patch('vllm.triton_utils.HAS_TRITON', False)
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
@@ -448,6 +449,28 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
                 self.positions_2d, self.query, self.key)
 
         mock_npu_mrope.assert_called_once()
+        self.assertFalse(torch.isnan(result_q).any().item())
+        self.assertFalse(torch.isnan(result_k).any().item())
+        self.assertEqual(result_q.shape, self.query.shape)
+
+    @patch('vllm.model_executor.layers.rotary_embedding.mrope.triton_mrope')
+    @patch('vllm.triton_utils.HAS_TRITON', True)
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.triton_utils.HAS_TRITON', return_value=True)
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
+    def test_forward_triton_2d_positions(self, mock_triton_mrope):
+
+        mock_triton_mrope.return_value = (torch.zeros_like(self.query),
+                                          torch.zeros_like(self.key))
+
+        vllm_config = self._create_vllm_config()
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward_oot(
+                self.positions_2d, self.query, self.key)
+
+        mock_triton_mrope.assert_called_once()
         self.assertFalse(torch.isnan(result_q).any().item())
         self.assertFalse(torch.isnan(result_k).any().item())
         self.assertEqual(result_q.shape, self.query.shape)
