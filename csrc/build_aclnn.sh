@@ -31,3 +31,4 @@ bash build.sh -n $CUSTOM_OPS -c $SOC_ARG
 
 # install custom ops to vllm_ascend/_cann_ops_custom
 ./output/CANN-custom_ops*.run --install-path=$ROOT_DIR/vllm_ascend/_cann_ops_custom
+source $ROOT_DIR/vllm_ascend/_cann_ops_custom/vendors/customize/bin/set_env.bash
