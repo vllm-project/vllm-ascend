@@ -444,8 +444,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
         per_group_param = [
             "weight_scale_second", "weight_offset_second", "scale_bias"
-        ] + ["weight_scale", "weight_offset"
-             ] if self.quant_method.group_size > 0 else []
+        ] + ["weight_scale", "weight_offset"] if hasattr(
+            self.quant_method,
+            "group_size") and self.quant_method.group_size > 0 else []
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)
