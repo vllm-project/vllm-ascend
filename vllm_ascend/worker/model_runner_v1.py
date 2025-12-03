@@ -4468,22 +4468,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
-<<<<<<< HEAD
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[np.ndarray]:
-        # This is a short term mitigation for issue mentioned in
-        # https://github.com/vllm-project/vllm/issues/22754.
-        # `tolist` would trigger a cuda wise stream sync, which
-        # would block other copy ops from other cuda streams.
-        # A cuda event sync would avoid such a situation. Since
-        # this is in the critical path of every single model
-        # forward loop, this has caused perf issue for a disagg
-        # setup.
-        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
-        pinned.copy_(sampled_token_ids, non_blocking=True)
-        self.transfer_event.record()
-        self.transfer_event.synchronize()
-        return [row for row in pinned.numpy()]
 
     def _do_async_exponential(self, default_stream, logits_indices):
         # Calculating exponential randoms in a different stream
@@ -4501,5 +4486,3 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     q[i].exponential_(generator=generator)
             self._async_exponential_event.record()
         self.sampler.set_q_event(q, self._async_exponential_event)
-=======
->>>>>>> upstream-ascend/main
