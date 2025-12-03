@@ -383,26 +383,31 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             else:
                 assert result.shape == x.shape
 
-    @patch('torch_npu.npu_moe_gating_top_k')
     @pytest.mark.parametrize("others_param", [16, 1, 4])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
-                                   mock_moe_env, others_param, mock_topk):
+                                   mock_moe_env, others_param):
         """
         1 test use_select_experts and use fused_expters_with_mc2
         2 test use_select_experts and fused_experts_with_all2all_buffer
         3 test use_select_experts and fused_experts_with_all2all
         4 test use_select_experts and fused_experts
         """
-        mock_topk.return_value = (torch.randn(8,
-                                              2), torch.randint(0, 8,
-                                                                (8, 2)), None)
         ep_size = others_param
         is_prefill = False
         forward_context = MagicMock(
             fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
-        with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
-             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3):
+        if ep_size == 1:
+            top_k_return = (torch.randn(16, 2), torch.randint(0, 16,
+                                                              (16, 2)), None)
+            expert_map = torch.tensor(
+                [0, 1, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1])
+        else:
+            top_k_return = (torch.randn(8, 2), torch.randint(0, 8,
+                                                             (8, 2)), None)
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
+        with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
+             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3), \
+             patch('torch_npu.npu_moe_gating_top_k', return_value=top_k_return):
             moe_method.ep_size = ep_size
             x = torch.randn(8, 2, 2)
             if ep_size == 1:
