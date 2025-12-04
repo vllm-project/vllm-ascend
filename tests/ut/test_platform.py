@@ -12,6 +12,7 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
                                COMPRESSED_TENSORS_METHOD, AscendDeviceType)
 
+
 class TestNPUPlatform(TestBase):
 
     @staticmethod

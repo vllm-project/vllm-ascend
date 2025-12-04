@@ -1077,7 +1077,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 return_value=1),
             patch('vllm_ascend.distributed.mooncake_connector.get_pcp_group',
                   return_value=self.mock_pcp_group),
-
         ]
 
         for p in self.patches:
