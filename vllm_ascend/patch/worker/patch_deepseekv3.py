@@ -26,7 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
+from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                 AscendSharedFusedMoE)
 
 class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
