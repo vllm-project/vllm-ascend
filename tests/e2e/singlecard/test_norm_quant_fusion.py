@@ -28,7 +28,7 @@ from vllm.compilation.fx_utils import OpOverload
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 
 from vllm_ascend.compilation.compiler_interface import compile_fx
-from vllm_ascend.compilation.passes.quant_fusion_pass import \
+from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
     AddRMSNormQuantFusionPass
 
 
