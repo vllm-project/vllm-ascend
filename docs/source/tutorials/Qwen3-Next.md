@@ -77,6 +77,12 @@ Coming soon ...
 
 ### Inference
 
+Please make sure you have already executed the command:
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+```
+
 :::::{tab-set}
 ::::{tab-item} Online Inference
 
