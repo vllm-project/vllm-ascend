@@ -78,6 +78,8 @@ class AscendConfig:
                              enable_shared_expert_dp=True)
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
+        self.enable_sfa_cp = additional_config.get(
+            "enable_sfa_cp", False)
         self.recompute_scheduler_enable = additional_config.get(
             "recompute_scheduler_enable", False)
         self.lmhead_tensor_parallel_size = additional_config.get(

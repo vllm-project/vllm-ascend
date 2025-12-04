@@ -1014,3 +1014,13 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+def dispose_layer(layer: Any):
+    for attr_name in dir(layer):
+        attr_value = getattr(layer, attr_name)
+        if isinstance(attr_value, torch.Tensor):
+            dispose_tensor(attr_value)
+
+def replace_layer(original_layer: Any, new_layer: Any):
+    original_layer.__class__ = new_layer.__class__
+    original_layer.__dict__ = new_layer.__dict__
