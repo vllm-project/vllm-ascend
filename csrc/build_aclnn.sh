@@ -3,6 +3,8 @@
 ROOT_DIR=$1
 SOC_VERSION=$2
 
+git config --global --add safe.directory "$ROOT_DIR"
+
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     # ASCEND310P series
     # currently, no custom aclnn ops for ASCEND310 series
@@ -22,6 +24,30 @@ else
     # currently, no custom aclnn ops for other series
     exit 0
 fi
+
+git submodule init
+git submodule update
+
+
+# For the compatibility of CANN8.5 and CANN8.3: copy and modify moe_distribute_base.h
+file_path=$(find /usr/local/Ascend/ascend-toolkit -name "moe_distribute_base.h" 2>/dev/null | head -n1)
+if [ -z "$file_path" ]; then
+    echo "cannot find moe_distribute_base.h file in CANN env"
+    exit 1
+fi
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+TARGET_DIR="$SCRIPT_DIR/dispatch_ffn_combine/op_kernel/utils/"
+TARGET_FILE="$TARGET_DIR/$(basename "$file_path")"
+
+echo "*************************************"
+echo $file_path
+echo "$TARGET_DIR"
+cp "$file_path" "$TARGET_DIR"
+
+sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
+sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
+
 
 # build custom ops
 cd csrc

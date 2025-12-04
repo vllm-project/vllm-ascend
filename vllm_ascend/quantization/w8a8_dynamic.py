@@ -233,16 +233,15 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2 = [layer.w2_weight]
             w2_scale = [layer.w2_weight_scale]
 
-        fused_flag = get_forward_context().moe_comm_type in [
-            MoECommType.FUSED_ALLTOALL, MoECommType.FUSED_MC2
-        ]
+        fused_flag = get_forward_context(
+        ).moe_comm_type == MoECommType.FUSED_ALLTOALL
         return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
-            w1=w1,
-            w1_scale=self.w13_scale if fused_flag else w1_scale,
-            w2=w2,
-            w2_scale=self.w2_scale if fused_flag else w2_scale,
+            w1=w1[0] if fused_flag else w1,
+            w1_scale=layer.fused_w1_scale if fused_flag else w1_scale,
+            w2=w2[0] if fused_flag else w2,
+            w2_scale=layer.fused_w2_scale if fused_flag else w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
@@ -275,6 +274,11 @@ class AscendW8A8DynamicFusedMoEMethod:
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
 
+        layer.fused_w1_scale = scale_from_float_to_int64(
+            layer.w13_weight_scale.data)
+        layer.fused_w2_scale = scale_from_float_to_int64(
+            layer.w2_weight_scale.data)
+
         if self.dynamic_eplb:
             layer.w13_weight_list = [
                 weight.clone()
@@ -297,9 +301,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
             torch.npu.empty_cache()
-
-        self.w13_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
-        self.w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
 
 
 def scale_from_float_to_int64(scale):

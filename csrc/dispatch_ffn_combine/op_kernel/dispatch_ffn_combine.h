@@ -20,8 +20,7 @@ using namespace AscendC;
 
 #include "kernel_operator.h"
 
-#include "hccl/hccl_common.h"
-#include "hccl/common/hccl_inner_def.h"
+#include "utils/moe_distribute_base.h"
 
 #include "dispatch_ffn_combine_tiling.h"
 
@@ -38,7 +37,6 @@ using namespace AscendC;
 #include "catlass/gemm/kernel/matmul_epilogue.hpp"
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
-#include "catlass/status.hpp"
 
 #include "utils/select_helper.hpp"
 #include "utils/const_args.hpp"
@@ -46,7 +44,6 @@ using namespace AscendC;
 #include "moe_init_routing_quant_v2/moe_init_routing_quant_v2_tiling.h"
 
 using namespace Catlass;
-using namespace AscendC::HcclContextDef;
 
 namespace DispatchFFNCombineImpl {
 #define TemplateMMA2AClass typename AType_, typename BType_, typename CType_, bool TB_, bool Nz_
@@ -156,11 +153,11 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     initRoutingQuantTilingKey = tilingData.cocTiling.initRoutingQuantTilingKey;
 
     auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-    __gm__ HcclOpResParam *WinContext_{nullptr};
-    WinContext_ = (__gm__ HcclOpResParam *)contextGM0;
+    __gm__ HcclOpResParamCustom *WinContext_{nullptr};
+    WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
 
-    rank = WinContext_->rankId;
-    rankSize = WinContext_->rankNum;
+    rank = WinContext_->localUsrRankId;
+    rankSize = WinContext_->rankSize;
 }
 
 template <TemplateMMA2AClass>

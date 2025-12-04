@@ -156,6 +156,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
                                     c10::optional<c10::string_view> quant_mode)
 {
     return;
+}
 
 at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& x,

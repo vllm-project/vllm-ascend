@@ -618,6 +618,7 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     });
     cmd.Run();
     return;
+}
 
 at::Tensor& dispatch_ffn_combine(
     const at::Tensor& x,
