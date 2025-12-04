@@ -224,9 +224,9 @@ at::Tensor npu_sparse_flash_attention_meta(
 } // namespace vllm_ascend
 
 namespace {
-  // Register the meta implementations of the custom kernels for symbolic tracing, this will also
-  // the custom kernel been captured into aclgraph
-  TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+// Register the meta implementations of the custom kernels for symbolic tracing, this will also
+// the custom kernel been captured into aclgraph
+TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Rotary embedding meta implementation
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
