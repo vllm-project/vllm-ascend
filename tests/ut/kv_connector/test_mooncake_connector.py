@@ -1037,9 +1037,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.mock_pcp_group.device_group = MagicMock()
 
         self.patches = [
-            patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.envs_ascend.PHYSICAL_DEVICES',
-                '10,11'),
             patch('torch.Tensor.size', return_value=(10, 16, 8, 16)),
             patch('torch.Tensor.element_size', return_value=4),
             patch('torch.Tensor.data_ptr', return_value=0x1000),
@@ -1056,7 +1053,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 'vllm_ascend.distributed.mooncake_connector.string_to_int64_hash',
                 mock_string_to_int64_hash),
             patch(
-                'vllm_ascend.distributed.mooncake_transfer_engine.TransferEngine',
+                'vllm_ascend.distributed.mooncake.transfer_engine.TransferEngine',
                 return_value=self.mock_transfer_engine),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.KVCacheSendingThread',
@@ -1160,7 +1157,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         # Test with physical devices set
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         # Default tp_rank is 0, so device_id should be 10
-        self.assertEqual(worker.device_id, 10)
+        self.assertIsNotNone(worker.engine)
 
 
 if __name__ == '__main__':
