@@ -309,7 +309,6 @@ class AscendAttentionMetadataBuilder:
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        max_seq_len = common_attn_metadata.max_seq_len
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
@@ -484,7 +483,6 @@ class AscendAttentionMetadataBuilder:
             query_start_loc_list=query_start_loc_cpu[1:].tolist(),
             query_lens=query_lens,
             seq_lens=seq_lens,
-            max_seq_len=max_seq_len,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
