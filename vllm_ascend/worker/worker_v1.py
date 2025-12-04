@@ -432,11 +432,24 @@ class NPUWorker(WorkerBase):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
 
+            aic_metrics_list = [
+                torch_npu.profiler.AiCMetrics.AiCoreNone,
+                torch_npu.profiler.AiCMetrics.PipeUtilization,
+                torch_npu.profiler.AiCMetrics.ArithmeticUtilization,
+                torch_npu.profiler.AiCMetrics.Memory,
+                torch_npu.profiler.AiCMetrics.MemoryL0,
+                torch_npu.profiler.AiCMetrics.ResourceConflictRatio,
+                torch_npu.profiler.AiCMetrics.MemoryUB,
+                torch_npu.profiler.AiCMetrics.L2Cache,
+                torch_npu.profiler.AiCMetrics.MemoryAccess
+            ]
+
             experimental_config = torch_npu.profiler._ExperimentalConfig(
                 export_type=torch_npu.profiler.ExportType.Text,
                 profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
                 msprof_tx=False,
-                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                aic_metrics=aic_metrics_list[
+                    envs_ascend.VLLM_ASCEND_PROFILER_AIC_METRICS],
                 l2_cache=False,
                 op_attr=False,
                 data_simplification=False,
