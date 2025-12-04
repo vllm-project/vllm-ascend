@@ -24,7 +24,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.speculative_config = None
-        mock_vllm_config.compilation_config.pass_config.enable_sequence_parallelism = False
+        mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = None
         return mock_vllm_config
 

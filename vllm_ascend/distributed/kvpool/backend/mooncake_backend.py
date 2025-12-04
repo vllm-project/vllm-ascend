@@ -7,7 +7,7 @@ from typing import Union
 
 # Third Party
 from vllm.config import ParallelConfig
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend

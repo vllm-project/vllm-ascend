@@ -38,27 +38,6 @@ from vllm_ascend.utils import (
     prefill_context_parallel_enable, update_aclgraph_sizes,
     update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
 
-# set custom ops path
-CUR_DIR = os.path.dirname(os.path.realpath(__file__))
-CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "vllm_ascend", "_cann_ops_custom",
-                               "vendors", "customize")
-CUSTOM_LIB_PATH = os.path.join(CUSTOM_OPP_PATH, "op_api", "lib")
-
-if os.path.exists(CUSTOM_OPP_PATH):
-    current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
-    if current_cust_opp_path:
-        os.environ[
-            "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
-    else:
-        os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
-
-if os.path.exists(CUSTOM_LIB_PATH):
-    current_lib_path = os.environ.get("LD_LIBRARY_PATH", "")
-    if current_lib_path:
-        os.environ["LD_LIBRARY_PATH"] = f"{CUSTOM_LIB_PATH}:{current_lib_path}"
-    else:
-        os.environ["LD_LIBRARY_PATH"] = CUSTOM_LIB_PATH
-
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -66,6 +45,8 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+
+CUSTOM_OP_REGISTERED = False
 
 
 class NPUPlatform(Platform):
@@ -178,6 +159,8 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
+        compilation_config.pass_config.fuse_norm_quant = False
+        compilation_config.pass_config.fuse_act_quant = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -212,7 +195,7 @@ class NPUPlatform(Platform):
         # to ascend ops && hardwares. We update these sizes here to improve
         # default performance.
         update_default_aclgraph_sizes(vllm_config)
-        # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
+        # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
                 enable_sp(vllm_config):
@@ -331,7 +314,7 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
-            vllm_config.scheduler_config.chunked_prefill_enabled = True
+            vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         if vllm_config.kv_transfer_config is not None and \
@@ -361,7 +344,22 @@ class NPUPlatform(Platform):
         # TODO: when the above issue is fixed, we can uncomment the following lines.
         # from vllm_ascend.utils import enable_custom_op
         # enable_custom_op()
-        pass
+        # set custom ops path
+        global CUSTOM_OP_REGISTERED
+        if CUSTOM_OP_REGISTERED:
+            return
+        CUR_DIR = os.path.dirname(os.path.realpath(__file__))
+        CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
+                                       "vllm-ascend")
+        if os.path.exists(CUSTOM_OPP_PATH):
+            current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH",
+                                                   "")
+            if current_cust_opp_path:
+                os.environ[
+                    "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
+            else:
+                os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+        CUSTOM_OP_REGISTERED = True
 
     @classmethod
     def get_attn_backend_cls(
