@@ -27,6 +27,7 @@ class TestAscendSchedulerConfig(TestBase):
             max_model_len=8192,
             is_multimodal_model=False,
             send_delta_data=False,
+            is_encoder_decoder=False,
         )
 
     def test_initialize_from_config_with_default(self):
