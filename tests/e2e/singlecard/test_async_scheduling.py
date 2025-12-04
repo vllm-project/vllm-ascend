@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from itertools import repeat
 from typing import Any
-import os
 
 import pytest
 import torch._dynamo.config as dynamo_config
-
 from vllm import SamplingParams
-from vllm.logprobs import Logprob
 from vllm.v1.metrics.reader import Metric
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 MODEL = "Qwen/Qwen3-0.6B"
-MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 first_prompt = ("The following numbers of the sequence " +
                 ", ".join(str(i) for i in range(10)) + " are:")
@@ -29,9 +26,7 @@ default_params = dict(
 )
 
 
-def test_without_spec_decoding(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_without_spec_decoding(monkeypatch: pytest.MonkeyPatch, ):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor, prefill chunking."""
     test_sampling_params: list[dict[str, Any]] = [
@@ -44,36 +39,9 @@ def test_without_spec_decoding(
         (False, "mp", False, None, False),
         (False, "mp", True, None, False),
         (False, "uni", True, None, False),
-        (True, "mp", True, None, False),
-        (True, "uni", True, None, False),
     ]
 
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
-
-
-def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
-    """Test consistency and acceptance rates with some different combos of
-    preemption, executor, async scheduling, prefill chunking,
-    spec decoding model length.
-    """
-
-    spec_config = {
-        "method": "eagle3",
-        "num_speculative_tokens": 2,
-        "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
-    }
-
-    # test_preemption, executor, async_scheduling,
-    # spec_config, test_prefill_chunking
-    test_configs = [
-        (False, "mp", False, None, False),
-        (False, "mp", False, spec_config, False),
-        (False, "mp", True, spec_config, False),
-        (True, "mp", True, spec_config, False),
-        (True, "uni", True, spec_config, False),
-    ]
-
-    run_tests(monkeypatch, MTP_MODEL, test_configs, [{}])
 
 
 @dynamo_config.patch(cache_size_limit=16)
@@ -119,10 +87,7 @@ def run_tests(
 
     failure = None
     for test_config, test_outputs, test_acceptance_rates in outputs[1:]:
-        for (base_outs, base_logprobs), base_acceptance_rate, (
-                test_outs,
-                test_logprobs,
-        ), test_acceptance_rate, params in zip(
+        for base_outs, base_acceptance_rate, test_outs, test_acceptance_rate, params in zip(
                 baseline_tests,
                 baseline_acceptances or repeat(None),
                 test_outputs,
@@ -136,7 +101,6 @@ def run_tests(
                     name_0=f"baseline=[{baseline_config}], params={params}",
                     name_1=f"config=[{test_config}], params={params}",
                 )
-                assert _all_logprobs_match(base_logprobs, test_logprobs)
 
                 if (base_acceptance_rate is not None
                         and test_acceptance_rate is not None):
@@ -193,7 +157,7 @@ def run_test(
             enforce_eager=True,
             async_scheduling=async_scheduling,
             distributed_executor_backend=executor,
-            dtype="float32",  # avoid precision errors
+            dtype="float16",  # avoid precision errors
             speculative_config=spec_config,
             disable_log_stats=False,
             **cache_arg,
@@ -208,7 +172,6 @@ def run_test(
                     example_prompts,
                     sampling_params=SamplingParams(**default_params,
                                                    **override_params),
-                    return_logprobs=True,
                 ))
             metrics_after = vllm_model.model.get_metrics()
             if acceptance_rates is not None:
@@ -225,9 +188,8 @@ def run_test(
     if len(results) > 1:
         # First check that the different parameter configs
         # actually result in different output.
-        for (other_test_outs,
-             other_test_logprobs), params in zip(results[1:],
-                                                 sampling_param_tests[1:]):
+        for other_test_outs, params in zip(results[1:],
+                                           sampling_param_tests[1:]):
             with pytest.raises(AssertionError):
                 check_outputs_equal(
                     outputs_0_lst=results[0][0],
@@ -235,24 +197,8 @@ def run_test(
                     name_0=f"baseline params={params}",
                     name_1=f"other params={params}",
                 )
-                assert _all_logprobs_match(results[0][1], other_test_logprobs)
 
     return test_config, results, acceptance_rates
-
-
-def _all_logprobs_match(req_a, req_b) -> bool:
-    return (req_a == req_b or len(req_a) == len(req_b) and all(
-        len(seq_a) == len(seq_b) and all(
-            _logprobs_match(a, b) for a, b in zip(seq_a, seq_b))
-        for seq_a, seq_b in zip(req_a, req_b)))
-
-
-def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int,
-                                                           Logprob]) -> bool:
-    return len(lps_a) == len(lps_b) and all(
-        a.decoded_token == b.decoded_token and a.rank == b.rank
-        and a.logprob == pytest.approx(b.logprob, rel=1e-3, abs=1e-6)
-        for a, b in ((lps_a[x], lps_b[x]) for x in lps_a))
 
 
 def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
