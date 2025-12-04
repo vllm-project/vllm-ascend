@@ -231,7 +231,11 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = True, **kwargs):
+    def __init__(self, 
+                fuse_norm_quant: bool = True,
+                fuse_qknorm_rope: bool = True, 
+                **kwargs
+                ):
         """
         Initialize the configuration.
         

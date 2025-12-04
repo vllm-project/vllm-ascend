@@ -107,6 +107,7 @@ def qk_rmsnorm_triton_kernel(
         input_offset += input_offset_step
         output_offset += output_offset_step
 
+
 @triton.jit
 def qk_rmsnorm_bias_triton_kernel(
     input_ptr,
@@ -288,9 +289,18 @@ def qk_rmsnorm_impl_fake(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # fake impl for shape inference
     batch_size = input.shape[0]
-    q_output = torch.empty(batch_size, q_hidden_size, device=input.device, dtype=input.dtype)
-    k_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
-    v_output = torch.empty(batch_size, kv_hidden_size, device=input.device, dtype=input.dtype)
+    q_output = torch.empty(batch_size,
+                           q_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
+    k_output = torch.empty(batch_size,
+                           kv_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
+    v_output = torch.empty(batch_size,
+                           kv_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
     return q_output, k_output, v_output
 
 

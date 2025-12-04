@@ -20,8 +20,8 @@ import torch
 import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
+import vllm_ascend.ops.triton.linear.qk_rmsnorm  # noqa
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
-import vllm_ascend.ops.triton.linear.qk_rmsnorm # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
 from vllm_ascend.ops.rotary_embedding import (
     AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
