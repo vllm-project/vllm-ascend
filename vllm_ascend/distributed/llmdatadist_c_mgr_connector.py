@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (get_dcp_group, get_tp_group,
                                              get_world_group)
 from vllm.forward_context import ForwardContext
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig

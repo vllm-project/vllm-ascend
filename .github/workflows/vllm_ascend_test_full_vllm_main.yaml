@@ -17,7 +17,7 @@
 name: 'ascend test / vllm main'
 
 on:
-  # Run 1-card and 2-cards e2e tests per 2h
+  # Run full e2e tests per 2h
   schedule:
     - cron: '0 */2 * * *'
   workflow_dispatch:
@@ -28,12 +28,6 @@ on:
 defaults:
   run:
     shell: bash -el {0}
-
-# only cancel in-progress runs of the same workflow
-# and ignore the lint / 1 card / 4 cards test type
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   e2e-test:

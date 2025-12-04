@@ -22,6 +22,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
 |-------------|--------------|------------------|-------------|--------------------|--------------|
+| v0.11.0rc3  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1.post1            |              |
 | v0.11.0rc2  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1            |              |
 | v0.11.0rc1  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC1     | 2.7.1 / 2.7.1            |              |
 | v0.11.0rc0  | v0.11.0rc3      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
@@ -43,7 +44,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | v0.11.2 | >= 3.10, < 3.12   | 8.3.RC1 | 2.7.1 / 2.7.1 |
+|     main    | v0.12.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
 
 ## Release cadence
 
@@ -51,6 +52,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2025.12.03 | Release candidates, v0.11.0rc3            |
 | 2025.11.21 | Release candidates, v0.11.0rc2            |
 | 2025.11.10 | Release candidates, v0.11.0rc1            |
 | 2025.09.30 | Release candidates, v0.11.0rc0            |

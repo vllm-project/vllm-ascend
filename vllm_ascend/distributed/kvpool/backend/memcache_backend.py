@@ -3,7 +3,7 @@ from enum import Enum
 
 import torch
 from vllm.config import ParallelConfig
-from vllm.utils import logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
 
