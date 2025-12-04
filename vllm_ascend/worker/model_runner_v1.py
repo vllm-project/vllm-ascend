@@ -1922,7 +1922,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
                 seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
                 seq_lens=self.seq_lens_cpu[:num_reqs],
-                max_seq_len=self.seq_lens_cpu[:num_reqs].np[:num_reqs].max().item(),
                 num_reqs=num_reqs,
                 num_actual_tokens=slot_mapping_size,
                 num_input_tokens=num_input_tokens,
@@ -2846,6 +2845,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
+    def _get_valid_sampled_token_count(self) -> list[int]:
+        # Wait until valid_sampled_tokens_count is copied to cpu,
+        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+        if (
+            self.valid_sampled_token_count_event is None
+            or prev_sampled_token_ids is None
+        ):
+            return []
+
+        counts_cpu = self.valid_sampled_token_count_cpu
+        self.valid_sampled_token_count_event.synchronize()
+        return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
+    
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         with set_ascend_forward_context(None, self.vllm_config):
