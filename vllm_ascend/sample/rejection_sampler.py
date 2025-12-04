@@ -3,6 +3,10 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import triton
+import triton.languages as tl
+
+
 import vllm.v1.sample.rejection_sampler as rs
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
