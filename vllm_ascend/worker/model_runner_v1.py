@@ -256,8 +256,7 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self._sampled_token_ids_cpu,
                 self.vocab_size,
                 self._invalid_req_indices,
-                return_cu_num_tokens=False
-            )
+                return_cu_num_tokens=False)
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         return output
@@ -2626,7 +2625,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
             sampled_token_ids = sampler_output.sampled_token_ids
-            
+
             if not self.use_async_scheduling:
                 # Get the valid generated tokens.
                 max_gen_len = sampled_token_ids.shape[-1]
