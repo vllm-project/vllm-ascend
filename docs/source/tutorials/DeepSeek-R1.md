@@ -62,7 +62,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /mnt/sfs_turbo/.cache:/root/.cache \
+-v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
