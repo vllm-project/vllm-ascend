@@ -3169,7 +3169,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
             mtp_instance = self.mtp_instance
-            num_mtp_layers = mtp_instance.model.num_mtp_layers if mtp_instance is not None else 0
+            if mtp_instance is not None:
+                num_mtp_layers = mtp_instance.model.num_mtp_layers
+            else:
+                num_mtp_layers = 0
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model,
                                                 mtp_instance=mtp_instance,
                                                 num_mtp_layers=num_mtp_layers)
