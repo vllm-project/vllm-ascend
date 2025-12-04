@@ -248,18 +248,6 @@ def enable_custom_op():
     """
     global _CUSTOM_OP_ENABLED
 
-    # set custom ops path
-    CUR_DIR = os.path.dirname(os.path.realpath(__file__))
-    CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
-                                   "vllm-ascend")
-    if os.path.exists(CUSTOM_OPP_PATH):
-        current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
-        if current_cust_opp_path:
-            os.environ[
-                "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
-        else:
-            os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
-
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
@@ -785,8 +773,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.
-            enable_sequence_parallelism
+            vllm_config.compilation_config.pass_config.enable_sp
             or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
