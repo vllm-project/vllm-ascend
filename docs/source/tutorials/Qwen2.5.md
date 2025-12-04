@@ -213,41 +213,68 @@ Two accuracy evaluation methods are provided: AISBench (recommended) and manual 
 
 ### Using AISBench
 
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
-2. After execution, you can get the result, here is the result of `Qwen2.5-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+
+#### Configuration Steps
+1. Locate the AISBench configuration file:
+```bash
+cd benchmark/
+ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --search
+```
+2. Modify the configuration file (e.g., `vllm_api_general_chat.py`) to match the deployed service:
+```Python
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr='vllm-api-general-chat',
+        path="",
+        model="qwen-2.5-7b-instruct",  # Must match --served-model-name from deployment
+        request_rate=0,
+        retry=2,
+        host_ip="<IP>",  # Deployment server IP
+        host_port=<Port>,  # Deployment server port
+        max_out_len=512,
+        batch_size=1,
+        generation_kwargs=dict(
+            temperature=0.5,
+            top_k=10,
+            top_p=0.95,
+            seed=None,
+            repetition_penalty=1.03,
+        )
+    )
+]
+```
+#### Execution Command
+```bash
+# Specify visible NPU cards (adjust based on available hardware)
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+# Run evaluation (debug logs recommended for first execution)
+ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --debug
+
+# Generate summary report
+ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer example
+```
+Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy report is shown below:
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- |--------------|
 | gsm8k | - | accuracy | gen | 75.00  |
-
-### Using Language Model Evaluation Harness
-
-As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
-
-1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
-
-2. Run `lm_eval` to execute the accuracy evaluation.
-
-```shell
-lm_eval \
-  --model local-completions \
-  --model_args model=/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
-  --tasks gsm8k \
-  --output_path ./
-```
-
-3. After execution, you can get the result, here is the result of `DeepSeek-V3.2-Exp-W8A8` in `vllm-ascend:0.11.0rc0` for reference only.
-
-|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
-|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
-|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9591|±  |0.0055|
-|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
 
 ## Performance
 
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+Add `--mode perf` to the accuracy evaluation command to run performance testing:
+```bash
+ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer example --mode perf
+```
 
 ### Using vLLM Benchmark
 Run performance evaluation of `Qwen2.5-Instruct` as an example.
