@@ -303,6 +303,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                       'decode_max_num_seqs', 0)
         self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
                                 decode_max_num_seqs)
+        self.max_model_len = self.model_config.max_model_len
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
@@ -2842,7 +2843,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         counts_cpu = self.valid_sampled_token_count_cpu
         self.valid_sampled_token_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
-    
+
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         with set_ascend_forward_context(None, self.vllm_config):
