@@ -157,7 +157,7 @@ class QKNormFusionPatternWithBias:
                                                        self.eps)
             q_normed = q_norm_out + q_bias
             
-            k_by_head = k.view(*k.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
                                                        self.eps)
             k_normed = k_norm_out + k_bias
@@ -226,11 +226,11 @@ class QKNormFusionPass(VllmInductorPass):
                                 eps=epsilon).register(
                                     self.pattern_match_passes)
 
-            # QKNormFusionPatternWithBias(head_dim=layer.head_size,
-            #                             num_heads=layer.num_heads,
-            #                             num_kv_heads=layer.num_kv_heads,
-            #                             eps=epsilon).register(
-            #                                 self.pattern_match_passes)
+            QKNormFusionPatternWithBias(head_dim=layer.head_size,
+                                        num_heads=layer.num_heads,
+                                        num_kv_heads=layer.num_kv_heads,
+                                        eps=epsilon).register(
+                                            self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
