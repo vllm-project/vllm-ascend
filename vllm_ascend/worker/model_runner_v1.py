@@ -244,14 +244,14 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Release the device tensor once the copy has completed
         del self._sampled_token_ids
-        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
+        max_gen_len = self._sampled_token_ids_cpu.shape[-1]
         if max_gen_len == 1:
             valid_sampled_token_ids: list[np.ndarray] = [
-                row for row in self.sampled_token_ids_cpu.numpy()
+                row for row in self._sampled_token_ids_cpu.numpy()
             ]
         else:
             valid_sampled_token_ids = RejectionSampler.parse_output(
-                self.sampled_token_ids_cpu,
+                self._sampled_token_ids_cpu,
                 self.vocab_size,
             )
 
