@@ -159,7 +159,11 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+    def __init__(self, 
+                enable_quantization_fusion: bool = True, 
+                fuse_qknorm: bool = True, 
+                **kwargs
+                ):
         """
         Initialize the configuration.
         
@@ -172,8 +176,7 @@ class AscendCompilationConfig:
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable_quantization_fusion = enable_quantization_fusion
-        # Add more compilation related configs here as needed
-
+        self.fuse_qknorm = fuse_qknorm
 
 class TorchairGraphConfig:
     """
