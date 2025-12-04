@@ -3,12 +3,14 @@
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -21,12 +23,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from tests.ut.base import TestBase
 from vllm_ascend.core.scheduler import AscendScheduler
 from vllm_ascend.core.scheduler_dynamic_batch import SchedulerDynamicBatch
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import sha256
-else:
-    from vllm.utils.hashing import sha256
 
 EOS_TOKEN_ID = 50256
 MODEL = "Qwen3-0.6B"
@@ -86,6 +82,7 @@ def make_output(scheduler):
         for i, req in enumerate(scheduler.running)
     }
     sampled_token_ids = [[1000]] * len(scheduler.running)
+
     logprobs = None
 
     modelrunner_output = ModelRunnerOutput(
@@ -99,6 +96,7 @@ def make_output(scheduler):
     return modelrunner_output
 
 
+@pytest.mark.skip("Ascend Scheduler has been deprecated")
 class TestAscendScheduler(TestBase):
 
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
@@ -181,23 +179,13 @@ class TestAscendScheduler(TestBase):
         )
         cache_config.num_gpu_blocks = 10000
 
-        if vllm_version_is("0.11.0"):
-            scheduler = AscendScheduler(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-                log_stats=True,
-                structured_output_manager=MagicMock(
-                    spec=StructuredOutputManager),
-            )
-        else:
-            scheduler = AscendScheduler(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
-                log_stats=True,
-                block_size=block_size,
-                structured_output_manager=MagicMock(
-                    spec=StructuredOutputManager),
-            )
+        scheduler = AscendScheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            block_size=block_size,
+            structured_output_manager=MagicMock(spec=StructuredOutputManager),
+        )
 
         should_advance = MagicMock()
         should_advance.return_value = False
@@ -376,9 +364,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -429,9 +415,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -481,9 +465,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -526,9 +508,7 @@ class TestAscendScheduler(TestBase):
             },
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
-            free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None)
+            free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},
@@ -904,11 +884,13 @@ class TestSchedulerDynamicBatch(TestBase):
                                                    torch.float32, False))
             ],
         )
+        kv_cache_config.hash_block_size = block_size
         cache_config.num_gpu_blocks = 10000
 
         scheduler = SchedulerDynamicBatch(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
+            block_size=block_size,
             log_stats=True,
             structured_output_manager=MagicMock(spec=StructuredOutputManager),
         )
@@ -1069,9 +1051,7 @@ class TestSchedulerDynamicBatch(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -1122,9 +1102,7 @@ class TestSchedulerDynamicBatch(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -1174,9 +1152,7 @@ class TestSchedulerDynamicBatch(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -1219,9 +1195,7 @@ class TestSchedulerDynamicBatch(TestBase):
             },
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
-            free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None)
+            free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},

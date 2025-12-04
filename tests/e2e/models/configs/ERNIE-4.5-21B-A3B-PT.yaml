@@ -1,0 +1,9 @@
+model_name: "PaddlePaddle/ERNIE-4.5-21B-A3B-PT"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,flexible-extract"
+    value: 0.71
+num_fewshot: 5
+trust_remote_code: True

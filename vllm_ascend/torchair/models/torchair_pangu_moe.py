@@ -24,7 +24,8 @@ import torch_npu
 from torch import nn
 from torch.nn import Parameter
 from transformers import PretrainedConfig
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
@@ -57,7 +58,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               get_ascend_device_type)
 
 _ROUTER_SCALE = None
 
@@ -448,7 +450,8 @@ class PanguProMoESparseMoeBlock(nn.Module):
         # on 300I Duo platform, we find that num_voted_experts set to 5 achieves
         # good performance without sacrifice too much accuracy. for other platform,
         # this is set to 8 to use original pangu grouped topk.
-        num_voted_experts = 5 if is_310p() else 8
+        num_voted_experts = 5 if get_ascend_device_type(
+        ) == AscendDeviceType._310P else 8
 
         self.experts = FusedMoE(
             num_experts=config.num_experts,
@@ -537,8 +540,7 @@ class PanguProMoEAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_parameters: Dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -564,7 +566,6 @@ class PanguProMoEAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -598,8 +599,7 @@ class PanguProMoEAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -652,8 +652,6 @@ class PanguProMoEDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
 
@@ -661,8 +659,7 @@ class PanguProMoEDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -808,7 +805,7 @@ class PanguProMoEModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -824,7 +821,7 @@ class PanguProMoEModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -916,8 +913,8 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -1109,7 +1106,8 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-            if is_310p() and "head" in name:
+            if get_ascend_device_type(
+            ) == AscendDeviceType._310P and "head" in name:
                 # on 300I Duo platform, ACL_FORMAT_FRACTAL_NZ is much more preferred than
                 # ACL_FORMAT_FRACTAL_ND by matmul operation. Since lmhead is also implemented
                 # by linear, we manually cast the format here.
