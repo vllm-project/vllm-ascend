@@ -65,7 +65,9 @@ except ImportError:
     Qwen3VLProcessingInfo = object
     Qwen3VLMoeForConditionalGeneration = object
     Qwen3VLMoeProcessingInfo = object
-from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm.model_executor.models.utils import (WeightsMapper,
+                                              _merge_multimodal_embeddings,
+                                              maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.models.qwen2_5_vl import AscendQwen2_5_VisionRotaryEmbedding
@@ -564,8 +566,6 @@ class AscendQwen2_5_VLForConditionalGeneration_Without_Padding(
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
         """
-        from vllm.model_executor.models.utils import \
-            _merge_multimodal_embeddings
 
         inputs_embeds = self._get_text_embeddings(
             input_ids,
@@ -706,8 +706,6 @@ class AscendQwen3VLMoeForConditionalGeneration(
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
         """
-        from vllm.model_executor.models.utils import \
-            _merge_multimodal_embeddings
         inputs_embeds = self._get_text_embeddings(
             input_ids,
             self.get_language_model().get_input_embeddings,
@@ -747,20 +745,17 @@ class AscendQwen3VLMoeForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings,
         is_multimodal: torch.Tensor,
     ) -> tuple[torch.Tensor, MultiModalEmbeddings]:
-        from vllm.model_executor.models.utils import \
-            _merge_multimodal_embeddings
 
         visual_lens = [len(x) for x in multimodal_embeddings]
         multimodal_embeddings_cat = torch.cat(multimodal_embeddings, dim=0)
 
-        (
-            multimodal_embeddings_main,
-            multimodal_embeddings_multiscale,
-        ) = torch.split(
-            multimodal_embeddings_cat,
-            [self.visual_dim, self.multiscale_dim],
-            dim=-1,
-        )
+        total_dim = multimodal_embeddings_cat.shape[-1]
+        assert total_dim == self.visual_dim + self.multiscale_dim, \
+            f"Total dimension mismatch: input {total_dim}, expected {self.visual_dim + self.multiscale_dim}"
+        multimodal_embeddings_main = multimodal_embeddings_cat[
+            ..., :self.visual_dim]
+        multimodal_embeddings_multiscale = multimodal_embeddings_cat[
+            ..., self.visual_dim:]
 
         multimodal_embeddings = torch.split(multimodal_embeddings_main,
                                             visual_lens,
@@ -779,6 +774,7 @@ class AscendQwen3VLMoeForConditionalGeneration(
         )
         deepstack_input_embeds = deepstack_input_embeds.view(
             inputs_embeds.shape[0], self.deepstack_num_level, self.visual_dim)
-        deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
+        deepstack_input_embeds = deepstack_input_embeds.permute(
+            1, 0, 2).contiguous()
 
         return deepstack_input_embeds, multimodal_embeddings
