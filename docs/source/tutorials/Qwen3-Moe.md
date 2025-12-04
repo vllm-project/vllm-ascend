@@ -1,4 +1,4 @@
-# Qwen3-235B-A22B
+# Qwen3-Moe
 
 ## Introduction
 
@@ -18,8 +18,8 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) nodes or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B)
-- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8)
+- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node， 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2（32G * 8）nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B)
+- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2（32G * 8）nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -30,57 +30,56 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ### Installation
 
 :::::{tab-set}
-::::{tab-item} Use vllm-ascend:v0.11.0rc1 docker image
+::::{tab-item} Use vllm-ascend:|vllm_ascend_version| docker image
 
 Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc1`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc1-a3`(for Atlas 800 A3).
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
 ```{code-block} bash
-   :substitutions:
-   # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-   # Update the vllm-ascend image according to your environment.
-   # Note you should download the weight to /root/.cache in advance.
-   # Update the vllm-ascend image
-   export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-   export NAME=vllm-ascend
+  :substitutions:
+  # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
+  # Update the vllm-ascend image according to your environment.
+  # Note you should download the weight to /root/.cache in advance.
+  # Update the vllm-ascend image
+  export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+  export NAME=vllm-ascend
 
-   # Run the container using the defined variables
-   # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-   docker run --rm \
-   --name $NAME \
-   --net=host \
-   --shm-size=1g \
-   --device /dev/davinci0 \
-   --device /dev/davinci1 \
-   --device /dev/davinci2 \
-   --device /dev/davinci3 \
-   --device /dev/davinci4 \
-   --device /dev/davinci5 \
-   --device /dev/davinci6 \
-   --device /dev/davinci7 \
-   --device /dev/davinci_manager \
-   --device /dev/devmm_svm \
-   --device /dev/hisi_hdc \
-   -v /usr/local/dcmi:/usr/local/dcmi \
-   -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-   -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-   -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-   -v /etc/ascend_install.info:/etc/ascend_install.info \
-   -v /mnt/sfs_turbo/.cache:/root/.cache \
-   -it $IMAGE bash
-   ```
-  
-  Set up environment variables:
-
-  ```bash
-  # Load model from ModelScope to speed up download
-  export VLLM_USE_MODELSCOPE=True
-
-  # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
-  export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+  # Run the container using the defined variables
+  # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+  docker run --rm \
+  --name $NAME \
+  --net=host \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -it $IMAGE bash
   ```
+  
+Set up environment variables:
+
+```bash
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+
+# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+```
 
 ::::
 ::::{tab-item} Build from source
@@ -98,7 +97,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3 or 1 Atlas 800 A2.
+`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G * 16）、 1 Atlas 800 A2（64G * 8）.
 Quantized version need to start with parameter `--quantization ascend`.
 
 Run the following script to execute online inference.
@@ -172,7 +171,7 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+vllm serve vllm-ascend/Qwen3-235B-A22B \
 --host 0.0.0.0 \
 --port 8000 \
 --data-parallel-size 2 \
@@ -181,7 +180,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --data-parallel-address $local_ip \
 --data-parallel-rpc-port 13389 \
 --seed 1024 \
---served-model-name qwen3vl \
+--served-model-name qwen3 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
@@ -215,7 +214,7 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+vllm serve vllm-ascend/Qwen3-235B-A22B \
 --host 0.0.0.0 \
 --port 8000 \
 --headless \
@@ -226,7 +225,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --data-parallel-rpc-port 13389 \
 --seed 1024 \
 --tensor-parallel-size 8 \
---served-model-name qwen3vl \
+--served-model-name qwen3 \
 --max-num-seqs 16 \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
