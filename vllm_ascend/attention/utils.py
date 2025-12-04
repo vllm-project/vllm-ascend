@@ -88,8 +88,6 @@ class AscendCommonAttentionMetadata:
 
     attn_mask: torch.Tensor = None
 
-    fia_attn_mask: torch.Tensor = None
-
     spec_attn_mask: torch.Tensor = None
 
     attn_state: Any = None

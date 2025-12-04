@@ -77,9 +77,7 @@ class EagleProposer(Proposer):
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-        attn_mask_len = self.vllm_config.model_config.max_model_len
-        self.attn_mask_builder = AttentionMaskBuilder(
-            attn_mask_len, self.vllm_config.model_config.dtype, device=device)
+        self.attn_mask_builder = AttentionMaskBuilder()
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -570,9 +568,7 @@ class EagleProposer(Proposer):
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-            attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-                attn_metadata.seq_lens, positions_cpu,
-                self.vllm_config.model_config.dtype, self.device)
+            attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
             attn_metadata.attn_mask = attn_mask
             attn_metadata.block_tables = block_table.to(device)

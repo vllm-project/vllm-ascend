@@ -378,12 +378,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        if self.pcp_size > 1:
-            self.attn_mask_builder = None
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
 
@@ -1036,15 +1031,15 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
     def _make_attention_mask(self, seq_lens, position,
                              attn_state) -> torch.Tensor:
         # pcp situation.
-        if self.pcp_size > 1:
-            return None
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
+        if self.pcp_size > 1 and self.vllm_config.model_config.use_mla:
+            return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
         # dcp situation.
         if self.dcp_size > 1:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
         if self.vllm_config.model_config.use_mla:
-            return None
+            return self.attn_mask_builder.get_mla_mask(self.dtype)
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
@@ -4486,18 +4481,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 tail_attn_nomask_seqlens = torch.tensor(
                     [chunk_seqlens, kv_with_q_tail_nomask_seqlens],
                     dtype=torch.int32)
-                if self.vllm_config.model_config.use_mla:
-                    pcp_prefill_mask = torch.triu(
-                        torch.ones(512,
-                                   512,
-                                   device=self.device,
-                                   dtype=self.dtype), 1)
-                else:
-                    pcp_prefill_mask = torch.triu(
-                        torch.full((2048, 2048),
-                                   True,
-                                   device=self.device,
-                                   dtype=torch.bool), 1)
+                pcp_prefill_mask = self.attn_mask
 
                 self.extra_long_seq_kwargs = {
                     'attn_mask_seqlens': attn_mask_seqlens,
