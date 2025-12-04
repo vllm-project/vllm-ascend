@@ -59,10 +59,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
                                                    supports_transcription)
-from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -3169,11 +3169,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
             num_mtp_layers = self.mtp_instance.model.num_mtp_layers if self.mtp_instance is not None else 0
-            self.eplb_adaptor = VllmEplbAdaptor(
-                model=self.model, 
-                mtp_instance=self.mtp_instance, 
-                num_mtp_layers=num_mtp_layers
-                )
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model,
+                                                mtp_instance=self.mtp_instance,
+                                                num_mtp_layers=num_mtp_layers)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor, num_mtp_layers)
             self.eplb_updator.warm_up_eplb()
@@ -3202,7 +3200,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     assert isinstance(self.drafter, MtpProposer), \
                         f"drafter type wrong: {type(self.drafter)}"
                     assert isinstance(self.drafter.model, (DeepSeekMTP, ACLGraphWrapper)), \
-                        f"drafter type wrong: {type(self.drafter)}, only suport DeepSeekMTP or ACLGraphWrapper"
+                        f"drafter type wrong: {type(self.drafter)}, only support DeepSeekMTP or ACLGraphWrapper"
                     if isinstance(self.drafter.model, DeepSeekMTP):
                         self.mtp_instance = self.drafter.model
                     elif isinstance(self.drafter.model, ACLGraphWrapper):

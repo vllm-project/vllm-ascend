@@ -18,7 +18,6 @@
 import types
 
 import torch
-
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 
 
@@ -33,7 +32,8 @@ def get_log2phy_map(self, layer_id):
     if not isinstance(self, DeepSeekMultiTokenPredictor):
         return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
     else:
-        return self.layers[str(layer_id)].mtp_block.mlp.experts.get_log2phy_map()
+        return self.layers[str(
+            layer_id)].mtp_block.mlp.experts.get_log2phy_map()
 
 
 def get_all_expert_map(self, num_moe_layers=None):
@@ -47,7 +47,8 @@ def get_all_expert_map(self, num_moe_layers=None):
             all_loads.append(load_tensor)
     else:
         all_loads = []
-        for layer_id in range(self.mtp_start_layer_idx, self.mtp_start_layer_idx + self.num_mtp_layers):
+        for layer_id in range(self.mtp_start_layer_idx,
+                              self.mtp_start_layer_idx + self.num_mtp_layers):
             load_tensor = self.get_expert_map(layer_id)
             all_loads.append(load_tensor)
 
@@ -81,7 +82,8 @@ def clear_all_moe_loads(self):
             self.model.layers[layer_id +
                             num_dense_layers].mlp.experts.clear_moe_load()
     else:
-        for layer_id in range(self.mtp_start_layer_idx, self.mtp_start_layer_idx + self.num_mtp_layers):
+        for layer_id in range(self.mtp_start_layer_idx,
+                              self.mtp_start_layer_idx + self.num_mtp_layers):
             self.layers[str(layer_id)].mtp_block.mlp.experts.clear_moe_load()
     
     
