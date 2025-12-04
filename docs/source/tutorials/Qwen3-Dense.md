@@ -95,9 +95,12 @@ Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0r
 
 #### Docker Pull (by tag)
 
-`docker pull quay.io/ascend/vllm-ascend:v0.11.0rc2`
+```{code-block} bash
+   :substitutions:
 
-`docker pull quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+```
 
 #### Docker run
 ```{code-block} bash
