@@ -32,6 +32,7 @@ from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
+from vllm.model_executor.layers.linear import LinearBase
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 
@@ -63,6 +64,7 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
+_FLASHCOMM2_OSHARD_LAYER = None
 
 
 def _print_callback_on_stream(*args):
@@ -958,6 +960,12 @@ def flashcomm2_enable() -> bool:
 def flashcomm2_o_shared_enabled() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED > 0
 
+def get_flashcomm2_o_shard_layer(layer: LinearBase = None) -> LinearBase:
+    global _FLASHCOMM2_OSHARD_LAYER
+    if _FLASHCOMM2_OSHARD_LAYER is None:
+        _FLASHCOMM2_OSHARD_LAYER = layer
+    assert _FLASHCOMM2_OSHARD_LAYER is not None, f"_FLASHCOMM2_OSHARD_LAYER is not init, please make sure that you input a valid layer parameter"
+    return _FLASHCOMM2_OSHARD_LAYER
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
