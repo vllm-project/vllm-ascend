@@ -100,7 +100,7 @@ async def test_multi_node() -> None:
     disaggregated_prefill = config.disaggregated_prefill
     server_port = config.server_port
     proxy_port = config.proxy_port
-    server_host = config.node_info.ip
+    server_host = config.master_ip
     proxy_script = config.envs.get("DISAGGREGATED_PREFILL_PROXY_SCRIPT", \
         'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py')
     with config.launch_server_proxy(proxy_script):

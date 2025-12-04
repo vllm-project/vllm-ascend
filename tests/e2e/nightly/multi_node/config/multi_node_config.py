@@ -340,3 +340,9 @@ class MultiNodeConfig:
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(
             str(ranktable_path)), "failed generate ranktable.json"
+
+
+if __name__ == '__main__':
+    config = MultiNodeConfig.from_yaml()
+    for node in config.nodes_info:
+        print(node)
