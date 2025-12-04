@@ -189,11 +189,20 @@ class ACLGraphWrapper:
         return entry.output
 
 
-def update_attn_params(update_stream, forward_context, runtime_shape,
-                       kv_transfer_config):
+def update_attn_params(update_stream,
+                       forward_context,
+                       runtime_shape,
+                       kv_transfer_config=None):
     graph_params = get_graph_params()
 
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+    # NOTE(Angazenn): By moving the npu-stream context ahead,
+    # (see https://github.com/vllm-project/vllm-ascend/pull/3985)
+    # we can reduce host overhead introduced by stream initialization.
+    # However, we find that this might cause potential accuracy problems
+    # with pd-disaggreagation. Therefore, this optimization is only enabled
+    # without pd-disaggreagation. We are working on to solve this problem
+    # directly int the future.
+    if kv_transfer_config is not None:
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
                 graph_params.attn_params[runtime_shape],

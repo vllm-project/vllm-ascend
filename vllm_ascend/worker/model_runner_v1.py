@@ -1590,7 +1590,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                        self.speculative_config)
             else:
                 update_attn_params(self.update_stream, forward_context,
-                                   maybe_padded_num_tokens)
+                                   maybe_padded_num_tokens,
+                                   self.vllm_config.kv_transfer_config)
 
         if get_forward_context().sp_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -2351,7 +2352,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                        num_tokens, self.speculative_config)
             else:
                 update_attn_params(self.update_stream, forward_context,
-                                   num_tokens)
+                                   num_tokens,
+                                   self.vllm_config.kv_transfer_config)
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
