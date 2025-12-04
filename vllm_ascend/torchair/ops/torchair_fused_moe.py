@@ -16,7 +16,7 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -45,16 +45,17 @@ from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
+from vllm_ascend.quantization.quant_config import (AscendFusedMoEMethod,
+                                                   AscendQuantConfig)
+from vllm_ascend.quantization.utils import get_quant_method
 from vllm_ascend.torchair.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         get_rm_router_logits_state,
                                         npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_ascend_soc_version, is_310p,
-                               is_hierarchical_communication_enabled,
-                               vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
+                               get_ascend_device_type,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_fused_experts_with_mc2(
@@ -76,11 +77,11 @@ def torchair_fused_experts_with_mc2(
     ep_world_size = moe_parallel_config.ep_size
 
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
-    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+    need_extra_args = (get_ascend_device_type() == AscendDeviceType._910_93
                        or is_torchair)
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    a3_need_extra_args = get_ascend_device_type() == AscendDeviceType._910_93
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
@@ -468,7 +469,7 @@ def torchair_fused_experts_moge(
         group_list=group_list,
     )[0]
 
-    if is_310p():
+    if get_ascend_device_type() == AscendDeviceType._310P:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:
@@ -937,6 +938,15 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 ep_group=get_ep_group())
 
 
+class TorchairAscendFusedMoEMethod(AscendFusedMoEMethod):
+
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str, Any]):
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "moe",
+                                             packed_modules_mapping)
+
+
 class TorchairAscendFusedMoE(FusedMoE):
 
     # The moe_counter parameter is required during the initialization of EPLB
@@ -983,6 +993,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
+            pcp_size=1,
             prefix=prefix,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
@@ -1001,6 +1012,8 @@ class TorchairAscendFusedMoE(FusedMoE):
         self.moe_parallel_config = FusedMoEParallelConfig.make(
             tp_size_=(tp_size if tp_size is not None else
                       get_tensor_model_parallel_world_size()),
+            # TODO: support pcp
+            pcp_size_=1,
             dp_size_=(dp_size
                       if dp_size is not None else get_dp_group().world_size),
             vllm_parallel_config=vllm_config.parallel_config)
@@ -1069,12 +1082,8 @@ class TorchairAscendFusedMoE(FusedMoE):
                     get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
-            if vllm_version_is("0.11.0"):
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
-            else:
-                self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
+            self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
                 self.log2phy = determine_default_log2phy_map(
@@ -1120,7 +1129,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.quant_method = TorchairAscendUnquantizedFusedMoEMethod(
                     self.moe)
             else:
-                self.quant_method = AscendFusedMoEMethod(
+                self.quant_method = TorchairAscendFusedMoEMethod(
                     quant_config, prefix, quant_config.packed_modules_mapping)
 
         assert self.quant_method is not None
@@ -1390,7 +1399,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         return self.expert_map
 
     def get_log2phy_map(self):
-        return self.logical_to_physical_map
+        return self.log2phy
 
     def clear_moe_load(self):
         if self.moe_load is not None:

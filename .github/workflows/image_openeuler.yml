@@ -61,7 +61,7 @@ jobs:
       }}
     if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6.0.0
       with:
         fetch-depth: 0
         persist-credentials: false

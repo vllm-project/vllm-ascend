@@ -29,16 +29,8 @@ class FusedMoEState(Enum):
     All2AllSeq = 5
 
 
-class MoECommType(Enum):
-    ALLGATHER = 0
-    MC2 = 1
-    ALLTOALL = 2
-    NAIVE_MULTICAST = 3
-
-
-# TODO(zzzzwwjj): add soc_version to choose branch
-def _get_fused_moe_state(ep_size: int, with_prefill: bool,
-                         is_deepseek_v3_r1: bool):
+def get_fused_moe_state(ep_size: int, with_prefill: bool,
+                        is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
     if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
@@ -54,6 +46,12 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
         return FusedMoEState.All2All
     else:
         return FusedMoEState.MC2
+
+
+class MoECommType(Enum):
+    ALLGATHER = 0
+    MC2 = 1
+    ALLTOALL = 2
 
 
 @contextmanager
@@ -103,8 +101,8 @@ def set_ascend_forward_context(
         is_deepseek_v3_r1 = hasattr(
             vllm_config.model_config.hf_config, 'n_routed_experts'
         ) and vllm_config.model_config.hf_config.n_routed_experts == 256
-        fused_moe_state = _get_fused_moe_state(ep_size, with_prefill,
-                                               is_deepseek_v3_r1)
+        fused_moe_state = get_fused_moe_state(ep_size, with_prefill,
+                                              is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
@@ -160,25 +158,6 @@ def set_ascend_forward_context(
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
         forward_context.is_mtp_model = is_mtp_model
-
-        # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
-        # It will be improved later by implementing operator fusion through the FX graph.
-        #
-        # set for addrmsnorm+quant fusion.
-        # this optim now just support dense models due to the specific operators used.
-        # Once the necessary conditions are met, support for MOE models will also be added.
-        from vllm_ascend.quantization.quant_config import AscendQuantConfig
-        model_type_scope = ["llama", "qwen2", "qwen3", "qwen3_moe"]
-        addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in model_type_scope and \
-            forward_context.layer_idx is not None
-        if addrmsnorm_quant_fusion_enabled:
-            forward_context.model_instance = model_instance
-            forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
-            forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
-            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
-                forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
-        forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens

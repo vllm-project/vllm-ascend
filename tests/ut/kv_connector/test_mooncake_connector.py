@@ -13,13 +13,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import zmq
 from vllm.distributed.parallel_state import GroupCoordinator
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import make_zmq_path
-else:
-    from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.network_utils import make_zmq_path
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -1057,7 +1051,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 'vllm_ascend.distributed.mooncake_connector.string_to_int64_hash',
                 mock_string_to_int64_hash),
             patch(
-                'vllm_ascend.distributed.mooncake.transfer_engine.TransferEngine',
+                'vllm_ascend.distributed.mooncake_transfer_engine.TransferEngine',
                 return_value=self.mock_transfer_engine),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.KVCacheSendingThread',
