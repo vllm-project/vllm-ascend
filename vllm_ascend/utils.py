@@ -41,6 +41,7 @@ else:
     VllmConfig = None
 
 ASCEND_QUANTIZATION_METHOD = "ascend"
+COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
@@ -246,6 +247,7 @@ def enable_custom_op():
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
+
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
@@ -469,6 +471,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
+    if not vllm_config.model_config:
+        logger.warning(
+            "Got empty model config. This typically occurs when an empty vllm_config is "
+            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+        )
+
+        return
     hf_config = vllm_config.model_config.hf_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
@@ -647,7 +656,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
@@ -657,6 +665,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendQKVParallelLinear,
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
+    from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
         AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
@@ -757,19 +766,24 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
-def enable_sp(vllm_config=None) -> bool:
+def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
         if vllm_config is None:
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.
-            enable_sequence_parallelism
+            vllm_config.compilation_config.pass_config.enable_sp
             or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+        if not _ENABLE_SP and enable_shared_expert_dp:
+            _ENABLE_SP = True
+            logger.info(
+                "shared_expert_dp requires enable_sp = True. has set enable_sp to True"
+            )
 
         if not _ENABLE_SP:
             return _ENABLE_SP
@@ -947,7 +961,7 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     if not flashcomm2_enable():
-        logger.info("FLASHCOMM2 not enable.")
+        logger.debug("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size
 
     logger.info(

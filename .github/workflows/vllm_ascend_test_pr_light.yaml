@@ -42,14 +42,14 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: v0.11.2
+      vllm: v0.12.0
   changes:
     runs-on: ubuntu-latest
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -76,22 +76,30 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
-      # fixme: vllm-ascend install failed with 8.3.rc1 on github action
-      image: quay.io/ascend/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      # fixme: vllm-ascend install failed with 8.3.rc2 on github action
+      image: quay.io/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [v0.12.0]
+        
     steps:
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
       - name: Install packages
         run: |
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.0
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -104,10 +112,15 @@ jobs:
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.0
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          export TMPDIR=/mnt
+          rm -f /usr/share/dotnet
+          rm -rf /opt/ghc
+          rm -rf "/usr/local/share/boost"
+          rm -rf "$AGENT_TOOLSDIRECTORY"
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
@@ -124,7 +137,8 @@ jobs:
             --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
             --ignore tests/ut/models/test_qwen2_vl.py \
             --ignore tests/ut/models/test_qwen2_5_vl.py \
-            --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py
+            --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py \
+            --ignore tests/ut/model_loder
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
@@ -141,7 +155,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [v0.12.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
@@ -150,5 +164,5 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       type: light

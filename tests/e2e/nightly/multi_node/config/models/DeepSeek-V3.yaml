@@ -20,6 +20,9 @@ env_common:
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128
+  DISAGGREGATED_PREFILL_PROXY_SCRIPT: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
+# For None kubernetes deployment, list the IPs of all nodes used in order as follow
+# cluster_hosts: []
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]

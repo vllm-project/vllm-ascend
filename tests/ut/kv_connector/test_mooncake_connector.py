@@ -1051,7 +1051,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 'vllm_ascend.distributed.mooncake_connector.string_to_int64_hash',
                 mock_string_to_int64_hash),
             patch(
-                'vllm_ascend.distributed.mooncake.transfer_engine.TransferEngine',
+                'vllm_ascend.distributed.mooncake_transfer_engine.TransferEngine',
                 return_value=self.mock_transfer_engine),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.KVCacheSendingThread',
