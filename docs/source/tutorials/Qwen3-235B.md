@@ -102,8 +102,9 @@ export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
+export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export TASK_QUEUE_ENABLE=1
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --host 0.0.0.0 \
@@ -141,6 +142,102 @@ The parameters are explained as follows:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 - `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tp_size > 1.
+
+### Multi-node Deployment with MP (Recommended)
+Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
+
+Node 0
+```shell
+#!/bin/sh
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 2 \
+--api-server-count 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $local_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--served-model-name qwen3vl \
+--tensor-parallel-size 8 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--async-scheduling \
+--gpu-memory-utilization 0.8 \
+```
+
+Node1
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+--host 0.0.0.0 \
+--port 8000 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--tensor-parallel-size 8 \
+--served-model-name qwen3vl \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--enable-expert-parallel \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--async-scheduling \
+--gpu-memory-utilization 0.8 \
+```
+
+If the service starts successfully, the following information will be displayed on node 0:
+```
+INFO:     Started server process [44610]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Started server process [44611]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
 ### Multi-node Deployment with Ray
 
