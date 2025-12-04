@@ -30,7 +30,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-
+from vllm_ascend import envs
 # isort: off
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
@@ -326,6 +326,9 @@ class NPUPlatform(Platform):
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
             )
+
+        if ascend_config.enable_sfa_cp and envs.VLLM_ASCEND_ENABLE_MLAPO:
+            raise AssertionError("CP and MLAPO cannot be enabled simultaneously")
 
         if is_vl_model(vllm_config):
             if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
