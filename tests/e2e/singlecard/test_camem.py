@@ -77,6 +77,7 @@ def test_end_to_end():
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
     with VllmRunner("Qwen/Qwen3-0.6B",
+                    cudagraph_capture_sizes=[4],
                     enforce_eager=False,
                     enable_sleep_mode=True) as runner:
 

@@ -39,6 +39,7 @@ def mtp_correctness(sampling_config: SamplingParams,
     '''
     with VllmRunner(model_name,
                     tensor_parallel_size=1,
+                    cudagraph_capture_sizes=[4],
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
                     enforce_eager=enforce_eager) as ref_llm:
@@ -52,6 +53,7 @@ def mtp_correctness(sampling_config: SamplingParams,
                     tensor_parallel_size=1,
                     max_num_seqs=256,
                     gpu_memory_utilization=0.7,
+                    cudagraph_capture_sizes=[4],
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
                     speculative_config={

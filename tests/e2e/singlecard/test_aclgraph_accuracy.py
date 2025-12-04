@@ -50,6 +50,7 @@ def test_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[4],
                 enforce_eager=False,
                 quantization="ascend",
         ) as runner:
@@ -59,6 +60,7 @@ def test_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[4],
                 enforce_eager=True,
                 quantization="ascend",
         ) as runner:
@@ -68,6 +70,7 @@ def test_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[4],
                 enforce_eager=False,
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
@@ -76,6 +79,7 @@ def test_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[4],
                 enforce_eager=True,
         ) as runner:
             vllm_eager_outputs = runner.model.generate(prompts,
@@ -155,6 +159,7 @@ def test_output_between_eager_and_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[4],
                 enforce_eager=False,
                 compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
                 quantization="ascend",
@@ -166,6 +171,7 @@ def test_output_between_eager_and_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[4],
                 enforce_eager=False,
                 compilation_config={
                     "cudagraph_capture_sizes": [4, 8, 32, 64],

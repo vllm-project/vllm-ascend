@@ -94,7 +94,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
             "backend": guided_decoding_backend
         },
     }
-    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
+    with VllmRunner(MODEL_NAME, **runner_kwargs, cudagraph_capture_sizes=[4]) as vllm_model:
         prompts = [
             f"Give an example JSON for an employee profile "
             f"that fits this schema: {sample_json_schema}"
@@ -134,7 +134,7 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
         },
     }
 
-    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
+    with VllmRunner(MODEL_NAME, **runner_kwargs, cudagraph_capture_sizes=[4]) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2

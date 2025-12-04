@@ -68,9 +68,10 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
         if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
             vllm_model = VllmRunner(snapshot_download(model),
                                     max_model_len=1024,
+                                    cudagraph_capture_sizes=[4],
                                     quantization="ascend")
         else:
-            vllm_model = VllmRunner(snapshot_download(model))
+            vllm_model = VllmRunner(snapshot_download(model), cudagraph_capture_sizes=[4])
         _ = vllm_model.generate(prompts, sampling_params)
 
     assert capture_called.value == 1, "_capture_model was not called during test"

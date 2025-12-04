@@ -40,6 +40,7 @@ def test_multimodal_vl(prompt_template):
     prompts = prompt_template(img_questions)
     with VllmRunner("Qwen/Qwen3-VL-8B-Instruct",
                     max_model_len=4096,
+                    cudagraph_capture_sizes=[4],
                     mm_processor_kwargs={
                         "min_pixels": 28 * 28,
                         "max_pixels": 1280 * 28 * 28,
@@ -81,6 +82,7 @@ def test_multimodal_audio():
                     max_model_len=4096,
                     max_num_seqs=5,
                     dtype="bfloat16",
+                    cudagraph_capture_sizes=[4],
                     limit_mm_per_prompt={"audio": 2},
                     gpu_memory_utilization=0.9) as runner:
         outputs = runner.generate(inputs, sampling_params=sampling_params)
