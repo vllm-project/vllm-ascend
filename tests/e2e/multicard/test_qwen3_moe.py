@@ -38,6 +38,7 @@ def test_qwen3_moe_distributed_mp_tp2_ep():
     with VllmRunner(
             "Qwen/Qwen3-30B-A3B",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
     ) as vllm_model:
@@ -53,6 +54,7 @@ def test_qwen3_moe_w8a8_distributed_tp2():
             snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
             max_model_len=8192,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -68,6 +70,7 @@ def test_qwen3_moe_w8a8_distributed_tp2_ep():
             snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
             max_model_len=8192,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enable_expert_parallel=True,
             quantization="ascend",
     ) as vllm_model:
@@ -85,5 +88,28 @@ def test_qwen3_moe_distributed_aiv_tp2():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
+<<<<<<< HEAD
+=======
+            cudagraph_capture_sizes=[4],
+            enforce_eager=False,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH():
+    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
+        del os.environ['HCCL_OP_EXPANSION_MODE']
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    dtype = "auto"
+    max_tokens = 5
+    with VllmRunner(
+            "Qwen/Qwen3-30B-A3B",
+            dtype=dtype,
+            tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
+            enforce_eager=False,
+>>>>>>> 80ff85ee (add cudagraph_capture_sizes)
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

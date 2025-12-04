@@ -36,6 +36,7 @@ def test_qwen3_next_distributed_mp_tp4():
     max_tokens = 5
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp") as vllm_model:
@@ -50,6 +51,7 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
     max_tokens = 5
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
@@ -69,6 +71,7 @@ def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
     with VllmRunner(
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             tensor_parallel_size=4,
+            cudagraph_capture_sizes=[4],
             max_model_len=4096,
             gpu_memory_utilization=0.8,
             distributed_executor_backend="mp",
@@ -79,6 +82,7 @@ def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
 
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
@@ -117,6 +121,7 @@ def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
             snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"),
             max_model_len=4096,
             tensor_parallel_size=4,
+            cudagraph_capture_sizes=[4],
             gpu_memory_utilization=0.4,
             max_num_seqs=1,
             enable_expert_parallel=True,
