@@ -25,6 +25,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import (RequestQueue,
+                                              create_request_queue)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -40,7 +42,6 @@ class AscendScheduler(Scheduler):
     def _initialize_common(self) -> None:
         """Initialize common attributes shared across all versions."""
         self.scheduled_req_ids: set[str] = set()
-        self.running: list[Request] = []
         self.finished_prefill_reqs: deque[Request] = deque()
 
         enable_pd_transfer = getattr(self.scheduler_config,
@@ -96,7 +97,7 @@ class AscendScheduler(Scheduler):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests: deque[Request] = deque()
+        skipped_waiting_requests: RequestQueue = create_request_queue(self.policy)
 
         if self.phase == "prefill":
             remaining_running_reqs = []
@@ -127,11 +128,11 @@ class AscendScheduler(Scheduler):
 
                 break
 
-            request = self.waiting[0]
+            request = self.waiting.peek_request()
 
             def skip_cur_request():
-                self.waiting.popleft()
-                skipped_waiting_requests.appendleft(request)
+                self.waiting.pop_request()
+                skipped_waiting_requests.prepend_request(request)
 
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -206,7 +207,7 @@ class AscendScheduler(Scheduler):
                     request.status = RequestStatus.FINISHED_IGNORED
                     self.finished_req_ids.add(  # type: ignore
                         request.request_id)  # type: ignore
-                    self.waiting.popleft()
+                    self.waiting.pop_request()
                     continue
 
                 if num_new_tokens > token_budget:
@@ -261,11 +262,11 @@ class AscendScheduler(Scheduler):
                     num_external_computed_tokens,
                 )
 
-            self.waiting.popleft()
+            self.waiting.pop_request()
             if load_kv_async:
                 # If loading async, allocate memory and put request
                 # into the WAITING_FOR_REMOTE_KV state.
-                skipped_waiting_requests.appendleft(request)
+                skipped_waiting_requests.prepend_request(request)
                 request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                 continue
 
@@ -310,7 +311,7 @@ class AscendScheduler(Scheduler):
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
-            self.waiting.extendleft(skipped_waiting_requests)
+            self.waiting.prepend_requests(skipped_waiting_requests)
 
         if self.phase == "decode":
             while len(
@@ -387,7 +388,7 @@ class AscendScheduler(Scheduler):
                             preempted_req.record_event(
                                 EngineCoreEventType.PREEMPTED,
                                 scheduled_timestamp)
-                        self.waiting.appendleft(preempted_req)
+                        self.waiting.prepend_request(preempted_req)
                         preempted_reqs.append(preempted_req)
                         if preempted_req == request:
                             # No more request to preempt.
