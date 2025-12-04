@@ -60,6 +60,7 @@ def test_internvl_basic(model: str):
                 model,
                 max_model_len=8192,
                 limit_mm_per_prompt={"image": 4},
+                cudagraph_capture_sizes=[4],
                 enforce_eager=enforce_eager,
                 dtype="bfloat16",
         ) as vllm_model:

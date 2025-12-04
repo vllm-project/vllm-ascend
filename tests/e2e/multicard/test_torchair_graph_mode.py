@@ -52,6 +52,7 @@ def _deepseek_torchair_test_fixture(
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
             additional_config=additional_config,
     ) as vllm_model:
@@ -126,6 +127,7 @@ def _pangu_torchair_test_fixture(
             "vllm-ascend/pangu-pro-moe-pruing",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
             additional_config=additional_config,
             enable_expert_parallel=True,
@@ -187,6 +189,7 @@ def _qwen_torchair_test_fixture(
             model,
             dtype="half",
             tensor_parallel_size=tp,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
             enforce_eager=True,
             additional_config=additional_config,
@@ -244,6 +247,7 @@ def _deepseek_v2_lite_torchair_test_fixure(
             "deepseek-ai/DeepSeek-V2-Lite",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
             additional_config=additional_config,
     ) as vllm_model:

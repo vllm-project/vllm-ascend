@@ -28,6 +28,7 @@ def test_bge_model_correctness():
     model_name = snapshot_download("BAAI/bge-m3")
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             runner="pooling",
             enforce_eager=True,
     ) as vllm_runner:

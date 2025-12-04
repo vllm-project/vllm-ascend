@@ -37,6 +37,7 @@ def test_models_distributed_Qwen3_MOE_TP2():
     with VllmRunner(
             "Qwen/Qwen3-30B-A3B",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -51,6 +52,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_EP():
     with VllmRunner(
             "Qwen/Qwen3-30B-A3B",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
             enforce_eager=False,
@@ -67,6 +69,7 @@ def test_models_distributed_Qwen3_MOE_W8A8():
             snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
             max_model_len=8192,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -82,6 +85,7 @@ def test_models_distributed_Qwen3_MOE_W8A8_WITH_EP():
             snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
             max_model_len=8192,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enable_expert_parallel=True,
             quantization="ascend",
     ) as vllm_model:
@@ -99,6 +103,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH_AIV():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -116,6 +121,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

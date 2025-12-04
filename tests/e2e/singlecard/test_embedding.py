@@ -28,6 +28,7 @@ def test_embed_models_correctness():
     model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             runner="pooling",
             enforce_eager=False,
     ) as vllm_runner:

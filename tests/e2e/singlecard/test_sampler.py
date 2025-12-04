@@ -32,6 +32,7 @@ def test_models_topk() -> None:
 
     with VllmRunner("Qwen/Qwen3-0.6B",
                     max_model_len=8192,
+                    cudagraph_capture_sizes=[4],
                     gpu_memory_utilization=0.7) as runner:
         runner.generate(example_prompts, sampling_params)
 
@@ -43,6 +44,7 @@ def test_models_prompt_logprobs() -> None:
 
     with VllmRunner("Qwen/Qwen3-0.6B",
                     max_model_len=8192,
+                    cudagraph_capture_sizes=[4],
                     gpu_memory_utilization=0.7) as runner:
         runner.generate_greedy_logprobs(example_prompts,
                                         max_tokens=5,
