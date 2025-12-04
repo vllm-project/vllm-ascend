@@ -182,6 +182,7 @@ class KVCacheSendingThread(threading.Thread):
         self.tp_rank = tp_rank
         self.prefill_tp_size = prefill_tp_size
         self.pp_rank = get_pp_group().rank_in_group
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.local_engine_id = local_engine_id
         self.side_channel_host = side_channel_host
@@ -221,7 +222,8 @@ class KVCacheSendingThread(threading.Thread):
         # NOTE(rob): we need each rank to have a unique port. This hack to keeps
         # us moving. We will switch when moving to etcd or where we have a
         # single ZMQ socket in the scheduler.
-        device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
+        if self.pp_size > 1:
+            device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
         handshake_port = self.side_channel_port + device_index
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("Starting listening on path: %s", path)
@@ -983,8 +985,10 @@ class MooncakeConnectorWorker:
             vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size *
             vllm_config.parallel_config.pipeline_parallel_size * self.pcp_size)
-        device_index = (self.pp_rank +
-                        self.pcp_rank) * self.tp_size + self.tp_rank
+        if self.pp_size > 1:
+            device_index = self.pp_rank * self.tp_size + self.tp_rank
+        else:
+            device_index = self.pcp_rank * self.tp_size + self.pcp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
 
@@ -1344,6 +1348,13 @@ class MooncakeConnectorWorker:
     def _get_remote_tp_rank(self, req_id: str) -> List[int]:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
 
+    def _get_tp_remote_tp_ranks(self, tp_ori_data:list[int], rand_group_index:int, num_groups:int):
+        tp_ori_data = tp_ori_data.reshape(-1, num_groups)
+        choosen_group = tp_ori_data[:, [rand_group_index]]
+        flattened = choosen_group.reshape(-1).tolist()
+        sampled_nums = [flattened[i:i + self.tp_num_need_pulls] for i in range(0, len(flattened), self.tp_num_need_pulls)]
+        return sampled_nums
+
     def _get_remote_tp_ranks_for_req(self, req_id: str) -> List[List[int]]:
         if self._prefill_tp_size == self._decode_tp_size:
             result = list(
@@ -1358,23 +1369,29 @@ class MooncakeConnectorWorker:
         # random split prefill tp list
         if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
             if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+                # The KV cache in the model config file for MLA and SFA formats has 128 heads, but we treat it as a single unit.
                 num_kv_head = 1
             else:
                 num_kv_head = self.num_key_value_heads
+            # Divide the ranks according to the PP stage
+            ori_data = ori_data.reshape(self._prefill_pp_size, -1)
+            # The number of redundant copies for each KV head within the PP stage
             num_groups = max(
                 1,
-                len(ori_data) // num_kv_head // self._prefill_pp_size)
+                len(ori_data) // num_kv_head)
             ori_data = ori_data.reshape(-1, num_groups)
             rand_group_index = rand.sample(range(num_groups), \
                 (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
 
-            choosen_group = ori_data[:, [rand_group_index]]
-            flattened = choosen_group.reshape(-1).tolist()
-            sampled_nums = [
-                flattened[i:i + self.tp_num_need_pulls * self._prefill_pp_size]
-                for i in range(0, len(flattened), self.tp_num_need_pulls *
-                               self._prefill_pp_size)
-            ]
+            for i in range(self._prefill_pp_size):
+                if i == 0:
+                    sampled_nums = self._get_tp_remote_tp_ranks(ori_data[i], rand_group_index, num_groups)
+                else:
+                    current_result = self._get_tp_remote_tp_ranks(ori_data[i], rand_group_index, num_groups)
+                    # Merge the ports for each PP stage that the Decode side needs to pull from
+                    for j in range(len(sampled_nums)):
+                        sampled_nums[j].extend(current_result[j])
+            return sampled_nums
 
         # non-random split
         else:
