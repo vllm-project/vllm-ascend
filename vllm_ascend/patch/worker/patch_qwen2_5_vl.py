@@ -32,8 +32,6 @@ from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import (
-    apply_rotary_emb_torch, dispatch_rotary_emb_function)
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionPatchMerger, Qwen2_5_VisionTransformer,
@@ -69,36 +67,50 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
-        # Split q k v.
         qkv = einops.rearrange(
             x,
             "s b (three head head_dim) -> b s three head head_dim",
             three=3,
             head=self.num_attention_heads_per_partition,
         )
-        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-        origin_shape = q.shape[-1]
 
         # Convert cumulative tensor to intervals and move it to cpu.
         cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
-        cos = torch.cat((rotary_pos_emb_cos, rotary_pos_emb_cos), dim=-1)
-        sin = torch.cat((rotary_pos_emb_sin, rotary_pos_emb_sin), dim=-1)
-        cos = cos.reshape(1, -1, 1, self.hidden_size_per_attention_head)
-        sin = sin.reshape(1, -1, 1, self.hidden_size_per_attention_head)
-        q = torch_npu.npu_rotary_mul(q, cos, sin)
-        k = torch_npu.npu_rotary_mul(k, cos, sin)
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+            qk, v = qkv[:, :, :2], qkv[:, :, 2]
+
+            qk_reshaped = einops.rearrange(
+                qk, "b s two head head_dim -> (two b) s head head_dim", two=2)
+            qk_rotated = self.apply_rotary_emb(
+                qk_reshaped,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
+            )
+            qk_rotated = qk_rotated.view(
+                2,
+                batch_size,
+                seq_len,
+                self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+            q, k = qk_rotated.unbind(dim=0)
+        else:
+            q, k, v = qkv.unbind(dim=2)
+
+        # TODO(shen-shanshan): Move codes below to MMEncoderAttention CustomOp
+        # ----------------------------------------------------------------------
+        enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
+                      and self.hidden_size_per_attention_head > MIN_PAD_SIZE
+                      and self.hidden_size_per_attention_head < MAX_PAD_SIZE)
 
         q, k, v = [
             einops.rearrange(x, "b s h d -> (b s) h d").contiguous()
             for x in (q, k, v)
         ]
 
-        enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
-                      and self.hidden_size_per_attention_head > MIN_PAD_SIZE
-                      and self.hidden_size_per_attention_head < MAX_PAD_SIZE)
-
         if enable_pad:
+            origin_shape = q.shape[-1]
             pad_len = MAX_PAD_SIZE - origin_shape
             # q/k/v: [b * s, head, head_dim] -> [b * s, head, MAX_PAD_SIZE]
             q = F.pad(q, (0, pad_len), mode="constant", value=0)
@@ -125,6 +137,7 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         context_layer = einops.rearrange(context_layer,
                                          "(b s) h d -> s b (h d)",
                                          b=batch_size).contiguous()
+        # ----------------------------------------------------------------------
 
         output, _ = self.proj(context_layer)
         return output
@@ -650,14 +663,6 @@ class AscendQwen2_5_VLForConditionalGeneration(nn.Module):
         return video_embeds.split(sizes)
 
 
-def _apply_rotary_pos_emb_vision(t: torch.Tensor, cos: torch.Tensor,
-                                 sin: torch.Tensor) -> torch.Tensor:
-    rotary_emb_function = dispatch_rotary_emb_function(
-        default=partial(apply_rotary_emb_torch, is_neox_style=True))
-    output = rotary_emb_function(t, cos, sin).type_as(t)
-    return output
-
-
 # NOTE: This will be removed after MMEncoderAttention has been extract as a CustomOp in vllm.
 Qwen2VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
 Qwen2_5_VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
@@ -676,4 +681,3 @@ Qwen2_5_VisionTransformer.__init__ = AscendQwen2_5_VisionTransformer.__init__
 Qwen2_5_VisionTransformer.rotary_pos_emb_thw = AscendQwen2_5_VisionTransformer.rotary_pos_emb_thw
 Qwen2_5_VisionTransformer.get_rope_by_thw = AscendQwen2_5_VisionTransformer.get_rope_by_thw
 Qwen2_5_VisionTransformer.forward = AscendQwen2_5_VisionTransformer.forward
-apply_rotary_pos_emb_vision = _apply_rotary_pos_emb_vision
