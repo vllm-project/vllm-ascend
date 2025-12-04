@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
@@ -47,6 +47,8 @@ PADDING_SLOT_ID = -1
 
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "DeepseekV32ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP")
 }
 
@@ -314,8 +316,7 @@ class MtpProposer(Proposer):
                 break
 
     def generate_token_ids(self,
-                           sampled_token_ids: Union[torch.Tensor,
-                                                    list[np.ndarray]],
+                           sampled_token_ids: torch.Tensor | list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -392,7 +393,6 @@ class MtpProposer(Proposer):
                 common_attn_metadata.query_start_loc = \
                     query_start_loc_pcp_full[:num_reqs + 1]
             if self.speculative_config.disable_padded_drafter_batch:
-                assert isinstance(sampled_token_ids, list)
                 # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                 token_indices_to_sample = None
                 common_attn_metadata, token_indices =\
@@ -451,7 +451,7 @@ class MtpProposer(Proposer):
     def _prepare_inputs(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
         num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
@@ -695,13 +695,11 @@ class MtpProposer(Proposer):
                       2))) and (scheduler_output.total_num_scheduled_tokens
                                 == self.runner.input_batch.num_reqs *
                                 (self.num_speculative_tokens + 1))
-            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                               uniform_decode=uniform_decode)
         else:
-            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                               uniform_decode=False)
+            uniform_decode = False
+        has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
+            self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -817,26 +815,28 @@ class MtpProposer(Proposer):
                 attn_metadata_i.slot_mapping.fill_(-1)
                 attn_metadata_i.query_start_loc = self.arange[:batch_size + 1]
                 last_token_indices = self.arange[:batch_size]
-                if attn_metadata_i.num_decode_tokens != 0:
+                if getattr(attn_metadata_i, "num_decode_tokens", 0):
                     attn_metadata_i.num_decode_tokens = batch_size
 
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
 
+            decode_metadata = getattr(attn_metadata_i, "decode", None)
+            prefill_metadata = getattr(attn_metadata_i, "prefill", None)
             # When disable_padded_drafter_batch=False, it should not to be updating these params, maybe.
-            if self.speculative_config.disable_padded_drafter_batch or \
-                    aclgraph_runtime_mode != CUDAGraphMode.FULL:
-                attn_metadata_i.decode.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
+            if decode_metadata is not None and (self.speculative_config.disable_padded_drafter_batch or \
+                    aclgraph_runtime_mode != CUDAGraphMode.FULL):
+                decode_metadata.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
                     1:batch_size + 1].tolist()
                 if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-                    attn_metadata_i.decode.actual_seq_lengths_q = \
+                    decode_metadata.actual_seq_lengths_q = \
                         builder.pad_actual_seq_len_q_mtp_disable_pad(
                             graph_pad_size - batch_size,
                             batch_size,
-                            attn_metadata_i.decode.actual_seq_lengths_q)
-                attn_metadata_i.decode.cos = builder.cos_cache[
+                            decode_metadata.actual_seq_lengths_q)
+                decode_metadata.cos = builder.cos_cache[
                     positions[:batch_size]].unsqueeze(1).unsqueeze(2)
-                attn_metadata_i.decode.sin = builder.sin_cache[
+                decode_metadata.sin = builder.sin_cache[
                     positions[:batch_size]].unsqueeze(1).unsqueeze(2)
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
@@ -874,32 +874,32 @@ class MtpProposer(Proposer):
                 self.input_ids[batch_size:num_input_tokens] = 0
                 self.hidden_states[batch_size:num_input_tokens].fill_(0)
 
-            if attn_metadata_i.prefill is not None:
-                attn_metadata_i.prefill.seq_lens = attn_metadata_i.seq_lens
-                attn_metadata_i.prefill.seq_lens_list = attn_metadata_i.prefill.seq_lens.tolist(
+            if prefill_metadata is not None:
+                prefill_metadata.seq_lens = attn_metadata_i.seq_lens
+                prefill_metadata.seq_lens_list = prefill_metadata.seq_lens.tolist(
                 )
-                attn_metadata_i.prefill.context_lens = attn_metadata_i.seq_lens
-                attn_metadata_i.prefill.input_positions = self.positions[:
-                                                                         num_input_tokens]
-                attn_metadata_i.prefill.max_seq_lens += 1
-                attn_metadata_i.prefill.max_seq_lens = min(
-                    attn_metadata_i.prefill.max_seq_lens,
+                prefill_metadata.context_lens = attn_metadata_i.seq_lens
+                prefill_metadata.input_positions = self.positions[:
+                                                                  num_input_tokens]
+                prefill_metadata.max_seq_lens += 1
+                prefill_metadata.max_seq_lens = min(
+                    prefill_metadata.max_seq_lens,
                     self.runner.model_config.max_model_len)
-            if attn_metadata_i.decode is not None:
-                attn_metadata_i.decode.seq_lens = attn_metadata_i.seq_lens
-                attn_metadata_i.decode.seq_lens_list = attn_metadata_i.decode.seq_lens.tolist(
+            if decode_metadata is not None:
+                decode_metadata.seq_lens = attn_metadata_i.seq_lens
+                decode_metadata.seq_lens_list = decode_metadata.seq_lens.tolist(
                 )
-                decode_seq_lens_list = attn_metadata_i.decode.seq_lens_list
+                decode_seq_lens_list = decode_metadata.seq_lens_list
                 if aclgraph_runtime_mode == CUDAGraphMode.FULL and \
                         self.speculative_config.disable_padded_drafter_batch:
-                    attn_metadata_i.decode.seq_lens_list = decode_seq_lens_list + [
+                    decode_metadata.seq_lens_list = decode_seq_lens_list + [
                         0
                     ] * (graph_pad_size - len(decode_seq_lens_list))
-                attn_metadata_i.decode.input_positions = self.positions[:
-                                                                        num_input_tokens]
-                attn_metadata_i.decode.max_seq_lens += 1
-                attn_metadata_i.decode.max_seq_lens = min(
-                    attn_metadata_i.decode.max_seq_lens,
+                decode_metadata.input_positions = self.positions[:
+                                                                 num_input_tokens]
+                decode_metadata.max_seq_lens += 1
+                decode_metadata.max_seq_lens = min(
+                    decode_metadata.max_seq_lens,
                     self.runner.model_config.max_model_len)
 
         # mtp>1: [batch_size, k]
@@ -929,7 +929,7 @@ class MtpProposer(Proposer):
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -944,7 +944,7 @@ class MtpProposer(Proposer):
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -955,7 +955,7 @@ class MtpProposer(Proposer):
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[
                     req_id]
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id.item())
+            next_token_ids.append(next_token_id)
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.input_ids.device)
