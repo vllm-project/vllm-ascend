@@ -216,6 +216,23 @@ at::Tensor npu_sparse_flash_attention_meta(
     at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
     return output;
 }
+std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
+    const at::Tensor &x1,
+    const at::Tensor &x2,
+    const at::Tensor &residual,
+    const at::Tensor &gamma,
+    c10::string_view group_tp,
+    int64_t tp_rank_size,
+    int64_t tp_rank_id,
+    double epsilon,
+    bool is_trans_b,
+    bool is_gather_add_out)
+    {
+        at::Tensor output = at::empty_like(residual);
+        at::Tensor add_out = at::empty_like(residual);
+
+        return {output, add_out};
+    }
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -244,5 +261,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    // matmul allreduce add rmsnorm
+    ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
 }
 }
