@@ -44,6 +44,8 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
+    _MoECommMethods[MoECommType.FUSED_ALLTOALL] = FusedAlltoAllCommImpl(
+        moe_config)
 
 
 class MoECommMethod(ABC):
@@ -243,3 +245,69 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+
+class FusedAlltoAllCommImpl(MoECommMethod):
+    """This implementation is for the scenarios listed below:
+    1. `enable_expert_parallel=True`.
+    2. `npu_grouped_matmul` is available.
+
+    This implementation uses all-to-all communication to exchange tokens
+    between data parallel ranks before and after the MLP computation. It should
+    have better performance than AllGatherCommImpl when DP size > 1.
+    """
+
+    def _get_token_dispatcher(self):
+        return TokenDispatcherWithAll2AllV(
+            top_k=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts)
+
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def fused_experts(
+            self,
+            hidden_states: torch.Tensor,
+            w1: torch.Tensor,
+            w2: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            activation: str = "silu",
+            apply_router_weight_on_input: bool = False,
+            use_int8_w8a8: bool = False,
+            use_int4_w4a8: bool = False,
+            global_num_experts: Optional[int] = None,
+            expert_map: Optional[torch.Tensor] = None,
+            w1_scale: Optional[torch.Tensor] = None,
+            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale_bias: torch.Tensor = None,
+            w2_scale_bias: torch.Tensor = None,
+            # For TorchAir graph
+            is_torchair: bool = False,
+            # For Cube/Vector parallel
+            shared_experts: Optional[Any] = None,
+            quantized_x_for_share: Optional[Any] = None,
+            dynamic_scale_for_share: Optional[Any] = None,
+            # For load balance
+            log2phy: torch.Tensor = None,
+            global_redundant_expert_num: int = 0,
+            need_trans: bool = False,
+            dynamic_eplb: bool = False,
+            mc2_mask: torch.Tensor = None,
+            pertoken_scale: Optional[torch.Tensor] = None):
+        out = torch.empty_like(hidden_states)
+
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            x=hidden_states,
+            weight1=w1,
+            weight2=w2,
+            expert_idx=topk_ids,
+            scale1=w1_scale,
+            scale2=w2_scale,
+            probs=topk_weights.to(torch.float32),
+            group=self.token_dispatcher.moe_all_to_all_group_name,
+            max_output_size=65536,
+            out=out,
+        )
+        return out
