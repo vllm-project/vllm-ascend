@@ -36,6 +36,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
+from vllm_ascend.eplb.utils import moe_load_async_stream
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
@@ -46,8 +47,7 @@ from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               moe_load_async_stream, npu_stream_switch,
-                               shared_expert_dp_enabled,
+                               npu_stream_switch, shared_expert_dp_enabled,
                                shared_experts_calculation_stream)
 
 
@@ -380,6 +380,7 @@ class AscendFusedMoE(FusedMoE):
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
+
                 moe_load_stream = moe_load_async_stream()
                 cur_stream = torch.npu.current_stream()
 
