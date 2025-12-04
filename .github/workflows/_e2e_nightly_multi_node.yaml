@@ -84,8 +84,6 @@ jobs:
            pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
            pip install jinja2-cli
 
-           #apt-get update -y && apt-get install -y git curl
-
         - name: Install kubectl
           run: |
             # Install kubectl
@@ -112,6 +110,8 @@ jobs:
           run: |
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+            # clear log directory
+            rm -fr $RESULT_FILE
 
         - name: Clear resources
           run: |
@@ -263,5 +263,5 @@ jobs:
         - name: Post process
           if: always()
           run: |
-            kubectl get pods -n $NAMESPACE
-            kubectl delete -f ./lws.yaml
+            kubectl get pods -n $NAMESPACE --ignore-not-found=true
+            kubectl delete -f ./lws.yaml --ignore-not-found=true || true

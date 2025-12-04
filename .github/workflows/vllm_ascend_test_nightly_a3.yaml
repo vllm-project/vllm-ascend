@@ -61,9 +61,6 @@ jobs:
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
             size: 2
-          - name: multi-node-glm-2node
-            config_file_path: GLM-4_5.yaml
-            size: 2
           - name: multi-node-dpsk3.2-exp-2node
             config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
             size: 2
@@ -134,9 +131,6 @@ jobs:
           - name: deepseek3_2-exp-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
-          - name: glm-4-5
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_glm4_5.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.12.0

@@ -31,8 +31,8 @@ class NodeInfo:
         return (f"NodeInfo:\n"
                 f"  index={self.index}\n"
                 f"  ip={self.ip}\n"
-                f"  server_port={self.server_port}\n"
-                f"  headless={self.headless}")
+                f"  headless={self.headless}\n"
+                f"  server_port={self.server_port}")
 
 
 class MultiNodeConfig:

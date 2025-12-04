@@ -78,6 +78,7 @@ if [ -n "$LOCAL_DEVICE_IDS" ]; then
 fi
 
 if [[ -n "${GEN_RANKTABLE}" || ! -e ${PWD}/ranktable.json ]]; then
+    timeout 180s \
     GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME torchrun \
         --nproc_per_node 1 \
         --nnodes ${NNODES} \
