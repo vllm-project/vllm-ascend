@@ -220,21 +220,28 @@ Two accuracy evaluation methods are provided: AISBench (recommended) and manual 
 |----- | ----- | ----- | ----- |--------------|
 | gsm8k | - | accuracy | gen | 75.00  |
 
+### Using Language Model Evaluation Harness
 
-#### Execution Command
-```bash
-# Specify visible NPU cards (adjust based on available hardware)
-export ASCEND_RT_VISIBLE_DEVICES=0
+As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
 
-# Run evaluation (debug logs recommended for first execution)
-ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --debug
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
 
-# Generate summary report
-ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer example
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+lm_eval \
+  --model local-completions \
+  --model_args model=/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --tasks gsm8k \
+  --output_path ./
 ```
 
-#### Evaluation Results
-Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy report is shown below:
+3. After execution, you can get the result, here is the result of `DeepSeek-V3.2-Exp-W8A8` in `vllm-ascend:0.11.0rc0` for reference only.
+
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9591|±  |0.0055|
+|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
 
 ## Performance
 
