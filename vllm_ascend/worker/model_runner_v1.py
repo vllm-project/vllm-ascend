@@ -2217,8 +2217,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             return None
 
         soc_version = get_ascend_device_type()
-        quant_type = getattr(self.vllm_config.model_config.hf_config,
-                             'moe_quantize', None)
+        quant_type = getattr(
+            self.vllm_config.model_config.hf_config, 'moe_quantize',
+            getattr(self.vllm_config.model_config.hf_config, 'quantize', None))
         model_type = self.vllm_config.model_config.hf_config.model_type
 
         if not self.parallel_config.enable_expert_parallel:
@@ -2237,7 +2238,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         elif soc_version in {AscendDeviceType._910_93}:
             moe_comm_type = (MoECommType.MC2
                              if num_tokens <= self.mc2_tokens_capacity else
-                             MoECommType.ALLTOALL)
+                             MoECommType.FUSED_ALLTOALL if quant_type
+                             == "w8a8_dynamic" else MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
