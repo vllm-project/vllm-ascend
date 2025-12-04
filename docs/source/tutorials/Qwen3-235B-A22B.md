@@ -1,4 +1,4 @@
-# Qwen3-Moe
+# Qwen3-235B-A22B
 
 ## Introduction
 
@@ -30,9 +30,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ### Installation
 
 :::::{tab-set}
-::::{tab-item} Use vllm-ascend:|vllm_ascend_version| docker image
+::::{tab-item} Use docker image
 
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc1`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc1-a3`(for Atlas 800 A3).
+Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -97,7 +97,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G*16）、 1 Atlas 800 A2（64G*8）.`
+`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G*16）、 1 Atlas 800 A2（64G*8）.
 Quantized version need to start with parameter `--quantization ascend`.
 
 Run the following script to execute online inference.
