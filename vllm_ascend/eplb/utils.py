@@ -80,12 +80,11 @@ def clear_all_moe_loads(self):
             self, "num_dense_layers") else 0
         for layer_id in range(self.num_moe_layers):
             self.model.layers[layer_id +
-                            num_dense_layers].mlp.experts.clear_moe_load()
+                              num_dense_layers].mlp.experts.clear_moe_load()
     else:
         for layer_id in range(self.mtp_start_layer_idx,
                               self.mtp_start_layer_idx + self.num_mtp_layers):
             self.layers[str(layer_id)].mtp_block.mlp.experts.clear_moe_load()
-    
     
 
 def model_register(model, model_config):

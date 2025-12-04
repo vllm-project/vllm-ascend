@@ -173,8 +173,8 @@ class VllmEplbAdaptor(EplbAdaptor):
                                            str(self.num_dense_layers +
                                                self.num_moe_layers +
                                                mtp_layer_idx) +
-                                            ".mtp_block.mlp.experts." +
-                                            name].data[local_expert_id]
+                                           ".mtp_block.mlp.experts." +
+                                           name].data[local_expert_id]
                             for name in self.mtp_expert_weight_names
                         ])
 
@@ -193,7 +193,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         expert_map = self.model.get_all_expert_map(num_moe_layers)
         if self.mtp_instance is not None:
             expert_map = torch.cat([
-                expert_map, self.mtp_instance.model.get_all_expert_map().to(
+                expert_map, 
+                self.mtp_instance.model.get_all_expert_map().to(
                     device=expert_map.device)
             ],
                                    dim=0)
@@ -373,6 +374,7 @@ class VllmEplbAdaptor(EplbAdaptor):
 
             local_ids = torch.arange(local_count, dtype=torch.int32)
             expert_map_all[:, r, start:end] = local_ids.unsqueeze(0).expand(
-                self.num_moe_layers if self.mtp_instance is None else (self.num_moe_layers + self.num_mtp_layers), -1)
+                self.num_moe_layers if self.mtp_instance is None else 
+                (self.num_moe_layers + self.num_mtp_layers), -1)
 
         return expert_map_all
