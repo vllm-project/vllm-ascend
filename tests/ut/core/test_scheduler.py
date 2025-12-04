@@ -821,6 +821,7 @@ class TestSchedulerDynamicBatch(TestBase):
             disable_chunked_mm_input=False,
             enable_chunked_prefill=True,
             max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+            is_encoder_decoder=False,
         )
 
         scheduler_config.max_num_encoder_input_tokens = 10000
