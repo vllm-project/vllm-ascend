@@ -87,8 +87,13 @@ class TestAscendSchedulerConfig(TestBase):
 
     def test_valid_config_with_multimodal(self):
         config = AscendSchedulerConfig.initialize_from_config(
-            SchedulerConfig(is_multimodal_model=True,
-                            max_num_batched_tokens=8192), {})
+            SchedulerConfig(
+                is_multimodal_model=True,
+                max_num_batched_tokens=8192,
+                is_encoder_decoder=False,
+            ),
+            {},
+        )
         self.assertTrue(config.is_multimodal_model)
 
     def test_valid_config_with_chunked_prefill(self):

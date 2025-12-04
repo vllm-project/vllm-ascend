@@ -40,17 +40,28 @@ class AscendSchedulerConfig(SchedulerConfig):
         vllm_scheduler_config: SchedulerConfig,
         ascend_scheduler_config,
     ):
-        scheduler_config = {
-            field.name: getattr(vllm_scheduler_config, field.name)
-            for field in fields(vllm_scheduler_config) if field.init
-        }
+        scheduler_config = {}
+        for field in fields(vllm_scheduler_config):
+            if not field.init:
+                continue
+            try:
+                scheduler_config[field.name] = getattr(vllm_scheduler_config,
+                                                       field.name)
+            except AttributeError:
+                pass
+
+        if "is_encoder_decoder" not in scheduler_config:
+            scheduler_config["is_encoder_decoder"] = False
+
+        if "max_model_len" not in scheduler_config:
+            scheduler_config["max_model_len"] = 8192
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
         scheduler_config["max_long_partial_prefills"] = None
         scheduler_config["long_prefill_token_threshold"] = None
         scheduler_config["policy"] = "fcfs"
-        scheduler_config["scheduler_cls"] = (
-            "vllm_ascend.core.scheduler.AscendScheduler")
+        scheduler_config[
+            "scheduler_cls"] = "vllm_ascend.core.scheduler.AscendScheduler"
         scheduler_config["enable_pd_transfer"] = False
         scheduler_config["decode_max_num_seqs"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
@@ -78,13 +89,13 @@ class AscendSchedulerConfig(SchedulerConfig):
             self.max_long_partial_prefills = 1
             self.long_prefill_token_threshold = MAX_INT
 
-        if self.long_prefill_token_threshold is None or \
-            self.long_prefill_token_threshold <= 0:
+        if (self.long_prefill_token_threshold is None
+                or self.long_prefill_token_threshold <= 0):
             if self.max_model_len is None:
                 self.long_prefill_token_threshold = MAX_INT
             else:
-                self.long_prefill_token_threshold = \
-                    max(1, int(self.max_model_len * 0.04))
+                self.long_prefill_token_threshold = max(
+                    1, int(self.max_model_len * 0.04))
 
         if self.max_long_partial_prefills < 0:
             raise ValueError(
