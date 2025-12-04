@@ -217,9 +217,6 @@ Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for 
 
 #### Execution Command
 ```bash
-# Specify visible NPU cards (adjust based on available hardware)
-export ASCEND_RT_VISIBLE_DEVICES=0
-
 # Run evaluation (debug logs recommended for first execution)
 ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --debug
 
