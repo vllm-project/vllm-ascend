@@ -39,6 +39,8 @@ class AscendSchedulerConfig(SchedulerConfig):
         cls,
         vllm_scheduler_config: SchedulerConfig,
         ascend_scheduler_config,
+        max_model_len: int,
+        is_encoder_decoder: bool = False,
     ):
         scheduler_config = {}
         for field in fields(vllm_scheduler_config):
@@ -50,11 +52,8 @@ class AscendSchedulerConfig(SchedulerConfig):
             except AttributeError:
                 pass
 
-        if "is_encoder_decoder" not in scheduler_config:
-            scheduler_config["is_encoder_decoder"] = False
-
-        if "max_model_len" not in scheduler_config:
-            scheduler_config["max_model_len"] = 8192
+        scheduler_config["max_model_len"] = max_model_len
+        scheduler_config["is_encoder_decoder"] = is_encoder_decoder
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
         scheduler_config["max_long_partial_prefills"] = None
