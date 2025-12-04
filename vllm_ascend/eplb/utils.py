@@ -85,7 +85,7 @@ def clear_all_moe_loads(self):
         for layer_id in range(self.mtp_start_layer_idx,
                               self.mtp_start_layer_idx + self.num_mtp_layers):
             self.layers[str(layer_id)].mtp_block.mlp.experts.clear_moe_load()
-    
+
 
 def model_register(model, model_config):
     model.get_expert_map = types.MethodType(get_expert_map, model)

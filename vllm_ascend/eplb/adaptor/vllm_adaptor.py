@@ -20,8 +20,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
-from vllm.config import get_current_vllm_config
+from vllm.logger import logger  
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
@@ -78,7 +77,6 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.mtp_expert_weight_names = ["w13_weight", "w2_weight"]
         else:
             self.mtp_expert_weight_names = []
-        
 
         self.expert_map_per_layer = dict(
         )  # reference to expert map on device for expert map update
@@ -93,7 +91,7 @@ class VllmEplbAdaptor(EplbAdaptor):
             for mtp_layer_idx in range(self.num_mtp_layers):
                 self.expert_map_per_layer[self.num_dense_layers + self.num_moe_layers + mtp_layer_idx] = \
                     self.mtp_instance.model.get_expert_map(self.num_dense_layers + self.num_moe_layers + mtp_layer_idx)
-        
+
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(
             self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
@@ -109,7 +107,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
                 self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
-                
+
         if self.mtp_instance is not None:
             for mtp_layer_idx in range(self.num_mtp_layers):
                 self.log2phy_map_per_layer[self.num_dense_layers + self.num_moe_layers + mtp_layer_idx] = \
@@ -193,7 +191,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         expert_map = self.model.get_all_expert_map(num_moe_layers)
         if self.mtp_instance is not None:
             expert_map = torch.cat([
-                expert_map, 
+                expert_map,
                 self.mtp_instance.model.get_all_expert_map().to(
                     device=expert_map.device)
             ],
@@ -374,7 +372,7 @@ class VllmEplbAdaptor(EplbAdaptor):
 
             local_ids = torch.arange(local_count, dtype=torch.int32)
             expert_map_all[:, r, start:end] = local_ids.unsqueeze(0).expand(
-                self.num_moe_layers if self.mtp_instance is None else 
+                self.num_moe_layers if self.mtp_instance is None else
                 (self.num_moe_layers + self.num_mtp_layers), -1)
 
         return expert_map_all

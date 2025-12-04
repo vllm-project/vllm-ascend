@@ -3168,9 +3168,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
-            num_mtp_layers = self.mtp_instance.model.num_mtp_layers if self.mtp_instance is not None else 0
+            mtp_instance = self.mtp_instance
+            num_mtp_layers = mtp_instance.model.num_mtp_layers if mtp_instance is not None else 0
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model,
-                                                mtp_instance=self.mtp_instance,
+                                                mtp_instance=mtp_instance,
                                                 num_mtp_layers=num_mtp_layers)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor, num_mtp_layers)
@@ -3202,10 +3203,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     assert isinstance(self.drafter.model, (DeepSeekMTP, ACLGraphWrapper)), \
                         f"drafter type wrong: {type(self.drafter)}, only support DeepSeekMTP or ACLGraphWrapper"
                     if isinstance(self.drafter.model, DeepSeekMTP):
-                        self.mtp_instance = self.drafter.model
+                        mtp_instance = self.drafter.model
                     elif isinstance(self.drafter.model, ACLGraphWrapper):
-                        self.mtp_instance = self.drafter.model.unwrap()
-                    model_register(self.mtp_instance.model, self.vllm_config)
+                        mtp_instance = self.drafter.model.unwrap()
+                    self.mtp_instance = mtp_instance
+                    model_register(mtp_instance.model, self.vllm_config)
 
                 if self.drafter.name == SpecDcodeType.EAGLE3:
                     self.model.set_aux_hidden_state_layers(
