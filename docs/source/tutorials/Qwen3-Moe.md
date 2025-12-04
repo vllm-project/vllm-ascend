@@ -71,8 +71,16 @@ Select an image based on your machine type and start the docker image on your no
    -v /mnt/sfs_turbo/.cache:/root/.cache \
    -it $IMAGE bash
    ```
+  
+  Set up environment variables:
 
-   If you want to deploy multi-node environment, you need to set up environment on each node.
+  ```bash
+  # Load model from ModelScope to speed up download
+  export VLLM_USE_MODELSCOPE=True
+
+  # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
+  export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+  ```
 
 ::::
 ::::{tab-item} Build from source

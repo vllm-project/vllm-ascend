@@ -18,7 +18,7 @@ multi_npu_quantization
 single_node_300i
 DeepSeek-V3.1.md
 DeepSeek-V3.2-Exp.md
-Qwen3-235B.md
+Qwen3-Moe.md
 Qwen3-Coder-30B-A3B
 multi_node
 multi_node_kimi
