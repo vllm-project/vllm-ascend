@@ -83,8 +83,11 @@ def pack_to_int32(weight: torch.Tensor) -> torch.Tensor:
     :param weight: The 3D tensor to pack, must be int8 or int32 dtype
     :return: Packed tensor with int32 dtype optimized for storage
     """
-    assert weight.dim() == 3
-    assert weight.dtype in [torch.int8, torch.int32]
+    assert weight.dim(
+    ) == 3, f"Expecting `weight.dim()` is 3 ([e, n, k] or [e, k, n]) but got {weight.dim()}."
+    assert weight.dtype in [
+        torch.int8, torch.int32
+    ], f"Expecting `weight.dtype` is torch.int8 or torch.int32 bug got {weight.dtype}."
 
     if weight.dtype == torch.int32:
         assert weight.shape[
@@ -123,6 +126,9 @@ class AscendW4A16FusedMoEMethod:
         hidden_sizes: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
+        assert intermediate_size_per_partition % self.pack_factor == 0, f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} can be divided by `pack_factor` {self.pack_factor}"
+        assert hidden_sizes % self.pack_factor == 0, f"Expecting `hidden_sizes` {hidden_sizes} can be divided by `pack_factor` {self.pack_factor}"
+
         param_dict = {}
 
         param_dict["w13_weight_packed"] = torch.empty(
@@ -145,6 +151,9 @@ class AscendW4A16FusedMoEMethod:
         hidden_sizes: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
+        assert intermediate_size_per_partition % self.group_size == 0, f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} can be divided by `group_size` {self.group_size}"
+        assert hidden_sizes % self.group_size == 0, f"Expecting `hidden_sizes` {hidden_sizes} can be divided by `group_size` {self.group_size}"
+
         param_dict = {}
 
         param_dict["w13_weight_scale"] = torch.empty(

@@ -275,7 +275,7 @@ def test_models_distributed_Kimi_K2_Thinking_W4A16(model):
             model,
             max_model_len=8192,
             dtype="auto",
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             enable_expert_parallel=True,
             compilation_config={
                 "cudagraph_mode": "FULL_DECODE_ONLY",
