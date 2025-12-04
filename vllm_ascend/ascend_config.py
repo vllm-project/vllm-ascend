@@ -231,7 +231,7 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, fuse_norm_quant: bool = True, **kwargs):
+    def __init__(self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = True, **kwargs):
         """
         Initialize the configuration.
         
@@ -239,11 +239,13 @@ class AscendCompilationConfig:
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
                 
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        # Add more compilation related configs here as needed
+        self.fuse_qknorm_rope = fuse_qknorm_rope
 
 
 class XliteGraphConfig:
