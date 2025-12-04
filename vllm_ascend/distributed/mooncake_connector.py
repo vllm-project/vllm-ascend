@@ -1348,11 +1348,15 @@ class MooncakeConnectorWorker:
     def _get_remote_tp_rank(self, req_id: str) -> List[int]:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
 
-    def _get_tp_remote_tp_ranks(self, tp_ori_data:list[int], rand_group_index:int, num_groups:int):
+    def _get_tp_remote_tp_ranks(self, tp_ori_data: list[int],
+                                rand_group_index: int, num_groups: int):
         tp_ori_data = tp_ori_data.reshape(-1, num_groups)
         choosen_group = tp_ori_data[:, [rand_group_index]]
         flattened = choosen_group.reshape(-1).tolist()
-        sampled_nums = [flattened[i:i + self.tp_num_need_pulls] for i in range(0, len(flattened), self.tp_num_need_pulls)]
+        sampled_nums = [
+            flattened[i:i + self.tp_num_need_pulls]
+            for i in range(0, len(flattened), self.tp_num_need_pulls)
+        ]
         return sampled_nums
 
     def _get_remote_tp_ranks_for_req(self, req_id: str) -> List[List[int]]:
@@ -1376,18 +1380,18 @@ class MooncakeConnectorWorker:
             # Divide the ranks according to the PP stage
             ori_data = ori_data.reshape(self._prefill_pp_size, -1)
             # The number of redundant copies for each KV head within the PP stage
-            num_groups = max(
-                1,
-                len(ori_data) // num_kv_head)
+            num_groups = max(1, len(ori_data) // num_kv_head)
             ori_data = ori_data.reshape(-1, num_groups)
             rand_group_index = rand.sample(range(num_groups), \
                 (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
 
             for i in range(self._prefill_pp_size):
                 if i == 0:
-                    sampled_nums = self._get_tp_remote_tp_ranks(ori_data[i], rand_group_index, num_groups)
+                    sampled_nums = self._get_tp_remote_tp_ranks(
+                        ori_data[i], rand_group_index, num_groups)
                 else:
-                    current_result = self._get_tp_remote_tp_ranks(ori_data[i], rand_group_index, num_groups)
+                    current_result = self._get_tp_remote_tp_ranks(
+                        ori_data[i], rand_group_index, num_groups)
                     # Merge the ports for each PP stage that the Decode side needs to pull from
                     for j in range(len(sampled_nums)):
                         sampled_nums[j].extend(current_result[j])

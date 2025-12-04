@@ -1230,8 +1230,10 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNotNone(worker.engine)
 
     def test_get_remote_tp_rank(self):
-        def get_tp_rank(prefill_tp_size:int, prefill_pp_size:int, decode_tp_size:int, 
-        num_kv_heads:int, tp_num_need_pulls:int, is_deepseek_mla:bool):
+
+        def get_tp_rank(prefill_tp_size: int, prefill_pp_size: int,
+                        decode_tp_size: int, num_kv_heads: int,
+                        tp_num_need_pulls: int, is_deepseek_mla: bool):
             with patch('vllm_ascend.distributed.mooncake_connector.get_ascend_config',
                     return_value=MagicMock()), \
                 patch.object(self.vllm_config.kv_transfer_config, 'get_from_extra_config',
@@ -1241,28 +1243,61 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                             }.get(k, d)):
                 self.vllm_config.model_config.hf_config.num_key_value_heads = num_kv_heads
                 self.vllm_config.model_config.is_deepseek_mla = is_deepseek_mla
-                worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
+                worker = MooncakeConnectorWorker(self.vllm_config,
+                                                 self.engine_id)
                 worker.tp_num_need_pulls = tp_num_need_pulls
                 worker.use_sparse = 0
                 return worker._get_remote_tp_ranks_for_req('test')
-        self.assertIn(get_tp_rank(16, 1, 1, 4, 4, False)[0], [[0, 4, 8, 12],[1, 5, 9, 13],[2, 6, 10, 14],[3, 7, 11, 15]])
-        self.assertIn(get_tp_rank(8, 1, 1, 4, 4, False)[0], [[0, 2, 4, 6],[1, 3, 5, 7]])
+
+        self.assertIn(
+            get_tp_rank(16, 1, 1, 4, 4, False)[0],
+            [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]])
+        self.assertIn(
+            get_tp_rank(8, 1, 1, 4, 4, False)[0], [[0, 2, 4, 6], [1, 3, 5, 7]])
         self.assertIn(get_tp_rank(4, 1, 1, 4, 4, False)[0], [[0, 1, 2, 3]])
-        self.assertIn(get_tp_rank(16, 1, 4, 4, 1, False), [[[0], [4], [8], [12]],[[1], [5], [9], [13]],[[2], [6], [10], [14]],[[3], [7], [11], [15]]])
-        self.assertIn(get_tp_rank(8, 1, 4, 4, 1, False), [[[0], [2], [4], [6]],[[1], [3], [5], [7]]])
-        self.assertIn(get_tp_rank(4, 1, 4, 4, 1, False), [[[0], [1], [2], [3]]])
-        self.assertIn(get_tp_rank(8, 2, 1, 4, 4, False)[0], [[0, 2, 4, 6, 8, 10, 12, 14],[1, 3, 5, 7, 9, 11, 13, 15]])
-        self.assertIn(get_tp_rank(4, 2, 1, 4, 4, False)[0], [[0, 1, 2, 3, 4, 5, 6, 7]])
-        self.assertIn(get_tp_rank(4, 4, 1, 4, 4, False)[0], [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]])
-        self.assertIn(get_tp_rank(8, 2, 4, 4, 1, False), [[[0, 8],[2, 10], [4, 12], [6, 14]], [[1, 9],[3, 11], [5, 13], [7, 15]]])
-        self.assertIn(get_tp_rank(4, 2, 4, 4, 4, False), [[[0, 4],[1, 5], [2, 6],[3, 7]]])
-        self.assertIn(get_tp_rank(4, 4, 4, 4, 1, False), [[[0, 4, 8, 12],[1, 5, 9, 13],[2, 6, 10, 14],[3, 7, 11, 15]]])
-        self.assertIn(get_tp_rank(16, 1, 1, 1, 1, True)[0], [[0], [1], [2], [3], [4], [5], [6], [7], [8], [9], [10], [11], [12], [13], [14], [15]])
+        self.assertIn(get_tp_rank(16, 1, 4, 4, 1, False),
+                      [[[0], [4], [8], [12]], [[1], [5], [9], [13]],
+                       [[2], [6], [10], [14]], [[3], [7], [11], [15]]])
+        self.assertIn(get_tp_rank(8, 1, 4, 4, 1, False),
+                      [[[0], [2], [4], [6]], [[1], [3], [5], [7]]])
+        self.assertIn(get_tp_rank(4, 1, 4, 4, 1, False),
+                      [[[0], [1], [2], [3]]])
+        self.assertIn(
+            get_tp_rank(8, 2, 1, 4, 4, False)[0],
+            [[0, 2, 4, 6, 8, 10, 12, 14], [1, 3, 5, 7, 9, 11, 13, 15]])
+        self.assertIn(
+            get_tp_rank(4, 2, 1, 4, 4, False)[0], [[0, 1, 2, 3, 4, 5, 6, 7]])
+        self.assertIn(
+            get_tp_rank(4, 4, 1, 4, 4, False)[0],
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]])
+        self.assertIn(get_tp_rank(8, 2, 4, 4, 1, False),
+                      [[[0, 8], [2, 10], [4, 12], [6, 14]],
+                       [[1, 9], [3, 11], [5, 13], [7, 15]]])
+        self.assertIn(get_tp_rank(4, 2, 4, 4, 4, False),
+                      [[[0, 4], [1, 5], [2, 6], [3, 7]]])
+        self.assertIn(
+            get_tp_rank(4, 4, 4, 4, 1, False),
+            [[[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]]])
+        self.assertIn(
+            get_tp_rank(16, 1, 1, 1, 1,
+                        True)[0], [[0], [1], [2], [3], [4], [5], [6], [7], [8],
+                                   [9], [10], [11], [12], [13], [14], [15]])
         self.assertIn(get_tp_rank(4, 1, 4, 1, 1, True), [[[0], [1], [2], [3]]])
-        self.assertIn(get_tp_rank(8, 2, 1, 1, 1, True)[0], [[0, 8],[2, 10], [4, 12], [6, 14], [1, 9],[3, 11], [5, 13], [7, 15]])
-        self.assertIn(get_tp_rank(4, 4, 1, 1, 1, True)[0], [[0, 4, 8, 12],[1, 5, 9, 13],[2, 6, 10, 14],[3, 7, 11, 15]])
-        self.assertIn(get_tp_rank(8, 2, 4, 1, 1, True)[0], [[0, 8],[2, 10], [4, 12], [6, 14],[1, 9],[3, 11], [5, 13], [7, 15]])
-        self.assertIn(get_tp_rank(4, 4, 4, 1, 1, True), [[[0, 4, 8, 12],[1, 5, 9, 13],[2, 6, 10, 14],[3, 7, 11, 15]]])
+        self.assertIn(
+            get_tp_rank(8, 2, 1, 1, 1, True)[0],
+            [[0, 8], [2, 10], [4, 12], [6, 14], [1, 9], [3, 11], [5, 13],
+             [7, 15]])
+        self.assertIn(
+            get_tp_rank(4, 4, 1, 1, 1, True)[0],
+            [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]])
+        self.assertIn(
+            get_tp_rank(8, 2, 4, 1, 1, True)[0],
+            [[0, 8], [2, 10], [4, 12], [6, 14], [1, 9], [3, 11], [5, 13],
+             [7, 15]])
+        self.assertIn(
+            get_tp_rank(4, 4, 4, 1, 1, True),
+            [[[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]]])
+
 
 if __name__ == '__main__':
     unittest.main()
