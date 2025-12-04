@@ -171,10 +171,10 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
-        self.expert_map_path = ascend_config.expert_map_path
-        self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+        self.ascend_config = get_ascend_config()
+        self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
+        self.expert_map_path = self.ascend_config.expert_map_path
+        self.global_redundant_expert_num = self.ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
             vllm_config = get_current_vllm_config()
@@ -194,8 +194,8 @@ class AscendFusedMoE(FusedMoE):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
-            self.global_redundant_expert_num = (
-                self.expert_load_balancer.get_global_redundant_expert_num())
+            # self.global_redundant_expert_num = (
+            #     self.expert_load_balancer.get_global_redundant_expert_num())
             self.global_num_experts = num_experts + self.global_redundant_expert_num
             try:
                 self.local_num_experts, self.expert_map = (
@@ -253,7 +253,7 @@ class AscendFusedMoE(FusedMoE):
             moe_quant_params["intermediate_size_full"] = intermediate_size
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.enable_shared_expert_dp = self.ascend_config.enable_shared_expert_dp
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
@@ -459,8 +459,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
-        ascend_config = get_ascend_config()
-        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
+        self.ascend_config = get_ascend_config()
+        self.multistream_overlap_shared_expert = self.ascend_config.multistream_overlap_shared_expert
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
@@ -488,11 +488,19 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared_out, fused_out = AscendFusedMoE.forward(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        if self._shared_experts is None:
+            fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            shared_out = None
+        else:
+            shared_out, fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
         return shared_out, fused_out
 
     def forward_impl(self, hidden_states: torch.Tensor,
@@ -506,7 +514,10 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # Use a separate stream to run shared experts.
             # Note that currently we only support calculations in separate streams with aclgraph.
             # Communication operations in another stream might cause unknown errors.
-            shared_out = self._shared_experts(hidden_states)
+            if self._shared_experts is None:
+                shared_out = None
+            else:
+                shared_out = self._shared_experts(hidden_states)
 
         fused_output = AscendFusedMoE.forward_impl(
             self,
@@ -521,6 +532,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         forward_context = get_forward_context()
         moe_comm_type = forward_context.moe_comm_type
         if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
-                and not shared_expert_dp_enabled():
+                and not shared_expert_dp_enabled() and shared_out is not None:
             shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out, fused_output
+        if shared_out is None:
+            return fused_output
+        else:
+            return shared_out, fused_output
