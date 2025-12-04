@@ -97,7 +97,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G * 16）、 1 Atlas 800 A2（64G * 8）.
+`Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G*16）、 1 Atlas 800 A2（64G*8）.`
 Quantized version need to start with parameter `--quantization ascend`.
 
 Run the following script to execute online inference.
@@ -154,6 +154,7 @@ The parameters are explained as follows:
 Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
 
 Node 0
+
 ```shell
 #!/bin/sh
 # this obtained through ifconfig
@@ -193,6 +194,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 ```
 
 Node1
+
 ```shell
 #!/bin/sh
 
@@ -237,6 +239,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 ```
 
 If the service starts successfully, the following information will be displayed on node 0:
+
 ```
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
