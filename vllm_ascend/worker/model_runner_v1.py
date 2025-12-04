@@ -1933,13 +1933,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+            if self.speculative_config and self.speculative_config.method == 'mtp':
                 # SpecDecoding now supports seq_len=1 and seq_len=2
                 # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+            if self.speculative_config and self.speculative_config.method == 'mtp':
                 attn_state = AscendAttentionState.SpecDecoding
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
@@ -2584,7 +2584,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.method in ("deepseek_mtp", "qwen3_next_mtp") and \
+                    self.speculative_config.method == "mtp" and \
                     not self.speculative_config.disable_padded_drafter_batch
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens
@@ -2783,7 +2783,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         block_table_tensor[:num_reqs * self.decode_threshold]
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
-                        self.speculative_config.method == "deepseek_mtp":
+                        self.speculative_config.method == "mtp":
                     attn_state = AscendAttentionState.SpecDecoding
 
                 common_metadata = CommonAttentionMetadata(
