@@ -81,7 +81,7 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
     const at::Tensor &descale0,
@@ -106,12 +106,15 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     const c10::optional<at::Tensor> &q_nope_scale,
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
+    bool enable_inner_out,
     at::Tensor &q_out0,
     at::Tensor &kv_cache_out0,
     at::Tensor &q_out1,
-    at::Tensor &kv_cache_out1)
+    at::Tensor &kv_cache_out1,
+    at::Tensor &inner_out
+    )
 {
-    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1};
+    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
@@ -221,9 +224,9 @@ at::Tensor npu_sparse_flash_attention_meta(
 } // namespace vllm_ascend
 
 namespace {
-// Register the meta implementations of the custom kernels for symbolic tracing, this will also
-// the custom kernel been captured into aclgraph
-TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+  // Register the meta implementations of the custom kernels for symbolic tracing, this will also
+  // the custom kernel been captured into aclgraph
+  TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Rotary embedding meta implementation
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
