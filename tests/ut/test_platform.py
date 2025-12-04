@@ -24,7 +24,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.speculative_config = None
-        mock_vllm_config.compilation_config.pass_config.enable_sequence_parallelism = False
+        mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = None
         return mock_vllm_config
 
@@ -685,9 +685,12 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(VllmConfig)
+            target_msg = "PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
+            found = any(target_msg in log for log in cm.output)
+
             self.assertTrue(
-                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode" in cm.output[0])
+                found,
+                f"Expected log message not found. Captured logs: {cm.output}")
 
             self.assertEqual(
                 VllmConfig.compilation_config.mode,

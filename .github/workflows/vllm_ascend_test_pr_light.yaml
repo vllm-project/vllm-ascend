@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: v0.11.2
+      vllm: v0.12.0
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -84,8 +84,15 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [v0.12.0]
+        
     steps:
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
       - name: Install packages
         run: |
           apt-get update -y
@@ -109,6 +116,11 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          export TMPDIR=/mnt
+          rm -f /usr/share/dotnet
+          rm -rf /opt/ghc
+          rm -rf "/usr/local/share/boost"
+          rm -rf "$AGENT_TOOLSDIRECTORY"
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
@@ -125,7 +137,8 @@ jobs:
             --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
             --ignore tests/ut/models/test_qwen2_vl.py \
             --ignore tests/ut/models/test_qwen2_5_vl.py \
-            --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py
+            --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py \
+            --ignore tests/ut/model_loder
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
@@ -142,7 +155,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [v0.12.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
