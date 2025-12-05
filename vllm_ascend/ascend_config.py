@@ -246,6 +246,8 @@ class AscendCompilationConfig:
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: True
                 
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
