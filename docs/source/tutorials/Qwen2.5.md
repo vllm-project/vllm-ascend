@@ -215,6 +215,7 @@ Two accuracy evaluation methods are provided: AISBench (recommended) and manual 
 
 Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
+<!-- skip-exec -->
 #### Execution Command
 ```shell
 # Run evaluation (debug logs recommended for first execution)
