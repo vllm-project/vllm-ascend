@@ -1348,8 +1348,8 @@ class MooncakeConnectorWorker:
     def _get_remote_tp_rank(self, req_id: str) -> List[int]:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
 
-    def _get_tp_remote_tp_ranks(self, tp_ori_data: list[int],
-                                rand_group_index: int, num_groups: int):
+    def _get_tp_remote_tp_ranks(self, tp_ori_data: np.ndarray,
+                                rand_group_index: list[int], num_groups: int)-> List[List[int]]:
         tp_ori_data = tp_ori_data.reshape(-1, num_groups)
         choosen_group = tp_ori_data[:, [rand_group_index]]
         flattened = choosen_group.reshape(-1).tolist()
