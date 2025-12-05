@@ -886,9 +886,7 @@ class MtpProposer(Proposer):
             # Increment the sequence lengths.
             # This is an out-of-place operation to avoid modifying the original tensor
             # when enable async_scheduling.
-            attn_metadata_i.seq_lens[:
-                                     batch_size] = attn_metadata_i.seq_lens[:
-                                                                            batch_size] + 1
+            attn_metadata_i.seq_lens = attn_metadata_i.seq_lens + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
             exceeds_max_model_len_cpu = exceeds_max_model_len.to(
