@@ -184,7 +184,7 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::CopyOutXQuant1H(int64_t progr
 
     inputXInQueue.EnQue<T>(inLocal);
 
-    // 计算quant
+    // Compute quantization
     Compute(smoothLocal);
 
     LocalTensor<float> quantScaleLocal = scaleOutQueue.DeQue<float>();
@@ -525,7 +525,7 @@ template <typename T>
 __aicore__ inline void MoeV2GatherDynamicQuant<T>::Process() {
   if (this->blockIdx < this->needCoreNum) {
     currentLoopRows = perLoopRows;
-    if (colLoops > 1) {  // 一行无法全载，需要workspace
+    if (colLoops > 1) {  // A single row cannot be fully loaded; workspace is required
       if (smoothType == 2) {
         for (int64_t loop = 0; loop < this->rowLoops - 1; loop++) {
           CopyInExpandedExpertIdx(loop);
@@ -543,7 +543,7 @@ __aicore__ inline void MoeV2GatherDynamicQuant<T>::Process() {
         CopyInExpandedRowIdx(this->rowLoops - 1);
         CopyOutPartialXQuant1H(this->rowLoops - 1);
       }
-    } else {  // 一行可以全载
+    } else {  // A single row can be fully loaded
       if (smoothType == 2) {
         for (int64_t loop = 0; loop < this->rowLoops - 1; loop++) {
           CopyInExpandedExpertIdx(loop);
