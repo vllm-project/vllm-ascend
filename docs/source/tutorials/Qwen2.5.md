@@ -1,12 +1,12 @@
-# Qwen2.5-Instruct
+# Qwen2.5-7B-Instruct
 
 ## Introduction
 
-Qwen2.5-Instruct is the flagship instruction-tuned variant of Alibaba Cloud’s Qwen 2.5 LLM series. It supports a maximum context window of 128K, enables generation of up to 8K tokens, and delivers enhanced capabilities in multilingual processing, instruction following, programming, mathematical computation, and structured data handling.
+Qwen2.5-7B-Instruct is the flagship instruction-tuned variant of Alibaba Cloud’s Qwen 2.5 LLM series. It supports a maximum context window of 128K, enables generation of up to 8K tokens, and delivers enhanced capabilities in multilingual processing, instruction following, programming, mathematical computation, and structured data handling.
 
 This document details the complete deployment and verification workflow for the model, including supported features, environment preparation, single-node deployment, functional verification, accuracy and performance evaluation, and troubleshooting of common issues. It is designed to help users quickly complete model deployment and validation.
 
-The `Qwen2.5-Instruct` model was supported since `vllm-ascend:v0.11.0rc0`.
+The `Qwen2.5-7B-Instruct` model was supported since `vllm-ascend:v0.11.0rc0`.
 
 ## Supported Features
 
@@ -18,9 +18,9 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen2.5-7B-Instruct`(BF16 version): require 2 910B4 (32G × 2) cards. [Qwen2.5-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
+- `Qwen2.5-7B-Instruct`(BF16 version): require 2 910B4 (32G × 2) cards. [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
 
-It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-Instruct/`) for quick access during deployment.
+It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment.
 
 ### Verify Multi-node Communication(Optional)
 
@@ -28,11 +28,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image and install extra operator for supporting `Qwen2.5-Instruct`.
-
-:::{note}
-Only AArch64 architecture are supported currently due to extra operator's installation limitations.
-:::
+You can using our official docker image and install extra operator for supporting `Qwen2.5-7B-Instruct`.
 
 :::::{tab-set}
 :sync-group: install
@@ -97,19 +93,11 @@ docker run --rm \
 ::::
 :::::
 
-In addition, if you don't want to use the docker image as above, you can also build all from source:
-
-- Install `vllm-ascend` from source, refer to [installation](../installation.md).
-
-- Install extra operator for supporting `Qwen2.5-7B-Instruct`, refer to the above tab.
-
-If you want to deploy multi-node environment, you need to set up environment on each node.
-
 ## Deployment
 
 ### Single-node Deployment
 
-Qwen2.5-Instruct supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
+Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
 
 1. Prepare model weights: Ensure the downloaded model weights are stored in the `./Qwen2.5-7B-Instruct/` directory.
 2. Create and execute the deployment script (save as `deploy.sh`):
@@ -123,7 +111,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 export ASCEBD_RT_VISIBLE_DEVICES=0,1
 
-vllm serve ./Qwen2.5-Instruct/ \
+vllm serve ./Qwen2.5-7B-Instruct/ \
           --host <IP> \
           --port <Port> \
           --served-model-name qwen-2.5-7b-instruct \
@@ -135,7 +123,7 @@ vllm serve ./Qwen2.5-Instruct/ \
 
 ### Multi-node Deployment
 
-This document currently focuses on single-node deployment.
+Single-node deployment is recommended.
 
 ### Prefill-Decode Disaggregation
 
@@ -179,7 +167,7 @@ Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy re
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
-Run performance evaluation of `Qwen2.5-Instruct` as an example.
+Run performance evaluation of `Qwen2.5-7B-Instruct` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
@@ -191,9 +179,8 @@ There are three `vllm bench` subcommand:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
 vllm bench serve \
-  --model ./Qwen2.5-Instruct/ \
+  --model ./Qwen2.5-7B-Instruct/ \
   --dataset-name random \
   --random-input 200 \
   --num-prompt 200 \
