@@ -25,7 +25,8 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
-                              get_decode_context_model_parallel_world_size)
+                              get_decode_context_model_parallel_world_size,
+                              get_pcp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -41,8 +42,6 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
-
-from vllm.distributed import get_pcp_group
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
