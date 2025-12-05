@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+    from zmq import Socket
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -224,7 +225,7 @@ class KVCacheSendingThread(threading.Thread):
                          e,
                          exc_info=True)
 
-    def run_busy_loop(self, sock: zmq.Socket):
+    def run_busy_loop(self, sock: "Socket"):
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         size_in_bytes = len(encoded_data)
@@ -1136,6 +1137,7 @@ class MooncakeConnectorWorker:
 
         start_wait_time = time.time()
         thread = self.kv_send_thread if self.kv_role == 'kv_producer' else self.kv_recv_thread
+        assert thread is not None
         while not ready_event.is_set():
             if not thread.is_alive():
                 raise RuntimeError(
