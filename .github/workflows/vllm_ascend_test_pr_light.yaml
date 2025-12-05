@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: 86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24
+      vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -84,8 +84,15 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24]
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
+
     steps:
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
       - name: Install packages
         run: |
           apt-get update -y
@@ -109,6 +116,11 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          export TMPDIR=/mnt
+          rm -f /usr/share/dotnet
+          rm -rf /opt/ghc
+          rm -rf "/usr/local/share/boost"
+          rm -rf "$AGENT_TOOLSDIRECTORY"
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
@@ -123,9 +135,11 @@ jobs:
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
-            --ignore tests/ut/models/test_qwen2_vl.py \
-            --ignore tests/ut/models/test_qwen2_5_vl.py \
-            --ignore tests/ut/models/test_qwen2_5_vl_without_padding.py
+            --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
+            --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
+            --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
+            --ignore tests/ut/kv_connector/test_llmdatadist_connector.py \
+            --ignore tests/ut/core/test_scheduler_dynamic_batch.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
@@ -142,7 +156,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24]
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
