@@ -25,15 +25,11 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
-                                             get_tp_group,
-                                             get_pp_group,
-                                             get_pcp_group,
-                                             get_tensor_model_parallel_rank,
-                                             get_tensor_model_parallel_world_size,
-                                             get_decode_context_model_parallel_rank,
-                                             get_decode_context_model_parallel_world_size)
+from vllm.distributed.parallel_state import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size, get_pp_group,
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    get_tp_group)
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
@@ -173,11 +169,11 @@ class KVCacheTaskTracker:
 
 class KVCacheSendingThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, prefill_tp_size: int,
-                 local_engine_id: str, side_channel_host: str,
-                 side_channel_port: int, metadata: MooncakeAgentMetadata,
-                 ready_event: threading.Event, kv_caches: dict[str, Any],
-                 pcp_rank: int):
+    def __init__(self, vllm_config: VllmConfig, tp_rank: int,
+                 prefill_tp_size: int, local_engine_id: str,
+                 side_channel_host: str, side_channel_port: int,
+                 metadata: MooncakeAgentMetadata, ready_event: threading.Event,
+                 kv_caches: dict[str, Any], pcp_rank: int):
         super().__init__(daemon=True, name="KVCacheSendingThread")
         self.tp_rank = tp_rank
         self.prefill_tp_size = prefill_tp_size
@@ -1169,9 +1165,9 @@ class MooncakeConnectorWorker:
         ready_event = threading.Event()
         if self.kv_role == 'kv_producer':
             self.kv_send_thread = KVCacheSendingThread(
-                self.tp_rank, self._prefill_tp_size, self.engine_id,
-                self.side_channel_host, self.side_channel_port, metadata,
-                ready_event, self.kv_caches, self.pcp_rank)
+                self.vllm_config, self.tp_rank, self._prefill_tp_size,
+                self.engine_id, self.side_channel_host, self.side_channel_port,
+                metadata, ready_event, self.kv_caches, self.pcp_rank)
             self.kv_send_thread.start()
         else:
             self.kv_recv_thread = KVCacheRecvingThread(
@@ -1349,7 +1345,8 @@ class MooncakeConnectorWorker:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
 
     def _get_tp_remote_tp_ranks(self, tp_ori_data: np.ndarray,
-                                rand_group_index: list[int], num_groups: int)-> List[List[int]]:
+                                rand_group_index: list[int],
+                                num_groups: int) -> List[List[int]]:
         tp_ori_data = tp_ori_data.reshape(-1, num_groups)
         choosen_group = tp_ori_data[:, [rand_group_index]]
         flattened = choosen_group.reshape(-1).tolist()
@@ -1378,11 +1375,17 @@ class MooncakeConnectorWorker:
             else:
                 num_kv_head = self.num_key_value_heads
             # The number of redundant copies for each KV head within the PP stage
-            ori_data = ori_data.reshape(self._prefill_pp_size, -1)  # Divide the ranks according to the PP stage
+            ori_data = ori_data.reshape(
+                self._prefill_pp_size,
+                -1)  # Divide the ranks according to the PP stage
             num_groups = max(1, len(ori_data[0]) // num_kv_head)
             rand_group_index = rand.sample(range(num_groups), \
                 (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
-            all_results = [self._get_tp_remote_tp_ranks(ori_data[pp_index], rand_group_index, num_groups) for pp_index in range(self._prefill_pp_size)]
+            all_results = [
+                self._get_tp_remote_tp_ranks(ori_data[pp_index],
+                                             rand_group_index, num_groups)
+                for pp_index in range(self._prefill_pp_size)
+            ]
             for group_index in range(len(all_results[0])):
                 group = []
                 for pp_index in range(self._prefill_pp_size):
