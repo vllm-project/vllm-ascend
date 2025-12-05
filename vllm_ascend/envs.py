@@ -177,8 +177,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Whether to enable exponential overlap with model executing.
+    # Set to 0 by default, disable the exponential overlap.
+    # Set to 1 is to enable exponential overlap, using default exponential or AI-CPU exponential.
+    # Set to 2 is to enable exponential overlap, using AI-Core exponential. 
     "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL", '0'))),
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL", '0')),
 }
 
 # end-env-vars-definition

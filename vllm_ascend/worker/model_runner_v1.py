@@ -625,7 +625,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.transfer_event = torch.npu.Event()
 
-        if envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+        self.enable_asnyc_exp = envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL
+        if self.enable_asnyc_exp not in [0, 1, 2]:
+            logger.info("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL can ONLY be set to 0, 1, 2. \
+                        Invalid input will be set to default 0!")
+            self.enable_asnyc_exp = 0
+        if self.enable_asnyc_exp != 0 and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
             logger.info("Enable async exponential while model executing.")
             self._async_exponential_stream = torch.npu.Stream()
             self._async_exponential_event = torch.npu.Event()
@@ -2316,7 +2321,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+        if self.enable_asnyc_exp and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
             default_stream = torch.npu.current_stream()
             self._do_async_exponential(default_stream=default_stream,
                                        logits_indices=logits_indices)
@@ -4478,10 +4483,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             head_dim = self.model_config.get_vocab_size()
             q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
             generators = self.input_batch.sampling_metadata.generators
-            if len(generators) != q.shape[0]:
-                q.exponential_()
-            if generators:
-                for i, generator in generators.items():
-                    q[i].exponential_(generator=generator)
-            self._async_exponential_event.record()
+            if self.enable_asnyc_exp == 2 and hasattr(torch_npu, "npu_sim_exponential_"):
+                # Async exponential with AI-core exponential.
+                # If AI-core exponential is not supported, use the default expontial.
+                if len(generators) != q.shape[0]:
+                    torch_npu.npu_sim_exponential_(q)
+                if generators:
+                    for i, generator in generators.items():
+                        torch_npu.npu_sim_exponential_(q[i], generator=generator)
+            else:
+                # Asnyc exponential with AI-CPU exponential or default exponential.
+                if len(generators) != q.shape[0]:
+                    q.exponential_()
+                if generators:
+                    for i, generator in generators.items():
+                        q[i].exponential_(generator=generator)
+                self._async_exponential_event.record()
         self.sampler.set_q_event(q, self._async_exponential_event)
