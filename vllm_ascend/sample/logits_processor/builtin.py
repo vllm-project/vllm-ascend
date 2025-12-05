@@ -33,3 +33,20 @@ class AscendMinPLogitsProcessor(MinPLogitsProcessor):
                 self.min_p_device = self.min_p_cpu_tensor
             # Current slice of the device tensor
             self.min_p: torch.Tensor = self.min_p_device[:0]
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.min_p_count:
+            return logits
+        # Convert logits to probability distribution
+        probability_values = torch.nn.functional.softmax(logits, dim=-1)
+        # Calculate maximum probabilities per sequence
+        max_probabilities = torch.amax(probability_values,
+                                       dim=-1,
+                                       keepdim=True)
+        # Adjust min_p
+        adjusted_min_p = max_probabilities.mul_(self.min_p)
+        # Identify valid tokens using threshold comparison
+        invalid_token_mask = probability_values < adjusted_min_p
+        # Apply mask using boolean indexing
+        logits.masked_fill_(invalid_token_mask, -float('inf'))
+        return logits

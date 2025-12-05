@@ -44,13 +44,13 @@ jobs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
+              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
               - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
@@ -69,12 +69,12 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       type: full

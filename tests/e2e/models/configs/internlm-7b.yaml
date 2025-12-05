@@ -1,0 +1,13 @@
+model_name: "Shanghai_AI_Laboratory/internlm-7b"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "ceval-valid"
+  metrics:
+  - name: "acc,none"
+    value: 0.42
+num_fewshot: 5
+max_model_len: 2048
+trust_remote_code: True
+dtype: "bfloat16"
+apply_chat_template: False
+fewshot_as_multiturn: False

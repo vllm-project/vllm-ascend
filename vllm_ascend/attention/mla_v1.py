@@ -13,7 +13,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
+                              get_pcp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -37,17 +37,9 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, prefill_context_parallel_enable,
-                               weak_ref_tensors)
+                               is_enable_nz, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-# isort: on
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -226,7 +218,7 @@ class AscendMLAMetadataBuilder:
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -265,15 +257,13 @@ class AscendMLAMetadataBuilder:
         self.cos_cache = None
         self.sin_cache = None
 
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
-        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size if prefill_context_parallel_enable(
-        ) else 1
+        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
                                       0)
@@ -868,10 +858,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 
@@ -887,15 +876,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         ).device_group if self.tp_size > 1 else None
 
     def _v_up_proj(self, x):
-        if self.W_UV.shape[0] * self.W_UV.shape[
-                1] < 65536 and not self.dcp_size * self.pcp_size > 1:
+        if x.dtype in [torch.float16, torch.bfloat16] \
+                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
+                and not self.dcp_size * self.pcp_size > 1:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
-            x = torch_npu.npu_transpose_batchmatmul(x,
-                                                    self.W_UV,
-                                                    perm_x1=[1, 0, 2],
-                                                    perm_x2=[0, 1, 2],
-                                                    perm_y=[1, 0, 2])
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            b, _, _ = x.shape
+            res = torch.empty((b, self.num_heads, self.v_head_dim),
+                              dtype=x.dtype,
+                              device=x.device)
+            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
+            x = res.reshape(-1, self.num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
             x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -923,8 +913,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
+                try:
                     return getattr(layer, attr)
+                except AttributeError:
+                    pass
             raise AttributeError(
                 f"Layer '{layer}' has no recognized weight attribute:"
                 f" {WEIGHT_NAMES}.")
@@ -1674,6 +1666,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         forward_context = get_forward_context()
         if (self.enable_mlapo and
             (attn_metadata is None or not forward_context.with_prefill)):
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
                 hidden_states, kv_cache, attn_metadata)
         else:
