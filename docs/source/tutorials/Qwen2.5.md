@@ -194,7 +194,7 @@ Not supported yet.
 
 After starting the service, verify functionality using a `curl` request:
 
-```bash
+```shell
 curl http://<IP>:<Port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -216,7 +216,7 @@ Two accuracy evaluation methods are provided: AISBench (recommended) and manual 
 Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
 #### Execution Command
-```bash
+```shell
 # Run evaluation (debug logs recommended for first execution)
 ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --debug
 
@@ -237,7 +237,7 @@ Refer to [Using AISBench for performance evaluation](../developer_guide/evaluati
 
 Add `--mode perf` to the accuracy evaluation command to run performance testing:
 <!-- skip-exec -->
-```bash
+```shell
 ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer example --mode perf
 ```
 
@@ -253,7 +253,7 @@ There are three `vllm bench` subcommand:
 
 Take the `serve` as an example. Run the code as follows.
 
-```bash
+```shell
 export VLLM_USE_MODELSCOPE=true
 vllm bench serve \
   --model ./Qwen2.5-Instruct/ \
