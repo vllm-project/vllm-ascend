@@ -4374,30 +4374,37 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     #long sequences into shorter ones to improve performance.
                     split_size = 16 * 1024
                     if self.pcp_rank == 0:
-                        split_q_head_nomask_idx_list = [self.kv_idx_names['kv_with_q_head_nomask_idx_tensor']]
+                        split_q_head_nomask_idx_list = [
+                            self.
+                            kv_idx_names['kv_with_q_head_nomask_idx_tensor']
+                        ]
                     else:
-                        split_q_head_nomask_idx_list, split_q_head_nomask_lens_list = self._split_multi_batch_kv_idx(split_with_q_head_nomask_idx_reqs, split_size)
-                    split_q_tail_nomask_idx_list, split_q_tail_nomask_lens_list = self._split_multi_batch_kv_idx(split_kv_with_q_tail_nomask_idx_reqs, split_size)
+                        split_q_head_nomask_idx_list, split_q_head_nomask_lens_list = self._split_multi_batch_kv_idx(
+                            split_with_q_head_nomask_idx_reqs, split_size)
+                    split_q_tail_nomask_idx_list, split_q_tail_nomask_lens_list = self._split_multi_batch_kv_idx(
+                        split_kv_with_q_tail_nomask_idx_reqs, split_size)
                     for q_head_nomask_idx in split_q_head_nomask_idx_list:
-                        split_q_head_nomask_idx_tensor_list.append(_list_to_tensor(q_head_nomask_idx, self.device))
+                        split_q_head_nomask_idx_tensor_list.append(
+                            _list_to_tensor(q_head_nomask_idx, self.device))
+
                     for q_tail_nomask_idx in split_q_tail_nomask_idx_list:
-                        split_q_tail_nomask_idx_tensor_list.append(_list_to_tensor(q_tail_nomask_idx, self.device)) 
+                        split_q_tail_nomask_idx_tensor_list.append(
+                            _list_to_tensor(q_tail_nomask_idx, self.device))
 
                     if self.pcp_rank == 0:
-                        head_attn_nomask_seqlens_list = [head_attn_nomask_seqlens]
+                        head_attn_nomask_seqlens_list = [
+                            head_attn_nomask_seqlens
+                        ]
                     else:
                         for q_head_nomask_lens in split_q_head_nomask_lens_list:
-                                head_attn_nomask_seqlens_list.append(
-                                    torch.tensor(
-                                        [chunk_seqlens, q_head_nomask_lens],
-                                        dtype=torch.int32)
-                                )
+                            head_attn_nomask_seqlens_list.append(
+                                torch.tensor(
+                                    [chunk_seqlens, q_head_nomask_lens],
+                                    dtype=torch.int32))
                     for q_tail_nomask_lens in split_q_tail_nomask_lens_list:
                         tail_attn_nomask_seqlens_list.append(
-                            torch.tensor(
-                                [chunk_seqlens, q_tail_nomask_lens],
-                                dtype=torch.int32)
-                        )
+                            torch.tensor([chunk_seqlens, q_tail_nomask_lens],
+                                         dtype=torch.int32))
 
                 if self.vllm_config.model_config.use_mla:
                     pcp_prefill_mask = torch.triu(
@@ -4527,12 +4534,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 current_time_merged.extend(batch[time_idx])
             merged_split_kv_idx_3d.append(current_time_merged)
 
-        # print(f"pcp_rank:{self.pcp_rank}, dcp_rank:{self.dcp_rank}, split_kv_idx_3d: {split_kv_idx_3d}")
-        # print(f"pcp_rank:{self.pcp_rank}, dcp_rank:{self.dcp_rank}, split_kv_len_2d: {split_kv_len_2d}")
         def reshape_kv_len_to_time_first(split_kv_len_2d):
-            return [
-                [batch_len[time_idx] for batch_len in split_kv_len_2d]
-                for time_idx in range(len(split_kv_len_2d[0]))
-            ]
-        merged_split_kv_idx_2d = reshape_kv_len_to_time_first(split_kv_len_2d)
-        return merged_split_kv_idx_3d, merged_split_kv_idx_2d
+            return [[batch_len[time_idx] for batch_len in split_kv_len_2d]
+                    for time_idx in range(len(split_kv_len_2d[0]))]
+
+        merged_split_kv_len_2d = reshape_kv_len_to_time_first(split_kv_len_2d)
+        return merged_split_kv_idx_3d, merged_split_kv_len_2d
