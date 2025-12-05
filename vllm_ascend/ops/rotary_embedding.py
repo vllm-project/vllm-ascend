@@ -68,7 +68,7 @@ def _rope_forward_oot(
     else:
         if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
                 -1] == 128:
-            attn_metadata = get_forward_context().attn_metadata
+            forward_context = get_forward_context()
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,
@@ -77,7 +77,7 @@ def _rope_forward_oot(
             # Although this function modifies in-place, please retain the function's return value.
             # Otherwise, the graph fusion operation may fail.
             query, key = torch_npu.npu_apply_rotary_pos_emb(
-                query, key, attn_metadata.cos, attn_metadata.sin)
+                query, key, forward_context.cos, forward_context.sin)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
