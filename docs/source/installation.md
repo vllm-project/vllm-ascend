@@ -157,6 +157,7 @@ cd ..
 # Install vLLM Ascend.
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+git submodule update --init --recursive
 pip install -v -e .
 cd ..
 ```

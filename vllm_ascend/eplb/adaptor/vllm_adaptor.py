@@ -107,8 +107,8 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
-        num_local_expert = self.param_dict["model.layers." + str(self.num_dense_layers) + \
-                                           ".mlp.experts." + self.expert_weight_names[0]].data.shape[0]
+        key = f"model.layers.{self.num_dense_layers}.mlp.experts.{self.expert_weight_names[0]}"
+        num_local_expert = len(self.param_dict[key])
         for moe_layer_id in range(self.num_moe_layers):
             layer_idx = self.num_dense_layers + moe_layer_id
             self.expert_param_per_layer[layer_idx] = list()
