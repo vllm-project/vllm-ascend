@@ -162,6 +162,8 @@ class AscendSFAMetadataBuilder:
 
         cos = common_attn_metadata.cos
         sin = common_attn_metadata.sin
+
+        assert self.cos_cache is not None and self.sin_cache is not None
         new_cos = self.cos_cache[input_positions][:, None, None]
         new_sin = self.sin_cache[input_positions][:, None, None]
 
@@ -193,7 +195,10 @@ class AscendSFAMetadataBuilder:
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
         model: Optional[nn.Module] = None,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+        if attn_state in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        }:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
