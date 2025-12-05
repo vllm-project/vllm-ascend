@@ -2906,6 +2906,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             seq_lens = max_query_len
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
+            self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                           non_blocking=True)
 
             cu_num_tokens, arange = self._get_cumsum_and_arange(
                 num_scheduled_tokens)
@@ -2936,15 +2938,15 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         [0] * dcp_world_size for _ in range(pcp_world_size)
                     ] for _ in range(num_tokens)]
                     long_seq_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
+                # QUESTION: Why do we separately set query_start_loc for spec in the first place?
+                # While in _prepare_inputs we don't?
                 if self.speculative_config:
-                    query_start_loc = torch.tensor(
+                    self.query_start_loc[:num_reqs + 1] = torch.tensor(
                         [0] + self.actual_seq_lengths_q[:num_reqs],
                         device=self.device,
                         dtype=torch.int32)
-                else:
-                    query_start_loc = self.query_start_loc[:num_reqs + 1]
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=query_start_loc,
+                    query_start_loc=self.query_start_loc[:num_reqs + 1],
                     query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
                                                                  1],
                     seq_lens_cpu=self.seq_lens_cpu,
@@ -3241,7 +3243,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    dummy_compute_logits=dummy_drafter_compute_logits)
+                    dummy_compute_logits=dummy_drafter_compute_logits,
+                    skip_attn=not force_attention)
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:

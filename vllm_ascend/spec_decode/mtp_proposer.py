@@ -254,9 +254,10 @@ class MtpProposer(Proposer):
                     query_start_loc_cpu=self.runner.
                     query_start_loc_cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens_cpu,
-                    seq_lens=self.runner.seq_lens_cpu[:num_reqs],
+                    seq_lens=self.runner.seq_lens[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
+                    num_input_tokens=num_tokens,
                     max_query_len=self.num_speculative_tokens + 1,
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
@@ -289,7 +290,7 @@ class MtpProposer(Proposer):
         positions = self.positions[:num_tokens]
         previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
-            if i > 0:
+            if i > 0 and not skip_attn and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,
@@ -316,7 +317,7 @@ class MtpProposer(Proposer):
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
                     not forward_context.capturing:
-                    if self.vllm_config.model_config.use_mla:
+                    if self.vllm_config.model_config.use_mla and not self.use_sparse:
                         update_mla_attn_params(
                             self.update_stream, forward_context, num_tokens,
                             self.vllm_config.speculative_config)
@@ -587,6 +588,7 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
+            num_input_tokens=common_attn_metadata.num_input_tokens,
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -704,8 +706,8 @@ class MtpProposer(Proposer):
 
         assert self.runner is not None
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
-        ) and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]:
+        if self.runner.use_aclgraph and num_scheduled_tokens <= self.cudagraph_batch_sizes[
+                -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         elif self.use_aclgraph and num_tokens <= self.cudagraph_batch_sizes[-1]:
@@ -797,7 +799,7 @@ class MtpProposer(Proposer):
                                                hidden_states=hidden_states)
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                        if self.vllm_config.model_config.use_mla:
+                        if self.vllm_config.model_config.use_mla and not self.use_sparse:
                             update_mla_attn_params(
                                 self.update_stream, forward_context,
                                 num_input_tokens,
@@ -1112,6 +1114,7 @@ class MtpProposer(Proposer):
             seq_lens_cpu=common_attn_metadata.seq_lens,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
+            num_input_tokens=common_attn_metadata.num_input_tokens,
             max_query_len=new_query_len_per_req.max().item(),
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=common_attn_metadata.block_table_tensor,
