@@ -17,6 +17,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ## Environment Preparation
 
 ### Model Weight
+
 - `Qwen2.5-7B-Instruct`(BF16 version): require 2 910B4 (32G × 2) cards. [Qwen2.5-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-Instruct/`) for quick access during deployment.
