@@ -44,6 +44,7 @@ def set_ascend_forward_context(
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
         weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
+        cos_sin_cache: Optional[torch.Tensor] = None,
         is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -127,7 +128,19 @@ def set_ascend_forward_context(
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
         forward_context.is_mtp_model = is_mtp_model
-
+        
+        # initialize rope
+        if cos_sin_cache is not None:
+            last_dim = cos_sin_cache.size()[-1]
+            cos, sin = cos_sin_cache.reshape(-1, 2, last_dim // 2).repeat(
+                1, 1, 2).chunk(2, dim=-2)
+            # BSNH
+            forward_context.cos = cos.view(1, -1, 1, last_dim).contiguous()
+            forward_context.sin = sin.view(1, -1, 1, last_dim).contiguous()
+        else:
+            forward_context.cos = None
+            forward_context.sin = None
+            
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 

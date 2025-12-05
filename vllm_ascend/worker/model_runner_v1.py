@@ -1444,7 +1444,9 @@ class NPUModelRunner(GPUModelRunner):
                     total_num_scheduled_tokens,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    cos_sin_cache=self.model.model.layers[
+                    self.model.model.start_layer].self_attn.rotary_emb.cos_sin_cache.index_select(0, positions)):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -2159,7 +2161,9 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    cos_sin_cache=self.model.model.layers[
+                    self.model.model.start_layer].self_attn.rotary_emb.cos_sin_cache.index_select(0, positions)):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)
