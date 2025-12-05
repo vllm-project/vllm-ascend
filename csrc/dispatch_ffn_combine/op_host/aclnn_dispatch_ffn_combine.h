@@ -47,10 +47,10 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineGetWor
                                                                                         uint64_t* workspaceSize, aclOpExecutor** executor);
 
 /**
- * @brief Second-stage interface of aclnnDispatchGmmCombine to execute computation.
+ * @brief Second-stage interface of aclnnDispatchFFNCombine to execute computation.
  * @param [in] workspace: workspace memory address allocated on the NPU device side.
  * @param [in] workspace_size: workspace size allocated on the NPU device side, obtained from aclnnDispatchFFNCombineGetWorkspaceSize.
- * @param [in] exector: op executor containing the operator compute flow.
+ * @param [in] executor: op executor containing the operator compute flow.
  * @param [in] stream: acl stream.
  * @return aclnnStatus: status code.
  */
