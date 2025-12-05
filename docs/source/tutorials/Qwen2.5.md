@@ -30,6 +30,16 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can using our official docker image and install extra operator for supporting `Qwen2.5-Instruct`.
 
+:::{note}
+Only AArch64 architecture are supported currently due to extra operator's installation limitations.
+:::
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
+
 1. Start the docker image on your each node.
 
 ```{code-block} bash
