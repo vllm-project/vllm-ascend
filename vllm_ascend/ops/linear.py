@@ -37,7 +37,8 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer, is_enable_nz
+from vllm_ascend.ops.shared_weight_layer import is_hidden_layer, post_process_after_loading_for_shared_weight_series, reach_layer_for_shared_weight_series
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
@@ -50,6 +51,10 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
                 in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        # if flashcomm2_o_shared_enabled():
+        #     post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+        #     if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
+        #         reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
@@ -245,14 +250,6 @@ class AscendRowParallelLinear(RowParallelLinear):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
-            disable_tp, prefix, self, "row")
-        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
-        # Divide the weight matrix along the first dimension.
-        self.input_size_per_partition = divide(input_size, self.tp_size)
-        self.output_size_per_partition = output_size
-        self.output_partition_sizes = [output_size]
-
         AscendLinearBase.__init__(self,
                                   input_size,
                                   output_size,
@@ -262,6 +259,14 @@ class AscendRowParallelLinear(RowParallelLinear):
                                   prefix,
                                   return_bias=return_bias,
                                   disable_tp=disable_tp)
+
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
+            disable_tp, prefix, self, "row")
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
+        # Divide the weight matrix along the first dimension.
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results

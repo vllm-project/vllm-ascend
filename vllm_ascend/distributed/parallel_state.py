@@ -240,45 +240,45 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 backend,
                 group_name="flashcomm2_odp")
 
-            def _create_shared_weight_group(
-                    shared_weight_tp_size: int,
-                    group_name: str) -> GroupCoordinator:
-                # when global dp size is 1, shared weight group is same as tp group
-                if global_dp_size == 1:
-                    _SHARED_WEIGHT = get_tp_group()
-                else:  # when global dp size > 1, need to create new group
-                    num_shared_weight_tensor_parallel_groups = (
-                        global_tp_size // shared_weight_tp_size)
-                    group_ranks = []
+        def _create_shared_weight_group(
+                shared_weight_tp_size: int,
+                group_name: str) -> GroupCoordinator:
+            # when global dp size is 1, shared weight group is same as tp group
+            if global_dp_size == 1:
+                _SHARED_WEIGHT = get_tp_group()
+            else:  # when global dp size > 1, need to create new group
+                num_shared_weight_tensor_parallel_groups = (
+                    global_tp_size // shared_weight_tp_size)
+                group_ranks = []
 
-                    for pp_idx in range(global_pp_size):
-                        for j in range(shared_weight_tp_size):
-                            group = []
-                            for dp_idx in range(global_dp_size):
-                                base = (dp_idx * global_pp_size +
-                                        pp_idx) * global_tp_size
-                                for i in range(
-                                        num_shared_weight_tensor_parallel_groups
-                                ):
-                                    tp_local = i + j * num_shared_weight_tensor_parallel_groups
-                                    global_rank = base + tp_local
-                                    group.append(global_rank)
-                            group_ranks.append(group)
+                for pp_idx in range(global_pp_size):
+                    for j in range(shared_weight_tp_size):
+                        group = []
+                        for dp_idx in range(global_dp_size):
+                            base = (dp_idx * global_pp_size +
+                                    pp_idx) * global_tp_size
+                            for i in range(
+                                    num_shared_weight_tensor_parallel_groups
+                            ):
+                                tp_local = i + j * num_shared_weight_tensor_parallel_groups
+                                global_rank = base + tp_local
+                                group.append(global_rank)
+                        group_ranks.append(group)
 
-                    _SHARED_WEIGHT = init_model_parallel_group(
-                        group_ranks,
-                        get_world_group().local_rank,
-                        backend,
-                        group_name=group_name)
+                _SHARED_WEIGHT = init_model_parallel_group(
+                    group_ranks,
+                    get_world_group().local_rank,
+                    backend,
+                    group_name=group_name)
 
-                return _SHARED_WEIGHT
+            return _SHARED_WEIGHT
 
-            global _SHARED_WEIGHT
+        global _SHARED_WEIGHT
 
-            # Create shared weight group for flashcomm2 oproj
-            if flashcomm2_o_shared_enabled():
-                _SHARED_WEIGHT = _create_shared_weight_group(
-                    flashcomm2_otp_size, "flashcomm2_o_shared")
+        # Create shared weight group for flashcomm2 oproj
+        if flashcomm2_o_shared_enabled():
+            _SHARED_WEIGHT = _create_shared_weight_group(
+                flashcomm2_otp_size, "flashcomm2_o_shared")
 
 
 def get_mlp_tensor_model_parallel_world_size():

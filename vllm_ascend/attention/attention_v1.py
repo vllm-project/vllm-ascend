@@ -27,6 +27,7 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.config import VllmConfig
+from vllm.config.vllm import get_current_vllm_config
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size)
@@ -41,7 +42,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
+from vllm_ascend.utils import flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer, prefill_context_parallel_enable, weak_ref_tensors
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -54,6 +55,7 @@ if prefill_context_parallel_enable():
 
 from vllm.attention.backends.registry import (AttentionBackendEnum,
                                               register_backend)
+from vllm_ascend.ops.shared_weight_layer import is_hidden_layer, post_process_after_loading_for_shared_weight_series, reach_layer_for_shared_weight_series
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -551,6 +553,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ) if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group(
         ).device_group if self.dcp_size > 1 else None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        print(f"AscendAttentionBackendImpl************************process_weights_after_loading")
+        if flashcomm2_o_shared_enabled():
+            post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+            if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
+                reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())        
 
     def full_graph_attention(self,
                              query: torch.Tensor,

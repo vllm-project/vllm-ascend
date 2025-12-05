@@ -415,7 +415,14 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
-        self.post_process_after_weight_loading()
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer(self.layer)):
+            from vllm_ascend.distributed.parallel_state import \
+                get_shared_weight_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_shared_weight_group(),
+                layer=self.layer,
+                prefetch_step=1)
 
 
 class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
