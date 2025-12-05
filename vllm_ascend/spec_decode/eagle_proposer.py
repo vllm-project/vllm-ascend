@@ -79,7 +79,7 @@ class EagleProposer(Proposer):
                                    dtype=torch.int32)
         attn_mask_len = self.vllm_config.model_config.max_model_len
         self.attn_mask_builder = AttentionMaskBuilder(
-            attn_mask_len, self.vllm_config.model_config.dtype)
+            attn_mask_len, self.vllm_config.model_config.dtype, device=device)
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -430,9 +430,7 @@ class EagleProposer(Proposer):
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
-        attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-            seq_lens, target_positions, self.vllm_config.model_config.dtype,
-            self.device)
+        attn_mask = self.runner.attn_mask
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens.to(device),
