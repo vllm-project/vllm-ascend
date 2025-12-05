@@ -26,6 +26,8 @@ from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 
+from vllm_ascend.ascend_config import get_ascend_config
+
 
 def compile_fx(graph: GraphModule, example_inputs: list,
                inner_compile: Callable, decompositions: dict) -> Callable:
@@ -37,6 +39,66 @@ def compile_fx(graph: GraphModule, example_inputs: list,
         return make_graph_return_tuple(graph, example_inputs,
                                        recursive_compile_fx)
     return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
+
+def fusion_pass_compile(
+    graph: fx.GraphModule,
+    example_inputs: list[Any],
+    compiler_config: dict[str, Any],
+    runtime_shape: Optional[int] = None,
+    key: Optional[str] = None,
+) -> tuple[Optional[Callable], Optional[Any]]:
+    def compile_inner(graph, example_inputs):
+        current_pass_manager = compiler_config["graph_fusion_manager"]
+        graph = current_pass_manager(graph, runtime_shape)
+        return graph
+
+    decompositions = select_decomp_table()
+
+    compiled_fn = compile_fx(
+        graph=graph,
+        example_inputs=example_inputs,
+        inner_compile=compile_inner,
+        decompositions=decompositions,
+    )
+
+    return compiled_fn, None
+
+def npugraph_ex_compile(
+    graph: fx.GraphModule,
+    example_inputs: list[Any],
+    compiler_config: dict[str, Any],
+    runtime_shape: Optional[int] = None,
+    key: Optional[str] = None,
+)-> tuple[Optional[Callable], Optional[Any]]:
+    # When currently using the FULL_DECODE_ONLY mode,
+    # the piecewise compilation level slicing process
+    # in vllm is also encountered.
+    # This process causes the output to no longer be
+    # wrapped as a tuple when the fx graph has a single
+    # output, but torch.compile has a mandatory check.
+    graph = graph.graph
+    output_node = graph.output_node()
+    return_value = output_node.args[0]
+    if not (isinstance(return_value, tuple) or
+            (isinstance(return_value, fx.Node) and return_value.op
+             == "call_function" and return_value.target is tuple)):
+        with graph.inserting_before(output_node):
+            tuple_node = graph.create_node("call_function",
+                                           tuple,
+                                           args=([return_value],))
+        output_node.args = (tuple_node,)
+        graph.recompile()
+
+    import torchair
+
+    torch.npu.set_compile_mode(jit_compile=False)
+    config = torchair.CompilerConfig()
+    config.debug.run_eagerly = True
+    config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+
+    npugraph_ex = torchair.get_npu_backend(compiler_config=config)
+    compile_graph = npugraph_ex(graph, example_inputs)
+    return compile_graph, None
 
 
 class AscendCompiler(CompilerInterface):
@@ -56,18 +118,10 @@ class AscendCompiler(CompilerInterface):
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
 
-        def compile_inner(graph, example_inputs):
-            current_pass_manager = compiler_config["graph_fusion_manager"]
-            graph = current_pass_manager(graph, runtime_shape)
-            return graph
-
-        decompositions = select_decomp_table()
-
-        compiled_fn = compile_fx(
-            graph=graph,
-            example_inputs=example_inputs,
-            inner_compile=compile_inner,
-            decompositions=decompositions,
-        )
-
-        return compiled_fn, None
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_npugraph_ex_optimize:
+            return npugraph_ex_compile(graph, example_inputs,
+                                       compiler_config, runtime_shape, key)
+        else:
+            return fusion_pass_compile(graph, example_inputs,
+                                       compiler_config, runtime_shape, key)
