@@ -458,7 +458,7 @@ class AscendAttentionMetadataBuilder:
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             prefill=prefill_metadata,
-            decode_meta=decode_metadata)
+            decode_meta=decode_metadata,)
         return attn_metadata
 
     def _get_chunked_req_mask(self, local_context_lens_allranks) -> List[bool]:
