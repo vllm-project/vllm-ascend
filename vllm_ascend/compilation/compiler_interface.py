@@ -18,6 +18,7 @@
 import functools
 from typing import Any, Callable, Optional
 
+import torch
 import torch.fx as fx
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import (graph_returns_tuple,
@@ -122,7 +123,7 @@ class AscendCompiler(CompilerInterface):
     ) -> tuple[Optional[Callable], Optional[Any]]:
 
         ascend_config = get_ascend_config()
-        if ascend_config.enable_npugraph_ex_optimize:
+        if ascend_config.enable_npugraph_ex:
             return npugraph_ex_compile(graph, example_inputs, compiler_config,
                                        runtime_shape, key)
         else:

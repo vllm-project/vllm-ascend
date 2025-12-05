@@ -78,13 +78,13 @@ class TestAscendConfig(TestBase):
             },
             "multistream_overlap_shared_expert": True,
             "expert_map_path": "test_expert_map_path",
-            "enable_npugraph_ex_optimize": True,
+            "enable_npugraph_ex": True,
             "refresh": True,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
-        self.assertTrue(ascend_config.enable_npugraph_ex_optimize)
+        self.assertTrue(ascend_config.enable_npugraph_ex)
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertTrue(torchair_graph_config.enabled)
