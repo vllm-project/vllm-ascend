@@ -451,8 +451,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         else:
             raise NotImplementedError(
                 "Torchair graph mode with non-MLA attention backend is still experimental."
-                "v1 scheduler(chunked prefill) is not supported at this moment. Please"
-                "setting 'ascend_scheduler_config':{'enabled':true} in additional_config"
-                "to use ascend scheduler.")
+                "v1 scheduler(chunked prefill) is not supported at this moment."
+            )
 
         return output.view(num_tokens, self.hidden_size)

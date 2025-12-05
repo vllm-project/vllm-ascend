@@ -139,7 +139,6 @@ jobs:
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
             --ignore tests/ut/kv_connector/test_llmdatadist_connector.py \
-            --ignore tests/ut/ops/test_linear.py \
             --ignore tests/ut/core/test_scheduler_dynamic_batch.py
 
       - name: Upload coverage to Codecov
