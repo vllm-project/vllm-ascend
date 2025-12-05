@@ -13,7 +13,7 @@ Unified Cache Management (UCM) provides an external KV-cache storage layer desig
 
 ## UCM Installation
 
-**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/getting-started/installation_npu.html)**
+**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/getting-started/getting-started/quickstart_vllm_ascend.html)**
 
 ## Configure UCM for Prefix Caching
 
@@ -22,7 +22,7 @@ You may directly edit the example file at:
 
 `unified-cache-management/examples/ucm_config_example.yaml`
 
-**For updated configuration options, please refer to the [official UCM documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/nfs_store.html)**
+**For updated configuration options, please refer to the [official UCM documentation for prefix-caching](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/nfs_store.html)**
 
 A minimal configuration looks like this:
 
