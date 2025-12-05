@@ -32,7 +32,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 :::::{tab-set}
 ::::{tab-item} Use docker image
 
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
+For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -69,16 +69,6 @@ Select an image based on your machine type and start the docker image on your no
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
   -v /etc/ascend_install.info:/etc/ascend_install.info \
   -it $IMAGE bash
-  ```
-  
-Set up environment variables:
-
-```bash
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-
-# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ```
 
 ::::
@@ -104,10 +94,12 @@ Run the following script to execute online 128k inference.
 
 ```shell
 #!/bin/sh
+# Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=true
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -127,11 +119,14 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
---hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":4,"original_max_position_embeddings":32768}}' \
---additional-config '{"ascend_scheduler_config":{"enabled":false}}' \
+--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}'
 --compilation-config '{"cudagraph_capture_sizes":[1,4],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
 ```
+
+**Notice:** 
+- for vllm version below `v0.12.0` use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}'`
+- for vllm version `v0.12.0` use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":4,"original_max_position_embeddings":32768}}' \`
 
 The parameters are explained as follows:
 - `--data-parallel-size` 1 and `--tensor-parallel-size` 8 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
@@ -157,6 +152,10 @@ Node 0
 
 ```shell
 #!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=true
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
@@ -188,16 +187,18 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
---no-enable-prefix-caching \
 --async-scheduling \
---gpu-memory-utilization 0.8 \
+--gpu-memory-utilization 0.9 \
 ```
 
 Node1
 
 ```shell
 #!/bin/sh
-
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=true
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
@@ -233,9 +234,8 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
---no-enable-prefix-caching \
 --async-scheduling \
---gpu-memory-utilization 0.8 \
+--gpu-memory-utilization 0.9 \
 ```
 
 If the service starts successfully, the following information will be displayed on node 0:
