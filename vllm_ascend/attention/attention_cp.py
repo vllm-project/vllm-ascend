@@ -40,7 +40,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 from vllm.distributed import get_pcp_group
 
