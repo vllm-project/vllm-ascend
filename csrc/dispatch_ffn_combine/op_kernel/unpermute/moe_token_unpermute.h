@@ -107,7 +107,7 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::Init(GM_ADDR permuted_tokens, GM_ADD
     this->tokens_splited_num = tiling_data->tokens_splited_num;
     this->tokens_splited_remain = tiling_data->tokens_splited_remain;
 
-    // 处理token_by_core尾块
+    // Handle the tail block for token_by_core
     if (this->tokens_core_remain > 0 && blockIdx < this->tokens_core_remain) {
         this->tokens_core_length += 1;
         this->tokens_splited_remain += 1;
@@ -181,7 +181,7 @@ __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::Process()
     for (int64_t i = 0; i < this->tokens_splited_num; ++i) {
         CalMultiOutToken(i * this->tokens_splited_length, this->tokens_splited_length);
     }
-    // 处理tokens_num不能均匀分核数的尾块
+    // Handle the tail block when tokens_num is not evenly divisible by core count
     if (this->tokens_splited_remain > 0) {
         CalMultiOutToken(this->tokens_splited_num * this->tokens_splited_length, this->tokens_splited_remain);
     }
@@ -231,7 +231,7 @@ __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalSingleOutT
     for (int64_t h_index = 0; h_index < this->hidden_splited_num; ++h_index) {
         CalPartOutToken(start_token, h_index, this->hidden_splited_length, out_token_idx);
     }
-    // 一次不能完整容纳完整的hidden_size, 处理尾块
+    // Handle the tail block when a full hidden_size does not fit in one pass
     if (this->hidden_splited_remain > 0) {
         CalPartOutToken(start_token, this->hidden_splited_num, this->hidden_splited_remain, out_token_idx);
     }
@@ -248,7 +248,7 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalPartOutToken(const int64_t start_
     int64_t end_token = start_token + this->top_k;
     T2 cal_token_idx = this->indicesLocal.GetValue(start_token);
 
-    // 处理第一个Token数据
+    // Handle the first token
     if (cal_token_idx < this->num_out_tokens) {
         float probsValue = 0;
         if constexpr (PROBS) {
@@ -263,7 +263,7 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalPartOutToken(const int64_t start_
         Duplicate(this->token_tensor0, static_cast<float>(0), h_length);
     }
 
-    // 处理剩余的Token数据
+    // Handle the remaining tokens
     for (int64_t token_index = start_token + 1; token_index < end_token; ++token_index) {
         cal_token_idx = this->indicesLocal.GetValue(token_index);
         if (cal_token_idx < this->num_out_tokens) {
@@ -278,7 +278,7 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalPartOutToken(const int64_t start_
         }
     }
 
-    // 输出计算结果
+    // Write out the computed result
     CopyOut(out_token_index, h_index, h_length);
 }
 
