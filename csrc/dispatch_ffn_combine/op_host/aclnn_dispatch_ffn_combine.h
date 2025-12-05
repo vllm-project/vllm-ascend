@@ -25,13 +25,16 @@ extern "C" {
  * Operator function: fuse all distributed MoE ops from InitRouting through Unpermute.
  * @brief First-stage interface of aclnnDispatchFFNCombine that calculates workspace size based on the specific compute flow.
  * @domain aclnn_ops_infer
- * @param [in] a: left matmul matrix, supports float16 and bf16.
- * @param [in] b: right matmul matrix, supports float16 and bf16.
- * @param [in] bias: bias, supports float16 and bf16.
+ * @param [in] x: The input tensor.
+ * @param [in] weight1: The first weight tensor.
+ * @param [in] weight2: The second weight tensor.
+ * @param [in] expertId: The expert ID tensor.
+ * @param [in] scale1: The first scale tensor.
+ * @param [in] scale2: The second scale tensor.
+ * @param [in] probs: The probabilities tensor.
  * @param [in] group: string identifying the communication domain name.
- * @param [in] worldsize: communication domain size; supports 2/4/8 cards.
- * @param [in] epRankId: local ep rank id in [0, worldSize); rankIds must be unique per card.
- * @param [out] c: result of computation + communication; same dtype as input.
+ * @param [in] maxOutputSize: The maximum output size.
+ * @param [out] out: result of computation + communication; same dtype as input.
  * @param [out] workspaceSize: workspace size to allocate on the NPU device side.
  * @param [out] executor: op executor containing the operator compute flow.
  * @return aclnnStatus: status code.
