@@ -41,6 +41,7 @@ else:
     VllmConfig = None
 
 ASCEND_QUANTIZATION_METHOD = "ascend"
+COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
@@ -48,7 +49,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
@@ -57,9 +57,9 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
-_ENABLE_NZ = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
@@ -121,22 +121,8 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def is_310p():
-    global _IS_310P
-    if _IS_310P is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
-    return _IS_310P
-
-
-def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
-    global _ENABLE_NZ
-    if _ENABLE_NZ is None:
-        if not vllm_config:
-            raise ValueError(
-                "vllm_config must be provided when _ENABLE_NZ is None")
-        _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
-    return _ENABLE_NZ
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -261,6 +247,7 @@ def enable_custom_op():
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
+
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
@@ -418,28 +405,22 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
     Check whether it is vLLM default capture sizes.
     """
 
-    if vllm_version_is("0.11.0"):
-        cuda_graph_sizes = vllm_config.scheduler_config.cuda_graph_sizes
-        if len(cuda_graph_sizes) == 1:
-            cudagraph_capture_sizes = [1, 2, 4] + [
-                i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-            ]
-    else:
-        max_cudagraph_capture_size = \
-            vllm_config.compilation_config.max_cudagraph_capture_size
-        cudagraph_capture_sizes = [
-            i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-        ]
-        if max_cudagraph_capture_size >= 8:
-            # Step size 8 for small batch sizes, up to 256(not included)
-            cudagraph_capture_sizes += list(
-                range(8, min(max_cudagraph_capture_size + 1, 256), 8))
-        if max_cudagraph_capture_size >= 256:
-            # Step size 16 for larger batch sizes
-            cudagraph_capture_sizes += list(
-                range(256, max_cudagraph_capture_size + 1, 16))
-
-    if sorted(cudagraph_capture_sizes, reverse=True) == \
+    max_cudagraph_capture_size = \
+        vllm_config.compilation_config.max_cudagraph_capture_size
+    cudagraph_capture_sizes = [
+        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+    ]
+    if max_cudagraph_capture_size >= 8:
+        # Step size 8 for small batch sizes, up to 256(not included)
+        cudagraph_capture_sizes += list(
+            range(8, min(max_cudagraph_capture_size + 1, 256), 8))
+    if max_cudagraph_capture_size >= 256:
+        # Step size 16 for larger batch sizes
+        cudagraph_capture_sizes += list(
+            range(256, max_cudagraph_capture_size + 1, 16))
+    # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
+    target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
+    if target_cudagraph_capture_sizes == \
             vllm_config.compilation_config.cudagraph_capture_sizes:
         return True
 
@@ -465,21 +446,13 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
-        if vllm_version_is("0.11.0"):
-            max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
-        else:
-            max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+
+        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
         new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
             i for i in range(24, max_capture_size + 1, 8)
         ]
-
-        if vllm_version_is("0.11.0"):
-            vllm_config.compilation_config.cudagraph_capture_sizes = new_cudagraph_capture_sizes
-            vllm_config.compilation_config.init_with_cudagraph_sizes(
-                new_cudagraph_capture_sizes)
-        else:
-            update_cudagraph_capture_sizes(vllm_config,
-                                           new_cudagraph_capture_sizes)
+        update_cudagraph_capture_sizes(vllm_config,
+                                       new_cudagraph_capture_sizes)
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
@@ -498,6 +471,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
+    if not vllm_config.model_config:
+        logger.warning(
+            "Got empty model config. This typically occurs when an empty vllm_config is "
+            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+        )
+
+        return
     hf_config = vllm_config.model_config.hf_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
@@ -573,10 +553,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         indices[0], indices[-1] = 0, len(original_sizes) - 1
 
         sampled_sizes = [original_sizes[i] for i in indices]
-        if vllm_version_is("0.11.0"):
-            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
-        else:
-            update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
+        update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -607,10 +584,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
             enlarged_sizes = [(num_speculative_tokens + 1) * size
                               for size in original_sizes]
-            if vllm_version_is("0.11.0"):
-                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
-            else:
-                update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
+            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
             logger.info(
                 "Adjusted ACL graphs: %s → %s for speculative decoding",
                 original_sizes, enlarged_sizes)
@@ -682,7 +656,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
@@ -692,6 +665,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendQKVParallelLinear,
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
+    from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
         AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
@@ -719,11 +693,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
+        "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
     }
-    mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
-        "0.11.0") else "MultiHeadLatentAttentionWrapper"
-    if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
-        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -732,32 +703,47 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
-# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
-# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
-class AscendSocVersion(Enum):
-    A2 = 0
-    A3 = 1
-    UNDEFINED = 2
+class AscendDeviceType(Enum):
+    _910B = 0  # A2
+    _910_93 = 1  # A3
+    _310P = 2
+    _910_95 = 3  # A5
 
 
-_ascend_soc_version = None
+_ascend_device_type = None
 
 
-def init_ascend_soc_version():
+def _init_ascend_device_type():
+    global _ascend_device_type
+    from vllm_ascend import _build_info  # type: ignore
+    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
+
+
+def check_ascend_device_type():
+    global _ascend_device_type
+    if _ascend_device_type is None:
+        _init_ascend_device_type()
+
     soc_version = torch_npu.npu.get_soc_version()
-    global _ascend_soc_version
     if 220 <= soc_version <= 225:
-        _ascend_soc_version = AscendSocVersion.A2
+        cur_device_type = AscendDeviceType._910B
     elif 250 <= soc_version <= 255:
-        _ascend_soc_version = AscendSocVersion.A3
+        cur_device_type = AscendDeviceType._910_93
+    elif 200 <= soc_version <= 205:
+        cur_device_type = AscendDeviceType._310P
+    elif soc_version == 260:
+        cur_device_type = AscendDeviceType._910_95
     else:
-        _ascend_soc_version = AscendSocVersion.UNDEFINED
+        raise RuntimeError(f"Can not support soc_version: {soc_version}.")
+
+    assert _ascend_device_type == cur_device_type, f"Current device type: {cur_device_type} does not match the installed version's device type: {_ascend_device_type}, please check your installation package."
 
 
-def get_ascend_soc_version():
-    global _ascend_soc_version
-    assert _ascend_soc_version is not None
-    return _ascend_soc_version
+def get_ascend_device_type():
+    global _ascend_device_type
+    if _ascend_device_type is None:
+        _init_ascend_device_type()
+    return _ascend_device_type
 
 
 def lmhead_tp_enable() -> bool:
@@ -780,19 +766,24 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
-def enable_sp(vllm_config=None) -> bool:
+def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
         if vllm_config is None:
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.
-            enable_sequence_parallelism
+            vllm_config.compilation_config.pass_config.enable_sp
             or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+        if not _ENABLE_SP and enable_shared_expert_dp:
+            _ENABLE_SP = True
+            logger.info(
+                "shared_expert_dp requires enable_sp = True. has set enable_sp to True"
+            )
 
         if not _ENABLE_SP:
             return _ENABLE_SP
@@ -834,6 +825,15 @@ def _is_contain_expert(config: Any):
             if _is_contain_expert(v):
                 return True
     return False
+
+
+def is_vl_model(vllm_config: VllmConfig):
+    """Checks if the model is a VL model by config"""
+    global _IS_VL_MODEL
+    if _IS_VL_MODEL is None and vllm_config.model_config:
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+    return _IS_VL_MODEL
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -911,6 +911,9 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
+        "ep": {
+            "hccl_buffer_size": calculate_ep_buffer_size()
+        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -930,6 +933,30 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+def calculate_ep_buffer_size() -> int:
+    """
+    formula of ep buffer size:
+    batch_size * hidden_size * topk * 4
+    """
+    ep_buffer_size = _DEFAULT_BUFFER_SIZE
+    try:
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        hf_config = vllm_config.model_config.hf_config
+
+        hidden_size = hf_config.hidden_size
+        topk = getattr(hf_config, "num_experts_per_token", 1)
+        batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        int8_size = torch.iinfo(torch.int8).bits // 8
+        bf16_size = torch.finfo(torch.bfloat16).bits // 8
+        ep_buffer_size = math.ceil(
+            (batch_size * hidden_size * topk *
+             (int8_size * 2 + bf16_size)) / (1024 * 1024))
+    except Exception:
+        pass
+    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
@@ -961,7 +988,7 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     if not flashcomm2_enable():
-        logger.info("FLASHCOMM2 not enable.")
+        logger.debug("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size
 
     logger.info(
@@ -1014,3 +1041,29 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+
+def refresh_block_size(vllm_config):
+    """
+    Refresh the block size in cache config.
+    """
+    cache_config = vllm_config.cache_config
+    scheduler_config = vllm_config.scheduler_config
+    model_config = vllm_config.model_config
+
+    if not cache_config:
+        return
+
+    if cache_config.block_size is None:
+        cache_config.block_size = 128
+
+    if not scheduler_config or not model_config:
+        return
+
+    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
+    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
+            logger.info(
+                "Block size is set to 128 if prefix cache or chunked prefill is enabled."
+            )
+            cache_config.block_size = 128

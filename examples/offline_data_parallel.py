@@ -63,11 +63,7 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment, destroy_model_parallel)
-from vllm_ascend.utils import vllm_version_is
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_open_port
-else:
-    from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -115,6 +111,10 @@ def parse_args():
     parser.add_argument("--enable-expert-parallel",
                         action="store_true",
                         help="Enable expert parallel, used in MOE models.")
+    parser.add_argument("--quantization",
+                        type=str,
+                        default="",
+                        help="Use quantization models")
     return parser.parse_args()
 
 
@@ -138,6 +138,7 @@ def main(
     enable_expert_parallel,
     enforce_eager,
     trust_remote_code,
+    quantization,
 ):
     # DP only support on V1 engine
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
@@ -189,6 +190,7 @@ def main(
         enforce_eager=enforce_eager,
         enable_expert_parallel=enable_expert_parallel,
         trust_remote_code=trust_remote_code,
+        quantization=quantization,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -224,6 +226,8 @@ if __name__ == "__main__":
     assert dp_size % node_size == 0, "dp_size should be divisible by node_size"
     dp_per_node = dp_size // node_size
 
+    quantization = args.quantization if args.quantization else None
+
     from multiprocessing import Process
 
     procs = []
@@ -242,6 +246,7 @@ if __name__ == "__main__":
                 args.enable_expert_parallel,
                 args.enforce_eager,
                 args.trust_remote_code,
+                quantization,
             ),
         )
         proc.start()

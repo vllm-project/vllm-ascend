@@ -7,8 +7,8 @@ from modelscope import snapshot_download  # type: ignore
 from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.nightly.multi_node.config.multi_node_config import (
-    DISAGGREGATED_PREFILL_PROXY_SCRIPT, MultiNodeConfig)
+from tests.e2e.nightly.multi_node.config.multi_node_config import \
+    MultiNodeConfig
 from tools.aisbench import run_aisbench_cases
 
 prompts = [
@@ -100,8 +100,10 @@ async def test_multi_node() -> None:
     disaggregated_prefill = config.disaggregated_prefill
     server_port = config.server_port
     proxy_port = config.proxy_port
-    server_host = config.cluster_ips[0]
-    with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
+    server_host = config.master_ip
+    proxy_script = config.envs.get("DISAGGREGATED_PREFILL_PROXY_SCRIPT", \
+        'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py')
+    with config.launch_server_proxy(proxy_script):
         with RemoteOpenAIServer(
                 model=local_model_path,
                 vllm_serve_args=config.server_cmd,
@@ -121,8 +123,8 @@ async def test_multi_node() -> None:
                 run_aisbench_cases(local_model_path,
                                    port,
                                    aisbench_cases,
-                                   host_ip=config.cluster_ips[0])
+                                   host_ip=config.master_ip)
             else:
                 # for the nodes except master, should hang until the task complete
-                master_url = f"http://{config.cluster_ips[0]}:{server_port}/health"
+                master_url = f"http://{config.master_ip}:{server_port}/health"
                 remote_server.hang_until_terminated(master_url)

@@ -6,11 +6,12 @@ import torchair
 from torchair import patch_for_hcom
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -23,13 +24,7 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               vllm_version_is)
-
-if vllm_version_is("0.11.0"):
-    from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-else:
-    from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
 
@@ -85,9 +80,9 @@ class TorchairMtpProposer(MtpProposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None) -> None:
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None) -> None:
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if not with_prefill:
             skip_attn = False
@@ -148,6 +143,7 @@ class TorchairMtpProposer(MtpProposer):
                     self.model(input_ids=input_ids,
                                positions=positions,
                                hidden_states=previous_hidden_states)
+                dummy_compute_logits(previous_hidden_states)
             if with_prefill:
                 break
 
@@ -346,13 +342,7 @@ class TorchairMtpProposer(MtpProposer):
         # torchair mode can reuse self.runner.num_tokens_across_dp
         num_tokens_across_dp = self.runner.num_tokens_across_dp
         with_prefill = self.runner.with_prefill
-
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
-        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=False)
-        aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
@@ -363,7 +353,6 @@ class TorchairMtpProposer(MtpProposer):
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):

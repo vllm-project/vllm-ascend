@@ -15,10 +15,6 @@ class TestAscendSFABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
-    def test_get_metadata_cls(self):
-        self.assertEqual(AscendSFABackend.get_metadata_cls(),
-                         AscendSFAMetadata)
-
     def test_get_builder_cls(self):
         self.assertEqual(AscendSFABackend.get_builder_cls(),
                          AscendSFAMetadataBuilder)

@@ -4,13 +4,12 @@ from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
 import torch
 import torch_npu
 from torch import nn
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata,
-                                              MLAAttentionImpl)
+from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -18,6 +17,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          wait_for_kv_layer_from_connector)
+from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_enable_nz)
@@ -34,10 +34,6 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AscendSFAMetadata
 
     @staticmethod
     def get_builder_cls():
@@ -279,8 +275,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
+                try:
                     return getattr(layer, attr)
+                except AttributeError:
+                    pass
             raise AttributeError(
                 f"Layer '{layer}' has no recognized weight attribute:"
                 f" {WEIGHT_NAMES}.")
@@ -461,7 +459,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                                            kv_cache=kv_cache,
                                            attn_metadata=attn_metadata,
                                            need_gather_q_kv=need_gather_q_kv)
-        attn_output = torch.ops.custom.npu_sparse_flash_attention(
+        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=k_nope,
             value=k_nope,
@@ -496,35 +494,50 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos = attn_metadata.cos
         sin = attn_metadata.sin
 
-        cos_q, sin_q = cos, sin
-        cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-        sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
         # q process in new stream
         q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
-        q = q.view(-1, self.n_head, self.head_dim)  # [b,s,64,128]
-        q_pe, q_nope = torch.split(
-            q, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-            dim=-1)  # [b,s,64,64+64]
-
-        q_pe = q_pe.unsqueeze(2)
-        q_pe = torch_npu.npu_interleave_rope(q_pe, cos_q, sin_q)
-        q_pe = q_pe.squeeze(2)
-        q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
+        q = q.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
 
         k_proj, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
         k_proj = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             k_proj, need_gather_q_kv)
         k = self.k_norm(k_proj).unsqueeze(1)
-        k_pe, k_nope = torch.split(
-            k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-            dim=-1)  # [b,s,64+64]
+        k = k.view(-1, 1, self.head_dim)
 
-        k_pe = k_pe.unsqueeze(2)
-        k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
-        k_pe = k_pe.squeeze(2)
+        if HAS_TRITON:
+            cos = cos.view(-1, self.qk_rope_head_dim)
+            sin = sin.view(-1, self.qk_rope_head_dim)
+            q, k = rope_forward_triton(q,
+                                       k,
+                                       cos,
+                                       sin,
+                                       rope_dim=self.qk_rope_head_dim,
+                                       is_neox_style=True)
+        else:
+            cos_q, sin_q = cos, sin
+            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
-        k = torch.cat([k_pe, k_nope], dim=-1)  # [b*s,128]
+            q_pe, q_nope = torch.split(
+                q,
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                dim=-1)  # [b,s,64,64+64]
+
+            q_pe = q_pe.unsqueeze(2)
+            q_pe = torch_npu.npu_interleave_rope(q_pe, cos_q, sin_q)
+            q_pe = q_pe.squeeze(2)
+            q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
+
+            k_pe, k_nope = torch.split(
+                k,
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                dim=-1)  # [b,s,64+64]
+
+            k_pe = k_pe.unsqueeze(2)
+            k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
+            k_pe = k_pe.squeeze(2)
+
+            k = torch.cat([k_pe, k_nope], dim=-1)  # [b*s,128]
 
         if kv_cache is not None:
             torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, k.shape[-1]),
@@ -541,7 +554,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         seq_lens = attn_metadata.seq_lens
         cum_query_lens = attn_metadata.cum_query_lens
 
-        topk_indices = torch.ops.custom.npu_lightning_indexer(
+        topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
             query=q,
             key=kv_cache[2],
             weights=weights,

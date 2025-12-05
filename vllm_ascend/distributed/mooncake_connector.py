@@ -29,15 +29,16 @@ from vllm.distributed.parallel_state import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
     get_tensor_model_parallel_rank, get_tp_group)
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
+from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import prefill_context_parallel_enable, vllm_version_is
+from vllm_ascend.utils import prefill_context_parallel_enable
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -46,10 +47,7 @@ if prefill_context_parallel_enable():
                                   )
 # isort: on
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
-else:
-    from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -150,13 +148,14 @@ class KVCacheTaskTracker:
 
 class KVCacheSendingThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, decode_tp_size: int, local_engine_id: str,
-                 side_channel_host: str, side_channel_port: int,
-                 metadata: MooncakeAgentMetadata, ready_event: threading.Event,
-                 kv_caches: dict[str, Any], pcp_rank: int):
+    def __init__(self, tp_rank: int, prefill_tp_size: int,
+                 local_engine_id: str, side_channel_host: str,
+                 side_channel_port: int, metadata: MooncakeAgentMetadata,
+                 ready_event: threading.Event, kv_caches: dict[str, Any],
+                 pcp_rank: int):
         super().__init__(daemon=True, name="KVCacheSendingThread")
         self.tp_rank = tp_rank
-        self.decode_tp_size = decode_tp_size
+        self.prefill_tp_size = prefill_tp_size
         self.local_engine_id = local_engine_id
         self.side_channel_host = side_channel_host
         self.side_channel_port = side_channel_port
@@ -195,7 +194,7 @@ class KVCacheSendingThread(threading.Thread):
         # NOTE(rob): we need each rank to have a unique port. This hack to keeps
         # us moving. We will switch when moving to etcd or where we have a
         # single ZMQ socket in the scheduler.
-        handshake_port = self.side_channel_port + self.pcp_rank * self.decode_tp_size \
+        handshake_port = self.side_channel_port + self.pcp_rank * self.prefill_tp_size \
                         + self.tp_rank
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("Starting listening on path: %s", path)
@@ -295,7 +294,7 @@ class KVCacheRecvingThread(threading.Thread):
     def add_request(self, request_id: str, local_block_ids: list[int],
                     remote_block_ids: list[int], remote_engine_id: str,
                     remote_host: str, remote_handshake_port: int, offset: int,
-                    num_need_pulls: int):
+                    num_need_pulls: int, all_task_done: bool):
         """Add a new request to the queue for processing."""
         logger.debug(f"Adding request {request_id} to the queue.")
         self.request_queue.put({
@@ -306,7 +305,8 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_host": remote_host,
             "remote_handshake_port": remote_handshake_port,
             "offset": offset,
-            "num_need_pulls": num_need_pulls
+            "num_need_pulls": num_need_pulls,
+            "all_task_done": all_task_done
         })
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -335,8 +335,7 @@ class KVCacheRecvingThread(threading.Thread):
         request_id = req_meta["request_id"]
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
-        offset = req_meta["offset"]
-        num_need_pulls = req_meta["num_need_pulls"]
+        all_task_done = req_meta["all_task_done"]
 
         try:
             logger.debug(
@@ -353,7 +352,7 @@ class KVCacheRecvingThread(threading.Thread):
             # remote host.
             self._send_done_recv_signal(request_id, remote_host,
                                         remote_handshake_port)
-            if offset == num_need_pulls - 1:
+            if all_task_done:
                 self.task_tracker.update_done_task_count(request_id)
             self.request_queue.task_done()
 
@@ -636,7 +635,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
@@ -946,7 +948,7 @@ class MooncakeConnectorWorker:
         else:
             hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
         logger.info("Initializing Mooncake work %s", engine_id)
-        self.engine = get_global_te(hostname, device_name=None)
+        self.engine = global_te.get_transfer_engine(hostname, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -1056,6 +1058,8 @@ class MooncakeConnectorWorker:
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
+        ptrs = []
+        lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
             if self.use_mla:
@@ -1063,13 +1067,15 @@ class MooncakeConnectorWorker:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[i % 2]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             elif self.use_sparse:
                 for i, cache in enumerate(cache_or_caches, 0):
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[i % 3]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             else:
                 cache_list = [
                     cache_or_caches
@@ -1078,8 +1084,9 @@ class MooncakeConnectorWorker:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
-
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+        global_te.register_buffer(ptrs, lengths)
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
@@ -1091,7 +1098,7 @@ class MooncakeConnectorWorker:
         ready_event = threading.Event()
         if self.kv_role == 'kv_producer':
             self.kv_send_thread = KVCacheSendingThread(
-                self.tp_rank, self._decode_tp_size, self.engine_id,
+                self.tp_rank, self._prefill_tp_size, self.engine_id,
                 self.side_channel_host, self.side_channel_port, metadata,
                 ready_event, self.kv_caches, self.pcp_rank)
             self.kv_send_thread.start()
@@ -1102,14 +1109,6 @@ class MooncakeConnectorWorker:
                 ready_event, self.vllm_config, self.kv_caches)
             self.kv_recv_thread.start()
         ready_event.wait()
-
-    def _register(self, ptr, length):
-        logger.debug(
-            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
-            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
-        ret_value = self.engine.register_memory(ptr, length)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake memory registration failed.")
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_sending = (
@@ -1239,7 +1238,10 @@ class MooncakeConnectorWorker:
                         remote_handshake_port=remote_handshake_port_list[
                             pcp_dcp_rank][i],
                         offset=i,
-                        num_need_pulls=self.num_need_pulls)
+                        num_need_pulls=self.num_need_pulls,
+                        all_task_done=(pcp_dcp_rank
+                                       == len(remote_handshake_port_list) - 1
+                                       and i == self.num_need_pulls - 1))
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():

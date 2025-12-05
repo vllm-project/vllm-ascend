@@ -1,6 +1,9 @@
 from typing import Any, Dict, Optional, Type
 
+import torch
 from vllm.logger import logger
+
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
@@ -9,6 +12,8 @@ from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
+from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
+                         AscendW8A8PDMixLinearMethod)
 
 ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W4A8_DYNAMIC": {
@@ -26,6 +31,10 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W8A8_DYNAMIC": {
         "linear": AscendW8A8DynamicLinearMethod,
         "moe": AscendW8A8DynamicFusedMoEMethod,
+    },
+    "W8A8_MIX": {
+        "linear": AscendW8A8PDMixLinearMethod,
+        "moe": AscendW8A8PDMixFusedMoeMethod,
     },
     "C8": {
         "attention": AscendC8KVCacheMethod,
@@ -60,8 +69,28 @@ def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
 def get_quant_method(quant_description: Dict[str, Any],
                      prefix: str,
                      layer_type: str,
-                     packed_modules_mapping: Optional[Dict[str, Any]] = None):
-    logger.info_once("Using the vLLM Ascend Quantization now!")
+                     packed_modules_mapping: Optional[Dict[str, Any]] = None,
+                     layer: torch.nn.Module = None):
+    if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
+        return get_quant_method_llmcompressor(layer)
+
+    return get_quant_method_modelslim(quant_description, prefix, layer_type,
+                                      packed_modules_mapping)
+
+
+def get_quant_method_llmcompressor(layer: torch.nn.Module):
+    logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
+    if layer.scheme is None:
+        raise ValueError("A scheme must be defined for each layer")
+    return layer.scheme
+
+
+def get_quant_method_modelslim(
+        quant_description: Dict[str, Any],
+        prefix: str,
+        layer_type: str,
+        packed_modules_mapping: Optional[Dict[str, Any]] = None):
+    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
     # Attention

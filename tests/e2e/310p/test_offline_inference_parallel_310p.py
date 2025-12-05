@@ -29,9 +29,6 @@ ADDITIONAL_CONFIG = [{
     "additional_config": {
         "torchair_graph_config": {
             "enabled": True
-        },
-        "ascend_scheduler_config": {
-            "enabled": True,
         }
     }
 }]

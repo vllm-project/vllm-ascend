@@ -29,7 +29,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendFusedMoE, AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.fused_moe.moe_mlp import (cumsum_group_list,
                                                unified_apply_mlp)
-from vllm_ascend.utils import AscendSocVersion, adapt_patch
+from vllm_ascend.utils import AscendDeviceType, adapt_patch
 
 adapt_patch(True)
 
@@ -129,7 +129,7 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
-        patch("vllm_ascend.utils.get_ascend_soc_version", return_value=AscendSocVersion.A3), \
+        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._910_93), \
         patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context',
                 return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher',
@@ -323,21 +323,20 @@ class TestCumsumGroupList(TestBase):
 class TestUnifiedApplyMLP(TestBase):
 
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
-    @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_dynamic_quant')
     @patch('torch_npu.npu_dequant_swiglu_quant')
     def test_unified_apply_mlp_with_quantization_mc2(self, mock_npu_dequant,
                                                      mock_npu_dynamic_quant,
                                                      mock_npu_grouped_matmul,
-                                                     mock_is_310p,
+                                                     mock_soc_version,
                                                      mock_get_forward_context):
 
         mock_forward_context = MagicMock()
         mock_forward_context.moe_comm_type = MoECommType.MC2
         mock_get_forward_context.return_value = mock_forward_context
-
-        mock_is_310p.return_value = False
 
         mock_npu_dynamic_quant.return_value = (torch.randint(-128,
                                                              127, (10, 20),
@@ -387,7 +386,8 @@ class TestUnifiedApplyMLP(TestBase):
 
         self.assertEqual(result.dtype, torch.bfloat16)
 
-    @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
@@ -395,9 +395,7 @@ class TestUnifiedApplyMLP(TestBase):
                                                     mock_npu_dynamic_quant,
                                                     mock_npu_swiglu,
                                                     mock_npu_grouped_matmul,
-                                                    mock_is_310p):
-        mock_is_310p.return_value = False
-
+                                                    mock_soc_version):
         mock_npu_grouped_matmul.side_effect = [[
             torch.randn(10, 40, dtype=torch.float16)
         ], [torch.randn(10, 20, dtype=torch.float16)]]
@@ -490,15 +488,14 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.shape, hidden_states_shape)
         self.assertEqual(result.dtype, torch.bfloat16)
 
-    @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
     def test_unified_apply_mlp_without_quantization_310p(
             self, mock_npu_dynamic_quant, mock_npu_swiglu,
-            mock_npu_grouped_matmul, mock_is_310p):
-        mock_is_310p.return_value = True
-
+            mock_npu_grouped_matmul, mock_soc_version):
         mock_gmm1_out = torch.randn(10, 40, dtype=torch.float16)
         mock_gmm2_out = torch.randn(10, 20, dtype=torch.float16)
         mock_npu_grouped_matmul.side_effect = [[mock_gmm1_out],
@@ -526,8 +523,6 @@ class TestUnifiedApplyMLP(TestBase):
                                    w2_scale_bias=None,
                                    topk_scales=topk_scales,
                                    with_quant=False)
-
-        mock_is_310p.assert_called_once()
 
         self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
         mock_npu_swiglu.assert_called_once()

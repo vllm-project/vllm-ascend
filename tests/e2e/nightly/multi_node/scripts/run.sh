@@ -108,8 +108,8 @@ install_extra_components() {
     fi
     pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
     
-    export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
+    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     
     rm -f CANN-custom_ops-sfa-linux.aarch64.run \
@@ -127,19 +127,14 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
-    # each worker should have log file
-    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
-    mkdir -p ${RESULT_FILE_PATH}
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
-    ret=${PIPESTATUS[0]}
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
             print_failure "Some tests failed!"
-            mv LOG_FILE error_${LOG_FILE}
         fi
     fi
 }

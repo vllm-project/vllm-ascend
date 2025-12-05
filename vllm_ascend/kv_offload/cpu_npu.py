@@ -1,17 +1,11 @@
 import numpy as np
 import torch
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import (OffloadingHandler,
                                               TransferResult, TransferSpec)
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import is_pin_memory_available
-else:
-    from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 

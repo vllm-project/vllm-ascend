@@ -18,7 +18,7 @@ Hence, we propose to integrate Mooncake Store with a brand new **MooncakeStoreCo
 
 vLLM Ascend Currently supports Mooncake Store for KV Cache Pool. To enable Mooncake Store, one needs to config `kv-transfer-config` and choose `MooncakeStoreConnector` as KV Connector.
 
-For step-by-step deployment and configuration, please refer to the KV Pool User Guide at `vllm-ascend/docs/source/user_guide/feature_guide/kv_pool_mooncake.md`
+For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html).
 
 ## How it works?
 The KV Cache Pool integrates multiple memory tiers (HBM, DRAM, SSD, etc.) through a connector-based architecture.
@@ -80,4 +80,4 @@ The KV Connector methods that need to be implemented can be categorized into sch
 
 1. Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the storage for KV Cache pool.
 
-2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. gWe will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).
+2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. We will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).

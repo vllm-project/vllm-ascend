@@ -21,7 +21,9 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
-from vllm_ascend.compilation.acl_graph import ACLGraphEntry, ACLGraphWrapper
+from vllm_ascend.compilation.acl_graph import (
+    ACLGraphEntry, ACLGraphWrapper, get_mtp_graph_params, set_mtp_graph_params,
+    update_mtp_graph_params_workspaces)
 
 
 class TestACLGraphEntry(TestBase):
@@ -30,7 +32,7 @@ class TestACLGraphEntry(TestBase):
         """Test ACLGraphEntry initialization with default values"""
         batch_descriptor = BatchDescriptor(
             num_tokens=30,
-            uniform_decode=False,
+            uniform=False,
         )
 
         entry = ACLGraphEntry(batch_descriptor=batch_descriptor)
@@ -44,7 +46,7 @@ class TestACLGraphEntry(TestBase):
         """Test ACLGraphEntry initialization with specified values"""
         batch_descriptor = BatchDescriptor(
             num_tokens=30,
-            uniform_decode=False,
+            uniform=False,
         )
 
         mock_graph = MagicMock()
@@ -87,7 +89,7 @@ class TestACLGraphWrapper(TestBase):
         # Mock BatchDescriptor
         self.mock_batch_descriptor = BatchDescriptor(
             num_tokens=30,
-            uniform_decode=False,
+            uniform=False,
         )
 
         # Mock ForwardContext
@@ -105,8 +107,7 @@ class TestACLGraphWrapper(TestBase):
 
         wrapper = ACLGraphWrapper(runnable=self.mock_runnable,
                                   vllm_config=self.mock_vllm_config,
-                                  runtime_mode=CUDAGraphMode.FULL,
-                                  graph_pool=self.mock_graph_pool)
+                                  runtime_mode=CUDAGraphMode.FULL)
 
         self.assertEqual(wrapper.runnable, self.mock_runnable)
         self.assertEqual(wrapper.vllm_config, self.mock_vllm_config)
@@ -128,7 +129,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         self.assertEqual(wrapper.runnable, self.mock_runnable)
@@ -150,8 +150,7 @@ class TestACLGraphWrapper(TestBase):
         with self.assertRaises(AssertionError):
             ACLGraphWrapper(runnable=self.mock_runnable,
                             vllm_config=self.mock_vllm_config,
-                            runtime_mode=CUDAGraphMode.NONE,
-                            graph_pool=self.mock_graph_pool)
+                            runtime_mode=CUDAGraphMode.NONE)
 
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
@@ -169,7 +168,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         result = wrapper("arg1", "arg2")
@@ -194,7 +192,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         result = wrapper("arg1", "arg2")
@@ -245,7 +242,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # Create a real torch tensor for the test, not a mock
@@ -317,7 +313,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # Create a real torch tensor for the test, not a mock
@@ -390,7 +385,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # First call to capture the graph
@@ -445,7 +439,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # First call to capture the graph
@@ -516,7 +509,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # Create a real torch tensor for the test, not a mock
@@ -586,7 +578,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # Create a real torch tensor for the test, not a mock
@@ -657,7 +648,6 @@ class TestACLGraphWrapper(TestBase):
                         runnable=self.mock_runnable,
                         vllm_config=self.mock_vllm_config,
                         runtime_mode=CUDAGraphMode.FULL,
-                        graph_pool=self.mock_graph_pool,
                         cudagraph_options=self.mock_cudagraph_options)
 
                     # Create a real torch tensor for the test, not a mock
@@ -678,7 +668,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # Should be able to access attributes of the runnable
@@ -697,7 +686,6 @@ class TestACLGraphWrapper(TestBase):
             runnable=mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         # Should raise AttributeError for non-existent attributes
@@ -713,8 +701,28 @@ class TestACLGraphWrapper(TestBase):
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
             runtime_mode=CUDAGraphMode.FULL,
-            graph_pool=self.mock_graph_pool,
             cudagraph_options=self.mock_cudagraph_options)
 
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
+
+
+class TestMTPGraphParams(TestBase):
+
+    def test_set_mtp_graph_params(self):
+        with patch('vllm_ascend.compilation.acl_graph._mtp_graph_params',
+                   new=None):
+            set_mtp_graph_params([4])
+            from vllm_ascend.compilation.acl_graph import _mtp_graph_params
+            self.assertIsNotNone(_mtp_graph_params)
+
+    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
+    def test_update_mtp_graph_params_workspaces(self, mtp_graph_params_mock):
+        mtp_graph_params_mock.workspaces = {4: 5}
+        update_mtp_graph_params_workspaces(4, 6)
+        self.assertEqual(mtp_graph_params_mock.workspaces[4], 6)
+
+    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
+    def test_get_mtp_graph_params(self, mtp_graph_params_mock):
+        graph_params = get_mtp_graph_params()
+        self.assertIs(mtp_graph_params_mock, graph_params)

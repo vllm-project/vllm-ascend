@@ -15,13 +15,15 @@
 # This file is a part of the vllm-ascend project.
 #
 ARG PY_VERSION=3.11
-FROM quay.io/ascend/manylinux:8.3.rc1-910b-manylinux_2_28-py${PY_VERSION}
+FROM quay.io/ascend/manylinux:8.3.rc2-910b-manylinux_2_28-py${PY_VERSION}
 
 ARG COMPILE_CUSTOM_KERNELS=1
+ARG SOC_VERSION="ascend910b1"
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+ENV SOC_VERSION=$SOC_VERSION
 RUN yum update -y && \
     yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
     rm -rf /var/cache/yum

@@ -9,18 +9,13 @@ import torch
 import vllm.envs as envs
 import zmq
 from vllm.config import KVTransferConfig, VllmConfig
-from vllm.utils import logger
+from vllm.logger import logger
+from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.distributed.cpu_offload_manager.cpu_kv_cache_manager import \
     CPUKVCacheManager
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_dtype_size, make_zmq_socket
-else:
-    from vllm.utils.network_utils import make_zmq_socket
-    from vllm.utils.torch_utils import get_dtype_size
 
 
 @dataclass

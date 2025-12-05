@@ -87,7 +87,7 @@ spec:
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
               - name: RESULT_FILE_PATH
-                value: {{ result_file_path | default("/root/.cache/tests/ret/test_result.txt") }}
+                value: {{ result_file_path | default("/root/.cache/tests/ret") }}
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
             command:
