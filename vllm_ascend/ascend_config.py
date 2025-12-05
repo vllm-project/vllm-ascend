@@ -29,26 +29,34 @@ def _check_torchair_supported(model_type: str):
 
 
 def check_kv_extra_config(vllm_config):
-    dp_key = "dp_size"
-    tp_key = "tp_size"
+
+    def _check(name: str, config: dict):
+        tp_key = "tp_size"
+        dp_key = "dp_size"
+        if tp_key in config:
+            config_tp = config[tp_key]
+            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
+            if config_tp != vllm_tp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
+                    f"Expected {vllm_tp}, but got {config_tp}.")
+        if dp_key in config:
+            config_dp = config[dp_key]
+            vllm_dp = vllm_config.parallel_config.data_parallel_size
+            if config_dp != vllm_dp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting data parallel size. "
+                    f"Expected {vllm_dp}, but got {config_dp}.")
+
     if vllm_config.kv_transfer_config.is_kv_producer:
-        prefill_parallel_config = vllm_config.kv_transfer_config.get_from_extra_config(
-            "prefill", {})
-        if tp_key in prefill_parallel_config.keys():
-            assert prefill_parallel_config[
-                tp_key] == vllm_config.parallel_config.tensor_parallel_size
-        if dp_key in prefill_parallel_config.keys():
-            assert prefill_parallel_config[
-                dp_key] == vllm_config.parallel_config.data_parallel_size
+        _check(
+            "prefill",
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {}))
     if vllm_config.kv_transfer_config.is_kv_consumer:
-        decode_parallel_config = vllm_config.kv_transfer_config.get_from_extra_config(
-            "decode", {})
-        if tp_key in decode_parallel_config.keys():
-            assert decode_parallel_config[
-                tp_key] == vllm_config.parallel_config.tensor_parallel_size
-        if dp_key in decode_parallel_config.keys():
-            assert decode_parallel_config[
-                dp_key] == vllm_config.parallel_config.data_parallel_size
+        _check(
+            "decode",
+            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
 
 
 class AscendConfig:
