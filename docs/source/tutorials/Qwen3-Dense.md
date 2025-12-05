@@ -10,7 +10,7 @@ This document will show the main verification steps of the model, including supp
 
 The Qwen3 Dense models is first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429)
 
-## **Attention**
+## **Node**
 This example requires version **v0.11.0rc2**.Earlier versions may lack certain features.
 
 ## Supported Features
@@ -19,66 +19,17 @@ Refer to [supported features](../user_guide/support_matrix/supported_models.md) 
 
 Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Key Optimization Points
-In this section, we will cover the key optimization points that can significantly improve the performance of Qwen Dense models. These techniques are designed to enhance throughput and efficiency across various scenarios.
-
-### 1. Rope Optimization
-Rope optimization enhances the model's efficiency by modifying the position encoding process. Specifically, it ensures that the cos_sin_cache and the associated index selection operation are only performed during the first layer of the forward pass. For subsequent layers, the position encoding is directly reused, eliminating redundant calculations and significantly speeding up inference in decode phase.
-
-This optimization is enabled by default and does not require any additional environment variables to be set.
-
-### 2. AddRMSNormQuant Fusion
-AddRMSNormQuant fusion merges the Address-wise Multi-Scale Normalization and Quantization operations, allowing for more efficient memory access and computation, thereby enhancing throughput.
-
-This optimization is enabled by default and does not require any additional environment variables to be set.
-
-### 3. FlashComm_v1
-FlashComm_v1 significantly improves performance in large-batch scenarios by decomposing the traditional allreduce collective communication into reduce-scatter and all-gather. This breakdown helps reduce the computation of the RMSNorm token dimensions, leading to more efficient processing. In quantization scenarios, FlashComm_v1 also reduces the communication overhead by decreasing the bit-level data transfer, which further minimizes the end-to-end latency during the prefill phase.
-
-It is important to note that the decomposition of the allreduce communication into reduce-scatter and all-gather operations only provides benefits in high-concurrency scenarios, where there is no significant communication degradation. In other cases, this decomposition may result in noticeable performance degradation. To mitigate this, the current implementation uses a threshold-based approach, where FlashComm_v1 is only enabled if the actual token count for each inference schedule exceeds the threshold. This ensures that the feature is only activated in scenarios where it improves performance, avoiding potential degradation in lower-concurrency situations.
-
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled.
-
-### 4. Matmul and ReduceScatter Fusion
-Once FlashComm_v1 is enabled, an additional optimization can be applied. This optimization fuses matrix multiplication and ReduceScatter operations, along with tiling optimization. The Matmul computation is treated as one pipeline, while the ReduceScatter and dequant operations are handled in a separate pipeline. This approach significantly reduces communication steps, improves computational efficiency, and allows for better resource utilization, resulting in enhanced throughput, especially in large-scale distributed environments.
-
-This optimization is automatically enabled once FlashComm_v1 is activated. However, due to an issue with performance degradation in small-concurrency scenarios after this fusion, a threshold-based approach is currently used to mitigate this problem. The optimization is only applied when the token count exceeds the threshold, ensuring that it is not enabled in cases where it could negatively impact performance.
-
-### 5. Weight Prefetching
-Weight prefetching optimizes memory usage by preloading weights into the cache before they are needed, minimizing delays caused by memory access during model execution.
-
-In dense model scenarios, the MLP's gate_up_proj and down_proj linear layers often exhibit relatively high MTE utilization. To address this, we create a separate pipeline specifically for weight prefetching, which runs in parallel with the original vector computation pipeline, such as RMSNorm and SiLU, before the MLP. This approach allows the weights to be preloaded to L2 cache ahead of time, reducing MTE utilization during the MLP computations and indirectly improving Cube computation efficiency by minimizing resource contention and optimizing data flow.
-
-It is important to emphasize that, since we use vector computations to hide the weight prefetching pipeline, the setting of the prefetch buffer size is crucial. If the buffer size is too small, the optimization benefits will not be fully realized, while a larger buffer size may lead to resource contention, resulting in performance degradation. To accommodate different scenarios, we have exposed two environment variables `VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE` and `VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE` to allow for flexible buffer size configuration based on the specific workload.
-
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` and `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE = 1` to be enabled.
-
-### 6. Zerolike Elimination
-This elimination removes unnecessary operations related to zero-like tensors in Attention forward, improving the efficiency of matrix operations and reducing memory usage.
-
-This optimization is enabled by default and does not require any additional environment variables to be set.
-
-### 7. FullGraph Optimization
-ACLGraph offers several key optimizations to improve model execution efficiency. By replaying the entire model execution graph at once, we significantly reduce dispatch latency compared to multiple smaller replays. This approach also stabilizes multi-device performance, as capturing the model as a single static graph mitigates dispatch fluctuations across devices. Additionally, consolidating graph captures frees up streams, allowing for the capture of more graphs and optimizing resource usage, ultimately leading to improved system efficiency and reduced overhead.
-
-The configuration compilation_config = { "cudagraph_mode": "FULL_DECODE_ONLY"} is used when starting the service. This setup is necessary to enable the aclgraph's full decode-only mode.
-
-### 8. Asynchronous Scheduling
-Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
-
-This optimization is enabled by setting --async-scheduling
-
 ## Environment Preparation
 
 ### Model Weight
 
-- `Qwen3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)
-- `Qwen3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)
-- `Qwen3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)
-- `Qwen3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
-- `Qwen3-14B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) node or 2 Atlas 800I A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
-- `Qwen3-32B`(BF16 version): require 4 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800I A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
-- `Qwen3-32B-W8A8`(Quantized version): require 4 Atlas 800 A3 (64G × 16) node or 4 Atlas 800I A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
+- `Qwen3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)
+- `Qwen3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)
+- `Qwen3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)
+- `Qwen3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
+- `Qwen3-14B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) cards or 2 Atlas 800I A2 (64G × 8) cards. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
+- `Qwen3-32B`(BF16 version): require 4 Atlas 800 A3 (64G × 16) cards or 4 Atlas 800I A2 (64G × 8) cards. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
+- `Qwen3-32B-W8A8`(Quantized version): require 4 Atlas 800 A3 (64G × 16) cards or 4 Atlas 800I A2 (64G × 8) cards. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -158,7 +109,7 @@ The specific example scenario is as follows:
 
 ### Run docker container:
 
-#### **Attention**
+#### **Node**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 - v0.11.0rc2-a3 is image tag, replace this with your actual tag.
 - replace this with your actual port: '-p 8113:8113'.
@@ -189,7 +140,11 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-### Setup environment variables
+### Online Inference on Multi-NPU
+
+Run the following script to start the vLLM server on Multi-NPU.
+
+This script is configured to achieve optimal performance under the above specific example scenarios,with batchsize = 72 on two A3 cards.
 
 ```bash
 # set the NPU device number
@@ -214,22 +169,7 @@ export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
 
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-```
 
-### Online Inference on Multi-NPU
-
-Run the following script to start the vLLM server on Multi-NPU.
-
-This script is configured to achieve optimal performance under the above specific example scenarios,with batchsize = 72 on two A3 cards.
-
-#### **Attention**
-- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
-
-- If the model is not a quantized model, remove the `--quantization ascend` parameter.
-
-- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./Qwen3-Dense.md#key-optimization-points)、[optimization-highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
-
-```bash
 vllm serve /model/Qwen3-32B-W8A8 \
   --served-model-name qwen3 \
   --trust-remote-code \
@@ -244,6 +184,13 @@ vllm serve /model/Qwen3-32B-W8A8 \
   --block-size 128 \
   --gpu-memory-utilization 0.9
 ```
+
+#### **Node**
+- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+
+- If the model is not a quantized model, remove the `--quantization ascend` parameter.
+
+- If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./Qwen3-Dense.md#key-optimization-points)、[optimization-highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
 Once your server is started, you can query the model with input prompts
 
@@ -264,7 +211,7 @@ curl http://localhost:8113/v1/chat/completions -H "Content-Type: application/jso
 
 Run the following script to execute offline inference on multi-NPU.
 
-#### **Attention**
+#### **Node**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
 - If the model is not a quantized model,remove the `quantization="ascend"` parameter.
@@ -342,7 +289,7 @@ There are three `vllm bench` subcommand:
 
 Take the `serve` as an example. Run the code as follows.
 
-#### **Attention**
+#### **Node**
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
 ```shell
@@ -350,6 +297,55 @@ vllm bench serve --model /model/Qwen3-32B-W8A8 --served-model-name qwen3 --port 
 ```
 
 After about several minutes, you can get the performance evaluation result.
+
+## Key Optimization Points
+In this section, we will cover the key optimization points that can significantly improve the performance of Qwen Dense models. These techniques are designed to enhance throughput and efficiency across various scenarios.
+
+### 1. Rope Optimization
+Rope optimization enhances the model's efficiency by modifying the position encoding process. Specifically, it ensures that the cos_sin_cache and the associated index selection operation are only performed during the first layer of the forward pass. For subsequent layers, the position encoding is directly reused, eliminating redundant calculations and significantly speeding up inference in decode phase.
+
+This optimization is enabled by default and does not require any additional environment variables to be set.
+
+### 2. AddRMSNormQuant Fusion
+AddRMSNormQuant fusion merges the Address-wise Multi-Scale Normalization and Quantization operations, allowing for more efficient memory access and computation, thereby enhancing throughput.
+
+This optimization is enabled by default and does not require any additional environment variables to be set.
+
+### 3. FlashComm_v1
+FlashComm_v1 significantly improves performance in large-batch scenarios by decomposing the traditional allreduce collective communication into reduce-scatter and all-gather. This breakdown helps reduce the computation of the RMSNorm token dimensions, leading to more efficient processing. In quantization scenarios, FlashComm_v1 also reduces the communication overhead by decreasing the bit-level data transfer, which further minimizes the end-to-end latency during the prefill phase.
+
+It is important to note that the decomposition of the allreduce communication into reduce-scatter and all-gather operations only provides benefits in high-concurrency scenarios, where there is no significant communication degradation. In other cases, this decomposition may result in noticeable performance degradation. To mitigate this, the current implementation uses a threshold-based approach, where FlashComm_v1 is only enabled if the actual token count for each inference schedule exceeds the threshold. This ensures that the feature is only activated in scenarios where it improves performance, avoiding potential degradation in lower-concurrency situations.
+
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled.
+
+### 4. Matmul and ReduceScatter Fusion
+Once FlashComm_v1 is enabled, an additional optimization can be applied. This optimization fuses matrix multiplication and ReduceScatter operations, along with tiling optimization. The Matmul computation is treated as one pipeline, while the ReduceScatter and dequant operations are handled in a separate pipeline. This approach significantly reduces communication steps, improves computational efficiency, and allows for better resource utilization, resulting in enhanced throughput, especially in large-scale distributed environments.
+
+This optimization is automatically enabled once FlashComm_v1 is activated. However, due to an issue with performance degradation in small-concurrency scenarios after this fusion, a threshold-based approach is currently used to mitigate this problem. The optimization is only applied when the token count exceeds the threshold, ensuring that it is not enabled in cases where it could negatively impact performance.
+
+### 5. Weight Prefetching
+Weight prefetching optimizes memory usage by preloading weights into the cache before they are needed, minimizing delays caused by memory access during model execution.
+
+In dense model scenarios, the MLP's gate_up_proj and down_proj linear layers often exhibit relatively high MTE utilization. To address this, we create a separate pipeline specifically for weight prefetching, which runs in parallel with the original vector computation pipeline, such as RMSNorm and SiLU, before the MLP. This approach allows the weights to be preloaded to L2 cache ahead of time, reducing MTE utilization during the MLP computations and indirectly improving Cube computation efficiency by minimizing resource contention and optimizing data flow.
+
+It is important to emphasize that, since we use vector computations to hide the weight prefetching pipeline, the setting of the prefetch buffer size is crucial. If the buffer size is too small, the optimization benefits will not be fully realized, while a larger buffer size may lead to resource contention, resulting in performance degradation. To accommodate different scenarios, we have exposed two environment variables `VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE` and `VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE` to allow for flexible buffer size configuration based on the specific workload.
+
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` and `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE = 1` to be enabled.
+
+### 6. Zerolike Elimination
+This elimination removes unnecessary operations related to zero-like tensors in Attention forward, improving the efficiency of matrix operations and reducing memory usage.
+
+This optimization is enabled by default and does not require any additional environment variables to be set.
+
+### 7. FullGraph Optimization
+ACLGraph offers several key optimizations to improve model execution efficiency. By replaying the entire model execution graph at once, we significantly reduce dispatch latency compared to multiple smaller replays. This approach also stabilizes multi-device performance, as capturing the model as a single static graph mitigates dispatch fluctuations across devices. Additionally, consolidating graph captures frees up streams, allowing for the capture of more graphs and optimizing resource usage, ultimately leading to improved system efficiency and reduced overhead.
+
+The configuration compilation_config = { "cudagraph_mode": "FULL_DECODE_ONLY"} is used when starting the service. This setup is necessary to enable the aclgraph's full decode-only mode.
+
+### 8. Asynchronous Scheduling
+Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
+
+This optimization is enabled by setting --async-scheduling
 
 ## Optimization Highlights
 
