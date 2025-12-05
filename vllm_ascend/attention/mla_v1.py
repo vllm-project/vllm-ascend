@@ -82,7 +82,10 @@ class AscendPCPMetadata:
     q_full_idx: torch.Tensor = None
     pcp_prefill_mask: torch.Tensor = None
     pcp_allgather_restore_idx: Optional[list[int]] = None
-
+    split_q_head_nomask_idx_tensor_list: Optional[list[torch.Tensor]] = None
+    split_q_tail_nomask_idx_tensor_list: Optional[list[torch.Tensor]] = None
+    head_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
+    tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
 
 @dataclass
 class AscendMLAPrefillMetadata:
@@ -483,7 +486,16 @@ class AscendMLAMetadataBuilder:
                     pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask
                     if long_seq_metadata else None,
                     pcp_allgather_restore_idx=long_seq_metadata.
-                    pcp_allgather_restore_idx if long_seq_metadata else None)
+                    pcp_allgather_restore_idx if long_seq_metadata else None,
+                    split_q_head_nomask_idx_tensor_list=common_long_seq_metadata.
+                    split_q_head_nomask_idx_tensor_list,
+                    split_q_tail_nomask_idx_tensor_list=common_long_seq_metadata.
+                    split_q_tail_nomask_idx_tensor_list,
+                    head_attn_nomask_seqlens_list=common_long_seq_metadata.
+                    head_attn_nomask_seqlens_list,
+                    tail_attn_nomask_seqlens_list=common_long_seq_metadata.
+                    tail_attn_nomask_seqlens_list,
+                )
 
             reqs_start = num_decodes  # prefill_start
             tokens_start = num_decode_tokens
@@ -1752,6 +1764,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
         mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
+        split_q_head_nomask_idx_tensor_list = attn_metadata.prefill.pcp_metadata.split_q_head_nomask_idx_tensor_list
+        split_q_tail_nomask_idx_tensor_list = attn_metadata.prefill.pcp_metadata.split_q_tail_nomask_idx_tensor_list
+        head_attn_nomask_seqlens_list = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens_list
+        tail_attn_nomask_seqlens_list = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens_list
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -1762,7 +1778,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_nomask_idx=kv_with_q_head_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=head_attn_nomask_seqlens,
-            mask=mask)
+            mask=mask,
+            split_nomask_idx_tensor_list=split_q_head_nomask_idx_tensor_list,
+            attn_nomask_seqlens_list=head_attn_nomask_seqlens_list,
+        )
 
         output_tail, lse_tail = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_tail_idx),
@@ -1774,7 +1793,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_nomask_idx=kv_with_q_tail_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=tail_attn_nomask_seqlens,
-            mask=mask)
+            mask=mask,
+            split_nomask_idx_tensor_list=split_q_tail_nomask_idx_tensor_list,
+            attn_nomask_seqlens_list=tail_attn_nomask_seqlens_list
+        )
 
         q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
         attn_output = torch.index_select(
@@ -1794,7 +1816,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope: torch.Tensor, k_pe: torch.Tensor, value: torch.Tensor,
             kv_mask_idx: torch.Tensor, kv_nomask_idx: torch.Tensor,
             attn_mask_seqlens: torch.Tensor, attn_nomask_seqlens: torch.Tensor,
-            mask: torch.Tensor):
+            mask: torch.Tensor,
+            split_nomask_idx_tensor_list,
+            attn_nomask_seqlens_list,
+        ):
         attn_output = torch.empty(q_nope.shape[0],
                                   self.num_heads,
                                   self.v_head_dim,
@@ -1831,27 +1856,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         if kv_nomask_idx.shape[0] == 0:
             return attn_output, attn_lse
 
-        k_nope_nomask = torch.index_select(k_nope, 0, kv_nomask_idx)
-        value_nomask = torch.index_select(value, 0, kv_nomask_idx)
-        k_pe_nomask = torch.index_select(k_pe, 0, kv_nomask_idx)
-        torch_npu.atb.npu_ring_mla(q_nope=q_nope,
-                                   q_rope=q_pe,
-                                   k_nope=k_nope_nomask,
-                                   k_rope=k_pe_nomask,
-                                   value=value_nomask,
-                                   mask=mask,
-                                   seqlen=attn_nomask_seqlens,
-                                   head_num=self.num_heads,
-                                   kv_head_num=self.num_heads,
-                                   pre_out=attn_output,
-                                   prev_lse=attn_lse,
-                                   qk_scale=self.scale,
-                                   kernel_type="kernel_type_high_precision",
-                                   mask_type="no_mask",
-                                   input_layout="type_bsnd",
-                                   calc_type="calc_type_default",
-                                   output=attn_output,
-                                   softmax_lse=attn_lse)
+        for kv_nomask_idx, attn_nomask_seqlens in zip(split_nomask_idx_tensor_list, attn_nomask_seqlens_list):
+            k_nope_nomask = torch.index_select(k_nope, 0, kv_nomask_idx)
+            value_nomask = torch.index_select(value, 0, kv_nomask_idx)
+            k_pe_nomask = torch.index_select(k_pe, 0, kv_nomask_idx)
+            torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                    q_rope=q_pe,
+                                    k_nope=k_nope_nomask,
+                                    k_rope=k_pe_nomask,
+                                    value=value_nomask,
+                                    mask=mask,
+                                    seqlen=attn_nomask_seqlens,
+                                    head_num=self.num_heads,
+                                    kv_head_num=self.num_heads,
+                                    pre_out=attn_output,
+                                    prev_lse=attn_lse,
+                                    qk_scale=self.scale,
+                                    kernel_type="kernel_type_high_precision",
+                                    mask_type="no_mask",
+                                    input_layout="type_bsnd",
+                                    calc_type="calc_type_default",
+                                    output=attn_output,
+                                    softmax_lse=attn_lse)
         return attn_output, attn_lse
 
     def _forward_decode_pcp_dcp(
