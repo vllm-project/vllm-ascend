@@ -20,8 +20,9 @@ It is recommended to download the model weight to the shared directory of multip
 ### Installation
 1. Start the docker image on your node, refer to [using docker](https://docs.vllm.ai/projects/ascend/en/latest/installation.html#set-up-using-docker).
 In addition, if you don’t want to use the docker image as above, you can also build all from source:
-    - Install vllm-ascend from source, refer to [installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html). 
-2. Please install system dependencies 
+    - Install vllm-ascend from source, refer to [installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html).
+2. Please install system dependencies
+
 ```bash
     pip install qwen_omni_utils modelscope
     # Used for audio processing.
@@ -125,11 +126,14 @@ if __name__ == "__main__":
 
 Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 1, and for 32 GB of memory, tensor-parallel-size should be at least 2.
+
 ```bash
-vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_expert_parallel
 ```
+
 ## Functional Verification
 Once your server is started, you can query the model with input prompts.
+
 ```bash
 curl http://localhost:8000/v1/chat/completions \
 -X POST \
@@ -185,7 +189,7 @@ evalscope eval \
     --api-url http://localhost:8000/v1 \
     --api-key EMPTY \
     --eval-type server \
-    --datasets omni_bench, mmmu, bbh \
+    --datasets omni_bench, gsm8k, bbh \
     --dataset-args '{"omni_bench": { "extra_params": { "use_image": true, "use_audio": false}}}' \
     --eval-batch-size 1 \
     --generation-config '{"max_tokens": 10000, "temperature": 0.6}' \
