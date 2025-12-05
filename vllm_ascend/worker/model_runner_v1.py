@@ -4368,27 +4368,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                 split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list= [], []
                 head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
-                # print(f"pcp_rank:{self.pcp_rank}, dcp_rank:{self.dcp_rank}, split_with_q_head_nomask_idx_reqs: {split_with_q_head_nomask_idx_reqs}")
                 if split_with_q_head_nomask_idx_reqs:
-                    """Since the _npu_ring_mla operator deteriorates in long-sequence
-                     scenarios, the long sequence is split into shorter sequences for 
-                     input to improve performance.
-                     """
+                    #Since the _npu_ring_mla operator deteriorates in long-sequence scenarios, 
+                    #the long sequence is split into shorter sequences for input to improve performance.
                     split_size = 8 * 1024
                     if self.pcp_rank == 0:
                         split_q_head_nomask_idx_list = [self.kv_idx_names['kv_with_q_head_nomask_idx_tensor']]
                     else:
-                        # print(f"pcp_rank:{self.pcp_rank}, dcp_rank:{self.dcp_rank}, split_q_head_nomask_lens_list: {split_q_head_nomask_lens_list}")
                         split_q_head_nomask_idx_list, split_q_head_nomask_lens_list = self._split_multi_batch_kv_idx(split_with_q_head_nomask_idx_reqs, split_size)
                     split_q_tail_nomask_idx_list, split_q_tail_nomask_lens_list = self._split_multi_batch_kv_idx(split_kv_with_q_tail_nomask_idx_reqs, split_size)
-                    # split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list= [], []
                     for q_head_nomask_idx in split_q_head_nomask_idx_list:
                         split_q_head_nomask_idx_tensor_list.append(_list_to_tensor(q_head_nomask_idx, self.device))
-                        
                     for q_tail_nomask_idx in split_q_tail_nomask_idx_list:
                         split_q_tail_nomask_idx_tensor_list.append(_list_to_tensor(q_tail_nomask_idx, self.device)) 
 
-                    # head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
                     if self.pcp_rank == 0:
                         head_attn_nomask_seqlens_list = [head_attn_nomask_seqlens]
                     else:

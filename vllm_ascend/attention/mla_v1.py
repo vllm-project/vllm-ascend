@@ -1817,8 +1817,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_mask_idx: torch.Tensor, kv_nomask_idx: torch.Tensor,
             attn_mask_seqlens: torch.Tensor, attn_nomask_seqlens: torch.Tensor,
             mask: torch.Tensor,
-            split_nomask_idx_tensor_list,
-            attn_nomask_seqlens_list,
+            split_nomask_idx_tensor_list: Optional[list[torch.Tensor]],
+            attn_nomask_seqlens_list: Optional[list[torch.Tensor]],
         ):
         attn_output = torch.empty(q_nope.shape[0],
                                   self.num_heads,
