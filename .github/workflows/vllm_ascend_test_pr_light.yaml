@@ -87,16 +87,16 @@ jobs:
         vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
 
     steps:
+      - name: Install packages
+        run: |
+          apt-get update -y
+          apt-get install -y python3-pip git net-tools gcc g++ cmake libnuma-dev curl gnupg2 sudo
+
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           docker-images: false
-
-      - name: Install packages
-        run: |
-          apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6.0.0
