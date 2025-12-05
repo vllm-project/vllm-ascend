@@ -1031,6 +1031,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.mock_dcp = MagicMock()
         self.mock_dcp.world_size = 1
 
+        self.mock_pcp_group = MagicMock(spec=GroupCoordinator)
+        self.mock_pcp_group.rank_in_group = 0
+        self.mock_pcp_group.world_size = 1
+        self.mock_pcp_group.device_group = MagicMock()
+
         self.patches = [
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.envs_ascend.PHYSICAL_DEVICES',
@@ -1069,7 +1074,9 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                   return_value=self.mock_dcp),
             patch(
                 'vllm.distributed.get_decode_context_model_parallel_world_size',
-                return_value=1)
+                return_value=1),
+            patch('vllm_ascend.distributed.mooncake_connector.get_pcp_group',
+                  return_value=self.mock_pcp_group),
         ]
 
         for p in self.patches:
