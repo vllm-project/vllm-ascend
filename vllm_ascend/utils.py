@@ -911,6 +911,9 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
+        "ep": {
+            "hccl_buffer_size": calculate_ep_buffer_size()
+        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -930,6 +933,30 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+def calculate_ep_buffer_size() -> int:
+    """
+    formula of ep buffer size:
+    batch_size * hidden_size * topk * 4
+    """
+    ep_buffer_size = _DEFAULT_BUFFER_SIZE
+    try:
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        hf_config = vllm_config.model_config.hf_config
+
+        hidden_size = hf_config.hidden_size
+        topk = getattr(hf_config, "num_experts_per_token", 1)
+        batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        int8_size = torch.iinfo(torch.int8).bits // 8
+        bf16_size = torch.finfo(torch.bfloat16).bits // 8
+        ep_buffer_size = math.ceil(
+            (batch_size * hidden_size * topk *
+             (int8_size * 2 + bf16_size)) / (1024 * 1024))
+    except Exception:
+        pass
+    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
@@ -1014,3 +1041,29 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+
+def refresh_block_size(vllm_config):
+    """
+    Refresh the block size in cache config.
+    """
+    cache_config = vllm_config.cache_config
+    scheduler_config = vllm_config.scheduler_config
+    model_config = vllm_config.model_config
+
+    if not cache_config:
+        return
+
+    if cache_config.block_size is None:
+        cache_config.block_size = 128
+
+    if not scheduler_config or not model_config:
+        return
+
+    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
+    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
+            logger.info(
+                "Block size is set to 128 if prefix cache or chunked prefill is enabled."
+            )
+            cache_config.block_size = 128

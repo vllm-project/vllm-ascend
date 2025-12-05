@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional
+from uuid import uuid4
 
 from vllm.logger import logger
 
@@ -44,11 +45,6 @@ class AscendConfig:
             "ascend_compilation_config", {})
         self.ascend_compilation_config = AscendCompilationConfig(
             **ascend_compilation_config)
-
-        ascend_scheduler_config = additional_config.get(
-            "ascend_scheduler_config", {})
-        self.ascend_scheduler_config = AscendSchedulerConfig(
-            ascend_scheduler_config)
 
         # Dump / PrecisionDebugger configuration
         dump_config_path = additional_config.get("dump_config", None)
@@ -150,6 +146,11 @@ class AscendConfig:
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
+        kv_cfg = vllm_config.kv_transfer_config
+        if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
+                                              False):
+            kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
+            kv_cfg._engine_id_patched = True
 
 
 class AscendCompilationConfig:
@@ -255,20 +256,6 @@ class TorchairGraphConfig:
             raise RuntimeError(
                 "use_cached_kv_cache_bytes is valid only when Torchair graph mode and use_cached_graph are enabled"
             )
-
-
-class AscendSchedulerConfig:
-    """
-    Configuration Object for ascend_scheduler_config from additional_config
-    """
-
-    def __init__(self, ascend_scheduler_config: dict):
-        self.enabled = ascend_scheduler_config.get("enabled", False)
-        # Ascend scheduler is based on vllm v0 scheduler, so we should support
-        # all vllm v0 scheduler configs as well.
-        for k, v in ascend_scheduler_config.items():
-            if not hasattr(self, k):
-                setattr(self, k, v)
 
 
 class DumpConfig:
