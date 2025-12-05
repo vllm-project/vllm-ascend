@@ -6,7 +6,7 @@ Qwen2.5-7B-Instruct is the flagship instruction-tuned variant of Alibaba Cloudâ€
 
 This document details the complete deployment and verification workflow for the model, including supported features, environment preparation, single-node deployment, functional verification, accuracy and performance evaluation, and troubleshooting of common issues. It is designed to help users quickly complete model deployment and validation.
 
-The `Qwen2.5-7B-Instruct` model was supported since `vllm-ascend:v0.11.0rc0`.
+The `Qwen2.5-7B-Instruct` model was supported since `vllm-ascend:v0.9.0`.
 
 ## Supported Features
 
@@ -104,11 +104,7 @@ Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 pla
 
 ```shell
 #!/bin/sh
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PAGED_ATTENTION_MASK_LEN=max_seq_len
 export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 export ASCEBD_RT_VISIBLE_DEVICES=0,1
 
 vllm serve ./Qwen2.5-7B-Instruct/ \
