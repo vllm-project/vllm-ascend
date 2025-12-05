@@ -412,6 +412,7 @@ class EagleProposer(Proposer):
         block_table = block_table.cpu()
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
+        last_token_indices = cu_num_tokens[1:] - 1
         target_positions = target_positions.cpu()
         if self.name == SpecDcodeType.EAGLE3:
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -419,26 +420,13 @@ class EagleProposer(Proposer):
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        first_token_indices = cu_num_tokens[:-1]
-        last_token_indices = cu_num_tokens[1:] - 1
-
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
-        if self.runner.attn_state == AscendAttentionState.PrefillNoCache:
-            prefill_seq_lens = (target_positions[last_token_indices] + 1).int()
-            decode_seq_lens = prefill_seq_lens
-        elif self.runner.attn_state == AscendAttentionState.ChunkedPrefill:
-            prefill_seq_lens = (target_positions[last_token_indices] + 1).int()
-            decode_seq_lens = prefill_seq_lens
-        elif self.runner.attn_state == AscendAttentionState.DecodeOnly:
-            prefill_seq_lens = (target_positions[first_token_indices]).int()
-            decode_seq_lens = (target_positions[last_token_indices] + 1).int()
-        else:
-            raise NotImplementedError("This attention state is not implemented!")
+        seq_lens = (target_positions[last_token_indices] + 1).int()
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
@@ -447,7 +435,7 @@ class EagleProposer(Proposer):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens.to(device),
             query_start_loc_cpu=cu_num_tokens,
-            seq_lens_cpu=prefill_seq_lens.cpu(),
+            seq_lens_cpu=seq_lens.cpu(),
             max_query_len=max_query_len,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
@@ -517,11 +505,15 @@ class EagleProposer(Proposer):
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        attn_metadata.query_start_loc_list = attn_metadata.query_start_loc[
+            1:].tolist()
+        attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
+        attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
         query_lens.fill_(1)
         attn_metadata.query_lens = query_lens
 
-        attn_metadata.actual_seq_lengths_q = [1 for _ in attn_metadata.actual_seq_lengths_q]
-        attn_metadata.seq_lens_list = decode_seq_lens.tolist()
+        attn_metadata.actual_seq_lengths_q = [1 + i for i in range(batch_size)]
+        attn_metadata.seq_lens_list = seq_lens.tolist()
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(
                 self.vllm_config.speculative_config.num_speculative_tokens -
@@ -548,7 +540,9 @@ class EagleProposer(Proposer):
             # TODO: Increment the sequence lengths.
 
             attn_metadata.seq_lens += 1
-            attn_metadata.seq_lens_list = [_ + 1 for _ in attn_metadata.seq_lens_list]
+            attn_metadata.seq_lens_list = [
+                _ + 1 for _ in attn_metadata.seq_lens_list
+            ]
             # TODO: Consider max model length.
             # attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
             #                                 self.max_model_len)
