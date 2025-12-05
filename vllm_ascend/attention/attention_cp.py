@@ -74,10 +74,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.uint8,
             device=device)
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
@@ -143,8 +142,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             query_lens = query_lens[num_decode_tokens:]
             context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
-            pcp_size = get_prefill_context_model_parallel_world_size(
-            ) if prefill_context_parallel_enable() else 1
+            pcp_size = get_pcp_group().world_size
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                 local_context_lens_allranks = torch.tensor(
                     num_computed_tokens_of_pcp_dcp)[num_decodes:num_reqs].to(
@@ -281,10 +279,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **kwargs)
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 
