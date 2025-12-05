@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: v0.12.0
+      vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -84,8 +84,8 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [v0.12.0]
-        
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
+
     steps:
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -139,7 +139,6 @@ jobs:
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
             --ignore tests/ut/kv_connector/test_llmdatadist_connector.py \
-            --ignore tests/ut/ops/test_linear.py \
             --ignore tests/ut/core/test_scheduler_dynamic_batch.py
 
       - name: Upload coverage to Codecov
@@ -157,7 +156,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.12.0]
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
