@@ -1,432 +1,212 @@
-#
+# SPDX-License-Identifier: Apache-2.0
+# This code is from: https://github.com/vllm-project/vllm/tests/v1/kv_connector/unit/utils.py
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 
-import io
-import json
-import logging
-import socket
-from unittest.mock import MagicMock, patch
+import os
+from typing import Any, Optional
 
-import pytest
 import torch
-import vllm.logger
-
-from vllm_ascend.model_loader.netloader.interaction.elastic import (
-    ElasticClient, ElasticServer)
-
-
-# Simulate server's normal response
-def mock_server_response(data):
-    return json.dumps({
-        "label": "JOIN_ACK",
-        "content": {
-            "name": "mocked_name"
-        }
-    }).encode("utf-8")
-
-
-# Simulate server's error response
-def mock_server_error_response(data):
-    return json.dumps({"label": "JOIN_ACK", "content": None}).encode("utf-8")
-
-
-# Simulated server's abnormal response
-def mock_server_exception_response(data):
-    raise Exception("Mocked server exception")
-
-
-# Test the initialization of ElasticClient
-def test_elastic_client_init():
-    sources = ["127.0.0.1:12345"]
-    device_id = 0
-    model_path = "mocked_model_path"
-    tp = 1
-    pp = 1
-
-    with patch('socket.socket') as mock_socket:
-        mock_socket_instance = MagicMock()
-        mock_socket.return_value = mock_socket_instance
-        mock_socket_instance.recv.return_value = mock_server_response(None)
-
-        mock_socket_instance.getsockname.return_value = ('127.0.0.1', 12346)
-        mock_socket_instance.__enter__.return_value = mock_socket_instance
-
-        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
-            assert client.server_addr == "127.0.0.1"
-            assert client.server_port == 12345
-            assert client.ack == ("mocked_name", 12346)
-        mock_socket_instance.close.assert_called_once()
-
-
-# Test the register method of ElasticClient
-def test_elastic_client_register():
-    sources = ["127.0.0.1:12345"]
-    device_id = 0
-    model_path = "mocked_model_path"
-    tp = 1
-    pp = 1
-
-    with patch('socket.socket') as mock_socket:
-        mock_socket_instance = MagicMock()
-        mock_socket.return_value = mock_socket_instance
-        mock_socket_instance.connect.return_value = None
-        mock_socket_instance.recv.return_value = mock_server_response(None)
-
-        mock_socket_instance.getsockname.return_value = ('127.0.0.1', 12346)
-        mock_socket_instance.__enter__.return_value = mock_socket_instance
-
-        client = ElasticClient(sources, device_id, model_path, tp, pp)
-        assert client.register(device_id, model_path, tp,
-                               pp) == ("mocked_name", 12346)
-
-
-# Test the behavior of the `register` method of ElasticClient when the server returns an error response.
-def test_elastic_client_register_error_response():
-    sources = ["127.0.0.1:12345"]
-    device_id = 0
-    model_path = "mocked_model_path"
-    tp = 1
-    pp = 1
-
-    with patch('socket.socket') as mock_socket:
-        mock_socket_instance = MagicMock()
-        mock_socket.return_value = mock_socket_instance
-        mock_socket_instance.connect.return_value = None
-        mock_socket_instance.recv.return_value = mock_server_error_response(
-            None)
-
-        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
-            with pytest.raises(RuntimeError):
-                client.register(device_id, model_path, tp, pp)
-        mock_socket_instance.close.assert_called_once()
-
-
-# Test the behavior of the `register` method of ElasticClient when an exception is thrown on the server.
-def test_elastic_client_register_exception():
-    sources = ["127.0.0.1:12345"]
-    device_id = 0
-    model_path = "mocked_model_path"
-    tp = 1
-    pp = 1
-
-    with patch('socket.socket') as mock_socket:
-        mock_socket_instance = MagicMock()
-        mock_socket.return_value = mock_socket_instance
-        mock_socket_instance.connect.return_value = None
-        mock_socket_instance.recv.side_effect = mock_server_exception_response
-        mock_socket_instance.__enter__.return_value = mock_socket_instance
-        mock_socket_instance.__exit__.return_value = None
-
-        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
-            with pytest.raises(RuntimeError):
-                client.register(device_id, model_path, tp, pp)
-        mock_socket_instance.close.assert_called_once()
-
-
-class FakeInt8Param:
-
-    def __init__(self, name="param", device="npu", dtype=torch.int8):
-        self.dtype = dtype
-        self.device = torch.device(device)
-
-    @property
-    def data(self):
-        return self  # Simulate .data returning self so .cpu() etc. can be chained
-
-    def clone(self):
-        return self
-
-    def detach(self):
-        return self
-
-    def cpu(self):
-        self.device = torch.device("cpu")
-        return self
-
-
-class FakeModel:
-
-    def __init__(self):
-        self.params = {
-            "param1": MagicMock(dtype=torch.float32),  # This will be ignored
-            "param2": FakeInt8Param(),  # This simulates a real int8 param
-        }
-
-    def named_parameters(self):
-        return self.params.items()
-
-
-@pytest.fixture
-def mock_model():
-    return FakeModel()
-
-
-@pytest.fixture
-def server_config():
-    return {
-        "addr": "127.0.0.1",
-        "port": 8080,
-        "model": MagicMock(),
-        "device_id": 0,
-        "model_path": "/test/model",
-        "tp": 1,
-        "pp": 1,
-        "int8_cache": "dram",
-        'int8_cache_name': None
-    }
-
-
-# Test server initialization
-def test_server_initialization(server_config, mock_model):
-    server_config["model"] = mock_model
-    with patch("socket.socket") as mock_socket:
-        log_capture_string = io.StringIO()
-        ch = logging.StreamHandler(log_capture_string)
-        ch.setLevel(logging.DEBUG)
-        vllm.logger.logger.addHandler(ch)
-
-        server = ElasticServer(**server_config)
-
-        # Check the socket configuration
-        mock_socket.assert_called_with(socket.AF_INET, socket.SOCK_STREAM)
-        mock_socket.return_value.setsockopt.assert_called_with(
-            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        mock_socket.return_value.bind.assert_called_with(("127.0.0.1", 8080))
-        mock_socket.return_value.listen.assert_called_with(256)
-
-        # Check int8 cache
-        assert "param2" in server.original_int8
-        assert server.original_int8[
-            "param2"].device.type == "cpu"  # Verifying DRAM Cache
-
-        assert server.addr == server_config['addr']
-        assert server.port == server_config['port']
-        assert server.device_id == server_config['device_id']
-        assert server.model_path == server_config['model_path']
-        assert server.tp == server_config['tp']
-        assert server.pp == server_config['pp']
-
-        # Get captured logs
-        log_output = log_capture_string.getvalue()
-        vllm.logger.logger.removeHandler(ch)
-        log_capture_string.close()
-
-        # Check output
-        assert "Server 127.0.0.1:8080 starts" in log_output
-
-
-# Test the int8 cache option
-@pytest.mark.parametrize("cache_option,expected_device", [("dram", "cpu"),
-                                                          ("no", None),
-                                                          ("invalid", None)])
-def test_int8_cache_handling(server_config, mock_model, cache_option,
-                             expected_device, caplog):
-    server_config["int8_cache"] = cache_option
-    server_config["model"] = mock_model
-
-    with patch("socket.socket"):
-        log_capture_string = io.StringIO()
-        ch = logging.StreamHandler(log_capture_string)
-        ch.setLevel(logging.DEBUG)
-        vllm.logger.logger.addHandler(ch)
-
-        server = ElasticServer(**server_config)
-
-        log_output = log_capture_string.getvalue()
-        vllm.logger.logger.removeHandler(ch)
-        log_capture_string.close()
-
-        if cache_option == "invalid":
-            assert "int8_cache should be selected in [HBM, DRAM]" in log_output
-
-        if expected_device is None:
-            assert len(server.original_int8) == 0
-        else:
-            assert server.original_int8[
-                "param2"].device.type == expected_device
-
-
-# Test client processing
-def test_client_handler_valid_join(server_config, mock_model):
-    server_config["model"] = mock_model
-    with patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend"
-               ) as mock_p2p_send:
-
-        # Create a simulated connection
-        mock_conn = MagicMock()
-        mock_addr = ("192.168.1.1", 12345)
-
-        # Configuring Client Data
-        valid_data = {
-            "label": "JOIN",
-            "content": {
-                "device_id": 0,
-                "model_path": "/test/model",
-                "tp": 1,
-                "pp": 1,
-                "port": 9090
-            }
-        }
-        mock_conn.recv.return_value = json.dumps(valid_data).encode("utf-8")
-
-        # Start the server
-        server = ElasticServer(**server_config)
-        server.register_handler(mock_conn, mock_addr)
-
-        # Verify response
-        expected_ack = {
-            "label": "JOIN_ACK",
-            "content": {
-                "name": "192.168.1.1:12345"
-            }
-        }
-        mock_conn.send.assert_called_once_with(
-            json.dumps(expected_ack).encode("utf-8"))
-        mock_p2p_send.assert_called_once_with("127.0.0.1", 9090,
-                                              "192.168.1.1:12345")
-        mock_conn.close.assert_called_once()
-
-
-# Test mismatched JOIN requests
-def test_client_handler_mismatch(server_config):
-    with patch("socket.socket"):
-        server = ElasticServer(**server_config)
-        mock_conn = MagicMock()
-        mock_addr = ("192.168.1.1", 12345)
-
-        # Send mismatched data
-        mismatch_data = {
-            "label": "JOIN",
-            "content": {
-                "device_id": 1,  # 不匹配的ID
-                "model_path": "/wrong/model",
-                "tp": 2,
-                "pp": 2,
-                "port": 9090
-            }
-        }
-        mock_conn.recv.return_value = json.dumps(mismatch_data).encode("utf-8")
-
-        server.register_handler(mock_conn, mock_addr)
-
-        assert isinstance(mismatch_data["content"], dict)
-
-        # Verify response
-        expected_ack = {
-            "label":
-            "JOIN_NACK",
-            "content":
-            f"Received data {(mismatch_data['content']['device_id'], mismatch_data['content']['model_path'], mismatch_data['content']['tp'], mismatch_data['content']['pp'])} does not consist with this server {(server_config['device_id'], server_config['model_path'], server_config['tp'], server_config['pp'])}"
-        }
-        mock_conn.send.assert_called_once_with(
-            json.dumps(expected_ack).encode("utf-8"))
-        mock_conn.close.assert_called_once()
-
-
-# Test Invalid Request
-@pytest.mark.parametrize(
-    "invalid_data,should_send",
-    [
-        (
-            {
-                "label": "WRONG_LABEL"
-            }, True
-        ),  # Incorrect label, can be decoded as JSON, but the content is invalid. 
-        (
-            {
-                "content": {
-                    "missing_fields": True
-                }
-            }, True
-        ),  # Missing field, can be decoded as JSON, but the content is invalid. 
-        ("plain text", False),  # Non-JSON data, json.loads failed 
-        (b"invalid_bytes", False)  # Invalid byte, decode or json.loads failed 
-    ])
-def test_client_handler_invalid_requests(server_config, invalid_data,
-                                         should_send):
-    with patch("socket.socket"):
-        log_capture_string = io.StringIO()
-        ch = logging.StreamHandler(log_capture_string)
-        ch.setLevel(logging.DEBUG)
-        vllm.logger.logger.addHandler(ch)
-
-        with patch("socket.socket"):
-            server = ElasticServer(**server_config)
-            mock_conn = MagicMock()
-            mock_addr = ("192.168.1.1", 12345)
-
-            if isinstance(invalid_data, (str, bytes)):
-                mock_conn.recv.return_value = invalid_data if isinstance(
-                    invalid_data, bytes) else invalid_data.encode()
-            else:
-                mock_conn.recv.return_value = json.dumps(invalid_data).encode(
-                    "utf-8")
-
-            server.register_handler(mock_conn, mock_addr)
-
-            if should_send:
-                expected_ack = {
-                    "label":
-                    "JOIN_NACK",
-                    "content":
-                    f"Received data does not contain required fields: {invalid_data}"
-                }
-                mock_conn.send.assert_called_once_with(
-                    json.dumps(expected_ack).encode("utf-8"))
-            else:
-                mock_conn.send.assert_not_called()
-
-            log_output = log_capture_string.getvalue()
-            vllm.logger.logger.removeHandler(ch)
-            log_capture_string.close()
-
-            # Any warning in the log is acceptable
-            assert "Failed to load" in log_output or "does not contain" in log_output
-            mock_conn.close.assert_called_once()
-
-
-# Test the thread startup.
-def test_server_start(server_config):
-    with patch("socket.socket"), \
-         patch("threading.Thread") as mock_thread:
-
-        handler_thread_instance = mock_thread.return_value
-
-        server = ElasticServer(**server_config)
-        server.start()
-
-        # Assert that the correct target parameter was passed when instantiating the Thread instance.
-        mock_thread.assert_called_once()
-        args, kwargs = mock_thread.call_args
-        assert kwargs['target'] == server.elastic_client_handler
-
-        # Check that the daemon attribute is set to True (the attribute value will be recorded after MagicMock assignment).
-        assert handler_thread_instance.daemon is True
-
-        # Check if the start() method is called.
-        handler_thread_instance.start.assert_called_once()
-
-
-# Test resource clearing
-def test_server_cleanup(server_config):
-    with patch("socket.socket") as mock_socket:
-        server = ElasticServer(**server_config)
-        del server
-        mock_socket.return_value.close.assert_called_once()
-
-
-if __name__ == "__main__":
-    pytest.main()
+from vllm import SamplingParams
+from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
+                         ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec)
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
+from vllm.v1.structured_output import StructuredOutputManager
+
+EOS_TOKEN_ID = 50256
+
+
+def assert_scheduler_empty(scheduler: Scheduler):
+    """Confirm the scheduler is "empty" - i.e. no leaks."""
+    # Scheduler Metadata.
+    assert len(scheduler.requests) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.finished_req_ids) == 0
+    assert len(scheduler.finished_recving_kv_req_ids) == 0
+
+    # EncoderCacheManager.
+    assert len(scheduler.encoder_cache_manager.freed) == 0
+    assert len(scheduler.encoder_cache_manager.cached) == 0
+
+    # KVCache Manager.
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+               req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+               num_cached_block) == 0
+    num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert num_free_blocks == (
+        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+
+    # NOTE(rob): just the ref count on blocks will be 0. The hash
+    # value, etc will remain since we lazily evict for prefix cache.
+    for block in scheduler.kv_cache_manager.block_pool.blocks:
+        assert block.ref_cnt == 0
+
+
+def create_vllm_config(
+    max_num_seqs: int = 16,
+    max_num_batched_tokens: int = 1024,
+    block_size: int = 128,
+) -> VllmConfig:
+    """Initialize VllmConfig For Testing."""
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_num_batched_tokens,
+        is_encoder_decoder=False,
+    )
+    fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
+                                    "fake_weight")
+    model_config = ModelConfig(
+        model=fake_weight_path,
+        skip_tokenizer_init=True,
+    )
+    # Cache config, optionally force APC
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        swap_space=0,
+        cache_dtype="auto",
+        enable_prefix_caching=True,
+    )
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="LLMDataDistCMgrConnector",
+        kv_role="kv_both",
+        kv_connector_module_path=
+        "vllm_ascend.distributed.llmdatadist_c_mgr_connector")
+    return VllmConfig(scheduler_config=scheduler_config,
+                      model_config=model_config,
+                      cache_config=cache_config,
+                      kv_transfer_config=kv_transfer_config,
+                      device_config=DeviceConfig("cpu"))
+
+
+def create_scheduler(
+    vllm_config: VllmConfig,
+    num_blocks: int = 10000,
+) -> Scheduler:
+    """Initialize Scheduler For Testing."""
+    block_size = vllm_config.cache_config.block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,  # A large number of blocks to hold all requests
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(block_size, 1, 1, torch.float16,
+                                               False, False))
+        ],
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        log_stats=True,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+
+
+_none_hash_initialized = False
+
+
+def create_request(
+    request_id: int,
+    num_tokens: int = 10,
+    max_tokens: int = 128,
+    do_remote_decode: bool = False,
+    do_remote_prefill: bool = False,
+    use_all_1s_for_prompt_tokens: bool = False,
+    num_remote_blocks: int = 3,
+    block_size: int = 16,
+) -> Request:
+    """Make dummy request for testing."""
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(sha256)
+        _none_hash_initialized = True
+
+    block_hasher = get_request_block_hasher(block_size, sha256)
+
+    kv_transfer_params: Optional[dict[str, Any]] = None
+
+    if do_remote_decode:
+        assert not do_remote_prefill
+        kv_transfer_params = dict(do_remote_prefill=False,
+                                  do_remote_decode=True)
+    elif do_remote_prefill:
+        kv_transfer_params = dict(do_remote_prefill=True,
+                                  do_remote_decode=False,
+                                  remote_engine_id="my-engine-id",
+                                  remote_block_ids=list(
+                                      range(num_remote_blocks)),
+                                  remote_host="my-host",
+                                  remote_port=1234,
+                                  remote_tp_size=1,
+                                  remote_pcp_size=1,
+                                  remote_dcp_size=1)
+
+    max_tokens = 1 if do_remote_decode else max_tokens
+    sampling_params = SamplingParams(max_tokens=max_tokens)
+
+    if use_all_1s_for_prompt_tokens:
+        prompt_token_ids = [1] * num_tokens
+    else:
+        prompt_token_ids = [i * request_id for i in range(num_tokens)]
+
+    req = Request(
+        request_id=f"id-{request_id}",
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+        pooling_params=[],
+        eos_token_id=EOS_TOKEN_ID,
+        block_hasher=block_hasher,
+    )
+    req.kv_transfer_params = kv_transfer_params
+    return req
+
+
+def create_model_runner_output(
+    reqs: list[Request],
+    finished_sending: Optional[list[str]] = None,
+    finished_recving: Optional[list[str]] = None,
+    use_eos: bool = False,
+) -> ModelRunnerOutput:
+    """Make dummy model runner output for testing."""
+
+    # Make request data.
+    req_ids = [req.request_id for req in reqs]
+    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
+
+    # Make sampled tokens.
+    sampled_token = EOS_TOKEN_ID if use_eos else 0
+    sampled_token_ids = [[sampled_token] for _ in req_ids]
+
+    # Make output data structure.
+    extra_args = {}
+    from vllm.v1.worker.kv_connector_model_runner_mixin import \
+        KVConnectorOutput  # type: ignore  # noqa
+    kv_connector_output = KVConnectorOutput(finished_sending=finished_sending,
+                                            finished_recving=finished_recving)
+    extra_args = {"kv_connector_output": kv_connector_output}
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        **extra_args,
+    )
+
+    return model_runner_output
