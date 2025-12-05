@@ -26,10 +26,13 @@ import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
+from vllm.attention.backends.registry import (AttentionBackendEnum,
+                                              register_backend)
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
-                              get_decode_context_model_parallel_world_size)
+                              get_decode_context_model_parallel_world_size,
+                              get_pcp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
@@ -41,19 +44,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
-
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-
-# isort: on
-
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
+from vllm_ascend.utils import weak_ref_tensors
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -183,7 +174,6 @@ class AscendMetadataForDecode:
 class AscendMetadata:
     # **************************** Basic Properties ************************** #
     attn_mask: Optional[torch.Tensor] = None
-    fia_attn_mask: Optional[torch.Tensor] = None
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
@@ -256,10 +246,9 @@ class AscendAttentionMetadataBuilder:
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.uint8,
             device=device)
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
@@ -312,21 +301,18 @@ class AscendAttentionMetadataBuilder:
                                                          num_actual_tokens_pcp_padded]
         # slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
-        fia_attn_mask = common_attn_metadata.fia_attn_mask
         attn_state = common_attn_metadata.attn_state
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
-        if attn_state == AscendAttentionState.DecodeOnly and \
-                common_attn_metadata.num_input_tokens > num_actual_tokens:
+        if common_attn_metadata.num_input_tokens > num_actual_tokens:
             padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
             seq_lens = torch.cat([
                 seq_lens,
-                torch.ones(padded_num_tokens,
-                           dtype=seq_lens.dtype,
-                           device=seq_lens.device)
+                torch.tensor([padded_num_tokens
+                              ]).to(seq_lens.device).to(seq_lens.dtype)
             ])
             block_table_padding = torch.zeros(
                 (padded_num_tokens, ) + block_table.shape[1:],
@@ -335,10 +321,8 @@ class AscendAttentionMetadataBuilder:
             block_table = torch.cat([block_table, block_table_padding], dim=0)
             query_start_loc_cpu = torch.cat([
                 query_start_loc_cpu,
-                torch.arange(query_start_loc_cpu[-1] + 1,
-                             query_start_loc_cpu[-1] + padded_num_tokens,
-                             dtype=query_start_loc_cpu.dtype,
-                             device=query_start_loc_cpu.device)
+                torch.tensor([query_start_loc_cpu[-1] + padded_num_tokens]).to(
+                    query_start_loc_cpu.device).to(query_start_loc_cpu.dtype)
             ])
 
         query_start_loc = query_start_loc_cpu.to(self.device,
@@ -356,8 +340,7 @@ class AscendAttentionMetadataBuilder:
                 context_lens_cpu = num_computed_tokens_cpu[
                     num_decodes:num_reqs]
                 max_context_len_cpu = context_lens_cpu.max().item()
-                pcp_size = get_prefill_context_model_parallel_world_size(
-                ) if prefill_context_parallel_enable() else 1
+                pcp_size = get_pcp_group().world_size
                 if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                     local_context_lens_allranks = torch.tensor(
                         num_computed_tokens_of_pcp_dcp
@@ -471,7 +454,6 @@ class AscendAttentionMetadataBuilder:
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            fia_attn_mask=fia_attn_mask,
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
@@ -546,10 +528,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 
@@ -604,7 +585,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         num_tokens = attn_metadata.query_start_loc_list[-1]
-        query = query[:num_tokens]
         graph_params = get_graph_params()
         query_start_loc = attn_metadata.query_start_loc_list
         # Prepare tensors for attention output
@@ -618,7 +598,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query=query,
                 key=key,
                 value=value,
-                atten_mask=attn_metadata.fia_attn_mask,
+                atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
                 input_layout="TND",
                 block_size=block_size,
@@ -641,7 +621,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         graph_params.attn_params[num_tokens].append(
             (weak_ref_tensors(query), weak_ref_tensors(key),
              weak_ref_tensors(value), weak_ref_tensors(block_table),
-             weak_ref_tensors(attn_metadata.fia_attn_mask), block_size,
+             weak_ref_tensors(attn_metadata.attn_mask), block_size,
              actual_seq_lengths_kv, query_start_loc, self.num_kv_heads,
              self.num_heads, self.scale, weak_ref_tensors(output),
              weak_ref_tensors(softmax_lse)))
@@ -651,7 +631,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.fia_attn_mask,
+            atten_mask=attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,

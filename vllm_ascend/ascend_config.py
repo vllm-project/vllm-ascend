@@ -36,13 +36,14 @@ class AscendConfig:
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
+
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
 
-        ascend_scheduler_config = additional_config.get(
-            "ascend_scheduler_config", {})
-        self.ascend_scheduler_config = AscendSchedulerConfig(
-            ascend_scheduler_config)
+        ascend_compilation_config = additional_config.get(
+            "ascend_compilation_config", {})
+        self.ascend_compilation_config = AscendCompilationConfig(
+            **ascend_compilation_config)
 
         # Dump / PrecisionDebugger configuration
         dump_config_path = additional_config.get("dump_config", None)
@@ -144,6 +145,31 @@ class AscendConfig:
             self, vllm_config)
 
 
+class AscendCompilationConfig:
+    """
+    Configuration for controlling the behavior of Ascend graph optimization.
+
+    This class provides a way to configure graph fusion optimizations.
+    These configurations directly impact the performance and behavior of models
+    deployed on Ascend platforms.
+    """
+
+    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+        """
+        Initialize the configuration.
+        
+        Args:
+            enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
+                When set to True, the system will optimize quantization-related operations,
+                reducing the number of quantization/dequantization nodes.
+                Default: True
+                
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
+        self.enable_quantization_fusion = enable_quantization_fusion
+        # Add more compilation related configs here as needed
+
+
 class TorchairGraphConfig:
     """
     Configuration Object for torchair_graph_config from additional_config
@@ -222,20 +248,6 @@ class TorchairGraphConfig:
             raise RuntimeError(
                 "use_cached_kv_cache_bytes is valid only when Torchair graph mode and use_cached_graph are enabled"
             )
-
-
-class AscendSchedulerConfig:
-    """
-    Configuration Object for ascend_scheduler_config from additional_config
-    """
-
-    def __init__(self, ascend_scheduler_config: dict):
-        self.enabled = ascend_scheduler_config.get("enabled", False)
-        # Ascend scheduler is based on vllm v0 scheduler, so we should support
-        # all vllm v0 scheduler configs as well.
-        for k, v in ascend_scheduler_config.items():
-            if not hasattr(self, k):
-                setattr(self, k, v)
 
 
 class DumpConfig:
@@ -326,6 +338,11 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
+            if ascend_config.ascend_compilation_config.enable_quantization_fusion:
+                logger.info(
+                    "Quantization fusion enabled! op fusion on quantization are expected. "
+                )
+
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
                 if "qwen" not in model_type:
