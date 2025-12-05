@@ -22,6 +22,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ### Run docker container
 
 ```{code-block} bash
+   :substitutions:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
