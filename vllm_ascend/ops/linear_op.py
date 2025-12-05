@@ -57,11 +57,15 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
-                               flashcomm2_enable,
+                               flashcomm2_enable, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
-
+from vllm_ascend.ops.shared_weight_layer import (
+    is_hidden_layer, post_process_after_loading_for_shared_weight_series,
+    reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
+from vllm.config import VllmConfig, get_current_vllm_config
 
 class CustomLinearOp:
 
@@ -280,6 +284,14 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             get_tp_group().world_size)
         self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
         self.layer._quant_comm_config = {}
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer(self.layer)):
+            from vllm_ascend.distributed.parallel_state import \
+                get_shared_weight_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_shared_weight_group(),
+                layer=self.layer,
+                prefetch_step=1)
 
     @property
     def comm_group(self):
@@ -392,11 +404,18 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         output_bias = self.bias if self.skip_bias_add else None
 
         return output, output_bias
+    
+    def post_process_after_weight_loading(self):
+        if flashcomm2_o_shared_enabled():
+            post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+            if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
+                reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
 
     def update_attrs(self):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
+        self.post_process_after_weight_loading()
 
 
 class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
@@ -471,6 +490,40 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+    
+# 该层用于flashcomm2开启oshard后，在QKV matmul之前调用异步broadcast，从而实现通算掩盖
+class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
+
+    def apply_impl(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
+            reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+        # if flashcomm2_o_shared_enable():
+        #     from vllm_ascend.multistream.context import get_multistream_microbatch_context
+        #     if get_multistream_microbatch_context() != 0:
+        #         #TODO: 建立Oshard适配层，包括几个关键函数：初始化后处理；权重加载后处理；异步broadcast调用
+        #         reach_layer_for_shared_weight_series(self.o_proj)
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
             output = self.comm_group.all_gather(output_parallel)
@@ -614,6 +667,9 @@ def _get_column_parallel_op(
             return SequenceColumnParallelOp(layer)
         if "in_proj" in prefix:
             return SequenceColumnParallelOp(layer)
+        if flashcomm2_enable():
+            if "qkv_proj" in prefix:
+                return Flashcomm2OshardQKVParallelOp(layer)
         if "qkv_proj" in prefix or "conv1d" in prefix:
             return SequenceColumnParallelOp(layer)
 
