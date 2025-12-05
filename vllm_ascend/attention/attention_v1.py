@@ -217,6 +217,9 @@ class AscendMetadata:
 
     decode_meta: Optional[AscendMetadataForDecode] = None
 
+    cos: torch.Tensor = None
+    sin: torch.Tensor = None
+
 
 class AscendAttentionMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
@@ -282,6 +285,15 @@ class AscendAttentionMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
+        # initialize rope
+        cos_sin = model.model.layers[
+                model.model.start_layer].self_attn.rotary_emb.cos_sin_cache.index_select(0, common_attn_metadata.positions)
+        last_dim = cos_sin.size()[-1]
+        cos, sin = cos_sin.reshape(-1, 2, last_dim // 2).repeat(
+            1, 1, 2).chunk(2, dim=-2)
+        # BSNH
+        cos = cos.view(1, -1, 1, last_dim).contiguous()
+        sin = sin.view(1, -1, 1, last_dim).contiguous()
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
@@ -457,8 +469,10 @@ class AscendAttentionMetadataBuilder:
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
+            cos=cos,
+            sin=sin,
             prefill=prefill_metadata,
-            decode_meta=decode_metadata)
+            decode_meta=decode_metadata,)
         return attn_metadata
 
     def _get_chunked_req_mask(self, local_context_lens_allranks) -> List[bool]:
