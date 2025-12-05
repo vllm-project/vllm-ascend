@@ -23,13 +23,13 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)
-- `Qwen3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)
-- `Qwen3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)
-- `Qwen3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) card or 1 Atlas 800I A2 (64G × 8) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
-- `Qwen3-14B`(BF16 version): require 2 Atlas 800 A3 (64G × 16) cards or 2 Atlas 800I A2 (64G × 8) cards. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
-- `Qwen3-32B`(BF16 version): require 4 Atlas 800 A3 (64G × 16) cards or 4 Atlas 800I A2 (64G × 8) cards. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
-- `Qwen3-32B-W8A8`(Quantized version): require 4 Atlas 800 A3 (64G × 16) cards or 4 Atlas 800I A2 (64G × 8) cards. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
+- `Qwen3-0.6B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 Atlas 800I A2 (64G × 1) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B)
+- `Qwen3-1.7B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 Atlas 800I A2 (64G × 1) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B)
+- `Qwen3-4B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 Atlas 800I A2 (64G × 1) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-4B)
+- `Qwen3-8B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 1 Atlas 800I A2 (64G × 1) card. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-8B)
+- `Qwen3-14B`(BF16 version): require 1 Atlas 800 A3 (64G × 2) card or 2 Atlas 800I A2 (64G × 1) cards. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-14B)
+- `Qwen3-32B`(BF16 version): require 2 Atlas 800 A3 (64G × 4) cards or 4 Atlas 800I A2 (64G × 4) cards. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-32B)
+- `Qwen3-32B-W8A8`(Quantized version): require 2 Atlas 800 A3 (64G × 4) cards or 4 Atlas 800I A2 (64G × 4) cards. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8)
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
