@@ -3,13 +3,13 @@ from typing import Optional
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
-                                             get_tp_group, get_world_group,
+                                             get_pp_group, get_tp_group,
+                                             get_world_group,
                                              init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import (flashcomm2_enable,
-                               prefill_context_parallel_enable)
+from vllm_ascend.utils import flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -73,15 +73,10 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
-    if prefill_context_parallel_enable():
-        all_ranks = torch.arange(world_size).reshape(
-            -1, parallel_config.data_parallel_size *
-            parallel_config.prefill_context_parallel_size *
-            parallel_config.tensor_parallel_size)
-    else:
-        all_ranks = torch.arange(world_size).reshape(
-            -1, parallel_config.data_parallel_size *
-            parallel_config.tensor_parallel_size)
+    all_ranks = torch.arange(world_size).reshape(
+        -1, parallel_config.data_parallel_size *
+        parallel_config.prefill_context_parallel_size *
+        parallel_config.tensor_parallel_size)
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
@@ -185,6 +180,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         ).flashcomm2_oproj_tensor_parallel_size
         global_tp_size = get_tp_group().world_size
         global_dp_size = get_dp_group().world_size
+        global_pp_size = get_pp_group().world_size
         num_fc2_oproj_tensor_parallel_groups: int = (global_tp_size //
                                                      flashcomm2_otp_size)
 
@@ -197,18 +193,27 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         if flashcomm2_otp_size > 1:
             otp_group_ranks = []
             odp_group_ranks: list[list[int]] = [
-                [] for _ in range(flashcomm2_otp_size * global_dp_size)
+                [] for _ in range(flashcomm2_otp_size * global_dp_size *
+                                  global_pp_size)
             ]
-
             for dp_group_index in range(global_dp_size):
-                for i in range(num_fc2_oproj_tensor_parallel_groups):
-                    ranks = []
-                    for j in range(flashcomm2_otp_size):
-                        rank_idx = dp_group_index * global_tp_size + i + j * num_fc2_oproj_tensor_parallel_groups
-                        ranks.append(rank_idx)
-                        odp_group_index = dp_group_index * flashcomm2_otp_size + j
-                        odp_group_ranks[odp_group_index].append(rank_idx)
-                    otp_group_ranks.append(ranks)
+                for pp_group_index in range(global_pp_size):
+                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
+                    tp_base_rank = dp_pp_serial_index * global_tp_size
+                    odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
+
+                    for i in range(num_fc2_oproj_tensor_parallel_groups):
+                        ranks = []
+                        for j in range(flashcomm2_otp_size):
+                            tp_local_rank = i + j * num_fc2_oproj_tensor_parallel_groups
+                            assert tp_local_rank < global_tp_size
+                            global_rank = tp_base_rank + tp_local_rank
+                            ranks.append(global_rank)
+
+                            odp_group_index = odp_base_index + j
+                            odp_group_ranks[odp_group_index].append(
+                                global_rank)
+                        otp_group_ranks.append(ranks)
 
             _FLASHCOMM2_OTP = init_model_parallel_group(
                 otp_group_ranks,

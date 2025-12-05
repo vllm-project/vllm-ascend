@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
@@ -32,7 +32,7 @@ on:
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
       vllm_version:
         required: false
-        default: "v0.11.2"
+        default: "v0.12.0"
         type: string
         description: vllm version to use
       vllm_ascend_remote_url:
@@ -69,7 +69,7 @@ jobs:
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
       env:
         KUBECONFIG: /tmp/kubeconfig
         KUBECTL: /root/.cache/.kube/kubectl
@@ -83,8 +83,6 @@ jobs:
            sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
            pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
            pip install jinja2-cli
-
-           #apt-get update -y && apt-get install -y git curl
 
         - name: Install kubectl
           run: |
@@ -106,12 +104,14 @@ jobs:
             echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
 
         - name: Checkout code
-          uses: actions/checkout@v6
+          uses: actions/checkout@v6.0.0
 
         - name: Prepare scripts
           run: |
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+            # clear log directory
+            rm -fr $RESULT_FILE
 
         - name: Clear resources
           run: |
@@ -263,5 +263,5 @@ jobs:
         - name: Post process
           if: always()
           run: |
-            kubectl get pods -n $NAMESPACE
-            kubectl delete -f ./lws.yaml
+            kubectl get pods -n $NAMESPACE --ignore-not-found=true
+            kubectl delete -f ./lws.yaml --ignore-not-found=true || true

@@ -8,7 +8,7 @@ import queue
 import struct
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -27,9 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              get_tp_group, get_world_group)
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -64,6 +65,27 @@ class ReqMeta:
     remote_te_rpc_port: Optional[int]
     remote_kv_caches_base_addr: Optional[list[int]]
     metaserver: Optional[str]
+
+
+@dataclass
+class SizedDict(OrderedDict):
+
+    def __init__(self, max_size=16000, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            value: dict[int, list[int]] = {}
+            self[key] = value
+            return value
 
 
 class KVCacheSendingLayerThread(threading.Thread):
@@ -359,7 +381,10 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeLayerwiseConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 role: KVConnectorRole,
+                 kv_cache_config: Optional[KVCacheConfig] = None):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeLayerwiseConnectorMetadata()
@@ -691,9 +716,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.encoder = msgspec.msgpack.Encoder()
 
         self.remote_kv_caches_base_addr: dict[str, dict[int, list[int]]] = \
-            defaultdict(dict)
+            SizedDict()
         self.remote_te_port: dict[str, dict[int, int]] = \
-            defaultdict(dict)
+            SizedDict()
         self.remote_sockets_lock = threading.Lock()
         self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]] = defaultdict(  # type: ignore

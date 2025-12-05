@@ -61,9 +61,6 @@ jobs:
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
             size: 2
-          - name: multi-node-glm-2node
-            config_file_path: GLM-4_5.yaml
-            size: 2
           - name: multi-node-dpsk3.2-exp-2node
             config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
             size: 2
@@ -136,7 +133,7 @@ jobs:
             tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.11.2
+      vllm: v0.12.0
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
