@@ -22,10 +22,11 @@ from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import (get_dcp_group, get_tp_group,
-                                             get_world_group)
+from vllm.distributed.parallel_state import (get_dcp_group, get_pcp_group,
+                                             get_tp_group, get_world_group)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
+from vllm.utils.network_utils import get_ip
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -33,14 +34,7 @@ from vllm.v1.request import Request, RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               prefill_context_parallel_enable)
-
-if prefill_context_parallel_enable():
-    from vllm.distributed.parallel_state import \
-        get_prefill_context_model_parallel_rank
-
-from vllm.utils.network_utils import get_ip
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -203,8 +197,7 @@ class LLMDataDistCMgrConnectorScheduler():
         else:
             dp_rank_local = vllm_config.parallel_config.data_parallel_rank_local
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size if prefill_context_parallel_enable(
-        ) else 1
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
 
         self.port = dp_rank_local * self.pcp_size * tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT
@@ -345,10 +338,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tp_group().rank_in_group
         self.rank = get_world_group().rank
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size if prefill_context_parallel_enable(
-        ) else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if prefill_context_parallel_enable() else 0
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group
         self.dcp_size = get_dcp_group().world_size
         self.local_ip = get_ip()
         self.kv_transfer_config: KVTransferConfig = vllm_config.kv_transfer_config

@@ -33,11 +33,12 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-    enable_sp, get_ascend_device_type, is_vl_model,
-    prefill_context_parallel_enable, update_aclgraph_sizes,
-    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+                               enable_sp, get_ascend_device_type, is_vl_model,
+                               update_aclgraph_sizes,
+                               update_cudagraph_capture_sizes,
+                               update_default_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -329,7 +330,6 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         if vllm_config.kv_transfer_config is not None and \
-            prefill_context_parallel_enable() and \
             cache_config.block_size != parallel_config.cp_kv_cache_interleave_size and \
             parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size > 1:
             raise AssertionError(

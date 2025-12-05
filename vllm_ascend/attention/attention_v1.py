@@ -26,10 +26,13 @@ import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
+from vllm.attention.backends.registry import (AttentionBackendEnum,
+                                              register_backend)
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
-                              get_decode_context_model_parallel_world_size)
+                              get_decode_context_model_parallel_world_size,
+                              get_pcp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
@@ -41,19 +44,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
-
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-
-# isort: on
-
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
+from vllm_ascend.utils import weak_ref_tensors
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -255,10 +246,9 @@ class AscendAttentionMetadataBuilder:
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.uint8,
             device=device)
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
@@ -350,8 +340,7 @@ class AscendAttentionMetadataBuilder:
                 context_lens_cpu = num_computed_tokens_cpu[
                     num_decodes:num_reqs]
                 max_context_len_cpu = context_lens_cpu.max().item()
-                pcp_size = get_prefill_context_model_parallel_world_size(
-                ) if prefill_context_parallel_enable() else 1
+                pcp_size = get_pcp_group().world_size
                 if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                     local_context_lens_allranks = torch.tensor(
                         num_computed_tokens_of_pcp_dcp
@@ -539,10 +528,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 
