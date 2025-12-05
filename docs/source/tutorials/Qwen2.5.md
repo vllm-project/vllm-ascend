@@ -235,12 +235,6 @@ Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy re
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-Add `--mode perf` to the accuracy evaluation command to run performance testing:
-
-```text
-ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer example --mode perf
-```
-
 ### Using vLLM Benchmark
 Run performance evaluation of `Qwen2.5-Instruct` as an example.
 
