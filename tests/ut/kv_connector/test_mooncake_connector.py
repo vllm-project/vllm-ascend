@@ -1260,6 +1260,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                        [[2], [6], [10], [14]], [[3], [7], [11], [15]]])
         self.assertIn(get_tp_rank(8, 1, 4, 4, 1, False),
                       [[[0], [2], [4], [6]], [[1], [3], [5], [7]]])
+        self.assertIn(get_tp_rank(4, 2, 2, 4, 2, False),
+                      [[[0, 1, 4, 5], [2, 3, 6, 7]]])
         self.assertIn(get_tp_rank(4, 1, 4, 4, 1, False),
                       [[[0], [1], [2], [3]]])
         self.assertIn(

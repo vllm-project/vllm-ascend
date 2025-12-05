@@ -1202,7 +1202,7 @@ class MooncakeConnectorWorker:
         Use this function to calculate remote port and remote block number of each remote P node that we need to pull.
         """
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
-            choosen_rank_list = self._get_remote_tp_rank(req_id)
+            choosen_rank_list = self._get_remote_rank(req_id)
             remote_handshake_port_list = [[
                 x + meta.remote_port for x in choosen_rank_list
             ]]
@@ -1313,7 +1313,7 @@ class MooncakeConnectorWorker:
                                 == len(remote_handshake_port_list) - 1
                                 and i == self.tp_num_need_pulls - 1))
             else:  #TODO: support prefill context parallel and pipeline parallel open at the same time
-                choosen_rank_list = self._get_remote_tp_rank(req_id)
+                choosen_rank_list = self._get_remote_rank(req_id)
                 remote_handshake_port_list = [[x + meta.remote_port]
                                               for x in choosen_rank_list]
                 for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
@@ -1332,21 +1332,21 @@ class MooncakeConnectorWorker:
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in self._prefill_get_remote_tp_rank(req_id):
+                if self.tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
 
-    def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
-        return sum(self._get_remote_tp_ranks_for_req(req_id), [])
+    def _prefill_get_remote_rank(self, req_id: str) -> List[int]:
+        return sum(self._get_remote_ranks_for_req(req_id), [])
 
-    def _get_remote_tp_rank(self, req_id: str) -> List[int]:
-        return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
+    def _get_remote_rank(self, req_id: str) -> List[int]:
+        return self._get_remote_ranks_for_req(req_id)[self.tp_rank]
 
-    def _get_tp_remote_tp_ranks(self, tp_ori_data: np.ndarray,
-                                rand_group_index: list[int],
-                                num_groups: int) -> List[List[int]]:
+    def _get_remote_tp_ranks(self, tp_ori_data: np.ndarray,
+                             rand_group_index: list[int],
+                             num_groups: int) -> List[List[int]]:
         tp_ori_data = tp_ori_data.reshape(-1, num_groups)
         choosen_group = tp_ori_data[:, [rand_group_index]]
         flattened = choosen_group.reshape(-1).tolist()
@@ -1356,7 +1356,7 @@ class MooncakeConnectorWorker:
         ]
         return sampled_nums
 
-    def _get_remote_tp_ranks_for_req(self, req_id: str) -> List[List[int]]:
+    def _get_remote_ranks_for_req(self, req_id: str) -> List[List[int]]:
         if self._prefill_tp_size == self._decode_tp_size:
             result = list(
                 map(lambda x: [x],
@@ -1382,8 +1382,8 @@ class MooncakeConnectorWorker:
             rand_group_index = rand.sample(range(num_groups), \
                 (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
             all_results = [
-                self._get_tp_remote_tp_ranks(ori_data[pp_index],
-                                             rand_group_index, num_groups)
+                self._get_remote_tp_ranks(ori_data[pp_index], rand_group_index,
+                                          num_groups)
                 for pp_index in range(self._prefill_pp_size)
             ]
             for group_index in range(len(all_results[0])):
@@ -1392,14 +1392,6 @@ class MooncakeConnectorWorker:
                     group.extend(all_results[pp_index][group_index])
                 sampled_nums.append(group)
             return sampled_nums
-
-        # non-random split
-        else:
-            group_size = self._prefill_tp_size // self._decode_tp_size * self._prefill_pp_size
-            for i in range(self._decode_tp_size):
-                slice = ori_data[i * group_size:(i + 1) * group_size]
-                sampled_nums.append(slice.tolist())
-        return sampled_nums
 
 
 @contextlib.contextmanager
