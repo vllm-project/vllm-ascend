@@ -602,7 +602,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 out=output)
         return output
 
-    def _forward_pooling(self, query: torch.Tensor, key: torch.Tensor,
+    def _forward_encoder_attention(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
                          _: torch.Tensor) -> torch.Tensor:
         assert attn_metadata is not None
@@ -926,9 +926,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return output.fill_(0)
         key, value = self.reshape_and_cache(key, value, kv_cache,
                                             attn_metadata)
-        if self.attn_type == AttentionType.ENCODER_ONLY:
-            attn_output = self._forward_pooling(query, key, value,
-                                               attn_metadata, output)
+        # pooling model branch
+        if isinstance(attn_metadata.is_causal_pooling, bool):
+            attn_output = self._forward_encoder_attention(
+                query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
         output = self.forward_impl(query, key, value, kv_cache, attn_metadata,
