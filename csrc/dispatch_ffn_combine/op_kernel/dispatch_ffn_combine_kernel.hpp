@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef DISPATH_FFN_COMBINE_KERNEL_HPP
-#define DISPATH_FFN_COMBINE_KERNEL_HPP
+#ifndef DISPATCH_FFN_COMBINE_KERNEL_HPP
+#define DISPATCH_FFN_COMBINE_KERNEL_HPP
 
 #include "kernel_operator.h"
 
