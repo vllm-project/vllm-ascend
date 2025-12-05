@@ -196,7 +196,7 @@ print(generated_text)
 
 If you run this script successfully, you can see the info shown below:
 
-```bash
+```
 The image displays a logo consisting of two main elements: a stylized geometric design and a pair of text elements.
 
 1. **Geometric Design**: On the left side of the image, there is a blue geometric design that appears to be made up of interconnected shapes. These shapes resemble a network or a complex polygonal structure, possibly hinting at a technological or interconnected theme. The design is monochromatic and uses only blue as its color, which could be indicative of a specific brand or company.
@@ -278,7 +278,7 @@ print(generated_text)
 
 If you run this script successfully, you can see the info shown below:
 
-```bash
+```
 ### **1. Logo:**
 - **Shape:** The logo on the left side of the image features a stylized geometric design composed of interconnected shapes that resemble interconnected hexagons or other polygonal forms.
 - **Color:**
