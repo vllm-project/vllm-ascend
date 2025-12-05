@@ -215,14 +215,6 @@ Two accuracy evaluation methods are provided: AISBench (recommended) and manual 
 
 Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-#### Execution Command
-```text
-# Run evaluation (debug logs recommended for first execution)
-ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --debug
-
-# Generate summary report
-ais_bench --models vllm_api_general_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer example
-```
 Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy report is shown below:
 
 | dataset | version | metric | mode | vllm-api-general-chat |
