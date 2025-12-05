@@ -6,7 +6,7 @@ The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powe
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
-This tutorial uses Qwen3-VL-8B-Instruct as an example to demonstrate the single NPU deployment and Qwen2.5-VL-32B-Instruct-w8a8 to demonstrate the multi-NPU deployment.
+This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct model` as an example for single NPU deployment and the `Qwen2.5-VL-32B-Instruct` model to illustrate multi-NPU deployment.
 
 ## Supported Features
 
@@ -207,7 +207,7 @@ The overall design is modern and minimalist, with a clear contrast between the g
 ```
 
 ::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct-w8a8
+::::{tab-item} Qwen2.5-VL-32B-Instruct
 :sync: multi
 
 Run the following script to execute offline inference on multi-NPU:
@@ -221,7 +221,7 @@ from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 from qwen_vl_utils import process_vision_info
 
-MODEL_PATH = "Qwen/Qwen2.5-VL-32B-Instruct-w8a8"
+MODEL_PATH = "Qwen/Qwen2.5-VL-32B-Instruct"
 
 llm = LLM(
     model=MODEL_PATH,
@@ -279,13 +279,30 @@ print(generated_text)
 If you run this script successfully, you can see the info shown below:
 
 ```bash
-The image displays a logo consisting of two main elements: a stylized geometric design and a pair of text elements.
+### **1. Logo:**
+- **Shape:** The logo on the left side of the image features a stylized geometric design composed of interconnected shapes that resemble interconnected hexagons or other polygonal forms.
+- **Color:**
+  - The logo is primarily composed of **blue lines**.
+  - The design appears to be constructed from a network-like or abstract geometric pattern, suggesting themes of connection, integration, or technology.
+  - The shapes are rendered using clean, crisp lines and angles, giving it a modern and tech-oriented aesthetic.
+  - The geometric design appears interconnected and dynamic, indicating concepts like networking, intelligence, and complexity.
+  - The lines are minimalist and symmetrical, with darker and lighter shades of blue, giving it a modular and abstract appearance.
+  - The design has a **three-dimensional or engineered feel**, with overlapping elements, possibly symbolizing interconnectedness, scalability, or a tech-forward, futuristic look.
+  - The shapes are simple yet intricate, implying advanced technology or AI-related innovation.
+  - The use of blue gives it a futuristic and professional tone.
 
-1. **Geometric Design**: On the left side of the image, there is a blue geometric design that appears to be made up of interconnected shapes. These shapes resemble a network or a complex polygonal structure, possibly hinting at a technological or interconnected theme. The design is monochromatic and uses only blue as its color, which could be indicative of a specific brand or company.
-
-2. **Text Elements**: To the right of the geometric design, there are two lines of text. The first line reads "TONGYI" in a sans-serif font, with the "YI" part possibly being capitalized. The second line reads "Qwen" in a similar sans-serif font, but in a smaller size.
-
-The overall design is modern and minimalist, with a clear contrast between the geometric and textual elements. The use of blue for the geometric design could suggest themes of technology, connectivity, or innovation, which are common associations with the color blue in branding. The simplicity of the design makes it easily recognizable and memorable.
+### **2. Text:**
+- **TONGYI:**
+  - Written in ** uppercase letters**.
+  - The font is clean, sharp, and modern, aligning with themes of innovation and digital technology.
+  - The interconnected hexagons or polygons give a sense of sophistication and precision.
+  
+- **Qwen:**
+  - Below "TONGYI," the word "Qwen" is written in a sans-serif font, which is typical of brand logos aimed at conveying simplicity, reliability, and digital symmetry.
+  - The font of "Qwen" is in a thinner, sleek typeface, aligning with branding associated with AI and technology.
+  - The blue color reinforces the technological and digital theme, often used to convey trust, stability, and intelligence, aligning with the design elements, reinforcing the overall tech-savvy and modern appearance.
+  - "Qwen" is placed below "TONGYI," further emphasizing the company or model's focus on precision and precision.
+  - The font
 ```
 
 ::::
@@ -354,7 +371,7 @@ INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 ```
 
 ::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct-w8a8
+::::{tab-item} Qwen2.5-VL-32B-Instruct
 :sync: multi
 
 Run docker container to start the vLLM server on multi-NPU:
@@ -362,8 +379,10 @@ Run docker container to start the vLLM server on multi-NPU:
 ```shell
 #!/bin/sh
 # if os is Ubuntu
+apt update
 apt install libjemalloc2 
 # if os is openEuler
+yum update
 yum install jemalloc
 # Add the LD_PRELOAD environment variable
 if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
@@ -378,11 +397,9 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 # Set vLLM to Engine V1
 export VLLM_USE_V1=1
 
-vllm serve /data/Qwen2.5-VL-32B-Instruct-w8a8 \
+vllm serve Qwen/Qwen2.5-VL-32B-Instruct \
     --host 0.0.0.0 \
-    --port 8888 \
-    --served-model-name qwen25_vl \
-    --quantization ascend \
+    --port 8000 \
     --async-scheduling \
     --tensor-parallel-size 2 \
     --max-model-len 30000 \
@@ -390,7 +407,7 @@ vllm serve /data/Qwen2.5-VL-32B-Instruct-w8a8 \
     --max-num-seqs 30 \
     --no-enable-prefix-caching \
     --trust-remote-code \
-    --additional-config '{"enable_weight_nz_layout":true}'
+    --dtype bfloat16
 
 ```
 
@@ -401,7 +418,7 @@ Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-Instruc
 If your service start successfully, you can see the info shown below:
 
 ```bash
-INFO:     Started server process [2736]
+INFO:     Started server process [14431]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
@@ -412,7 +429,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "qwen25_vl",
+    "model": "Qwen/Qwen2.5-VL-32B-Instruct",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -426,7 +443,7 @@ curl http://localhost:8000/v1/chat/completions \
 If you query the server successfully, you can see the info shown below (client):
 
 ```bash
-{"id":"chatcmpl-f04fb20e79bb40b39b8ed7fdf5bd613a","object":"chat.completion","created":1741749149,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"The text in the illustration reads \"TONGYI Qwen.\"","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":74,"total_tokens":89,"completion_tokens":15,"prompt_tokens_details":null},"prompt_logprobs":null}
+{"id":"chatcmpl-c07088bf992a4b77a89d79480122a483","object":"chat.completion","created":1764905884,"model":"Qwen/Qwen2.5-VL-32B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is:\n\n**TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null,"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":73,"total_tokens":89,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
 Logs of the vllm server:
@@ -473,17 +490,38 @@ lm_eval \
     --output_path ./results
 ```
 
-3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only.
 
 |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
 |---------|------:|------|-----:|------|---|-----:|---|-----:|
 |mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
 
 ::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct-w8a8
+::::{tab-item} Qwen2.5-VL-32B-Instruct
 :sync: multi
 
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen2.5-VL-32B-Instruct` in offline mode.
 
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+lm_eval \
+    --model vllm-vlm \
+    --model_args pretrained=Qwen/Qwen2.5-VL-32B-Instruct,max_model_len=8192,tensor_parallel_size=2 \
+    --tasks mmmu_val \
+    --batch_size 32 \
+    --apply_chat_template \
+    --trust_remote_code \
+    --output_path ./results
+```
+
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only.
+
+|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+|---------|------:|------|-----:|------|---|-----:|---|-----:|
+|mmmu_val |      0|none  |      |acc   |↑  |0.5839|±  |0.0159|
 
 ::::
 :::::
@@ -492,7 +530,7 @@ lm_eval \
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3-VL-8B-Instruct` as an example.
+The performance evaluation must be conducted in an online mode.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
@@ -514,10 +552,12 @@ vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --rand
 ```
 
 ::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct-w8a8
+::::{tab-item} Qwen2.5-VL-32B-Instruct
 :sync: multi
 
-
+```shell
+vllm bench serve --model Qwen/Qwen2.5-VL-32B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+```
 
 ::::
 :::::
