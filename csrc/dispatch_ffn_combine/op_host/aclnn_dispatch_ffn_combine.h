@@ -22,19 +22,22 @@ extern "C" {
 #endif
 
 /**
- * 算子功能：实现分布式MoE从InitRouting到Unpermute全部算子的融合
- * @brief aclnnDispatchFFNCombine的第一段接口，根据具体的计算流程，计算workspace大小。
+ * Operator function: fuse all distributed MoE ops from InitRouting through Unpermute.
+ * @brief First-stage interface of aclnnDispatchFFNCombine that calculates workspace size based on the specific compute flow.
  * @domain aclnn_ops_infer
- * @param [in] a: matmul左矩阵，数据类型支持：float16, bf16。
- * @param [in] b: matmul右矩阵，数据类型支持：float16, bf16。
- * @param [in] bias: 偏置，数据类型支持：float16, bf16。
- * @param [in] group: 标识通信域名称的字符串。
- * @param [in] worldsize: 通信域size，支持2/4/8卡。
- * @param [in] epRankId: ep本卡Id。取值范围[0, worldSize)，各卡的rankId不能重复
- * @param [out] c: 计算+通信的结果，数据类型：同输入。
- * @param [out] workspaceSize: 返回需要在npu device侧申请的workspace大小。
- * @param [out] executor: 返回op执行器，包含了算子计算流程。
- * @return aclnnStatus: 返回状态码
+ * @param [in] x: The input tensor.
+ * @param [in] weight1: The first weight tensor.
+ * @param [in] weight2: The second weight tensor.
+ * @param [in] expertId: The expert ID tensor.
+ * @param [in] scale1: The first scale tensor.
+ * @param [in] scale2: The second scale tensor.
+ * @param [in] probs: The probabilities tensor.
+ * @param [in] group: string identifying the communication domain name.
+ * @param [in] maxOutputSize: The maximum output size.
+ * @param [out] out: result of computation + communication; same dtype as input.
+ * @param [out] workspaceSize: workspace size to allocate on the NPU device side.
+ * @param [out] executor: op executor containing the operator compute flow.
+ * @return aclnnStatus: status code.
  */
 __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const aclTensor* weight1, const aclTensor* weight2,
                                                                                         const aclTensor* expertId, const aclTensor* scale1, const aclTensor* scale2,
@@ -44,12 +47,12 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineGetWor
                                                                                         uint64_t* workspaceSize, aclOpExecutor** executor);
 
 /**
- * @brief aclnnDispatchGmmCombine的第二段接口，用于执行计算。
- * @param [in] workspace: 在npu device侧申请的workspace内存起址。
- * @param [in] workspace_size: 在npu device侧申请的workspace大小，由第一段接口aclnnDispatchFFNCombineGetWorkspaceSize获取。
- * @param [in] exector: op执行器，包含了算子计算流程。
- * @param [in] stream: acl stream流。
- * @return aclnnStatus: 返回状态码
+ * @brief Second-stage interface of aclnnDispatchFFNCombine to execute computation.
+ * @param [in] workspace: workspace memory address allocated on the NPU device side.
+ * @param [in] workspace_size: workspace size allocated on the NPU device side, obtained from aclnnDispatchFFNCombineGetWorkspaceSize.
+ * @param [in] executor: op executor containing the operator compute flow.
+ * @param [in] stream: acl stream.
+ * @return aclnnStatus: status code.
  */
 __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombine(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                            aclrtStream stream);
@@ -58,4 +61,4 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombine(void*
 }
 #endif
 
-#endif  // OP_API_INC_GMM_ALLTOALLV_
+#endif  // OP_API_INC_DISPATCH_FFN_COMBINE_
