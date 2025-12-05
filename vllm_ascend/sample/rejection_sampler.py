@@ -153,7 +153,7 @@ def rejection_sample(
         if HAS_TRITON:
             vec_len = batch_size
             n = cu_num_draft_tokens.numel()
-            grid = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']),)
+            grid = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']), )
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
                 rejection_greedy_sample_spec_len_1_triton[grid](
@@ -607,7 +607,7 @@ def rejection_greedy_sample_spec_len_1_triton(
     target_argmax_ptr,  # [num_tokens]
     bonus_token_ids_ptr,
     vec_len,
-    BLOCK_SIZE:tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
     offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -657,7 +657,7 @@ def rejection_greedy_sample_triton(
     is_greedy_ptr,  # [batch_size] or None
     vec_len,
     max_spec_len,
-    BLOCK_SIZE:tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
     offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -671,8 +671,7 @@ def rejection_greedy_sample_triton(
 
     start_idx = tl.where(
         offset == 0, 0,
-        tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask)
-    )
+        tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask))
     end_idx = tl.load(cu_num_draft_tokens_ptr + offset, is_greedy_mask)
     num_draft_tokens = end_idx - start_idx
 
@@ -787,8 +786,7 @@ def expand_kernel(
     len_mask = offset < vec_len
 
     start_idx = tl.where(offset == 0, 0,
-                         tl.load(cu_num_tokens_ptr + offset - 1, len_mask)
-    )
+                         tl.load(cu_num_tokens_ptr + offset - 1, len_mask))
     end_idx = tl.load(cu_num_tokens_ptr + offset, len_mask)
     num_tokens = end_idx - start_idx
 
