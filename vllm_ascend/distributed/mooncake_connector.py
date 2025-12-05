@@ -1347,51 +1347,62 @@ class MooncakeConnectorWorker:
     def _get_remote_tp_ranks(self, tp_ori_data: np.ndarray,
                              rand_group_index: list[int],
                              num_groups: int) -> List[List[int]]:
-        tp_ori_data = tp_ori_data.reshape(-1, num_groups)
-        choosen_group = tp_ori_data[:, [rand_group_index]]
-        flattened = choosen_group.reshape(-1).tolist()
-        sampled_nums = [
-            flattened[i:i + self.tp_num_need_pulls]
-            for i in range(0, len(flattened), self.tp_num_need_pulls)
-        ]
-        return sampled_nums
+        # random split prefill tp list
+        tp_sampled_nums = []
+        if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+            tp_ori_data = tp_ori_data.reshape(-1, num_groups)
+            choosen_group = tp_ori_data[:, [rand_group_index]]
+            flattened = choosen_group.reshape(-1).tolist()
+            tp_sampled_nums = [
+                flattened[i:i + self.tp_num_need_pulls]
+                for i in range(0, len(flattened), self.tp_num_need_pulls)
+            ]
+        # non-random split
+        else:
+            group_size = self._prefill_tp_size // self._decode_tp_size
+            for i in range(self._decode_tp_size):
+                slice = tp_ori_data[i * group_size:(i + 1) * group_size]
+                tp_sampled_nums.append(slice.tolist())
+        return tp_sampled_nums
 
     def _get_remote_ranks_for_req(self, req_id: str) -> List[List[int]]:
+        # Divide the ports according to the TP within the PP
+        sampled_nums = []
         if self._prefill_tp_size == self._decode_tp_size:
-            result = list(
-                map(lambda x: [x],
-                    range(self._prefill_tp_size * self._prefill_pp_size)))
-            return result
-        sampled_nums: List[List[int]] = []
+            sampled_nums = list(
+                map(
+                    lambda tp: [
+                        tp + pp * self._prefill_tp_size
+                        for pp in range(self._prefill_pp_size)
+                    ], range(self._prefill_tp_size)))
+            return sampled_nums
+        # use deepseek mla, num_key_value_heads == 128, but consider as 1
+        if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+            num_kv_head = 1
+        else:
+            num_kv_head = self.num_key_value_heads
+        ori_data = np.arange(self._prefill_tp_size * self._prefill_pp_size)
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
-        sampled_nums = []
-        ori_data = np.arange(self._prefill_tp_size * self._prefill_pp_size)
         # random split prefill tp list
-        if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
-            if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
-                # The KV cache in the model config file for MLA and SFA formats has 128 heads, but we treat it as a single unit.
-                num_kv_head = 1
-            else:
-                num_kv_head = self.num_key_value_heads
-            # The number of redundant copies for each KV head within the PP stage
-            ori_data = ori_data.reshape(
-                self._prefill_pp_size,
-                -1)  # Divide the ranks according to the PP stage
-            num_groups = max(1, len(ori_data[0]) // num_kv_head)
-            rand_group_index = rand.sample(range(num_groups), \
-                (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
-            all_results = [
-                self._get_remote_tp_ranks(ori_data[pp_index], rand_group_index,
-                                          num_groups)
-                for pp_index in range(self._prefill_pp_size)
-            ]
-            for group_index in range(len(all_results[0])):
-                group = []
-                for pp_index in range(self._prefill_pp_size):
-                    group.extend(all_results[pp_index][group_index])
-                sampled_nums.append(group)
-            return sampled_nums
+        ori_data = ori_data.reshape(self._prefill_pp_size, -1)
+        num_groups = max(
+            1,
+            len(ori_data[0]) // num_kv_head
+        )  # The number of redundant copies for each KV head within the PP stage
+        rand_group_index = rand.sample(range(num_groups), \
+            (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
+        all_results = [
+            self._get_remote_tp_ranks(ori_data[pp_index], rand_group_index,
+                                      num_groups)
+            for pp_index in range(self._prefill_pp_size)
+        ]
+        for group_index in range(len(all_results[0])):
+            group = []
+            for pp_index in range(self._prefill_pp_size):
+                group.extend(all_results[pp_index][group_index])
+            sampled_nums.append(group)
+        return sampled_nums
 
 
 @contextlib.contextmanager
