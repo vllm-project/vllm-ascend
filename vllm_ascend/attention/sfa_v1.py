@@ -20,7 +20,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz)
+                               is_enable_nz, enable_custom_op)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -554,6 +554,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         seq_lens = attn_metadata.seq_lens
         cum_query_lens = attn_metadata.cum_query_lens
 
+        enable_custom_op()
         topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
             query=q,
             key=kv_cache[2],
