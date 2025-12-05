@@ -42,35 +42,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  multi-node-tests:
-    name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        test_config:
-          - name: multi-node-deepseek-dp
-            config_file_path: DeepSeek-R1-W8A8-A2.yaml
-            size: 2
-          - name: multi-node-deepseek-dp-torchair
-            config_file_path: DeepSeek-R1-W8A8-A2-torchair.yaml
-            size: 2
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a2
-      runner: linux-aarch64-a2-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
-
   single-node-tests:
     name: single-node
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: multi-node-tests
     strategy:
       fail-fast: false
       matrix:
@@ -139,3 +113,30 @@ jobs:
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11'
       upload: false
+
+
+  multi-node-tests:
+    name: multi-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: single-node-tests
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-deepseek-dp
+            config_file_path: DeepSeek-R1-W8A8-A2.yaml
+            size: 2
+          - name: multi-node-deepseek-dp-torchair
+            config_file_path: DeepSeek-R1-W8A8-A2-torchair.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a2
+      runner: linux-aarch64-a2-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
