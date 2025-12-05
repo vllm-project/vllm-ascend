@@ -100,7 +100,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 `Qwen3-235B-A22B` and `Qwen3-235B-A22B-w8a8` can both be deployed on 1 Atlas 800 A3（64G*16）、 1 Atlas 800 A2（64G*8）.
 Quantized version need to start with parameter `--quantization ascend`.
 
-Run the following script to execute online inference.
+Run the following script to execute online 128k inference.
 
 ```shell
 #!/bin/sh
@@ -127,7 +127,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
---rope-scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \
+--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":4,"original_max_position_embeddings":32768}}' \
 --additional-config '{"ascend_scheduler_config":{"enabled":false}}' \
 --compilation-config '{"cudagraph_capture_sizes":[1,4],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
