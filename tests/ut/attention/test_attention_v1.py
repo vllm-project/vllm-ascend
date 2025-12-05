@@ -54,18 +54,29 @@ class TestAscendAttentionBackend(TestBase):
 
 class TestAscendAttentionMetadataBuilder(TestBase):
 
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch('vllm.distributed.parallel_state.get_dcp_group')
     @patch('vllm.distributed.parallel_state._DCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
-    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group):
+    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group, mock_pcp,
+              mock_get_pcp_group):
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
         dcp_group.rank_in_group = 0
         dcp_group.world_size = 1
         dcp_group.device_group = MagicMock()
         mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
 
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
@@ -117,18 +128,29 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
 class TestAscendAttentionBackendImpl(TestBase):
 
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch('vllm.distributed.parallel_state.get_dcp_group')
     @patch('vllm.distributed.parallel_state._DCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
-    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group):
+    def setUp(self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group, mock_pcp,
+              mock_get_pcp_group):
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
         dcp_group.rank_in_group = 0
         dcp_group.world_size = 1
         dcp_group.device_group = MagicMock()
         mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
 
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
