@@ -1933,26 +1933,27 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
         ascend_config = get_ascend_config()
-        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
-            attn_state = AscendAttentionState.PrefillNoCache
-        # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        elif np.all(num_scheduled_tokens == 1):
-            attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                # SpecDecoding now supports seq_len=1 and seq_len=2
-                # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
-                attn_state = AscendAttentionState.SpecDecoding
-        # Speculative decoding.
-        elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
-                attn_state = AscendAttentionState.ChunkedPrefill
-        # splitfuse
-        elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
-            attn_state = AscendAttentionState.ChunkedPrefill
-        else:
-            attn_state = AscendAttentionState.PrefillCacheHit
+        attn_state = AscendAttentionState.ChunkedPrefill
+        # if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+        #     attn_state = AscendAttentionState.PrefillNoCache
+        # # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
+        # elif np.all(num_scheduled_tokens == 1):
+        #     attn_state = AscendAttentionState.DecodeOnly
+        #     if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+        #         # SpecDecoding now supports seq_len=1 and seq_len=2
+        #         # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
+        #         attn_state = AscendAttentionState.SpecDecoding
+        # # Speculative decoding.
+        # elif np.all(num_valid_tokens == 1):
+        #     if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+        #         attn_state = AscendAttentionState.SpecDecoding
+        #     else:
+        #         attn_state = AscendAttentionState.ChunkedPrefill
+        # # splitfuse
+        # elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
+        #     attn_state = AscendAttentionState.ChunkedPrefill
+        # else:
+        #     attn_state = AscendAttentionState.PrefillCacheHit
         return attn_state
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
