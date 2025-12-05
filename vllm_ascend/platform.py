@@ -30,13 +30,15 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
+from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-    enable_sp, get_ascend_device_type, is_vl_model,
-    prefill_context_parallel_enable, update_aclgraph_sizes,
-    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+                               enable_sp, get_ascend_device_type, is_vl_model,
+                               update_aclgraph_sizes,
+                               update_cudagraph_capture_sizes,
+                               update_default_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -45,6 +47,8 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+
+CUSTOM_OP_REGISTERED = False
 
 
 class NPUPlatform(Platform):
@@ -63,6 +67,32 @@ class NPUPlatform(Platform):
 
     def is_sleep_mode_available(self) -> bool:
         return True
+
+    @property
+    def pass_key(self) -> str:
+        """
+        Inductor config key for the PassManager custom pass, for example 'post_grad_custom_post_pass'.
+        It is a parameter of inductor_config used to register custom passes.
+        Currently, we only use Inductor's 'pattern matcher' functionality, so we define our own pass_key.
+        """
+        return "graph_fusion_manager"
+
+    @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        """
+        Get the pass manager class for this platform.
+        It will be registered as a custom pass under the current_platform.pass_key.
+        """
+        return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
+
+    @classmethod
+    def get_compile_backend(self) -> str:
+        """
+        Get the custom compile backend. Previously, we used EagerAdaptor by default. 
+        To use graph fusion operations, we defined our own backend compiler.
+        """
+        from vllm_ascend.compilation.compiler_interface import AscendCompiler
+        return AscendCompiler.__module__ + "." + AscendCompiler.__name__
 
     @classmethod
     def pre_register_and_update(cls,
@@ -132,7 +162,13 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
-        ascend_scheduler_config = ascend_config.ascend_scheduler_config
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        if ascend_compilation_config:
+            vllm_config.additional_config.setdefault(
+                "ascend_compilation_config", {}).update(
+                    vars(ascend_compilation_config
+                         ) if not isinstance(ascend_compilation_config, dict)
+                    else ascend_compilation_config)
 
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)
@@ -157,7 +193,8 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
-        compilation_config.pass_config.enable_fusion = False
+        compilation_config.pass_config.fuse_norm_quant = False
+        compilation_config.pass_config.fuse_act_quant = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -192,7 +229,7 @@ class NPUPlatform(Platform):
         # to ascend ops && hardwares. We update these sizes here to improve
         # default performance.
         update_default_aclgraph_sizes(vllm_config)
-        # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
+        # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
                 enable_sp(vllm_config):
@@ -210,6 +247,9 @@ class NPUPlatform(Platform):
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+        from vllm_ascend.compilation.compiler_interface import AscendCompiler
+        compilation_config.oot_compiler = AscendCompiler.__module__ + "." + AscendCompiler.__name__
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
@@ -268,38 +308,13 @@ class NPUPlatform(Platform):
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
 
-        if cache_config:
-            if cache_config.block_size is None:
-                cache_config.block_size = 128
-
-            if cache_config.enable_prefix_caching or \
-                not ascend_scheduler_config.enabled or \
-                getattr(ascend_scheduler_config, "enable_chunked_prefill", False):
-                logger.warning(
-                    "If chunked prefill or prefix caching is enabled, block size must be set to 128."
-                )
-                origin_block_size = cache_config.block_size
-                cache_config.block_size = 128
-                # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-                if model_config and model_config.hf_config.model_type == "qwen3_next":
-                    logger.warning(
-                        "When running qwen3-next model, block_size needs to be restored to its original value."
-                    )
-                    cache_config.block_size = origin_block_size
+        refresh_block_size(vllm_config)
 
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        # If ascend_scheduler_config is enabled,
-        # extents original scheduler_config to use AscendScheduler.
-        if ascend_config.ascend_scheduler_config.enabled:
-            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
-            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config,
-                ascend_config.ascend_scheduler_config)
-            vllm_config.scheduler_config = ascend_scheduler_config
-        elif ascend_config.recompute_scheduler_enable:
+        if ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_schedule_config import \
                 RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
@@ -315,7 +330,6 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
         if vllm_config.kv_transfer_config is not None and \
-            prefill_context_parallel_enable() and \
             cache_config.block_size != parallel_config.cp_kv_cache_interleave_size and \
             parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size > 1:
             raise AssertionError(
@@ -341,7 +355,22 @@ class NPUPlatform(Platform):
         # TODO: when the above issue is fixed, we can uncomment the following lines.
         # from vllm_ascend.utils import enable_custom_op
         # enable_custom_op()
-        pass
+        # set custom ops path
+        global CUSTOM_OP_REGISTERED
+        if CUSTOM_OP_REGISTERED:
+            return
+        CUR_DIR = os.path.dirname(os.path.realpath(__file__))
+        CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
+                                       "vllm-ascend")
+        if os.path.exists(CUSTOM_OPP_PATH):
+            current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH",
+                                                   "")
+            if current_cust_opp_path:
+                os.environ[
+                    "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
+            else:
+                os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+        CUSTOM_OP_REGISTERED = True
 
     @classmethod
     def get_attn_backend_cls(
