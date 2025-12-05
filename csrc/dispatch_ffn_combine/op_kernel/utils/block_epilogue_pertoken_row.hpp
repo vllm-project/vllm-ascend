@@ -146,27 +146,27 @@ public:
             auto gmTileD = gmD[loopIdx * blockN];
             LayoutC layoutUbC{1, blockN};
 
-            // 把C从GM workspace搬到UB
+            // Move C from GM workspace to UB
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             copyGmToUbC(ubC, gmTileC, layoutUbC, layoutUbC);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
-            //在UB上做把C cast成FP32
+            // Cast C to FP32 in UB
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
             AscendC::Cast(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, blockN);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
-            // 获取pertoken scale值，gmPerTokenScale的第loopIdx行
+            // Get per-token scale from row loopIdx of gmPerTokenScale
             ElementPerTokenScale perTokenScale = gmPerTokenScale(loopIdx);
 
             AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            // pertoken scale值与FP32的C做Muls乘法
+            // Multiply FP32 C by the per-token scale
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
             AscendC::PipeBarrier<PIPE_V>();
 
-            // 将muls结果转回fp16/bf16
+            // Cast the muls result back to fp16/bf16
             LayoutD layoutUbD{1, blockN};
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
 

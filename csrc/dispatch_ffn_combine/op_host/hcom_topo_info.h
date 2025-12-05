@@ -64,8 +64,8 @@ class HcomTopoInfo {
   ~HcomTopoInfo() = default;
   std::unordered_map<std::string, TopoInfo> rank_info_;
   std::mutex mutex_;
-  std::unordered_map<std::string, void*> group_to_ordered_stream_; // 通信域保序流
-  std::unordered_map<int32_t, std::unordered_map<std::string, void*>> device_id_to_group_to_ordered_stream_; // 通信域保序流
+  std::unordered_map<std::string, void*> group_to_ordered_stream_; // Ordered stream for the communication domain
+  std::unordered_map<int32_t, std::unordered_map<std::string, void*>> device_id_to_group_to_ordered_stream_; // Ordered stream for the communication domain
 };
 }
 
