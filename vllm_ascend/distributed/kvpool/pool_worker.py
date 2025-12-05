@@ -6,7 +6,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
+                              get_pcp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -22,14 +22,6 @@ from vllm_ascend.distributed.kvpool.config_data import (
 from vllm_ascend.distributed.kvpool.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
-from vllm_ascend.utils import prefill_context_parallel_enable
-
-if prefill_context_parallel_enable():
-    # isort: off
-    from vllm.distributed import (get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-    # isort: on
 
 backend_map: Dict[str, Type[Backend]] = {
     "mooncake": MooncakeBackend,
@@ -57,10 +49,9 @@ class KVPoolWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0

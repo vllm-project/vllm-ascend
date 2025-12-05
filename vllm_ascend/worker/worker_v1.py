@@ -53,7 +53,6 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
-                               prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -405,17 +404,11 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
-        if prefill_context_parallel_enable():
-            ensure_model_parallel_initialized(
-                self.parallel_config.tensor_parallel_size,
-                self.parallel_config.pipeline_parallel_size,
-                self.parallel_config.prefill_context_parallel_size,
-                self.parallel_config.decode_context_parallel_size)
-        else:
-            ensure_model_parallel_initialized(
-                self.parallel_config.tensor_parallel_size,
-                self.parallel_config.pipeline_parallel_size,
-                self.parallel_config.decode_context_parallel_size)
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.prefill_context_parallel_size,
+            self.parallel_config.decode_context_parallel_size)
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
         ensure_ec_transfer_initialized(self.vllm_config)
