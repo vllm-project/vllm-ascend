@@ -1,4 +1,4 @@
-# Qwen2.5
+# Qwen2.5-Instruct
 
 ## Introduction
 
