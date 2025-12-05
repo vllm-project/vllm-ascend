@@ -433,17 +433,9 @@ class AscendMLAMetadataBuilder:
                 common_attn_metadata.block_table_tensor[:graph_pad_size])
         else:
             block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
-        if self.pcp_size > 1:
-            num_decodes_flatten = num_decodes * self.decode_threshold
-            block_table = common_attn_metadata.block_table_tensor[:
-                                                                  num_decodes_flatten
-                                                                  +
-                                                                  num_prefills]
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
 
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
         input_positions = common_attn_metadata.positions[:
@@ -465,6 +457,13 @@ class AscendMLAMetadataBuilder:
         query_lens = query_seq_lens_cpu[:num_reqs]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         num_computed_tokens_cpu = (seq_lens - query_lens)
+
+        if self.pcp_size * self.dcp_size > 1:
+            num_decodes_flatten = query_lens[:num_decodes].sum().item()
+            block_table = common_attn_metadata.block_table_tensor[:
+                                                                  num_decodes_flatten
+                                                                  +
+                                                                  num_prefills]
 
         prefill_metadata = None
         chunked_context_metadata = None
@@ -530,8 +529,9 @@ class AscendMLAMetadataBuilder:
                 if self.dcp_size * self.pcp_size > 1:
                     if num_computed_tokens_of_pcp_dcp is not None:
                         local_context_lens_allranks = torch.tensor(
-                            num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]
-                        ).reshape(-1, self.dcp_size * self.pcp_size)
+                            num_computed_tokens_of_pcp_dcp[
+                                num_decodes_flatten:]).reshape(
+                                    -1, self.dcp_size * self.pcp_size)
                     # Note(qcs): The max local context lengths
                     # padded to `cp_local_block_size`.
                     padded_local_context_lens_cpu = (cdiv(
@@ -617,7 +617,7 @@ class AscendMLAMetadataBuilder:
                 cos=cos,
                 pcp_metadata=pcp_metadata,
             )
-            if self.pcp_size > 1:
+            if self.pcp_size * self.dcp_size > 1:
                 prefill_metadata.block_table = block_table[
                     num_decodes_flatten:, ...]
 
@@ -630,13 +630,12 @@ class AscendMLAMetadataBuilder:
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            if self.pcp_size > 1:
+            if self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten seq_lens and block_table
                 # to avoid irregular spec_attn_mask shape
                 block_table = block_table[:num_decodes_flatten, ...]
             else:
                 block_table = block_table[:num_decodes, ...]
-            # NOTE: Currently, MTP-fullgraph is incompatibility pcp
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
             if graph_pad_size > num_decodes and \
                     self.speculative_config.disable_padded_drafter_batch:
@@ -646,8 +645,7 @@ class AscendMLAMetadataBuilder:
             if num_computed_tokens_of_pcp_dcp is not None:
                 # [bs, pcp_size, dcp_size]
                 num_computed_tokens_of_cp_dcp_array = np.array(
-                    num_computed_tokens_of_pcp_dcp)[:num_decodes *
-                                                    self.decode_threshold]
+                    num_computed_tokens_of_pcp_dcp)[:num_decodes_flatten]
 
                 cp_seq_len = num_computed_tokens_of_cp_dcp_array[:,
                                                                  self.pcp_rank,
@@ -1897,8 +1895,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "return_lse": True,
             "calc_type": "calc_type_ring",
         }
-        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
+        if forward_context.is_mtp_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
         if forward_context.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
