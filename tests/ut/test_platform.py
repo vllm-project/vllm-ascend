@@ -32,7 +32,6 @@ class TestNPUPlatform(TestBase):
     def mock_vllm_ascend_config():
         mock_ascend_config = MagicMock()
         mock_ascend_config.torchair_graph_config.enabled = False
-        mock_ascend_config.ascend_scheduler_config.enabled = False
         mock_ascend_config.enable_shared_expert_dp = False
         return mock_ascend_config
 
