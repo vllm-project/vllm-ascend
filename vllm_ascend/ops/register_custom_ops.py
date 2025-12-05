@@ -249,8 +249,9 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         final_hidden_states: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
-    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2
-                         } or forward_context.sp_enabled:
+    if moe_comm_type in {
+            MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL
+    } or forward_context.sp_enabled:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
