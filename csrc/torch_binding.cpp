@@ -180,7 +180,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const at::Tensor &quant_scale0, const at::Tensor &quant_offset0, const at::Tensor &bias0,
     const at::Tensor &quant_scale1, const at::Tensor &quant_offset1, const at::Tensor &bias1,
     const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, bool enable_inner_out, at::Tensor &q_out0,
+    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
     at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1, at::Tensor &inner_out)
 {
     at::Tensor CtkvScale =
@@ -191,13 +191,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         q_nope_scale.has_value()
             ? q_nope_scale.value()
             : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
+    bool enableInnerOut =
+        enable_inner_out.has_value()
+            ? enable_inner_out.value()
+            : false;
     
     auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
         hiddenState,
         wuk,
         cache_mode,
         quant_mode,
-        enable_inner_out
+        enableInnerOut
     );
 
     void *hidden_state_ptr = hiddenState.data_ptr();
@@ -767,7 +771,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "               Tensor kv_cache_rope, Tensor slotmapping, Tensor quant_scale0,"
         "               Tensor quant_offset0, Tensor bias0, Tensor quant_scale1, Tensor quant_offset1,"
         "               Tensor bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
-        "               str? quant_mode, bool enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
         "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
         "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
     );
