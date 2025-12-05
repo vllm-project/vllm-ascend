@@ -8,7 +8,7 @@ import queue
 import struct
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -65,6 +65,27 @@ class ReqMeta:
     remote_te_rpc_port: Optional[int]
     remote_kv_caches_base_addr: Optional[list[int]]
     metaserver: Optional[str]
+
+
+@dataclass
+class SizedDict(OrderedDict):
+
+    def __init__(self, max_size=16000, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            value: dict[int, list[int]] = {}
+            self[key] = value
+            return value
 
 
 class KVCacheSendingLayerThread(threading.Thread):
@@ -695,9 +716,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.encoder = msgspec.msgpack.Encoder()
 
         self.remote_kv_caches_base_addr: dict[str, dict[int, list[int]]] = \
-            defaultdict(dict)
+            SizedDict()
         self.remote_te_port: dict[str, dict[int, int]] = \
-            defaultdict(dict)
+            SizedDict()
         self.remote_sockets_lock = threading.Lock()
         self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]] = defaultdict(  # type: ignore
