@@ -54,7 +54,7 @@ def run_tests(
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
-    with monkeypatch.context() as m:
+    with monkeypatch.context():
         # avoid precision errors
         outputs: list[tuple[str, list, list]] = []
         for n, (
