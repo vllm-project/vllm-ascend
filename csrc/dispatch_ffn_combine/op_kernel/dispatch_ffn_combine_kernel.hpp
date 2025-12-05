@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef DISPATH_FFN_COMBINE_KERNEL_HPP
-#define DISPATH_FFN_COMBINE_KERNEL_HPP
+#ifndef DISPATCH_FFN_COMBINE_KERNEL_HPP
+#define DISPATCH_FFN_COMBINE_KERNEL_HPP
 
 #include "kernel_operator.h"
 
@@ -324,7 +324,7 @@ private:
         int64_t gmGroupOffsetC = 0;
         uint32_t startCoreIdx = 0;
         uint32_t syncGroupIdx = 0;
-        AscendC::CrossCoreWaitFlag<0x2>(0); // 等待aiv计算cumsumformm
+        AscendC::CrossCoreWaitFlag<0x2>(0); // Wait for AIV to finish cumsum for matmul
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
@@ -364,7 +364,7 @@ private:
                 int64_t gmOffsetA = layoutA.GetOffset(offsetA);
                 int64_t gmOffsetB = layoutB1.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                int64_t gmOffsetS = groupIdx * params.problemShape.n() + blockCoord.n() * L1TileShape::N;   // 每个expert一组scale
+                int64_t gmOffsetS = groupIdx * params.problemShape.n() + blockCoord.n() * L1TileShape::N;   // One scale group per expert
                 if (currentM > 0) {
                     blockMmad(
                         gmA[gmGroupOffsetA + gmOffsetA], layoutA,
@@ -465,7 +465,7 @@ private:
                 int64_t gmOffsetA = layoutA.GetOffset(offsetA);
                 int64_t gmOffsetB = layoutB2.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                int64_t gmOffsetS = groupIdx * n2 + blockCoord.n() * L1TileShape::N;   // 每个expert一组scale
+                int64_t gmOffsetS = groupIdx * n2 + blockCoord.n() * L1TileShape::N;   // One scale group per expert
                 if (currentM > 0) {
                     blockMmad(
                         gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA,
@@ -537,7 +537,7 @@ private:
     void Dispatch(Params const &params) {
         icache_preload(8);
         int64_t localTokenPerExpertOffset = peermemInfo.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
-        GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;     // 把通信矩阵全部放到peermem
+        GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
         uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
 
         //---initRouting------
@@ -571,7 +571,7 @@ private:
         int32_t syncLoopIdx = -1;
         BlockEpilogue1 blockEpilogue(resource);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
-            // 第i个core从第i个rank的peermem读数据
+            // The ith core reads data from the ith rank's peermem
             groupIdxDeq = groupIdx - 2;
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
                 uint32_t rowStart = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum1;
@@ -592,9 +592,9 @@ private:
                     MatrixCoord offsetPeer{rowSrc, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
                     int64_t gmOffsetPeer = params.layoutA.GetOffset(offsetPeer);
-                    // 通信Data
+                    // Communication data
                     CopyGMToGM(gmA[gmOffsetA], gmRemoteA[gmOffsetPeer], rows * params.problemShape.k(), params.ubMoveNum);
-                    // 通信scale
+                    // Communication scale
                     CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
                 }
             }
@@ -604,7 +604,7 @@ private:
                 AscendC::CrossCoreWaitFlag<0x2>(syncLoopIdx / 8 + 1);
             }
             AscendC::SyncAll<true>();
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);   // V通知C当前轮的通信已完成
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);   // V notifies C that the current communication round is complete
             
             if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0) && groupIdx == params.expertPerRank - 1 && prevGroupSum1 > 0) {
                 uint32_t rowStartThisCore = 0;
@@ -664,7 +664,7 @@ private:
         uint32_t n2 = params.problemShape.k();
         uint32_t k2 = params.problemShape.n() / 2;
 
-        // TODO 计算tokenperexpert的cumsum
+        // TODO compute the cumsum of tokenPerExpert
         typename BlockEpilogue2::Params epilogueParams{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
@@ -774,10 +774,10 @@ private:
 
         CATLASS_DEVICE
         PeermemInfo(const Params & params, const HcclShmem & shmem) {
-            offsetA = 0;    // 占用1/3的BUFFSIZE
-            offsetPeerPerTokenScale = offsetA + AlignUp(shmem.SegmentSize() / 3, 512); // 占用1MB
-            offsetD = offsetPeerPerTokenScale + MB_SIZE;    // 占用剩下的
-            offsetPeerTokenPerExpert = shmem.SegmentSize() - 2 * MB_SIZE;     // 占用最后2MB
+            offsetA = 0;    // Occupies one third of BUFFSIZE
+            offsetPeerPerTokenScale = offsetA + AlignUp(shmem.SegmentSize() / 3, 512); // Occupies 1 MB
+            offsetD = offsetPeerPerTokenScale + MB_SIZE;    // Occupies the remaining space
+            offsetPeerTokenPerExpert = shmem.SegmentSize() - 2 * MB_SIZE;     // Occupies the final 2 MB
         }
     };
 

@@ -132,7 +132,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
             col = this->lastLoopCols;
           }
 #ifdef __CCE_KT_TEST__
-          // CPU孪生调试无法使用多核同步，可能导致index为未初始化的脏数据，因此需要特殊处理
+          // CPU twin debugging cannot use multi-core sync, so index may contain uninitialized dirty data; handle specially
           if (index * this->cols + i * this->perLoopCols + col * sizeof(T) > expandedXGm.GetSize()) {
               continue;
           }
