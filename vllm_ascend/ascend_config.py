@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional
+from uuid import uuid4
 
 from vllm.logger import logger
 
@@ -143,6 +144,11 @@ class AscendConfig:
             get_flashcomm2_oproj_tp_size_and_validate_config
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
             self, vllm_config)
+        kv_cfg = vllm_config.kv_transfer_config
+        if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
+                                              False):
+            kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
+            kv_cfg._engine_id_patched = True
 
 
 class AscendCompilationConfig:
