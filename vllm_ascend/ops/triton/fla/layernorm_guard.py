@@ -6,12 +6,49 @@
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 # mypy: ignore-errors
 
+from typing import Optional
+
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange
+
 from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 MAX_CORES = 65535
 UNIFIED_BUFFER_SIZE = 1572864
+
+def rms_norm_ref(x,
+                 weight,
+                 bias,
+                 z=None,
+                 eps=1e-6,
+                 group_size=None,
+                 norm_before_gate=True,
+                 upcast=True):
+    dtype = x.dtype
+    weight = weight.float()
+    bias = bias.float() if bias is not None else None
+    if upcast:
+        x = x.float()
+        z = z.float() if z is not None else z
+    if z is not None and not norm_before_gate:
+        x = x * F.silu(z)
+    if group_size is None:
+        rstd = 1 / torch.sqrt((x.square()).mean(dim=-1, keepdim=True) + eps)
+        out = (x * rstd * weight) + bias if bias is not None else (x * rstd *
+                                                                   weight)
+    else:
+        x_group = rearrange(x, "... (g d) -> ... g d", d=group_size)
+        rstd = 1 / torch.sqrt((x_group.square()).mean(dim=-1, keepdim=True) +
+                              eps)
+        out = rearrange(x_group * rstd, "... g d -> ... (g d)") * weight
+        if bias is not None:
+            out = out + bias
+    if z is not None and norm_before_gate:
+        out *= F.silu(z)
+    return out.to(dtype)
 
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
@@ -217,3 +254,103 @@ def layer_norm_fwd_kernel(
             y *= z * tl.sigmoid(z)
         # Write output
         tl.store(Y_inner, y, mask=blk_mask)
+
+def layernorm_fn(x,
+                 weight,
+                 bias,
+                 z=None,
+                 eps=1e-6,
+                 group_size=None,
+                 norm_before_gate=True,
+                 is_rms_norm=False):
+    return LayerNormFn.apply(x, weight, bias, z, eps, group_size,
+                             norm_before_gate, is_rms_norm)
+
+
+def rmsnorm_fn(x,
+               weight,
+               bias,
+               z=None,
+               eps=1e-6,
+               group_size=None,
+               norm_before_gate=True):
+    return LayerNormFn.apply(x, weight, bias, z, eps, group_size,
+                             norm_before_gate, True)
+
+
+class LayerNormGated(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size,
+        eps: float = 1e-5,
+        group_size: Optional[int] = None,
+        norm_before_gate: bool = True,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        """If group_size is not None, we do GroupNorm with each group having group_size elements.
+        group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
+        """
+
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+        torch.nn.init.zeros_(self.bias)
+
+    def forward(self, x, z=None):
+        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
+        """
+        return layernorm_fn(x,
+                            self.weight,
+                            self.bias,
+                            z=z,
+                            group_size=self.group_size,
+                            eps=self.eps,
+                            norm_before_gate=self.norm_before_gate)
+
+
+class RMSNormGated(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size,
+        eps: float = 1e-5,
+        group_size: Optional[int] = None,
+        norm_before_gate: bool = False,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        """If group_size is not None, we do GroupNorm with each group having group_size elements.
+        group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
+        """
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.register_parameter("bias", None)
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+
+    def forward(self, x, z=None):
+        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
+        """
+        return rmsnorm_fn(x,
+                          self.weight,
+                          self.bias,
+                          z=z,
+                          eps=self.eps,
+                          group_size=self.group_size,
+                          norm_before_gate=self.norm_before_gate)
