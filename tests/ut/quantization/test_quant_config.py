@@ -62,14 +62,25 @@ class TestAscendQuantConfig(TestBase):
 
     @patch('torch.npu.is_available')
     def test_override_quantization_method(self, mock_is_available):
-        # Test when NPU is available
+        # Test when quant_method is None
         mock_is_available.return_value = True
         result = AscendQuantConfig.override_quantization_method(None, None)
         self.assertIsNone(result)
 
+        # Test when NPU is available
+        mock_is_available.return_value = True
+        result = AscendQuantConfig.override_quantization_method({}, None)
+        self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
+
         # Test when NPU is not available
         mock_is_available.return_value = False
-        result = AscendQuantConfig.override_quantization_method(None, None)
+        result = AscendQuantConfig.override_quantization_method({}, None)
+        self.assertIsNone(result)
+
+        # Test when quant_method is specified
+        hf_quant_cfg = {"quant_method": "awq"}
+        result = AscendQuantConfig.override_quantization_method(
+            hf_quant_cfg, None)
         self.assertIsNone(result)
 
     def test_get_quant_method_for_linear(self):
