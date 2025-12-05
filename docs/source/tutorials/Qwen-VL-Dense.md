@@ -6,7 +6,7 @@ The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powe
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
-This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct model` as an example for single NPU deployment and the `Qwen2.5-VL-32B-Instruct` model to illustrate multi-NPU deployment.
+This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example for single NPU deployment and the `Qwen2.5-VL-32B-Instruct` model to illustrate multi-NPU deployment.
 
 ## Supported Features
 
@@ -82,6 +82,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
    :substitutions:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
 docker run --rm \
 --shm-size=1g \
 --net=host \
@@ -197,13 +198,27 @@ print(generated_text)
 If you run this script successfully, you can see the info shown below:
 
 ```
-The image displays a logo consisting of two main elements: a stylized geometric design and a pair of text elements.
+**Visual Components:**
 
-1. **Geometric Design**: On the left side of the image, there is a blue geometric design that appears to be made up of interconnected shapes. These shapes resemble a network or a complex polygonal structure, possibly hinting at a technological or interconnected theme. The design is monochromatic and uses only blue as its color, which could be indicative of a specific brand or company.
+1.  **Abstract Geometric Icon (Left Side):**
+    *   The logo features a stylized, abstract icon on the left.
+    *   It is composed of interconnected lines and angular shapes, forming a complex, hexagonal-like structure.
+    *   The icon is rendered in a solid, thin blue line, giving it a modern, technological, and clean appearance.
 
-2. **Text Elements**: To the right of the geometric design, there are two lines of text. The first line reads "TONGYI" in a sans-serif font, with the "YI" part possibly being capitalized. The second line reads "Qwen" in a similar sans-serif font, but in a smaller size.
+2.  **Text (Right Side):**
+    *   To the right of the icon, the name "TONGYI Qwen" is written.
+    *   **"TONGYI"** is written in uppercase letters in a bold, modern sans-serif font. The color is a medium blue, matching the icon's color.
+    *   **"Qwen"** is written below "TONGYI" in a slightly larger, bold, sans-serif font. The color of "Qwen" is a dark gray or black, creating a strong contrast with the blue text above it.
+    *   The text is aligned and spaced neatly, with "Qwen" appearing slightly larger and bolder than "TONGYI," emphasizing the proper noun.
 
-The overall design is modern and minimalist, with a clear contrast between the geometric and textual elements. The use of blue for the geometric design could suggest themes of technology, connectivity, or innovation, which are common associations with the color blue in branding. The simplicity of the design makes it easily recognizable and memorable.
+**Overall Design and Aesthetics:**
+
+*   The logo has a clean, contemporary, and professional feel, suitable for a technology and AI product.
+*   The use of blue conveys trust, innovation, and intelligence, while the dark gray adds stability and clarity.
+*   The overall layout is balanced and symmetrical, with the icon and text arranged horizontally for easy recognition and memorability.
+*   The design effectively communicates the product's high-tech nature while remaining brand-identifiable and straightforward.
+
+The logo is designed to be easily recognizable across various media and scales, from digital screens to printed materials.
 ```
 
 ::::
@@ -279,30 +294,24 @@ print(generated_text)
 If you run this script successfully, you can see the info shown below:
 
 ```
+The image displays a logo and text related to the Qwen model, which is an artificial intelligence (AI) language model developed by Alibaba Cloud. Here is a detailed description of the elements in the image:
+
 ### **1. Logo:**
-- **Shape:** The logo on the left side of the image features a stylized geometric design composed of interconnected shapes that resemble interconnected hexagons or other polygonal forms.
-- **Color:**
-  - The logo is primarily composed of **blue lines**.
-  - The design appears to be constructed from a network-like or abstract geometric pattern, suggesting themes of connection, integration, or technology.
-  - The shapes are rendered using clean, crisp lines and angles, giving it a modern and tech-oriented aesthetic.
-  - The geometric design appears interconnected and dynamic, indicating concepts like networking, intelligence, and complexity.
-  - The lines are minimalist and symmetrical, with darker and lighter shades of blue, giving it a modular and abstract appearance.
-  - The design has a **three-dimensional or engineered feel**, with overlapping elements, possibly symbolizing interconnectedness, scalability, or a tech-forward, futuristic look.
-  - The shapes are simple yet intricate, implying advanced technology or AI-related innovation.
-  - The use of blue gives it a futuristic and professional tone.
+- The logo on the left side of the image consists of a stylized, abstract geometric design.
+- The logo is primarily composed of interconnected lines and shapes that resemble a combination of arrows, lines, and geometric forms.
+- The lines are arranged in a triangular pattern, giving it a dynamic and modern appearance.
+- The lines are rendered in a dark blue color, and they form a three-dimensional, arrow-like structure. This conveys a sense of movement, forward momentum, or direction, which is often symbolic of progress and integration.
+- The design appears to be complex yet minimalistic, with clean and sharp lines.
+- The triangular and square-like structure suggests precision, connectivity, and innovation, which are often associated with technology and advanced systems.
+- This abstract, arrow-like design implies a sense of flow, direction, and connectivity, which aligns with themes of progress and technological advancement.
 
 ### **2. Text:**
-- **TONGYI:**
-  - Written in ** uppercase letters**.
-  - The font is clean, sharp, and modern, aligning with themes of innovation and digital technology.
-  - The interconnected hexagons or polygons give a sense of sophistication and precision.
-  
-- **Qwen:**
-  - Below "TONGYI," the word "Qwen" is written in a sans-serif font, which is typical of brand logos aimed at conveying simplicity, reliability, and digital symmetry.
-  - The font of "Qwen" is in a thinner, sleek typeface, aligning with branding associated with AI and technology.
-  - The blue color reinforces the technological and digital theme, often used to convey trust, stability, and intelligence, aligning with the design elements, reinforcing the overall tech-savvy and modern appearance.
-  - "Qwen" is placed below "TONGYI," further emphasizing the company or model's focus on precision and precision.
-  - The font
+- **"TONGYI" (on the top right side):
+  - The text is in dark blue, which is a color often associated with technology, stability, and trustworthiness.
+  - The name "Tongyi" is written in a bold, sans-serif font, giving it a modern and professional look.
+- **"Qwen" (below "Tongyi"):
+  - The font for "Qwen" is in a bold, uppercase format.
+  - The style
 ```
 
 ::::
@@ -359,15 +368,18 @@ curl http://localhost:8000/v1/chat/completions \
 If you query the server successfully, you can see the info shown below (client):
 
 ```bash
-{"id":"chatcmpl-f04fb20e79bb40b39b8ed7fdf5bd613a","object":"chat.completion","created":1741749149,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"The text in the illustration reads \"TONGYI Qwen.\"","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":74,"total_tokens":89,"completion_tokens":15,"prompt_tokens_details":null},"prompt_logprobs":null}
+{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
 Logs of the vllm server:
 
 ```bash
-INFO 03-12 11:16:50 logger.py:39] Received request chatcmpl-92148a41eca64b6d82d3d7cfa5723aeb: prompt: '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>\nWhat is the text in the illustrate?<|im_end|>\n<|im_start|>assistant\n', params: SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, stop=[], stop_token_ids=[], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16353, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, guided_decoding=None), prompt_token_ids: None, lora_request: None, prompt_adapter_request: None.
-INFO 03-12 11:16:50 engine.py:280] Added request chatcmpl-92148a41eca64b6d82d3d7cfa5723aeb.
-INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 12-05 08:42:07 [chat_utils.py:560] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+Downloading Model from https://www.modelscope.cn to directory: /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct
+INFO 12-05 08:42:11 [acl_graph.py:187] Replaying aclgraph
+INFO:     127.0.0.1:60988 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 12-05 08:42:13 [loggers.py:127] Engine 000: Avg prompt throughput: 10.7 tokens/s, Avg generation throughput: 1.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 12-05 08:42:23 [loggers.py:127] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
 ```
 
 ::::
@@ -449,9 +461,14 @@ If you query the server successfully, you can see the info shown below (client):
 Logs of the vllm server:
 
 ```bash
-INFO 03-12 11:16:50 logger.py:39] Received request chatcmpl-92148a41eca64b6d82d3d7cfa5723aeb: prompt: '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>\nWhat is the text in the illustrate?<|im_end|>\n<|im_start|>assistant\n', params: SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, stop=[], stop_token_ids=[], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16353, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, guided_decoding=None), prompt_token_ids: None, lora_request: None, prompt_adapter_request: None.
-INFO 03-12 11:16:50 engine.py:280] Added request chatcmpl-92148a41eca64b6d82d3d7cfa5723aeb.
-INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+INFO 12-05 08:50:57 [chat_utils.py:560] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+Downloading Model from https://www.modelscope.cn to directory: /root/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-32B-Instruct
+2025-12-05 08:50:58,913 - modelscope - INFO - Target directory already exists, skipping creation.
+INFO 12-05 08:51:00 [acl_graph.py:187] Replaying aclgraph
+INFO:     127.0.0.1:50720 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 12-05 08:51:10 [loggers.py:127] Engine 000: Avg prompt throughput: 7.3 tokens/s, Avg generation throughput: 1.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 12-05 08:51:20 [loggers.py:127] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
 ```
 
 ::::
@@ -475,7 +492,11 @@ You can refer to the [monitoring configuration](https://github.com/vllm-project/
 
 As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
 
-1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+
+```shell
+pip install lm_eval
+```
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
@@ -490,7 +511,7 @@ lm_eval \
     --output_path ./results
 ```
 
-3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only.
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
 |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
 |---------|------:|------|-----:|------|---|-----:|---|-----:|
@@ -502,14 +523,18 @@ lm_eval \
 
 As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen2.5-VL-32B-Instruct` in offline mode.
 
-1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+
+```shell
+pip install lm_eval
+```
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
 ```shell
 lm_eval \
     --model vllm-vlm \
-    --model_args pretrained=Qwen/Qwen2.5-VL-32B-Instruct,max_model_len=8192,tensor_parallel_size=2 \
+    --model_args pretrained=Qwen/Qwen2.5-VL-32B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7,tensor_parallel_size=2 \
     --tasks mmmu_val \
     --batch_size 32 \
     --apply_chat_template \
@@ -517,7 +542,7 @@ lm_eval \
     --output_path ./results
 ```
 
-3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only.
+3. After execution, you can get the result, here is the result of `Qwen2.5-VL-32B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
 |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
 |---------|------:|------|-----:|------|---|-----:|---|-----:|
@@ -530,8 +555,6 @@ lm_eval \
 
 ### Using vLLM Benchmark
 
-The performance evaluation must be conducted in an online mode.
-
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
@@ -539,7 +562,7 @@ There are three `vllm bench` subcommand:
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.
 
-Take the `serve` as an example. Run the code as follows.
+The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
 :::::{tab-set}
 :sync-group: install
