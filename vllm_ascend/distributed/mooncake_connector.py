@@ -1377,24 +1377,17 @@ class MooncakeConnectorWorker:
                 num_kv_head = 1
             else:
                 num_kv_head = self.num_key_value_heads
-            # Divide the ranks according to the PP stage
-            ori_data = ori_data.reshape(self._prefill_pp_size, -1)
             # The number of redundant copies for each KV head within the PP stage
-            num_groups = max(1, len(ori_data) // num_kv_head)
-            ori_data = ori_data.reshape(-1, num_groups)
+            ori_data = ori_data.reshape(self._prefill_pp_size, -1)  # Divide the ranks according to the PP stage
+            num_groups = max(1, len(ori_data[0]) // num_kv_head)
             rand_group_index = rand.sample(range(num_groups), \
                 (max(self._decode_tp_size // num_kv_head, 1))) # random choose a group
-
-            for i in range(self._prefill_pp_size):
-                if i == 0:
-                    sampled_nums = self._get_tp_remote_tp_ranks(
-                        ori_data[i], rand_group_index, num_groups)
-                else:
-                    current_result = self._get_tp_remote_tp_ranks(
-                        ori_data[i], rand_group_index, num_groups)
-                    # Merge the ports for each PP stage that the Decode side needs to pull from
-                    for j in range(len(sampled_nums)):
-                        sampled_nums[j].extend(current_result[j])
+            all_results = [self._get_tp_remote_tp_ranks(ori_data[pp_index], rand_group_index, num_groups) for pp_index in range(self._prefill_pp_size)]
+            for group_index in range(len(all_results[0])):
+                group = []
+                for pp_index in range(self._prefill_pp_size):
+                    group.extend(all_results[pp_index][group_index])
+                sampled_nums.append(group)
             return sampled_nums
 
         # non-random split
