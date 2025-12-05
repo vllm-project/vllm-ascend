@@ -45,7 +45,7 @@ bash gen_ranktable.sh --ips 192.0.0.1 \
   --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 1 --decode-device-cnt 1
 ```
 
-The rank table will be generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+If you want to run "2P1D", please set npus-per-node to 3 and prefill-device-cnt to 2. The rank table will be generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
 
 |Parameter  | Meaning |
 | --- | --- |
@@ -137,6 +137,8 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
 
 :::::
 
+If you want to run "2P1D", please set ASCEND_RT_VISIBLE_DEVICES, VLLM_ASCEND_LLMDD_RPC_PORT and port to different values for each P process.
+
 ## Example Proxy for Deployment
 
 Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
@@ -150,6 +152,12 @@ python load_balance_proxy_server_example.py \
     --decoder-hosts 192.0.0.1 \
     --decoder-ports 13701
 ```
+
+|Parameter  | Meaning |
+| --- | --- |
+| --port | Port of proxy |
+| --prefiller-port | All ports of prefill |
+| --decoder-ports | All ports of decoder |
 
 ## Verification
 
