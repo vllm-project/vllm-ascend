@@ -124,7 +124,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --async-scheduling
 ```
 
-**Notice:** 
+**Notice:**
 - for vllm version below `v0.12.0` use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}'`
 - for vllm version `v0.12.0` use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":4,"original_max_position_embeddings":32768}}' \`
 
