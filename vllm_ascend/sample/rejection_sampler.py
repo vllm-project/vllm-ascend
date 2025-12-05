@@ -3,10 +3,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import triton
-import triton.languages as tl
-
-
 import vllm.v1.sample.rejection_sampler as rs
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -156,11 +152,11 @@ def rejection_sample(
         target_argmax = target_probs.argmax(dim=-1)
         if HAS_TRITON:
             vec_len = batch_size
+            n = cu_num_draft_tokens.numel()
+            grid = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']),)
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
-                n = cu_num_draft_tokens.numel()
-                batch_size = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']), )
-                rejection_greedy_sample_spec_len_1_triton[batch_size](
+                rejection_greedy_sample_spec_len_1_triton[grid](
                     output_token_ids,
                     draft_token_ids,
                     target_argmax,
@@ -169,9 +165,7 @@ def rejection_sample(
                     num_warps=1,
                 )
             else:
-                n = cu_num_draft_tokens.numel()
-                batch_size = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']), )
-                rejection_greedy_sample_triton[batch_size](
+                rejection_greedy_sample_triton[grid](
                     output_token_ids,
                     cu_num_draft_tokens,
                     draft_token_ids,
@@ -294,8 +288,8 @@ def expand_batch_to_tokens(
     if HAS_TRITON:
         vec_len = batch_size
         n = cu_num_tokens.numel()
-        batch_size = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']), )
-        expand_kernel[batch_size](
+        grid = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']), )
+        expand_kernel[grid](
             expanded_x,
             x,
             cu_num_tokens,
@@ -595,6 +589,7 @@ def bonus_renew_1(
 def get_autotune_config():
     return [
         triton.Config({'BLOCK_SIZE': 2}),
+        triton.Config({'BLOCK_SIZE': 16}),
         triton.Config({'BLOCK_SIZE': 32}),
         triton.Config({'BLOCK_SIZE': 128}),
         triton.Config({'BLOCK_SIZE': 256}),
@@ -602,7 +597,7 @@ def get_autotune_config():
     ]
 
 @triton.autotune(
-    configs=get_autotune_config(),  # 配置列表
+    configs=get_autotune_config(),  # a list of configuration
     key=[],
 )
 @triton.jit(do_not_specialize=["max_spec_len"])
@@ -648,17 +643,8 @@ def bonus_renew(
         bonus_token_id)
 
 
-def get_autotune_config():
-    return [
-        triton.Config({'BLOCK_SIZE': 2}),
-        triton.Config({'BLOCK_SIZE': 32}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-    ]
-
 @triton.autotune(
-    configs=get_autotune_config(),  # 配置列表
+    configs=get_autotune_config(),  # a list of configuration
     key=[],
 )
 @triton.jit(do_not_specialize=["max_spec_len"])
@@ -781,17 +767,8 @@ def rejection_random_sample_kernel(
         )
 
 
-def get_autotune_config():
-    return [
-        triton.Config({'BLOCK_SIZE': 16}),
-        triton.Config({'BLOCK_SIZE': 32}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-    ]
-
 @triton.autotune(
-    configs=get_autotune_config(),  # 配置列表
+    configs=get_autotune_config(),  # a list of configuration
     key=[],
 )
 @triton.jit(do_not_specialize=["replace_from", "replace_to"])
@@ -823,7 +800,7 @@ def expand_kernel(
         start_idx1 = tl.get_element(start_idx, (i, ))
         src_val1 = tl.get_element(src_val, (i, ))
         offset1 = tl.arange(0, MAX_NUM_TOKENS)
-        tl.store(output_ptr + start_idx + offset1,
+        tl.store(output_ptr + start_idx1 + offset1,
                  src_val1,
                  mask=offset1 < num_tokens1)
 
