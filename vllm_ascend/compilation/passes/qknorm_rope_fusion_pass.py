@@ -19,13 +19,15 @@ import logging
 
 import torch
 import torch._inductor.pattern_matcher as pm
-from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._inductor.pattern_matcher import (PatternMatcherPass,
+                                             PatternPrettyPrinter)
 from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (VllmConfig, get_current_vllm_config,
                          get_layers_from_vllm_config)
 
-class QKNormFusionPattern:
+
+class QKNormRopeFusionPattern:
 
     def __init__(self, head_dim, num_heads, num_kv_heads, eps=1e-6):
         self.head_dim = head_dim
@@ -49,26 +51,33 @@ class QKNormFusionPattern:
         k_weight = torch.empty(self.head_dim,
                                dtype=torch.bfloat16,
                                device="npu")
-        cos = torch.empty(1, T, 1, self.head_dim,
-                        dtype=torch.bfloat16,
-                        device="npu")
-        sin = torch.empty(1, T, 1, self.head_dim,
-                        dtype=torch.bfloat16,
-                        device="npu")
+        cos = torch.empty(1,
+                          T,
+                          1,
+                          self.head_dim,
+                          dtype=torch.bfloat16,
+                          device="npu")
+        sin = torch.empty(1,
+                          T,
+                          1,
+                          self.head_dim,
+                          dtype=torch.bfloat16,
+                          device="npu")
         return [qkv, q_weight, k_weight, cos, sin]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(qkv: torch.Tensor, q_weight: torch.Tensor,
-                    k_weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-            
+                    k_weight: torch.Tensor, cos: torch.Tensor,
+                    sin: torch.Tensor):
+
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
                                 dim=-1)
-    
+
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                                self.head_dim)
-            q_norm_out, _ = torch.ops.npu.npu_rms_norm(
-                q_by_head, q_weight, self.eps)
+            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight,
+                                                       self.eps)
 
             k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
                                self.head_dim)
@@ -76,13 +85,16 @@ class QKNormFusionPattern:
                                                        self.eps)
 
             q_flat = q_norm_out.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
-            
+            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1,
+                                                 self.head_dim)
+
             k_flat = k_norm_out.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
-            
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
-            
+            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1,
+                                                 self.head_dim)
+
+            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
+                q_reshape, k_reshape, cos, sin)
+
             return q_rope, k_rope, v
 
         def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
@@ -99,16 +111,15 @@ class QKNormFusionPattern:
                 q_bias=None,
                 k_bias=None,
                 sin=sin,
-                cos=cos
-            )
-            
+                cos=cos)
+
             return results
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
 
 
-class QKNormFusionPatternWithBias:
+class QKNormRopeFusionPatternWithBias:
 
     def __init__(self, head_dim, num_heads, num_kv_heads, eps=1e-6):
         self.head_dim = head_dim
@@ -134,47 +145,59 @@ class QKNormFusionPatternWithBias:
                                device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos = torch.empty(1, T, 1, self.head_dim,
-                        dtype=torch.bfloat16,
-                        device="npu")
-        sin = torch.empty(1, T, 1, self.head_dim,
-                        dtype=torch.bfloat16,
-                        device="npu")
+        cos = torch.empty(1,
+                          T,
+                          1,
+                          self.head_dim,
+                          dtype=torch.bfloat16,
+                          device="npu")
+        sin = torch.empty(1,
+                          T,
+                          1,
+                          self.head_dim,
+                          dtype=torch.bfloat16,
+                          device="npu")
 
         return [qkv, q_weight, k_weight, q_bias, k_bias, cos, sin]
-
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(qkv: torch.Tensor, q_weight: torch.Tensor,
                     k_weight: torch.Tensor, q_bias: torch.Tensor,
-                    k_bias: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+                    k_bias: torch.Tensor, cos: torch.Tensor,
+                    sin: torch.Tensor):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
                                 dim=-1)
 
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                               self.head_dim)
             q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight,
                                                        self.eps)
             q_normed = q_norm_out + q_bias
-            
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                               self.head_dim)
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
                                                        self.eps)
             k_normed = k_norm_out + k_bias
-            
+
             q_flat = q_normed.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
-            
+            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1,
+                                                 self.head_dim)
+
             k_flat = k_normed.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
-            
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
-            
+            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1,
+                                                 self.head_dim)
+
+            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
+                q_reshape, k_reshape, cos, sin)
+
             return q_rope, k_rope, v
 
         def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
                         k_weight: torch.Tensor, q_bias: torch.Tensor,
-                        k_bias: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+                        k_bias: torch.Tensor, cos: torch.Tensor,
+                        sin: torch.Tensor):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
@@ -186,15 +209,14 @@ class QKNormFusionPatternWithBias:
                 q_bias=q_bias,
                 k_bias=k_bias,
                 cos=cos,
-                sin=sin
-            )
+                sin=sin)
             return results
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
 
 
-class QKNormFusionPass(VllmInductorPass):
+class QKNormRopeFusionPass(VllmInductorPass):
     """
     A pass for fusing QKV split and RMSNorm operations into a single qk_rmsnorm operator.
     """
@@ -202,44 +224,48 @@ class QKNormFusionPass(VllmInductorPass):
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
-            pass_name="qknorm_fusion_pass")
+            pass_name="qknorm_rope_fusion_pass")
 
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
-            logging.info("QKNorm fusion not enabled: unsupported dtype %s",
-                         dtype)
+            logging.info(
+                "QKNorm and Rope fusion not enabled: unsupported dtype %s",
+                dtype)
             return
 
-        # use one attn layer to get meta (such as head_dim) for QkNormFusionPattern
+        # use one attn layer to get meta (such as head_dim) for QKNormRopeFusionPattern
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
             vllm_config, Attention)
         if len(attn_layers) == 0:
             logging.info(
-                "QK Norm fusion enabled, but no Attention layers were discovered."
+                "QKNorm and Rope fusion enabled, but no Attention layers were discovered."
             )
             return
         layer = next(iter(attn_layers.values()))
         for epsilon in [1e-6, 1e-5]:
-            QKNormFusionPattern(head_dim=layer.head_size,
-                                num_heads=layer.num_heads,
-                                num_kv_heads=layer.num_kv_heads,
-                                eps=epsilon).register(
-                                    self.pattern_match_passes)
+            QKNormRopeFusionPattern(head_dim=layer.head_size,
+                                    num_heads=layer.num_heads,
+                                    num_kv_heads=layer.num_kv_heads,
+                                    eps=epsilon).register(
+                                        self.pattern_match_passes)
 
-            QKNormFusionPatternWithBias(head_dim=layer.head_size,
-                                        num_heads=layer.num_heads,
-                                        num_kv_heads=layer.num_kv_heads,
-                                        eps=epsilon).register(
-                                            self.pattern_match_passes)
+            QKNormRopeFusionPatternWithBias(head_dim=layer.head_size,
+                                            num_heads=layer.num_heads,
+                                            num_kv_heads=layer.num_kv_heads,
+                                            eps=epsilon).register(
+                                                self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        print("before qkvnorm rope fusion pass graph----------------------------")
-        print(graph.graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
-        print("after qkvnorm rope fusion pass graph----------------------------")
-        print(graph.graph)
-        logging.debug("Fused %s QKNorm patterns", self.matched_count)
+        logging.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
+        logging.debug("Patterns registered for replacement:")
+        pattern_idx = 0
+        for pattern_entry in self.pattern_match_passes.patterns.values():
+            for p in pattern_entry:
+                p_str = PatternPrettyPrinter.run(p.pattern)
+                logging.debug("Pattern %d: %s", pattern_idx, p_str)
+                pattern_idx += 1
         self.end_and_log()
 
     def is_applicable(self, runtime_shape):
@@ -247,4 +273,3 @@ class QKNormFusionPass(VllmInductorPass):
         Check if the pass is applicable for the current configuration.
         """
         return True
-
