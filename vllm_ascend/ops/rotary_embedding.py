@@ -29,7 +29,8 @@ from vllm.platforms import CpuArchEnum
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
                                get_ascend_device_type)
-
+from vllm_ascend.ops.triton.rope import rope_forward_triton
+from vllm.triton_utils import HAS_TRITON
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
     return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
@@ -68,15 +69,21 @@ def _rope_forward_oot(
     else:
         if self.cos is not None and \
             self.sin is not None:
-            # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
-            # This method requires head_size and rotary_dim equal 128 and neox_style is True
-            query = query.contiguous().view(1, query.shape[0], -1,
-                                            self.head_size)
-            key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-            # Although this function modifies in-place, please retain the function's return value.
-            # Otherwise, the graph fusion operation may fail.
-            query, key = torch_npu.npu_apply_rotary_pos_emb(
-                query, key, self.cos, self.sin)
+            if self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128 :
+                query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
+                key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
+                # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
+                # This method requires head_size and rotary_dim equal 128 and neox_style is True
+                torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
+            elif self.head_size == 256 and  HAS_TRITON:
+                query = query.view(query.shape[0], -1, self.head_size)
+                key = key.view(query.shape[0], -1, self.head_size)
+                query, key =  rope_forward_triton(query,
+                                            key,
+                                            self.cos,
+                                            self.sin,
+                                            rope_dim=self.rotary_dim,
+                                            is_neox_style=is_neox_style)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
@@ -145,17 +152,19 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         forward_context = get_forward_context()
         is_first_layer = forward_context.is_first_layer
         # Generate cos and sin outside layers to avoid repeated calculation.
-        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
-                -1] == 128:
-            if is_first_layer:
-                cos_sin = self.cos_sin_cache.index_select(0, positions)
-                last_dim = cos_sin.size()[-1]
-                cos, sin = cos_sin.reshape(-1, 2, last_dim // 2).repeat(
-                    1, 1, 2).chunk(2, dim=-2)
+        if is_first_layer and is_neox_style  :
+            cos_sin = self.cos_sin_cache.index_select(0, positions)
+            last_dim = cos_sin.size()[-1]
+            cos, sin = cos_sin.reshape(-1, 2, last_dim // 2).repeat(
+                1, 1, 2).chunk(2, dim=-2)
+            forward_context.is_first_layer = False
+            if self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128:
                 # BSNH
                 self.cos = cos.view(1, -1, 1, last_dim).contiguous()
                 self.sin = sin.view(1, -1, 1, last_dim).contiguous()
-                forward_context.is_first_layer = False
+            elif self.head_size == 256 and  HAS_TRITON:
+                self.cos = cos.view(-1, self.rotary_dim)
+                self.sin = sin.view(-1, self.rotary_dim)
         return _rope_forward_oot(self, positions, query, key, is_neox_style,
                                  offsets)
 
