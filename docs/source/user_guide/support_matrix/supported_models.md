@@ -61,6 +61,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | Qwen3-VL                       | ✅            |                                                                      |||||||||||||||||||
 | Qwen3-VL-MOE                   | ✅            |                                                                      |||||||||||||||||||
 | Qwen2.5-Omni                   | ✅            | [1760](https://github.com/vllm-project/vllm-ascend/issues/1760)      |||||||||||||||||||
+| Qwen3-Omni-30B-A3B-Thinking    | ✅            |                                                                      |||||||||||||||||||
 | QVQ                            | ✅            |                                                                      |||||||||||||||||||
 | LLaVA 1.5/1.6                  | ✅            | [1962](https://github.com/vllm-project/vllm-ascend/issues/1962)      |||||||||||||||||||
 | InternVL2                      | ✅            |                                                                      |||||||||||||||||||
