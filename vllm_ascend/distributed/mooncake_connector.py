@@ -68,6 +68,27 @@ class ReqMeta:
     remote_dcp_size: int
 
 
+@dataclass
+class SizedDict(OrderedDict):
+
+    def __init__(self, max_size=16000, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            value: dict[int, list[int]] = {}
+            self[key] = value
+            return value
+
+
 class KVCacheTaskTracker:
 
     def __init__(self):
@@ -253,11 +274,11 @@ class KVCacheRecvingThread(threading.Thread):
         self.ready_event = ready_event
 
         self.kv_caches_base_addr: dict[str, dict[int, list[int]]] = \
-            defaultdict(dict)
+            SizedDict()
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = \
             local_kv_caches_base_addr
         self.remote_te_port: dict[str, dict[int, int]] = \
-            defaultdict(dict)
+            SizedDict()
         self.block_len = block_len
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
