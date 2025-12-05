@@ -156,7 +156,79 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
                                     c10::optional<c10::string_view> quant_mode)
 {
     return;
+}
 
+at::Tensor& dispatch_ffn_combine_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight1,
+    const at::Tensor& weight2,
+    const at::Tensor& expert_idx,
+    const at::Tensor& scale1,
+    const at::Tensor& scale2,
+    const at::Tensor& probs,
+    c10::string_view group,
+    int64_t max_output_size,
+    at::Tensor& out
+) {
+    return out;
+}
+
+at::Tensor npu_lightning_indexer_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_key,
+    const c10::optional<at::Tensor> &block_table, c10::string_view layout_query,
+    c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
+{
+    // npu tensor max size
+    constexpr int32_t SIZE = 8;
+    constexpr int32_t DIM_0 = 0;
+    constexpr int32_t DIM_1 = 1;
+    constexpr int32_t DIM_2 = 2;
+    constexpr int32_t DIM_3 = 3;
+
+    TORCH_CHECK(query.numel() > 0, "Query is empty.");
+    TORCH_CHECK(key.numel() > 0, "Key is empty.");
+    TORCH_CHECK(weights.numel() > 0, "Weights is empty.");
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+
+    std::string query_layout_str = std::string(layout_query);
+    std::string key_layout_str = std::string(layout_key);
+    at::SmallVector<int64_t, SIZE> output_size;
+    if (query_layout_str == "BSND") {
+        output_size = {query.size(DIM_0), query.size(DIM_1), key.size(DIM_2), sparse_count};
+    } else {
+        int n_dim_index = 0;
+        n_dim_index = (key_layout_str == "TND") ? DIM_1 : DIM_2;
+        output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
+    }
+    // construct the output tensor
+    at::Tensor lightning_indexer_output = at::empty(output_size, query.options().dtype(at::kInt));
+    return lightning_indexer_output;
+}
+
+at::Tensor npu_sparse_flash_attention_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &sparse_indices, double scale_value, int64_t sparse_block_size,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &query_rope,
+    const c10::optional<at::Tensor> &key_rope, c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode)
+{
+    std::string layout_query_str = std::string(layout_query);
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+    return output;
 }
 
 } // namespace meta
@@ -182,5 +254,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
+    // Lightning indexer
+    ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
+    // Sparse flash attention
+    ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    // MoE dispatch-ffn-combine
+    ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
 }
 }
