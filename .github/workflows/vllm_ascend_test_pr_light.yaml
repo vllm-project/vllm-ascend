@@ -55,7 +55,7 @@ jobs:
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
+              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
               - 'cmake/**'
@@ -68,13 +68,14 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
+              - '.github/workflows/vllm_ascend_test_pr_light.yaml'
 
   ut:
     needs: [lint, changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04-arm
     container:
       # fixme: vllm-ascend install failed with 8.3.rc2 on github action
       image: quay.io/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
@@ -108,7 +109,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
+          VLLM_TARGET_DEVICE=empty python3 -m pip install .
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
@@ -116,22 +117,17 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
-          export TMPDIR=/mnt
-          rm -f /usr/share/dotnet
-          rm -rf /opt/ghc
-          rm -rf "/usr/local/share/boost"
-          rm -rf "$AGENT_TOOLSDIRECTORY"
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
-          python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/devlib
+          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install -v .
 
       - name: Run unit test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
