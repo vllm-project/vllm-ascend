@@ -55,7 +55,7 @@ jobs:
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
+              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
               - 'cmake/**'
@@ -68,6 +68,7 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
+              - '.github/workflows/vllm_ascend_test_pr_light.yaml'
 
   ut:
     needs: [lint, changes]
