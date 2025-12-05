@@ -42,14 +42,7 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import prefill_context_parallel_enable, weak_ref_tensors
 
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-
-# isort: on
+from vllm.distributed import get_pcp_group
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
