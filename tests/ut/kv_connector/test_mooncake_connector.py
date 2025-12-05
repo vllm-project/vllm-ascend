@@ -1247,7 +1247,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                                  self.engine_id)
                 worker.tp_num_need_pulls = tp_num_need_pulls
                 worker.use_sparse = 0
-                return worker._get_remote_tp_ranks_for_req('test')
+                return worker._get_remote_ranks_for_req('test')
 
         self.assertIn(
             get_tp_rank(16, 1, 1, 4, 4, False)[0],
