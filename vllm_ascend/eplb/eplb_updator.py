@@ -35,9 +35,11 @@ class EplbUpdator:
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
 
-    def set_adaptor(self, adaptor):
+    def set_adaptor(self, adaptor, num_mtp_layers):
         self.adaptor = adaptor
-        self.num_moe_layers = self.adaptor.num_moe_layers
+        self.num_moe_layers = (self.adaptor.num_moe_layers
+                               if self.adaptor.mtp_instance is None else
+                               self.adaptor.num_moe_layers + num_mtp_layers)
         self.global_expert_num = self.adaptor.global_expert_num
 
     def init_eplb(self, expert_map_path, process):
@@ -84,6 +86,8 @@ class EplbUpdator:
                     self.expert_map_record_path)
 
             self.adaptor.model.clear_all_moe_loads()
+            if self.adaptor.mtp_instance is not None:
+                self.adaptor.mtp_instance.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
 

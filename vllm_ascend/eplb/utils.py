@@ -18,45 +18,73 @@
 import types
 
 import torch
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 
 
 def get_expert_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.get_map()
+    if not isinstance(self, DeepSeekMultiTokenPredictor):
+        return self.model.layers[layer_id].mlp.experts.get_map()
+    else:
+        return self.layers[str(layer_id)].mtp_block.mlp.experts.get_map()
 
 
 def get_log2phy_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+    if not isinstance(self, DeepSeekMultiTokenPredictor):
+        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+    else:
+        return self.layers[str(
+            layer_id)].mtp_block.mlp.experts.get_log2phy_map()
 
 
-def get_all_expert_map(self, num_moe_layers):
-    all_loads = []
-    num_dense_layers = self.num_dense_layers if hasattr(
-        self, "num_dense_layers") else 0
-    for layer_id in range(num_moe_layers):
-        load_tensor = self.get_expert_map(
-            layer_id + num_dense_layers)  # (num_experts_per_layer,)
-        all_loads.append(load_tensor)
+def get_all_expert_map(self, num_moe_layers=None):
+    if not isinstance(self, DeepSeekMultiTokenPredictor):
+        all_loads = []
+        num_dense_layers = self.num_dense_layers if hasattr(
+            self, "num_dense_layers") else 0
+        for layer_id in range(num_moe_layers):
+            load_tensor = self.get_expert_map(
+                layer_id + num_dense_layers)  # (num_experts_per_layer,)
+            all_loads.append(load_tensor)
+    else:
+        all_loads = []
+        for layer_id in range(self.mtp_start_layer_idx,
+                              self.mtp_start_layer_idx + self.num_mtp_layers):
+            load_tensor = self.get_expert_map(layer_id)
+            all_loads.append(load_tensor)
 
     return torch.stack(all_loads, dim=0)
 
 
 def get_all_moe_loads(self):
-    num_dense_layers = self.num_dense_layers if hasattr(
-        self, "num_dense_layers") else 0
-    all_moe_loads = torch.stack(
-        [self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load \
-            for layer_id in range(self.num_moe_layers)],
-        dim=0
-    )
+    if not isinstance(self, DeepSeekMultiTokenPredictor):
+        num_dense_layers = self.num_dense_layers if hasattr(
+            self, "num_dense_layers") else 0
+        all_moe_loads = torch.stack(
+            [self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load \
+                for layer_id in range(self.num_moe_layers)],
+            dim=0
+        )
+    else:
+        all_moe_loads = torch.stack(
+            [self.layers[str(idx)].mtp_block.mlp.experts.moe_load \
+                for idx in range(self.mtp_start_layer_idx,
+                                    self.mtp_start_layer_idx + self.num_mtp_layers)],
+            dim=0
+        )
     return all_moe_loads
 
 
 def clear_all_moe_loads(self):
-    num_dense_layers = self.num_dense_layers if hasattr(
-        self, "num_dense_layers") else 0
-    for layer_id in range(self.num_moe_layers):
-        self.model.layers[layer_id +
-                          num_dense_layers].mlp.experts.clear_moe_load()
+    if not isinstance(self, DeepSeekMultiTokenPredictor):
+        num_dense_layers = self.num_dense_layers if hasattr(
+            self, "num_dense_layers") else 0
+        for layer_id in range(self.num_moe_layers):
+            self.model.layers[layer_id +
+                              num_dense_layers].mlp.experts.clear_moe_load()
+    else:
+        for layer_id in range(self.mtp_start_layer_idx,
+                              self.mtp_start_layer_idx + self.num_mtp_layers):
+            self.layers[str(layer_id)].mtp_block.mlp.experts.clear_moe_load()
 
 
 def model_register(model, model_config):
@@ -66,12 +94,13 @@ def model_register(model, model_config):
     model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)
     model.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, model)
 
-    config = model_config.hf_config
+    if not isinstance(model, DeepSeekMultiTokenPredictor):
+        config = model_config.hf_config
 
-    if config.model_type == "qwen3_moe":
-        model.num_moe_layers = config.num_hidden_layers
-    elif config.model_type == "deepseek_v2" or config.model_type == "deepseek_v3":
-        model.num_dense_layers = config.first_k_dense_replace
-        model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
-    else:
-        raise NotImplementedError("EPLB is not supported.")
+        if config.model_type == "qwen3_moe":
+            model.num_moe_layers = config.num_hidden_layers
+        elif config.model_type == "deepseek_v2" or config.model_type == "deepseek_v3":
+            model.num_dense_layers = config.first_k_dense_replace
+            model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
+        else:
+            raise NotImplementedError("EPLB is not supported.")
