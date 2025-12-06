@@ -414,7 +414,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         # TODO: This judgment will be removed once the mrope precision issue is fixed
         if self.mrope_section != [
                 16, 24, 24
-        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86:
+        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86 or \
+            get_ascend_device_type() == AscendDeviceType._910_95:
             return super().forward_oot(positions, query, key)
 
         import torch_npu
