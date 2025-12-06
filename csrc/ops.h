@@ -154,6 +154,7 @@ namespace vllm_ascend {
         void* keycache_out,
         void* q2,
         void* keycache_out2,
+        void* inner_out,
         void* workspace,
         void* tiling,
         const uint32_t block_dim
