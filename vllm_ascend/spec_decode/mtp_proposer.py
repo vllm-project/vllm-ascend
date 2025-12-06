@@ -108,7 +108,7 @@ class MtpProposer(Proposer):
         self.use_aclgraph = self.runner._use_aclgraph()
 
         self.cudagraph_batch_sizes = (list(
-            reversed(
+            sorted(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
                                       if self.use_aclgraph else [])
 
