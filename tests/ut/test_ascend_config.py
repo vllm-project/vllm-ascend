@@ -57,7 +57,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(torchair_graph_config.enable_kv_nz)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
-        self.assertTrue(ascend_compilation_config.enable_quantization_fusion)
+        self.assertTrue(ascend_compilation_config.fuse_norm_quant)
 
     @_clean_up_ascend_config
     def test_init_ascend_config_with_additional_config(self):
@@ -74,7 +74,7 @@ class TestAscendConfig(TestBase):
                 "enable_kv_nz": True
             },
             "ascend_compilation_config": {
-                "enable_quantization_fusion": False,
+                "fuse_norm_quant": False,
             },
             "multistream_overlap_shared_expert": True,
             "expert_map_path": "test_expert_map_path",
@@ -94,7 +94,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertTrue(torchair_graph_config.enable_kv_nz)
         ascend_compilation_config = ascend_config.ascend_compilation_config
-        self.assertFalse(ascend_compilation_config.enable_quantization_fusion)
+        self.assertFalse(ascend_compilation_config.fuse_norm_quant)
 
     @_clean_up_ascend_config
     def test_init_ascend_config_with_refresh(self):
