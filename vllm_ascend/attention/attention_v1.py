@@ -37,7 +37,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               weak_ref_tensors)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -551,12 +552,48 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
+    def _forward_decode_only_ascend91095(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = attn_metadata.seq_lens.shape[0]
+        block_size = 128
+        query = query[:batch_size]
+        query = query.view(batch_size, 1, self.num_heads * self.head_size)
+        key = self.key_cache
+        value = self.value_cache
+        block_table = attn_metadata.block_tables[:batch_size, :]
+        if self.key_cache is not None and self.value_cache is not None:
+            block_size = self.key_cache.shape[1]
+            key = self.key_cache.flatten(2, 3).contiguous()
+            value = self.value_cache.flatten(2, 3).contiguous()
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query,
+            key,
+            value,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            input_layout="BSH",
+            block_size=block_size,
+            scale=self.scale,
+            block_table=block_table,
+            actual_seq_lengths_kv=attn_metadata.seq_lens)
+        output[:batch_size] = attn_output.view(batch_size, self.num_heads,
+                                               self.head_size)
+        return output
+
     def _forward_decode_only(
         self,
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if get_ascend_device_type() == AscendDeviceType._910_95:
+            return self._forward_decode_only_ascend91095(
+                query, attn_metadata, output)
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
                 0] == query.size(0):
             batch_size = attn_metadata.seq_lens.shape[0]
@@ -634,12 +671,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
-            torch_npu._npu_reshape_and_cache(
-                key=key[:attn_metadata.num_actual_tokens],
-                value=value[:attn_metadata.num_actual_tokens],
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_indices=slots)
+            if get_ascend_device_type() == AscendDeviceType._910_95:
+                torch_npu.npu_scatter_pa_kv_cache(
+                    key=key[:attn_metadata.num_actual_tokens],
+                    value=value[:attn_metadata.num_actual_tokens].contiguous(),
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_mapping=slots)
+            else:
+                torch_npu._npu_reshape_and_cache(
+                    key=key[:attn_metadata.num_actual_tokens],
+                    value=value[:attn_metadata.num_actual_tokens],
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_indices=slots)
         return key, value
 
     def forward_impl(
