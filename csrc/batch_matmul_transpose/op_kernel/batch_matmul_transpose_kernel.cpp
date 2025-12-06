@@ -658,6 +658,7 @@ private:
 extern "C" __global__ __aicore__ void batch_matmul_transpose(GM_ADDR gm_a, GM_ADDR gm_b, GM_ADDR gm_c,
                                                              GM_ADDR gm_tiling_data)
 {
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
     PpMatmulEinSum<0, false, false, half, half, DataFormat::ND>
         einsum_0_n_fp16_nd;  // swizzleDir[0] transA[0] transB[0] DtypeA[001] DtypeB[001] DtypeC[001] DataFormatA[0]
                              // DataFormatB[0]
