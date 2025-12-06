@@ -2,14 +2,9 @@
 from typing import Optional
 
 import torch
-import torch.nn as nn
-import vllm.v1.sample.rejection_sampler as rs
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import (RejectionSampler,
-                                              apply_sampling_constraints,
-                                              generate_uniform_probs)
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.sample.rejection_sampler import generate_uniform_probs
 
 PLACEHOLDER_TOKEN_ID = -1
 GREEDY_TEMPERATURE = -1

@@ -2517,7 +2517,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             async_output_copy_stream=self.async_output_copy_stream,
         )
 
-
     def _sample(
         self,
         logits: torch.Tensor | None,
@@ -2542,7 +2541,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             sampling_metadata,
         )
         if self.need_accepted_tokens:  # TODO remove this if
-            self._update_states_after_model_execute(sampler_output.sampled_token_ids)
+            self._update_states_after_model_execute(
+                sampler_output.sampled_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -2554,12 +2554,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
-        LogprobsLists | None,
-        list[list[int]],
-        dict[str, LogprobsTensors | None],
-        list[str],
-        dict[str, int],
-        list[int],
+            LogprobsLists | None,
+            list[list[int]],
+            dict[str, LogprobsTensors | None],
+            list[str],
+            dict[str, int],
+            list[int],
     ]:
         # TODO check PR https://github.com/vllm-project/vllm/pull/18777
         # num_nans_in_logits = {}
@@ -2611,8 +2611,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 valid_sampled_token_ids[int(i)].clear()
         else:
             valid_sampled_token_ids = []
-            invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
-            )
+            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
             assert sampled_token_ids.shape[-1] == 1
 
@@ -2650,9 +2649,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 f"{self.model_config.max_model_len}")
 
             self.input_batch.token_ids_cpu[req_idx,
-            start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx,
-            start_idx:end_idx] = True
+                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = self.input_batch.req_ids[req_idx]
