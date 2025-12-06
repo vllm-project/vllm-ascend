@@ -51,7 +51,7 @@ class EagleProposer(Proposer):
                                not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
-            reversed(
+            sorted(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # persistent buffers for cuda graph
@@ -79,7 +79,7 @@ class EagleProposer(Proposer):
                                    dtype=torch.int32)
         attn_mask_len = self.vllm_config.model_config.max_model_len
         self.attn_mask_builder = AttentionMaskBuilder(
-            attn_mask_len, self.vllm_config.model_config.dtype)
+            attn_mask_len, self.vllm_config.model_config.dtype, device=device)
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -430,9 +430,7 @@ class EagleProposer(Proposer):
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
-        attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-            seq_lens, target_positions, self.vllm_config.model_config.dtype,
-            self.device)
+        attn_mask = self.runner.attn_mask
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens.to(device),
@@ -507,9 +505,15 @@ class EagleProposer(Proposer):
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        attn_metadata.query_start_loc_list = attn_metadata.query_start_loc[
+            1:].tolist()
+        attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
+        attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
         query_lens.fill_(1)
         attn_metadata.query_lens = query_lens
 
+        attn_metadata.actual_seq_lengths_q = [1 + i for i in range(batch_size)]
+        attn_metadata.seq_lens_list = seq_lens.tolist()
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(
                 self.vllm_config.speculative_config.num_speculative_tokens -
@@ -536,6 +540,9 @@ class EagleProposer(Proposer):
             # TODO: Increment the sequence lengths.
 
             attn_metadata.seq_lens += 1
+            attn_metadata.seq_lens_list = [
+                _ + 1 for _ in attn_metadata.seq_lens_list
+            ]
             # TODO: Consider max model length.
             # attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
             #                                 self.max_model_len)
