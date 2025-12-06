@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
@@ -26,7 +25,7 @@ class BaseLinearTest(unittest.TestCase):
         parallel_state._OTP = self.mock_group
 
         self.mock_ascend_config = MagicMock()
-        self.mock_ascend_config.oproj_tensor_parallel_size = 2
+        self.mock_ascend_config.module_tp_config.oproj_tensor_parallel_size = 2
 
         self.patches = [
             patch("vllm_ascend.ascend_config.get_ascend_config",
@@ -81,7 +80,8 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 class TestAscendRowParallelLinear(BaseLinearTest):
 
     def test_mlp_optimize(self):
-        os.environ["VLLM_ASCEND_ENABLE_MLP_OPTIMIZE"] = "1"
+        self.mock_ascend_config = MagicMock()
+        self.mock_ascend_config.module_tp_config.mlp_tensor_parallel_size = 2
 
         linear = AscendRowParallelLinear(
             input_size=16,
@@ -100,6 +100,8 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.oproj_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
+        ascend_config._ASCEND_CONFIG.module_tp_config.oproj_tensor_parallel_size = 2
+        ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
         linear = AscendRowParallelLinear(
             input_size=16,
@@ -115,7 +117,8 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
 
     def test_merged_mlp_tp_init(self):
-        os.environ["VLLM_ASCEND_ENABLE_MLP_OPTIMIZE"] = "1"
+        self.mock_ascend_config = MagicMock()
+        self.mock_ascend_config.module_tp_config.mlp_tensor_parallel_size = 8
 
         linear = AscendMergedColumnParallelLinear(
             input_size=16,

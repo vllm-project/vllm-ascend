@@ -154,10 +154,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
     "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
-    # Whether to enable mlp optimize when tensor parallel is enabled.
-    # this feature in eager mode will get better performance.
-    "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
     # Determine the number of physical devices in a non-full-use scenario
     # caused by the initialization of the Mooncake connector.
     "PHYSICAL_DEVICES":

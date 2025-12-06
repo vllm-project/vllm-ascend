@@ -46,6 +46,9 @@ class AscendConfig:
         self.ascend_compilation_config = AscendCompilationConfig(
             **ascend_compilation_config)
 
+        module_tp_config = additional_config.get("module_tp_config", {})
+        self.module_tp_config = ModuleTPConfig(module_tp_config, vllm_config)
+
         # Dump / PrecisionDebugger configuration
         dump_config_path = additional_config.get("dump_config", None)
         self.dump_config = DumpConfig(dump_config_path)
@@ -82,34 +85,6 @@ class AscendConfig:
             "multistream_overlap_shared_expert", False)
         self.recompute_scheduler_enable = additional_config.get(
             "recompute_scheduler_enable", False)
-        self.lmhead_tensor_parallel_size = additional_config.get(
-            "lmhead_tensor_parallel_size", None)
-        if self.lmhead_tensor_parallel_size is not None:
-            logger.info(
-                f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario"
-            )
-            if vllm_config.parallel_config.tensor_parallel_size != 1:
-                raise AssertionError(
-                    "lmhead_tensor_parallel_size is only supported in the pure DP scenario"
-                )
-        self.oproj_tensor_parallel_size = additional_config.get(
-            "oproj_tensor_parallel_size", None)
-        if self.oproj_tensor_parallel_size is not None:
-            logger.info(
-                f"Enable oproj_tensor_parallel_size={self.oproj_tensor_parallel_size} in pure DP scenario"
-            )
-            if vllm_config.parallel_config.tensor_parallel_size != 1:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in the pure DP scenario"
-                )
-            if vllm_config.model_config.enforce_eager is True:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in graph mode"
-                )
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
-                )
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
         self.pd_tp_ratio = 1
@@ -149,6 +124,60 @@ class AscendConfig:
                                               False):
             kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
             kv_cfg._engine_id_patched = True
+
+
+class ModuleTPConfig:
+    """
+    Configuration Object for module_tp_config from additional_config
+    """
+
+    def __init__(self, module_tp_config: dict, vllm_config):
+        self.oproj_tensor_parallel_size = module_tp_config.get(
+            "oproj_tensor_parallel_size", 0)
+        self.lmhead_tensor_parallel_size = module_tp_config.get(
+            "lmhead_tensor_parallel_size", 0)
+        self.embedding_tensor_parallel_size = module_tp_config.get(
+            "embedding_tensor_parallel_size", 0)
+        self.mlp_tensor_parallel_size = module_tp_config.get(
+            "mlp_tensor_parallel_size", 0)
+
+        enabled_configs = []
+        if self.oproj_tensor_parallel_size > 0:
+            enabled_configs.append(
+                f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}"
+            )
+            # dummy_run does not run the entire attention module in eager mode,, so the o_proj tp split can only be used in graph mode.
+            if vllm_config.model_config.enforce_eager is True:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size is only supported in graph mode"
+                )
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
+        if self.lmhead_tensor_parallel_size > 0:
+            enabled_configs.append(
+                f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}"
+            )
+        if self.embedding_tensor_parallel_size > 0:
+            enabled_configs.append(
+                f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}"
+            )
+        if self.mlp_tensor_parallel_size > 0:
+            enabled_configs.append(
+                f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
+
+        for module_tp_size in [
+                self.oproj_tensor_parallel_size,
+                self.lmhead_tensor_parallel_size,
+                self.embedding_tensor_parallel_size
+        ]:
+            if vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
+                raise AssertionError(
+                    "module tp sizes must divide by data_parallel_size")
+        if enabled_configs:
+            logger.info(
+                f"module_tp_config enabled: {', '.join(enabled_configs)}")
 
 
 class AscendCompilationConfig:

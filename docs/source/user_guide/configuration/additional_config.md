@@ -32,9 +32,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `expert_map_path`                   | str  | `None`  | When using expert load balancing for an MoE model, an expert map path needs to be passed in.                                                 |
 | `kv_cache_dtype`                    | str  | `None`  | When using the KV cache quantization method, KV cache dtype needs to be set, currently only int8 is supported.                                |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
-| `lmhead_tensor_parallel_size`       | int  | `None`  | The custom tensor parallel size of lmhead.                                                                                                    |
-| `oproj_tensor_parallel_size`        | int  | `None`  | The custom tensor parallel size of oproj.                                                                                                     |
-| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effect on MoE models with shared experts.                                |
+| `lmhead_tensor_parallel_size`       | int  | `0`  | The custom tensor parallel size of lmhead.                                                                                                    |
+| `oproj_tensor_parallel_size`        | int  | `0`  | The custom tensor parallel size of oproj.                                                                                                     |
+| `embedding_tensor_parallel_size`    | int  | `0`  | The custom tensor parallel size of embedding.                                                                                                  |
+| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effects on MoE models with shared experts.                                |
 | `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic EPLB.                                                                                                                |
 | `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when EPLB begins.                                                                                                      |
 | `gate_eplb`                         | bool | `False` | Whether to enable EPLB only once.                                                                                                              |

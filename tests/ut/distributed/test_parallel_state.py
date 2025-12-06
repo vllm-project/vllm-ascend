@@ -13,7 +13,7 @@ from vllm_ascend.distributed.parallel_state import (
 @pytest.fixture
 def parallel_config():
     return ParallelConfig(data_parallel_size=2,
-                          tensor_parallel_size=2,
+                          tensor_parallel_size=4,
                           pipeline_parallel_size=2)
 
 
@@ -36,8 +36,9 @@ def mock_distributed():
 
 def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config = MagicMock()
-    mock_ascend_config.lmhead_tensor_parallel_size = 2
-    mock_ascend_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.module_tp_config.lmhead_tensor_parallel_size = 2
+    mock_ascend_config.module_tp_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.module_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.flashcomm2_oproj_tensor_parallel_size = 2
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0

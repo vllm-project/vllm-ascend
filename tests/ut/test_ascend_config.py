@@ -329,19 +329,13 @@ class TestAscendConfig(TestBase):
 
         with self.assertRaises(AssertionError):
             test_vllm_config.additional_config = {
-                "lmhead_tensor_parallel_size": 2,
-                "refresh": True
-            }
-            test_vllm_config.parallel_config = ParallelConfig(
-                data_parallel_size=4, tensor_parallel_size=2)
-            init_ascend_config(test_vllm_config)
-
-        with self.assertRaises(AssertionError):
-            test_vllm_config.additional_config = {
                 "torchair_graph_config": {
                     "enabled": True,
                 },
-                "oproj_tensor_parallel_size": 2,
+                "module_tp_size": {
+                    "lmhead_tensor_parallel_size": 8,
+                    "embedding_tensor_parallel_size": 8,
+                },
                 "refresh": True
             }
             test_vllm_config.parallel_config = ParallelConfig(
@@ -353,7 +347,9 @@ class TestAscendConfig(TestBase):
                 "torchair_graph_config": {
                     "enabled": False,
                 },
-                "oproj_tensor_parallel_size": 2,
+                "module_tp_size": {
+                    "oproj_tensor_parallel_size": 2,
+                },
                 "refresh": True
             }
             test_vllm_config.parallel_config = ParallelConfig(
