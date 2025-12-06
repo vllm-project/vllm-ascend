@@ -173,7 +173,7 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     return {query_dst, key_dst};
 }
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const at::Tensor &descale0, const at::Tensor &gamma1, const at::Tensor &beta1, const at::Tensor &wuq,
     const at::Tensor &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
@@ -181,8 +181,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     const at::Tensor &quant_scale0, const at::Tensor &quant_offset0, const at::Tensor &bias0,
     const at::Tensor &quant_scale1, const at::Tensor &quant_offset1, const at::Tensor &bias1,
     const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, at::Tensor &q_out0,
-    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1)
+    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
+    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1, at::Tensor &inner_out)
 {
     at::Tensor CtkvScale =
         ctkv_scale.has_value()
@@ -192,12 +192,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
         q_nope_scale.has_value()
             ? q_nope_scale.value()
             : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
+    bool enableInnerOut =
+        enable_inner_out.has_value()
+            ? enable_inner_out.value()
+            : false;
     
     auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
         hiddenState,
         wuk,
         cache_mode,
-        quant_mode
+        quant_mode,
+        enableInnerOut
     );
 
     void *hidden_state_ptr = hiddenState.data_ptr();
@@ -225,6 +230,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     void *kv_cache_out0_ptr = kv_cache_out0.data_ptr();
     void *q_out1_ptr = q_out1.data_ptr();
     void *kv_cache_out1_ptr = kv_cache_out1.data_ptr();
+    void *inner_out_ptr = inner_out.data_ptr();
     void *workspace_ptr = workspace_tensor.data_ptr();
     void *tiling_ptr = tiling.data_ptr();
 
@@ -235,17 +241,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     cmd.SetCustomHandler([stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                           gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr,
                           kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
+                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                           tiling_ptr, block_dim]() -> int {
         mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                             gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr, sin_ptr, cos_ptr,
                             kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
+                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                             tiling_ptr, block_dim);
         return 0;
     });
     cmd.Run();
-    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1);
+    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out);
 }
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
@@ -792,9 +798,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "               Tensor kv_cache_rope, Tensor slotmapping, Tensor quant_scale0,"
         "               Tensor quant_offset0, Tensor bias0, Tensor quant_scale1, Tensor quant_offset1,"
         "               Tensor bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
-        "               str? quant_mode, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
-        "               Tensor! kv_cache_out1) -> (Tensor q_out0, Tensor kv_cache_out0,"
-        "                                          Tensor q_out1, Tensor kv_cache_out1)"
+        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
+        "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
