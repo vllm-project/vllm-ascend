@@ -160,7 +160,10 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+    def __init__(self,
+                 enable_quantization_fusion: bool = True,
+                 fuse_qknorm_rope: bool = True,
+                 **kwargs):
         """
         Initialize the configuration.
         
@@ -170,10 +173,12 @@ class AscendCompilationConfig:
                 reducing the number of quantization/dequantization nodes.
                 Default: True
                 
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable_quantization_fusion = enable_quantization_fusion
-        # Add more compilation related configs here as needed
+        self.fuse_qknorm_rope = fuse_qknorm_rope
 
 
 class TorchairGraphConfig:
