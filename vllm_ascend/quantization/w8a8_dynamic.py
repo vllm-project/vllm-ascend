@@ -26,7 +26,8 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
+                                                        zero_experts_compute)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
@@ -185,6 +186,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -196,9 +198,11 @@ class AscendW8A8DynamicFusedMoEMethod:
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert router_logits.shape[
-            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
-
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
+        if zero_expert_num == 0 or zero_expert_type is None:
+            assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, \
+                "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -209,8 +213,18 @@ class AscendW8A8DynamicFusedMoEMethod:
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
+
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=x,
+            )
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -235,7 +249,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         fused_flag = get_forward_context(
         ).moe_comm_type == MoECommType.FUSED_ALLTOALL
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
             w1=w1[0] if fused_flag else w1,
@@ -253,6 +267,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            final_hidden_states += zero_expert_result
+        return final_hidden_states
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

@@ -3378,10 +3378,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
                                                    kv_cache_raw_tensors)
-
+        # TODO: Remove hard code after vLLM modification
+        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
-                      self.kv_caches)
+                      self.kv_caches, num_attn_module)
         return kv_caches
 
     def _allocate_kv_cache_tensors(
