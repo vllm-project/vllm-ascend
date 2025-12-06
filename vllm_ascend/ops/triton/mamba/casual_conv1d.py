@@ -16,6 +16,7 @@ import triton.language as tl
 
 PAD_SLOT_ID = -1
 
+
 def causal_conv1d_fn_native(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -96,8 +97,6 @@ def causal_conv1d_fn(
             for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
             in this case, the kernel will not process entries at
             indices 0 and 3
-
-
     out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
