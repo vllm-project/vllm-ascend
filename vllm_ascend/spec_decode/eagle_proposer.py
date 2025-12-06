@@ -51,7 +51,7 @@ class EagleProposer(Proposer):
                                not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
-            reversed(
+            sorted(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # persistent buffers for cuda graph
