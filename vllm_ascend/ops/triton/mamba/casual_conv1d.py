@@ -50,8 +50,7 @@ def causal_conv1d_fn_native(
     out = out[..., :seqlen]
     if return_final_states:
         final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
-            dtype_in
-        )  # (batch, dim, width - 1)
+            dtype_in)  # (batch, dim, width - 1)
         if final_states_out is not None:
             final_states_out.copy_(final_states)
         else:
@@ -115,13 +114,9 @@ def causal_conv1d_fn(
             activation=activation,
             return_final_states=True,
             final_states_out=conv_states[cache_indices[0]].unsqueeze(0),
-            initial_states=(
-                conv_states[cache_indices[0]].unsqueeze(0)
-                if has_initial_state[0]
-                else None
-            ),
-        )
-    )
+            initial_states=(conv_states[cache_indices[0]].unsqueeze(0)
+                if has_initial_state[0] else None),
+        ))
 
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
