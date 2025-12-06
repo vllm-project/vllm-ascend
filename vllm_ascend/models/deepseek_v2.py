@@ -516,7 +516,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                     prefix=f"{prefix}.mlp",
               )
         
-        if self.role is not None or self.role == "attention" or self.is_mtp_layer:
+        if self.role is not None and self.role == "attention" or self.is_mtp_layer:
             # if layer_idx < config.first_k_dense_replace:
             #     print('开始加载attn侧的mlp')
             #     self.mlp = DeepseekV2MLP(
