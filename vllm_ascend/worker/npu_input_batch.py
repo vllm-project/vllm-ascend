@@ -68,6 +68,8 @@ class CachedRequestState:
     lora_request: Optional[LoRARequest] = None
     prompt_embeds: Optional[torch.Tensor] = None
 
+    prev_num_draft_len: int = 0  # previous number of draft tokens
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds)
