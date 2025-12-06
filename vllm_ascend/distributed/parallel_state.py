@@ -187,7 +187,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     def _create_shared_weight_group(group_name: str) -> GroupCoordinator:
         # when global dp size is 1, shared weight group is same as tp group
         if global_dp_size == 1:
-            _SHARED_WEIGHT = get_tp_group()
+            return get_tp_group()
         else:  # when global dp size > 1, need to create new group
             group_ranks = []
             for pp_idx in range(global_pp_size):
@@ -199,12 +199,16 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                         group.append(global_rank)
                 group_ranks.append(group)
 
-            _SHARED_WEIGHT = init_model_parallel_group(
-                group_ranks,
-                get_world_group().local_rank,
-                backend,
-                group_name=group_name)
-        return _SHARED_WEIGHT
+            return init_model_parallel_group(group_ranks,
+                                             get_world_group().local_rank,
+                                             backend,
+                                             group_name=group_name)
+
+    global _SHARED_WEIGHT
+    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
+    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
+    if enable_sp() and is_ds_v32:
+        _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
 
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
@@ -261,14 +265,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         # Create shared weight group for flashcomm2 oproj
         if flashcomm2_o_shared_enabled():
             assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
-            global _SHARED_WEIGHT
             _SHARED_WEIGHT = _create_shared_weight_group("flashcomm2_o_shared")
-
-    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
-    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
-    if enable_sp() and is_ds_v32:
-        global _SHARED_WEIGHT
-        _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
 
 
 def get_mlp_tensor_model_parallel_world_size():
