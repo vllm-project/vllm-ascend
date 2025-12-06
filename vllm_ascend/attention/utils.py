@@ -42,6 +42,13 @@ class AscendPrefillContextParallelMetadata:
 
     pcp_prefill_mask: torch.Tensor = None
 
+    split_q_head_nomask_idx_tensor_list: Optional[list[torch.Tensor]] = None
+    
+    split_q_tail_nomask_idx_tensor_list: Optional[list[torch.Tensor]] = None
+    
+    head_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
+    
+    tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None 
 
 @dataclass
 class AscendCommonAttentionMetadata:
