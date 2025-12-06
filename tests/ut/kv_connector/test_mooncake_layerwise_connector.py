@@ -400,7 +400,6 @@ class MockVllmConfig:
                 "tp_size": 2,
                 "dp_size": 1
             },
-            "use_ascend_direct": True,
         }.get(k, d)
 
 
@@ -861,26 +860,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()  # type: ignore
-
-    def test_worker_use_ascend_direct(self):
-        for use_ascend_direct in (True, False):
-            with self.subTest(use_ascend_direct=use_ascend_direct):
-                config = MockVllmConfig()
-                config.kv_transfer_config.get_from_extra_config.side_effect = (
-                    lambda k, d: {
-                        "prefill": {
-                            "tp_size": 2,
-                            "dp_size": 1
-                        },
-                        "decode": {
-                            "tp_size": 2,
-                            "dp_size": 1
-                        },
-                        "use_ascend_direct": use_ascend_direct,
-                    }.get(k, d))
-                worker = MooncakeLayerwiseConnectorWorker(
-                    config, self.engine_id)
-                self.assertIsNotNone(worker)
 
     def test_register_kv_caches_producer(self):
 
