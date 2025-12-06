@@ -983,7 +983,7 @@ def flashcomm2_enable() -> bool:
 
 
 def flashcomm2_o_shared_enabled() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED > 0
+    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
