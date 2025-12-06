@@ -46,9 +46,11 @@ class EagleProposer(Proposer):
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size(
         )
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.mode
-                               == CompilationMode.VLLM_COMPILE and
-                               not self.vllm_config.model_config.enforce_eager)
+        self.use_cuda_graph = (
+            self.vllm_config.compilation_config.mode
+            == CompilationMode.VLLM_COMPILE
+            and not self.vllm_config.model_config.enforce_eager
+            and not self.vllm_config.speculative_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
             sorted(
@@ -125,6 +127,9 @@ class EagleProposer(Proposer):
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None):
+        if not self.use_cuda_graph:
+            # It is used to adapt the eagle-fullgraph pre-commit.
+            aclgraph_runtime_mode = CUDAGraphMode.NONE  # noqa
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
@@ -454,6 +459,8 @@ class EagleProposer(Proposer):
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
+        aclgraph_runtime_mode = CUDAGraphMode.NONE
+        batch_descriptor = None
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -466,10 +473,19 @@ class EagleProposer(Proposer):
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
-        with set_ascend_forward_context(attn_metadata,
-                                        self.vllm_config,
-                                        moe_comm_type=moe_comm_type,
-                                        num_tokens=num_input_tokens):
+        # Make sure the speculative_config.enforce_eager validated to be compatible with eagle full graph.
+        # NOTE: set aclgraph_runtime_mode again to avoid an eagle-fullgraph pre-commit error.
+        # Should remove the reassignment once eagle-fullgraph pr be merged.
+        if not self.use_cuda_graph:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
+            batch_descriptor = None  # noqa
+
+        with set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                moe_comm_type=moe_comm_type,
+                num_tokens=num_input_tokens,
+                aclgraph_runtime_mode=aclgraph_runtime_mode):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
