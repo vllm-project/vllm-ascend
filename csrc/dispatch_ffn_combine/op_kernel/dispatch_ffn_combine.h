@@ -152,7 +152,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     moeInitRoutingQuantV2TilingData = tilingData.cocTiling.moeInitRoutingQuantV2TilingData;
     initRoutingQuantTilingKey = tilingData.cocTiling.initRoutingQuantTilingKey;
 
-    auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
     __gm__ HcclOpResParamCustom *WinContext_{nullptr};
     WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
 
@@ -250,8 +250,8 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
 
     GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
 
-    uint32_t epilogueCoreNum = aivNum / 2;
-    uint32_t epilogueGranularity = expertPerRank - 1;
+    uint32_t epilogueCoreNum = aivNum;
+    uint32_t epilogueGranularity = expertPerRank + 1;
 
     typename MatmulKernel::Params params{
         problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
