@@ -323,6 +323,10 @@ class AscendAttentionMetadataBuilder:
 
         query_start_loc = query_start_loc_cpu.pin_memory().to(
             self.device, non_blocking=True)
+        is_causal_pooling = None
+        if self.model_config.runner_type == "pooling":
+            is_causal_pooling = common_attn_metadata.causal if hasattr(
+                common_attn_metadata, 'causal') else True
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -602,9 +606,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 out=output)
         return output
 
-    def _forward_encoder_attention(self, query: torch.Tensor, key: torch.Tensor,
-                         value: torch.Tensor, attn_metadata: AscendMetadata,
-                         _: torch.Tensor) -> torch.Tensor:
+    def _forward_encoder_attention(self, query: torch.Tensor,
+                                   key: torch.Tensor, value: torch.Tensor,
+                                   attn_metadata: AscendMetadata,
+                                   _: torch.Tensor) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.is_causal_pooling is not None
 
