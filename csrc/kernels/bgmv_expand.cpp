@@ -341,9 +341,9 @@ private:
     }
 
 // declare all dtype kernel
-BGMV_EXPAND_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
-    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
+BGMV_EXPAND_TYPE_DECLARE(half);
+#ifndef __CCE_AI_CORE__ || __CCE_AI_CORE__ >= 200
+    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t);
 #endif
 
 namespace vllm_ascend {
@@ -356,10 +356,10 @@ extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weigh
         bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore,
                                                         maxLoRARank, outputHiddenDim, sliceOffset, outputFullDim);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
+        #ifndef __CCE_AI_CORE__ || __CCE_AI_CORE__ >= 200
             bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
-                                                                  numTokensPerCore, maxLoRARank, outputHiddenDim,
-                                                                  sliceOffset, outputFullDim);
+                                                              numTokensPerCore, maxLoRARank, outputHiddenDim,
+                                                              sliceOffset, outputFullDim);
         #endif
     } else {
         return;
