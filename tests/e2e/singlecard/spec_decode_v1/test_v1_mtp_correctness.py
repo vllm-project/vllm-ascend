@@ -56,7 +56,7 @@ def mtp_correctness(sampling_config: SamplingParams,
                     enable_expert_parallel=True,
                     speculative_config={
                         "method":
-                        "deepseek_mtp",
+                        "mtp",
                         "num_speculative_tokens":
                         num_speculative_tokens,
                         "disable_padded_drafter_batch":
