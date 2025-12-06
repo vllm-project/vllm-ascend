@@ -317,8 +317,8 @@ class AscendAttentionMetadataBuilder:
                     query_start_loc_cpu.device).to(query_start_loc_cpu.dtype)
             ])
 
-        query_start_loc = query_start_loc_cpu.to(self.device,
-                                                 non_blocking=True)
+        query_start_loc = query_start_loc_cpu.pin_memory().to(
+            self.device, non_blocking=True)
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,

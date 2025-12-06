@@ -299,6 +299,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
+        torch.Tensor.pin_memory = lambda x: x  # noqa
 
         mock_dcp.world_size = 1
         dcp_group = MagicMock(spec=GroupCoordinator)
@@ -534,6 +535,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                             mock_get_pcp_group):
         mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -599,6 +601,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                            mock_get_pcp_group):
         mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -660,6 +663,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                         mock_dcp_world_size,
                                         mock_get_pcp_group):
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -713,6 +718,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                                  mock_dcp_world_size,
                                                  mock_get_pcp_group):
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -767,6 +774,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                              mock_dcp_world_size,
                                              mock_get_pcp_group):
         mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
