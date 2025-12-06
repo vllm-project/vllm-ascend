@@ -129,7 +129,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             # act_fn: swiglu
             hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
                 x=hidden_states,
-                weight_scale=w1_scale,
+                weight_scale=w1_scale[0],
                 activation_scale=pertoken_scale,
                 bias=None,
                 quant_scale=None,

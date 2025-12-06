@@ -52,7 +52,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_pp_group, get_tp_group,
+                                             get_pcp_group, get_pp_group,
+                                             get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -145,15 +146,8 @@ from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable,
-                               prefill_context_parallel_enable)
+                               is_moe_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group
-    from vllm.distributed.parallel_state import (
-        get_prefill_context_model_parallel_rank,
-        get_prefill_context_model_parallel_world_size)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -290,10 +284,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dcp_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         decode_max_num_seqs = getattr(self.scheduler_config,
                                       'decode_max_num_seqs', 0)
         self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
@@ -332,10 +325,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        if self.ascend_config.ascend_scheduler_config.enabled:
-            self.chunked_prefill_enabled = self.scheduler_config.enable_chunked_prefill
-        else:
-            self.chunked_prefill_enabled = True
         self.weight_prefetch_method = WeightPrefetchMethod(
             self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
@@ -606,8 +595,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 if self.vllm_config.speculative_config else 0),
             kernel_block_sizes=[[self.vllm_config.cache_config.block_size]],
             cp_kv_cache_interleave_size=self.parallel_config.
-            cp_kv_cache_interleave_size
-            if prefill_context_parallel_enable() else 1,
+            cp_kv_cache_interleave_size,
         )
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
@@ -1932,7 +1920,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
-        ascend_config = get_ascend_config()
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
@@ -1949,7 +1936,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
         # splitfuse
-        elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
+        elif self.scheduler_config.enable_chunked_prefill:
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
@@ -2217,8 +2204,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             return None
 
         soc_version = get_ascend_device_type()
-        quant_type = getattr(self.vllm_config.model_config.hf_config,
-                             'moe_quantize', None)
+        quant_type = getattr(
+            self.vllm_config.model_config.hf_config, 'moe_quantize',
+            getattr(self.vllm_config.model_config.hf_config, 'quantize', None))
         model_type = self.vllm_config.model_config.hf_config.model_type
 
         if not self.parallel_config.enable_expert_parallel:
@@ -2237,7 +2225,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         elif soc_version in {AscendDeviceType._910_93}:
             moe_comm_type = (MoECommType.MC2
                              if num_tokens <= self.mc2_tokens_capacity else
-                             MoECommType.ALLTOALL)
+                             MoECommType.FUSED_ALLTOALL if quant_type
+                             == "w8a8_dynamic" else MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
@@ -2745,8 +2734,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                                      device=self.device)
                 long_seq_metadata = self._generate_pcp_metadata(num_tokens)
                 if long_seq_metadata is not None:
-                    pcp_world_size = get_pcp_group(
-                    ).world_size if prefill_context_parallel_enable() else 1
+                    pcp_world_size = get_pcp_group().world_size
                     dcp_world_size = get_dcp_group().world_size
                     num_computed_tokens_of_pcp_dcp = [[
                         [0] * dcp_world_size for _ in range(pcp_world_size)

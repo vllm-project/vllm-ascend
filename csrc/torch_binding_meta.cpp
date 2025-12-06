@@ -81,7 +81,7 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
     const at::Tensor &descale0,
@@ -106,12 +106,15 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     const c10::optional<at::Tensor> &q_nope_scale,
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
+    c10::optional<bool> enable_inner_out,
     at::Tensor &q_out0,
     at::Tensor &kv_cache_out0,
     at::Tensor &q_out1,
-    at::Tensor &kv_cache_out1)
+    at::Tensor &kv_cache_out1,
+    at::Tensor &inner_out
+    )
 {
-    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1};
+    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
@@ -156,7 +159,21 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
                                     c10::optional<c10::string_view> quant_mode)
 {
     return;
+}
 
+at::Tensor& dispatch_ffn_combine_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight1,
+    const at::Tensor& weight2,
+    const at::Tensor& expert_idx,
+    const at::Tensor& scale1,
+    const at::Tensor& scale2,
+    const at::Tensor& probs,
+    c10::string_view group,
+    int64_t max_output_size,
+    at::Tensor& out
+) {
+    return out;
 }
 
 at::Tensor npu_lightning_indexer_meta(
@@ -244,5 +261,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    // MoE dispatch-ffn-combine
+    ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
 }
 }
