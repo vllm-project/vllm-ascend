@@ -56,7 +56,7 @@ FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *
 constexpr int32_t MAX_RANK_SIZE = 32;
 class HcclShmem {
 public:
-    #ifdef HCCL_COMM    // hccl需要初始化hccl context
+    #ifdef HCCL_COMM    // HCCL needs to initialize the HCCL context
     __gm__ HcclOpResParamCustom *WinContext_{nullptr};
     Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
     GM_ADDR m_ptrArray[MAX_RANK_SIZE];
@@ -92,7 +92,7 @@ public:
     #endif
 
     FORCE_INLINE_AICORE
-    GM_ADDR operator() () const {   // 无参数，返回本地peermem
+    GM_ADDR operator() () const {   // No argument: return local peermem
         #ifdef HCCL_COMM
             return m_ptrArray[m_rank];
         #else
@@ -101,7 +101,7 @@ public:
     }
 
     FORCE_INLINE_AICORE
-    GM_ADDR operator() (int32_t index) const {  // 带index参数，返回远端peermem首地址
+    GM_ADDR operator() (int32_t index) const {  // With index: return remote peermem base address
         #ifdef HCCL_COMM
             return m_ptrArray[index];
         #else
@@ -125,22 +125,6 @@ public:
             return shmem_ptr(shmemi_get_state()->heap_base + offset, rankId);
         #endif
     }
-
-        // FORCE_INLINE_AICORE
-    // GM_ADDR operator () (GM_ADDR ptr, int32_t index) const  {   // shmem_ptr相同用法
-    //     #ifdef HCCL_COMM
-    //         size_t offset = ptr - m_ptrArray[m_rank];
-    //         if (offset < 0 || offset >= m_segmentSize) {
-    //             return nullptr;
-    //         }
-    //         if (index < 0 || index >= m_rankSize) {
-    //             return nullptr;
-    //         }
-    //         return m_ptrArray[index] + offset;
-    //     #else
-    //         return shmem_ptr(ptr, index);
-    //     #endif
-    // }
 
 
     FORCE_INLINE_AICORE
