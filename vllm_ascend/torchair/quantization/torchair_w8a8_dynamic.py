@@ -25,7 +25,6 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.utils import (npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
@@ -938,8 +937,6 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
-
         fused_moe_state = get_forward_context().fused_moe_state
         if self.enable_shared_expert_dp and fused_moe_state == FusedMoEState.MC2:
             fused_moe_state = FusedMoEState.All2All
@@ -948,35 +945,20 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         with super_kernel(prefix,
                           "stream-fusion=1",
                           enabled=running_in_super_kernel):
-            # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-            if is_deepseek_v3_r1:
-                topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-                    router_logits,
-                    k=top_k,  # topk currently is 8
-                    bias=e_score_correction_bias,
-                    k_group=topk_group,  # fix: 4
-                    group_count=num_expert_group,  # fix 8
-                    group_select_mode=
-                    1,  # 0: the maximum in the group; 1: topk2.sum(fix)
-                    renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
-                    norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                    # out_flag=False, # todo new api; should the third output be output
-                    # y2_flag=False, # old api; should the third output be output
-                    routed_scaling_factor=1,
-                    eps=float(1e-20))
-            else:
-                topk_weights, topk_ids = torchair_select_experts(
-                    hidden_states=x,
-                    router_logits=router_logits,
-                    top_k=top_k,
-                    use_grouped_topk=use_grouped_topk,
-                    renormalize=renormalize,
-                    topk_group=topk_group,
-                    num_expert_group=num_expert_group,
-                    custom_routing_function=custom_routing_function,
-                    scoring_func=scoring_func,
-                    e_score_correction_bias=e_score_correction_bias,
-                )
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+                router_logits,
+                k=top_k,  # topk currently is 8
+                bias=e_score_correction_bias,
+                k_group=topk_group,  # fix: 4
+                group_count=num_expert_group,  # fix 8
+                group_select_mode=
+                1,  # 0: the maximum in the group; 1: topk2.sum(fix)
+                renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+                norm_type=1,  # 0: softmax; 1: sigmoid(fix)
+                # out_flag=False, # todo new api; should the third output be output
+                # y2_flag=False, # old api; should the third output be output
+                routed_scaling_factor=1,
+                eps=float(1e-20))
 
             if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
                 with npu_stream_switch("moe_secondary", 0):
