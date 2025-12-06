@@ -44,11 +44,12 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 
 ### Pooling Models
 
-| Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
-|-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
-| Qwen3-Embedding               | ✅        |                                                                      |||||||||||||||||||
-| Molmo                         | ✅        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |||||||||||||||||||
-| XLM-RoBERTa-based             | ❌        | [1960](https://github.com/vllm-project/vllm-ascend/issues/1960)      |||||||||||||||||||
+| Model             | Support   | Note                                                            | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
+|-------------------|-----------|-----------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
+| Qwen3-Embedding   | ✅        |                                                                 ||                    ||||||||||||✅|||||
+| Molmo             | ✅        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942) ||                    |||||||||||||||||
+| bge-m3            | ✅        | [3171](https://github.com/vllm-project/vllm-ascend/pull/3171)   ||                    ||||||||||||✅|||||
+| bge-large-zh-v1.5 | ✅        | [4261](https://github.com/vllm-project/vllm-ascend/pull/4261)   || A2/A3              ||||||||||||✅|||||
 
 ## Multimodal Language Models
 
