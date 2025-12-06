@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
-    from zmq import Socket
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -213,7 +212,7 @@ class KVCacheSendingThread(threading.Thread):
                          e,
                          exc_info=True)
 
-    def run_busy_loop(self, sock: "Socket"):
+    def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         size_in_bytes = len(encoded_data)
