@@ -127,6 +127,7 @@ struct OpParam {
     int32_t cacheMode;
     QuantMode quantMode;
     caffe2::TypeMeta inDtype;
+    bool enableInnerOut;
 };
 
 class PpMatmulTilingApi
@@ -540,7 +541,8 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
 
 void MlaPreprocessTiling::SetTilingKey()
 {
-    uint64_t tilingKey = (static_cast<uint64_t>(opParam.inDtype == at::kBFloat16)) << 8;
+    uint64_t tilingKey = (static_cast<uint64_t>(opParam.enableInnerOut)) << 9;
+    tilingKey |= (static_cast<uint64_t>(opParam.inDtype == at::kBFloat16)) << 8;
 
     tilingKey |= static_cast<uint64_t>(opParam.cacheMode);
     tilingKey |= (static_cast<uint64_t>(opParam.quantMode) << 3);
@@ -619,21 +621,12 @@ inline int get_op_mode(const MapType &mode_map, c10::optional<c10::string_view> 
     return it->second;
 }
 
-// std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
-//     const at::Tensor &hiddenState, const at::Tensor &gamma0, const at::Tensor &beta0, const at::Tensor &wdqkv,
-//     const at::Tensor &descale0, const at::Tensor &gamma1, const at::Tensor &beta1, const at::Tensor &wuq,
-//     const at::Tensor &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
-//     const at::Tensor &wuk, const at::Tensor &kv_cache, const at::Tensor &kv_cache_rope, const at::Tensor &slotmapping,
-//     const at::Tensor &quant_scale0, const at::Tensor &quant_offset0, const at::Tensor &bias0,
-//     const at::Tensor &quant_scale1, const at::Tensor &quant_offset1, const at::Tensor &bias1,
-//     const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-//     c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, at::Tensor &q_out0,
-//     at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1)
 std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     const at::Tensor &hiddenState,
     const at::Tensor &wuk,
     c10::optional<c10::string_view> cache_mode,
-    c10::optional<c10::string_view> quant_mode
+    c10::optional<c10::string_view> quant_mode,
+    bool enable_inner_out
 )
 {
     auto cacheMode = get_op_mode(cache_mode_map, cache_mode, "krope_ctkv", "cache_mode");
@@ -661,6 +654,7 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     opParam.cacheMode = static_cast<int32_t>(cacheMode);
     opParam.quantMode = static_cast<QuantMode>(quantMode);
     opParam.inDtype = hiddenState.options().dtype();
+    opParam.enableInnerOut = enable_inner_out;
 
     MlaTilingData tilingData;
     MlaPreprocessTiling mlaTiling(platformInfo, opParam, &tilingData);
