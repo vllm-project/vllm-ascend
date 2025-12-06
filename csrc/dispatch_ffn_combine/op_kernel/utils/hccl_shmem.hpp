@@ -75,6 +75,7 @@ public:
             for (int i = 0; i < m_rankSize; i++) {
                 m_ptrArray[i] = (GM_ADDR)((i == m_rank) ? WinContext_->localWindowsIn :
                                 ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[i].nextDevicePtr))->windowsIn);
+            }
         }
     #else
         FORCE_INLINE_AICORE

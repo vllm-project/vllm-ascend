@@ -169,12 +169,6 @@ public:
             ptrWorkspace(ptrWorkspace_), ubMoveNum(ubMoveNum_),symmetricPtr(symmetricPtr_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
         {
-            moeInitRoutingQuantV2TilingData.vbsComputeParamsOp = moeInitRoutingQuantV2TilingData_.vbsComputeParamsOp;
-            moeInitRoutingQuantV2TilingData.vmsMiddleComputeParamsOp = moeInitRoutingQuantV2TilingData_.vmsMiddleComputeParamsOp;
-            moeInitRoutingQuantV2TilingData.sortOutComputeParamsOp = moeInitRoutingQuantV2TilingData_.sortOutComputeParamsOp;
-            moeInitRoutingQuantV2TilingData.srcToDstComputeParamsOp = moeInitRoutingQuantV2TilingData_.srcToDstComputeParamsOp;
-            moeInitRoutingQuantV2TilingData.srcToDstCapacityComputeParamsOp = moeInitRoutingQuantV2TilingData_.srcToDstCapacityComputeParamsOp;
-            moeInitRoutingQuantV2TilingData.gatherOutComputeParamsOp = moeInitRoutingQuantV2TilingData_.gatherOutComputeParamsOp;
         }
     };
 
