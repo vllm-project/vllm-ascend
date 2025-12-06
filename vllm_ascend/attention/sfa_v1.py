@@ -135,16 +135,12 @@ class AscendSFAMetadataBuilder:
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        device = self.device
+        num_input_tokens = common_attn_metadata.num_input_tokens
 
-        block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        slot_mapping = common_attn_metadata.slot_mapping[:
-                                                         num_actual_tokens].to(
-                                                             device,
-                                                             non_blocking=True)
+        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:
-                                                         num_actual_tokens].long(
+                                                         num_input_tokens].long(
                                                          )
         query_start_loc = common_attn_metadata.query_start_loc
         query_lens = query_start_loc[1:] - query_start_loc[:-1]
@@ -161,15 +157,23 @@ class AscendSFAMetadataBuilder:
             self.sin_cache = self.sin_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
 
-        cum_query_lens = query_start_loc_cpu[1:num_reqs + 1].to(
-            torch.int32).to(device, non_blocking=True)
-        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].to(
-            torch.int32).to(device, non_blocking=True)
+        cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
-            1).unsqueeze(2)
-        sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
-            1).unsqueeze(2)
+        cos = common_attn_metadata.cos
+        sin = common_attn_metadata.sin
+
+        assert self.cos_cache is not None and self.sin_cache is not None
+        new_cos = self.cos_cache[input_positions][:, None, None]
+        new_sin = self.sin_cache[input_positions][:, None, None]
+
+        if (cos is not None and sin is not None
+                and num_input_tokens <= cos.shape[0]
+                and num_input_tokens <= sin.shape[0]):
+            cos[:num_input_tokens] = new_cos
+            sin[:num_input_tokens] = new_sin
+        else:
+            cos, sin = new_cos, new_sin
 
         return self.metadata_cls(  # type: ignore
             has_prefill=has_prefill,
@@ -182,8 +186,8 @@ class AscendSFAMetadataBuilder:
             attn_mask=common_attn_metadata.attn_mask,
             attn_state=common_attn_metadata.attn_state,
             block_tables=block_table,
-            sin=sin,
-            cos=cos)
+            sin=sin[:num_input_tokens],
+            cos=cos[:num_input_tokens])
 
     def build_for_graph_capture(
         self,
@@ -191,7 +195,10 @@ class AscendSFAMetadataBuilder:
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
         model: Optional[nn.Module] = None,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+        if attn_state in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        }:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -422,11 +429,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Profiling run.
             return output.fill_(0)
         has_prefill = attn_metadata.has_prefill
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        hidden_states = hidden_states[:num_actual_tokens]
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        output = output[:num_actual_tokens]
         assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
         maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
                            dependency=hidden_states,
@@ -447,7 +451,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
 
-        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+        slot_mapping = attn_metadata.slot_mapping
         ql_nope, q_pe = \
             self._q_proj_and_k_up_proj(q_c)
         q_pe = self.rope_single(q_pe, attn_metadata.cos, attn_metadata.sin)
