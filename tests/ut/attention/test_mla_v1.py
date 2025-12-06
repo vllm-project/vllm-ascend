@@ -578,7 +578,14 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                            device=self.mock_device)
 
         mock_model = MagicMock()
-        metadata = builder.build(1, common_attn_metadata, mock_model)
+        orig_zeros = torch.zeros
+
+        def zeros_ignore_pin(*args, **kwargs):
+            kwargs.pop("pin_memory", None)
+            return orig_zeros(*args, **kwargs)
+
+        with patch("torch.zeros", zeros_ignore_pin):
+            metadata = builder.build(1, common_attn_metadata, mock_model)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
         self.assertEqual(metadata.num_actual_tokens,
@@ -645,7 +652,14 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                                            device=self.mock_device)
 
         mock_model = MagicMock()
-        metadata = builder.build(1, common_attn_metadata, mock_model)
+        orig_zeros = torch.zeros
+
+        def zeros_ignore_pin(*args, **kwargs):
+            kwargs.pop("pin_memory", None)
+            return orig_zeros(*args, **kwargs)
+
+        with patch("torch.zeros", zeros_ignore_pin):
+            metadata = builder.build(1, common_attn_metadata, mock_model)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
         self.assertEqual(metadata.num_actual_tokens,
