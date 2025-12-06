@@ -211,6 +211,9 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
             // Get per-token scale from row loopIdx of gmPerTokenScale
+            __asm__ __volatile__("");
+            AscendC::DataCacheCleanAndInvalid<ElementPerTokenScale, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(gmPerTokenScale1[loopIdx]);
+            __asm__ __volatile__("");
             ElementPerTokenScale perTokenScale = gmPerTokenScale1(loopIdx);
 
             AscendC::SetFlag<AscendC::HardEvent::S_V>(0);

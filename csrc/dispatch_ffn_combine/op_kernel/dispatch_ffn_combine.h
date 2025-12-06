@@ -250,7 +250,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
 
     GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
 
-    uint32_t epilogueCoreNum = aivNum / 2;
+    uint32_t epilogueCoreNum = aivNum;
     uint32_t epilogueGranularity = expertPerRank - 1;
 
     typename MatmulKernel::Params params{
