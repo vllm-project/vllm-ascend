@@ -53,7 +53,7 @@ Run the following script to execute offline inference on a single NPU:
 ```python
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # If network issues prevent AudioAsset from fetching remote audio files, retry or check your network.
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -177,8 +177,8 @@ docker run --rm \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
 vllm serve Qwen/Qwen2-Audio-7B-Instruct \
---max_model_len 16384 \
---max-num-batched-tokens 16384 \
+--max_model_len 8192 \
+--max-num-batched-tokens 8192 \
 --limit-mm-per-prompt '{"audio":2}' \
 --chat-template /path/to/your/vllm-ascend/examples/chat_templates/template_qwen2_audio.jinja
 ```
@@ -201,7 +201,7 @@ Once your server is started, you can query the model with input prompts:
 curl -X POST http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "/root/.cache/modelscope/models/Qwen/Qwen2-Audio-7B-Instruct",
+        "model": "Qwen/Qwen2-Audio-7B-Instruct",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": [
