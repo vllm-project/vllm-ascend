@@ -176,6 +176,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable exponential overlap with model executing.
+    "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL", '0'))),
 }
 
 # end-env-vars-definition
