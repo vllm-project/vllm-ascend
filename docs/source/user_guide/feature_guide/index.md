@@ -9,7 +9,6 @@ graph_mode
 quantization
 quantization-llm-compressor
 sleep_mode
-structured_output
 lora
 eplb_swift_balancer
 netloader
