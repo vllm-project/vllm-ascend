@@ -41,6 +41,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_FULL_DECODE_ONLY():
     with VllmRunner(model,
                     max_model_len=1024,
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -53,6 +54,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_FULL_DECODE_ONLY():
             model,
             max_model_len=1024,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enforce_eager=False,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
@@ -87,6 +89,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_FULL():
     with VllmRunner(model,
                     max_model_len=1024,
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL",
@@ -99,6 +102,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_FULL():
             model,
             max_model_len=1024,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             enforce_eager=False,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)

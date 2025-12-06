@@ -75,6 +75,7 @@ def test_ngram_correctness(
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     with VllmRunner(model_name,
+                    cudagraph_capture_sizes=[4],
                     speculative_config={
                         "method": "ngram",
                         "prompt_lookup_max": 5,
@@ -121,6 +122,7 @@ def test_eagle_correctness(
             max_num_seqs=1,
             max_num_batched_tokens=2048,
             gpu_memory_utilization=0.6,
+            cudagraph_capture_sizes=[4],
             speculative_config={
                 "method": "eagle3" if use_eagle3 else "eagle",
                 "model": spec_model_name,
@@ -160,6 +162,7 @@ def test_suffix_correctness(
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     with VllmRunner(model_name,
+                    cudagraph_capture_sizes=[4],
                     speculative_config={
                         "method": "suffix",
                         "num_speculative_tokens": 8,
@@ -194,6 +197,7 @@ def test_suffix_acceptance(
     num_draft = []
     num_accept = []
     with VllmRunner(model_name,
+                    cudagraph_capture_sizes=[4],
                     speculative_config={
                         "method": "suffix",
                         "suffix_decoding_max_spec_factor": 2.0,

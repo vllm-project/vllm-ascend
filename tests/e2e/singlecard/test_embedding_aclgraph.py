@@ -34,6 +34,7 @@ def test_aclgrpah_embed_models_correctness(model_name):
 
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             runner="pooling",
             enforce_eager=False,
     ) as vllm_aclgraph_runner:
@@ -41,6 +42,7 @@ def test_aclgrpah_embed_models_correctness(model_name):
 
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             runner="pooling",
             enforce_eager=True,
     ) as vllm_runner:

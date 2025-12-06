@@ -47,6 +47,7 @@ def test_generate_with_allgather():
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=1024,
                     dtype="auto",
                     enable_expert_parallel=True) as vllm_model:
@@ -68,6 +69,7 @@ def test_generate_with_alltoall():
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=1024,
                     dtype="auto",
                     enable_expert_parallel=True) as vllm_model:

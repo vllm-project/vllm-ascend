@@ -60,6 +60,7 @@ def test_models_distributed_QwQ():
             "Qwen/QwQ-32B",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
             enforce_eager=False,
     ) as vllm_model:
@@ -76,6 +77,7 @@ def test_models_distributed_DeepSeek_multistream_moe():
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             distributed_executor_backend="mp",
             additional_config={
                 "torchair_graph_config": {
@@ -99,6 +101,7 @@ def test_models_distributed_Qwen3_W8A8():
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -115,6 +118,7 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC_old_version(model):
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
@@ -131,6 +135,7 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC_new_version(model):
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
@@ -148,6 +153,7 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
             snapshot_download(model),
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
             enforce_eager=True,
             enable_expert_parallel=True,
@@ -170,6 +176,7 @@ def test_sp_for_qwen3_moe() -> None:
     with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
                     dtype="auto",
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     distributed_executor_backend="mp",
                     compilation_config={
                         "pass_config": {
@@ -195,6 +202,7 @@ def test_fc2_for_qwen3_moe() -> None:
     with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
                     dtype="auto",
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
                     enforce_eager=True) as vllm_model:
@@ -213,6 +221,7 @@ def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
                     dtype="auto",
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[4],
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
                     enforce_eager=True,
@@ -235,6 +244,7 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
             enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -255,6 +265,7 @@ def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
             enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[4],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

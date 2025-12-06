@@ -54,6 +54,7 @@ def test_single_prompt_embeds_inference(model_name):
     # Run inference with prompt embeddings
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             enable_prompt_embeds=True,
             enforce_eager=True,
     ) as vllm_runner:
@@ -96,6 +97,7 @@ def test_batch_prompt_embeds_inference(model_name):
     # Run batch inference with prompt embeddings
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             enable_prompt_embeds=True,
             enforce_eager=True,
     ) as vllm_runner:
@@ -126,6 +128,7 @@ def test_prompt_embeds_with_aclgraph(model_name):
     # Run with ACL graph enabled (enforce_eager=False)
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             enable_prompt_embeds=True,
             enforce_eager=False,
     ) as vllm_aclgraph_runner:
@@ -137,6 +140,7 @@ def test_prompt_embeds_with_aclgraph(model_name):
     # Run with ACL graph disabled (enforce_eager=True)
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             enable_prompt_embeds=True,
             enforce_eager=True,
     ) as vllm_eager_runner:
@@ -175,6 +179,7 @@ def test_mixed_prompt_embeds_and_text(model_name):
     # Run inference with mixed inputs
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             enable_prompt_embeds=True,
             enforce_eager=True,
     ) as vllm_runner:

@@ -48,6 +48,7 @@ def test_ilama_lora(ilama_lora_files):
     with VllmRunner(snapshot_download(MODEL_PATH),
                     enable_lora=True,
                     dtype="half",
+                    cudagraph_capture_sizes=[4],
                     max_loras=4,
                     max_model_len=1024,
                     max_num_seqs=16,

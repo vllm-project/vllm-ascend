@@ -35,6 +35,7 @@ def mtp_torchair_correctness(
     with VllmRunner(model_name,
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
+                    cudagraph_capture_sizes=[4],
                     max_model_len=256,
                     enforce_eager=False,
                     additional_config={
@@ -55,6 +56,7 @@ def mtp_torchair_correctness(
                     tensor_parallel_size=1,
                     max_num_seqs=256,
                     gpu_memory_utilization=0.7,
+                    cudagraph_capture_sizes=[4],
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
                     speculative_config={
