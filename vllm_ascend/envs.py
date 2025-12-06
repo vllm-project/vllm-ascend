@@ -176,6 +176,20 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Set torch_npu profiler to profile aicore metrics. There are the following options that can be configured:
+    # 0: torch_npu.profiler.AiCMetrics.AiCoreNone;
+    # 1: torch_npu.profiler.AiCMetrics.PipeUtilization;
+    # 2: torch_npu.profiler.AiCMetrics.ArithmeticUtilization;
+    # 3: torch_npu.profiler.AiCMetrics.Memory;
+    # 4: torch_npu.profiler.AiCMetrics.MemoryL0;
+    # 5: torch_npu.profiler.AiCMetrics.ResourceConflictRatio;
+    # 6: torch_npu.profiler.AiCMetrics.MemoryUB;
+    # 7: torch_npu.profiler.AiCMetrics.L2Cache;
+    # 8: torch_npu.profiler.AiCMetrics.MemoryAccess;
+    # If not set, it will be torch_npu.profiler.AiCMetrics.PipeUtilization by default.
+    # The meanings of various options can refer to: https://www.hiascend.com/document/detail/zh/Pytorch/720/apiref/torchnpuCustomsapi/context/torch_npu-profiler-AiCMetrics.md
+    "VLLM_ASCEND_PROFILER_AIC_METRICS":
+    lambda: int(os.getenv("VLLM_ASCEND_PROFILER_AIC_METRICS", 1)),
 }
 
 # end-env-vars-definition
