@@ -221,7 +221,13 @@ class VllmEplbAdaptor(EplbAdaptor):
                 json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
+        pad_len = self.expert_map_per_layer[layer_id].shape[
+            0] - updated_expert_map.shape[0]
+        updated_expert_map_padded = torch.nn.functional.pad(updated_expert_map,
+                                                            pad=(0, pad_len),
+                                                            mode='constant',
+                                                            value=-1)
+        self.expert_map_per_layer[layer_id].copy_(updated_expert_map_padded)
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace,
@@ -234,7 +240,15 @@ class VllmEplbAdaptor(EplbAdaptor):
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+            pad_len = self.log2phy_map_per_layer[layer_id].shape[
+                0] - updated_log2phy_map.shape[0]
+            updated_log2phy_map_padded = torch.nn.functional.pad(
+                updated_log2phy_map,
+                pad=(0, pad_len),
+                mode='constant',
+                value=-1)
+            self.log2phy_map_per_layer[layer_id].copy_(
+                updated_log2phy_map_padded)
 
     def global2local(self, placement: torch.Tensor,
                      E_local: int) -> torch.Tensor:
