@@ -692,7 +692,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     value=value[:attn_metadata.num_actual_tokens],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=slots)
+                    slot_indices=slots[:attn_metadata.num_actual_tokens])
         return key, value
 
     def forward_impl(

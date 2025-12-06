@@ -94,8 +94,6 @@ class EagleProposer(Proposer):
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ):
             self.update_stream = torch.npu.Stream()
-            set_mtp_graph_params(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
@@ -162,7 +160,6 @@ class EagleProposer(Proposer):
                 slot_mapping,
                 positions=self.runner.positions,
                 attn_mask=self.runner.attn_mask,
-                fia_attn_mask=self.runner.fia_attn_mask,
                 spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
@@ -275,8 +272,10 @@ class EagleProposer(Proposer):
                     [h[token_indices] for h in aux_hidden_states], dim=-1)
             else:
                 target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = eagle_attn_metadata.slot_mapping[
-                token_indices]
+            eagle_attn_metadata.slot_mapping[:token_indices.shape[0]].copy_(
+                eagle_attn_metadata.slot_mapping[token_indices])
+            eagle_attn_metadata.slot_mapping[token_indices.shape[0]:].fill_(-1)
+            target_slot_mapping = eagle_attn_metadata.slot_mapping
 
         draft_token_ids = self._propose(
             target_token_ids=target_token_ids,
@@ -430,7 +429,6 @@ class EagleProposer(Proposer):
                 slot_mapping,
                 positions=self.runner.positions,
                 attn_mask=self.runner.attn_mask,
-                fia_attn_mask=self.runner.fia_attn_mask,
                 spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
@@ -490,10 +488,12 @@ class EagleProposer(Proposer):
     ) -> torch.Tensor:
         device = cu_num_tokens.device
         cu_num_tokens = cu_num_tokens.cpu()
+        # NOTE: We do not need to send the block_table to cpu.
         block_table = block_table.cpu()
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
+        # NOTE: We do not need to send the target_positions to cpu.
         target_positions = target_positions.cpu()
         if self.name == SpecDcodeType.EAGLE3:
             assert isinstance(self.get_model(), Eagle3LlamaForCausalLM)
@@ -514,6 +514,8 @@ class EagleProposer(Proposer):
         attn_mask = self.runner.attn_mask
 
         common_attn_metadata = AscendCommonAttentionMetadata(
+            # NOTE: **FullGraph: It is dangerous in fullgraph mode because the attention need it as input.
+            # We can run it in graph just beacause it was not used in attention_v1's forward, curently.
             query_start_loc=cu_num_tokens.to(device),
             query_start_loc_cpu=cu_num_tokens,
             seq_lens_cpu=seq_lens.cpu(),
@@ -523,10 +525,14 @@ class EagleProposer(Proposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].
             get_device_tensor(),
+            # NOTE: *FullGraph: This is a very import value in fullgraph.
+            # Please make sure the newest value was copy to the address used in dummy_run.
             slot_mapping=target_slot_mapping,
+            # NOTE: *FullGraph: Currently, it's safe because this positions is not used in attention_v1's forward.
+            # But need to know, this target_positions's address is different with the captured one.
+            # So this target_positions's value is invalid for fullgraph mode.
             positions=target_positions,
             attn_mask=attn_mask,
-            fia_attn_mask=attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
@@ -536,6 +542,8 @@ class EagleProposer(Proposer):
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
+        aclgraph_runtime_mode = CUDAGraphMode.NONE
+        batch_descriptor = None
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -544,14 +552,16 @@ class EagleProposer(Proposer):
 
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
-        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=True)
-        aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
+        has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
+        if self.use_cuda_graph:
+            aclgraph_runtime_mode, batch_descriptor = \
+                self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora)
 
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
+        # NOTE: **FullGraph: Why we need to change this block_tables? It wasn't changed before.
+        # If we really need to change it, It should be copied to the attn_metadata.block_tables, not assigned.
         attn_metadata.block_tables = block_table.to(device)
         with set_ascend_forward_context(
             {self.attn_layer_name: attn_metadata},
@@ -572,14 +582,14 @@ class EagleProposer(Proposer):
                     update_mla_attn_params(
                         self.update_stream,
                         forward_context,
-                        num_tokens,
+                        num_input_tokens,
                         self.vllm_config.speculative_config,
                     )
                 else:
                     update_attn_params(
                         self.update_stream,
                         forward_context,
-                        num_tokens,
+                        num_input_tokens,
                     )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -610,6 +620,8 @@ class EagleProposer(Proposer):
 
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
+        # NOTE: **FullGraph: Here make a new tensor with a new address.
+        # Once it was used in forward, it may cases any errors in fullgraph mode.
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         attn_metadata.query_start_loc_list = attn_metadata.query_start_loc[
             1:].tolist()
@@ -670,28 +682,52 @@ class EagleProposer(Proposer):
             slot_mapping_cpu.masked_fill_(exceeds_max_model_len,
                                           PADDING_SLOT_ID)
             # NOTE: ASCEND slot_mapping must on cpu
-            attn_metadata.slot_mapping = slot_mapping_cpu.to(
-                torch.int32).to(device)
+            # NOTE: For above comment: Maybe this comment should be deleated?
+            attn_metadata.slot_mapping[:slot_mapping_cpu.shape[0]].copy_(
+                slot_mapping_cpu.to(torch.int32).to(device))
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+            # NOTE: **FullGraph: In fact, this fuction only return the same
+            # attn_mask_builder.chunked_prefill_attn_mask now.
+            # Should make sure the newest value always be copied to the attn_mask's address you use in capture.
             attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
             attn_metadata.attn_mask = attn_mask
+            # NOTE: **FullGraph: If we really need to change it, It should be
+            # copied to the attn_metadata.block_tables, not assigned.
             attn_metadata.block_tables = block_table.to(device)
             # Run the model.
-            with set_ascend_forward_context(attn_metadata,
-                                            self.vllm_config,
-                                            moe_comm_type=moe_comm_type,
-                                            num_tokens=input_batch_size,
-                                            is_draft_model=True):
+            with set_ascend_forward_context(
+                {self.attn_layer_name: attn_metadata},
+                self.vllm_config,
+                moe_comm_type=moe_comm_type,
+                num_tokens=input_batch_size,
+                batch_descriptor=batch_descriptor,
+                aclgraph_runtime_mode=aclgraph_runtime_mode,
+                is_draft_model=True):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
                     positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
+                forward_context = get_forward_context()
+                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                    if self.vllm_config.model_config.use_mla:
+                        update_mla_attn_params(
+                            self.update_stream,
+                            forward_context,
+                            input_batch_size,
+                            self.vllm_config.speculative_config,
+                        )
+                    else:
+                        update_attn_params(
+                            self.update_stream,
+                            forward_context,
+                            input_batch_size,
+                        )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
 
