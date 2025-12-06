@@ -15,6 +15,7 @@
 
 #include "mla_preprocess_mix_fp16.hpp"
 #include "mla_preprocess_mix_bf16.hpp"
+#include "mla_preprocess_mix_bf16_qdown.hpp"
 
 #include "../op_host/tiling/mla_preprocess_tiling.h"
 
@@ -23,7 +24,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
     GM_ADDR bias1, GM_ADDR gamma2, GM_ADDR beta2, GM_ADDR quantScale2, GM_ADDR quantOffset2, GM_ADDR gamma3,
     GM_ADDR sin1, GM_ADDR cos1, GM_ADDR sin2, GM_ADDR cos2, GM_ADDR keycache, GM_ADDR slotMapping, GM_ADDR wuq,
     GM_ADDR bias2, GM_ADDR wuk, GM_ADDR descale1, GM_ADDR descale2, GM_ADDR ctkvScale, GM_ADDR qnopeScale, GM_ADDR q,
-    GM_ADDR keycacheOut, GM_ADDR q2, GM_ADDR keycacheOut2, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR keycacheOut, GM_ADDR q2, GM_ADDR keycacheOut2, GM_ADDR innerOut, GM_ADDR workspace, GM_ADDR tiling)
 {
 #if defined(__CCE_KT_TEST__) || (__CCE_AICORE__ == 220)
     PRELOAD(2);
@@ -218,6 +219,54 @@ extern "C" __global__ __aicore__ void mla_preprocess(
             }
             break;
         }
+        case KEY_BF16_CACHEMODE_0_QUANTMODE_0_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 0, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TENSOR_ASYMM_QUANT>
+                opBf16Cm0Qm0Inner(mlaTilingData, tiling);
+            opBf16Cm0Qm0Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm0Qm0Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm0Qm0Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_1_QUANTMODE_0_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 1, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TENSOR_ASYMM_QUANT>
+                opBf16Cm1Qm0Inner(mlaTilingData, tiling);
+            opBf16Cm1Qm0Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm1Qm0Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm1Qm0Inner.ProcessVector();
+            }
+            break;
+        }
+        case KEY_BF16_CACHEMODE_3_QUANTMODE_0_INNER: {
+            MLAPO_BF16_INNER::MLAOperation<__bf16, 3, DataFormat::NZ, DataFormat::NZ, DataFormat::ND,
+                                     QuantMode::PER_TENSOR_ASYMM_QUANT>
+                opBf16Cm3Qm0Inner(mlaTilingData, tiling);
+            opBf16Cm3Qm0Inner.Init(hiddenState, quantScale1, quantOffset1, wdqkv, bias1, gamma2, beta2,
+                              quantScale2, quantOffset2, gamma3, sin1, cos1, sin2, cos2, keycache, slotMapping, wuq,
+                              bias2, wuk, descale1, descale2, ctkvScale, qnopeScale, q, keycacheOut, q2, keycacheOut2,
+                              s1, s2, s3, s4, s5, innerOut);
+            if ASCEND_IS_AIC {
+                opBf16Cm3Qm0Inner.ProcessCube();
+            }
+            if ASCEND_IS_AIV {
+                opBf16Cm3Qm0Inner.ProcessVector();
+            }
+            break;
+        }
         default: {
             break;
         }
@@ -256,6 +305,7 @@ extern void mla_preprocess_impl(
     void* keycache_out,
     void* q2,
     void* keycache_out2,
+    void* inner_out,
     void* workspace,
     void* tiling,
     const uint32_t block_dim)
@@ -288,6 +338,7 @@ extern void mla_preprocess_impl(
         keycache_out,
         q2,
         keycache_out2,
+        inner_out,
         workspace,
         tiling);
 }
