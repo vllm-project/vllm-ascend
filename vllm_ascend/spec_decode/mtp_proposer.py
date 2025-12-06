@@ -32,6 +32,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_mtp_graph_params,
+                                               update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
@@ -98,6 +99,7 @@ class MtpProposer(Proposer):
         self.pcp_size = self.runner.pcp_size
         self.dcp_size = self.runner.dcp_size
         self.pcp_rank = self.runner.pcp_rank
+        self.dcp_rank = self.runner.dcp_rank
 
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
         self.draft_indexer_metadata_builder: Optional[
@@ -258,6 +260,13 @@ class MtpProposer(Proposer):
                     cos=self.runner.cos,
                     sin=self.runner.sin,
                 )
+                if self.pcp_size * self.dcp_size > 1:
+                    # update long_seq related params and flatten block_table
+                    common_attn_metadata.prefill_context_parallel_metadata=\
+                        self.runner.long_seq_metadata
+                    common_attn_metadata.block_table_tensor = \
+                        self.runner.input_batch.block_table[0].get_device_tensor()[
+                            :num_reqs * self.decode_threshold]
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
                 attn_metadata_mtp = builder.build_for_graph_capture(
@@ -303,9 +312,13 @@ class MtpProposer(Proposer):
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
                     not forward_context.capturing:
                     if self.vllm_config.model_config.use_mla:
-                        update_mla_attn_params(
-                            self.update_stream, forward_context, num_tokens,
-                            self.vllm_config.speculative_config)
+                        if self.pcp_size * self.dcp_size > 1:
+                            update_mla_attn_dcp_pcp_params(
+                                self.update_stream, forward_context, num_tokens)
+                        else:
+                            update_mla_attn_params(
+                                self.update_stream, forward_context, num_tokens,
+                                self.vllm_config.speculative_config)
                 if self.enable_shared_expert_dp:
                     positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         positions, True)
@@ -359,7 +372,7 @@ class MtpProposer(Proposer):
                                                  valid_sampled_tokens_count)
 
         req_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        if self.pcp_size > 1:
+        if self.pcp_size * self.dcp_size > 1:
             long_seq_metadata = self.runner.long_seq_metadata
             input_ids_pcp_full = self.runner.input_ids_pcp_full
             query_start_loc_pcp_full = self.runner.query_start_loc_pcp_full
@@ -395,7 +408,6 @@ class MtpProposer(Proposer):
                 common_attn_metadata.query_start_loc = \
                     query_start_loc_pcp_full[:num_reqs + 1]
             if self.speculative_config.disable_padded_drafter_batch:
-                # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                 token_indices_to_sample = None
                 common_attn_metadata, token_indices =\
                     self._prepare_inputs(
@@ -628,15 +640,18 @@ class MtpProposer(Proposer):
         self.input_ids[last_token_indices] = next_token_ids
 
         # update pcp related params
-        if self.pcp_size > 1:
+        if self.pcp_size * self.dcp_size > 1:
             assert long_seq_metadata is not None
             common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
+            ori_last_token_indices = last_token_indices.cpu()
+            query_lens_d = self.runner.query_lens[:num_decode_reqs]
+        if self.pcp_size > 1:
             # 1. preprocess decode/prefill input_ids & target_hidden_states
             # decode input_ids: keep unchanged
             # decode target_hidden_states: remove padding
             # prefill input_ids: add padding and pcp split
             # prefill target_hidden_states: pcp split
-            num_tokens_d = num_decode_reqs * self.decode_threshold
+            num_tokens_d = query_lens_d.sum().item()
             num_tokens_d_padded = num_tokens_d * self.pcp_size
             input_ids_d = self.input_ids[:num_tokens_d]
             input_ids_p = self.input_ids[num_tokens_d:num_tokens]
@@ -644,12 +659,17 @@ class MtpProposer(Proposer):
                 target_hidden_states[:num_tokens_d_padded]
             if num_tokens_d:
                 # remove padding (from pcp all-gather) in decode part
-                target_hidden_states_d = target_hidden_states_d_padded.reshape(
-                    [
-                        num_decode_reqs, self.decode_threshold * self.pcp_size,
-                        -1
-                    ])[:, :self.decode_threshold, :].reshape(
-                        [num_tokens_d, -1])
+                mask_start_loc = torch.cat([
+                    torch.tensor([0], dtype=torch.int32),
+                    torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]
+                ])
+                mask_len = query_lens_d
+                mask = []
+                for req_id in range(num_decode_reqs):
+                    mask += list(
+                        range(mask_start_loc[req_id],
+                              mask_start_loc[req_id] + mask_len[req_id]))
+                target_hidden_states_d = target_hidden_states_d_padded[mask]
             else:
                 target_hidden_states_d = target_hidden_states_d_padded
             target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -784,10 +804,15 @@ class MtpProposer(Proposer):
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                         if self.vllm_config.model_config.use_mla:
-                            update_mla_attn_params(
-                                self.update_stream, forward_context,
-                                num_input_tokens,
-                                self.vllm_config.speculative_config)
+                            if self.pcp_size * self.dcp_size > 1:
+                                update_mla_attn_dcp_pcp_params(
+                                    self.update_stream, forward_context,
+                                    num_input_tokens)
+                            else:
+                                update_mla_attn_params(
+                                    self.update_stream, forward_context,
+                                    num_input_tokens,
+                                    self.vllm_config.speculative_config)
 
                     if self.enable_shared_expert_dp:
                         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -806,6 +831,8 @@ class MtpProposer(Proposer):
                     (0, max_num_reqs_across_dp - num_indices))
 
             if self.pcp_size > 1:
+                # remove graph padding before all_gather
+                hidden_states = hidden_states[:num_tokens]
                 hidden_states = get_pcp_group().all_gather(hidden_states, 0)
                 hidden_states = torch.index_select(
                     hidden_states, 0, self.runner.
@@ -836,6 +863,81 @@ class MtpProposer(Proposer):
                 break
 
             attn_metadata_i = attn_metadata[self.attn_layer_name[0]]
+
+            # TODO refactor this
+            if self.pcp_size * self.dcp_size > 1:
+                if step == 0:
+                    num_reject_tokens = torch.tensor(self.runner.cu_num_tokens_pcp_full, dtype=torch.int32) - ori_last_token_indices - 1
+                    num_accept_tokens = query_lens_d - num_reject_tokens
+                    ori_seq_len = attn_metadata_i.seq_lens
+                    mtp_slot_pad = self.runner.mtp_slot_pad
+                    # ori slot: [ -1,  -1, 134,  -1,  -1,  -1, 135,  -1, | -1,  -1, 261,  -1,  -1,  -1, 262,  -1]
+                    # mtp slot: [ -1,  -1, 134,  -1,  -1,  -1, 135,  -1, | -1,  -1, 136,  -1, | -1,  -1,  261,  -1,  -1,  -1, 262,  -1, | -1,  -1, 263,  -1]
+                    # scheduled_tokens * pcp_size + (num_speculative_tokens - 1) * pcp_size
+                    slot_idx_base = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1] * self.pcp_size]) # base offset from scheduled tokens
+                    slot_idx_base += torch.arange(num_decode_reqs) * (self.num_speculative_tokens - 1) * self.pcp_size # offset from pre-allocated mtp tokens
+                    slot_idx_base += (num_accept_tokens - 1) * self.pcp_size # offset from accepted tokens
+                    slot_indices = []
+                    for req_id in range(num_decode_reqs):
+                        slot_indices += list(range(slot_idx_base[req_id], slot_idx_base[req_id] + self.pcp_size))
+                    slot_indices = torch.tensor(slot_indices, dtype=torch.int32)
+
+                    # fold block_table (restore it to original size before flattened)
+                    block_indices = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]])
+                    attn_metadata_i.decode.block_table[:batch_size] = attn_metadata_i.decode.block_table[block_indices]
+                    attn_metadata_i.decode.block_table = attn_metadata_i.decode.block_table[:batch_size]
+
+                    positions = target_positions[ori_last_token_indices]
+                    hidden_states = hidden_states[last_token_indices]
+                    last_token_indices = self.arange[:batch_size]
+                    if attn_metadata_i.num_decode_tokens != 0:
+                        attn_metadata_i.num_decode_tokens = batch_size
+
+                input_ids = draft_token_ids_list[-1].int()
+                positions += 1
+
+                if self.speculative_config.disable_padded_drafter_batch or \
+                    aclgraph_runtime_mode != CUDAGraphMode.FULL:
+                        attn_metadata_i.decode.cos = builder.cos_cache[
+                            positions[:batch_size]].unsqueeze(1).unsqueeze(2)
+                        attn_metadata_i.decode.sin = builder.sin_cache[
+                            positions[:batch_size]].unsqueeze(1).unsqueeze(2)
+                        
+                # exceeds_max_model_len
+                exceeds_max_model_len = positions[:
+                                              batch_size] >= self.runner.model_config.max_model_len
+                clamped_positions = torch.where(exceeds_max_model_len, 0,
+                                            positions[:batch_size])
+
+                # update local seq_len
+                num_computed_tokens_of_pcp_dcp = self.runner._get_cp_local_seq_lens(
+                    ori_seq_len + step + 1,
+                    self.pcp_size,
+                    self.dcp_size,
+                    self.runner.parallel_config.cp_kv_cache_interleave_size,
+                )
+                cp_seq_len = num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
+                batch_seq_mask = (cp_seq_len == 0)
+                builder.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
+                    batch_seq_mask, non_blocking=True)
+                batch_seq_mask = builder.batch_seq_mask_buf[:batch_seq_mask.
+                                                         shape[0]]
+                # batch_seq_mask = batch_seq_mask.to(self.device)
+                cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
+                attn_metadata_i.decode.cp_seq_len = cp_seq_len
+                attn_metadata_i.decode.batch_seq_mask = batch_seq_mask
+
+                # update slot_mapping
+                slot_indices += self.pcp_size
+                slot_mapping = mtp_slot_pad[slot_indices]
+
+                self.input_ids[:batch_size] = input_ids
+                # self.positions[:batch_size] = positions[:batch_size]
+                self.positions[:batch_size] = clamped_positions
+                self.hidden_states[:hidden_states.shape[0]] = hidden_states
+                attn_metadata_i.slot_mapping[:batch_size * self.pcp_size] = slot_mapping
+
+                continue
 
             if step == 0:
                 positions = target_positions[last_token_indices]
