@@ -255,6 +255,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # Trigger torchair graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
+        torch._dynamo.config.inline_inbuilt_nn_modules = False
         for idx, num_tokens in enumerate(reversed(torchair_graph_batch_sizes)):
             for _ in range(self.vllm_config.compilation_config.
                            cudagraph_num_of_warmups):
