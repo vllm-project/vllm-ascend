@@ -18,10 +18,6 @@ GREEDY_TEMPERATURE = -1
 MAX_SPEC_LEN = 32
 
 
-class AscendRejectionSampler(RejectionSampler, nn.Module):
-    pass
-
-
 def rejection_sample(
     # [num_tokens]
     draft_token_ids: torch.Tensor,
@@ -695,7 +691,3 @@ def sample_recovered_tokens_kernel(
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
             orig_prob)
-
-
-rs.expand_batch_to_tokens = expand_batch_to_tokens
-rs.rejection_sample = rejection_sample
