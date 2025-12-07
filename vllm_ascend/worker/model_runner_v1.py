@@ -2907,7 +2907,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode = aclgraph_mode.mixed_mode()
 
                 # make sure we capture the largest batch size first
-                compilation_cases = list(reversed(self.aclgraph_batch_sizes))
+                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
 
                 try:
                     self._capture_aclgraphs(
