@@ -16,7 +16,7 @@ class NpuBlockTable(BlockTable):
                  max_num_batched_tokens: int,
                  pin_memory: bool,
                  device: torch.device,
-                 kernel_block_size: Union[list[int], None] = None,
+                 kernel_block_size: list[int],
                  cp_kv_cache_interleave_size: int = 1,
                  num_speculative_tokens: int = 0):
         super().__init__(block_size,
