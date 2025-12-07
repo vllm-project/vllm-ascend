@@ -124,8 +124,8 @@ class NpuMultiGroupBlockTable(MultiGroupBlockTable):
                  pin_memory: bool,
                  device: torch.device,
                  block_sizes: list[int],
+                 kernel_block_sizes: list[int],
                  num_speculative_tokens: int = 0,
-                 kernel_block_sizes: Optional[list[list[int]]] = None,
                  cp_kv_cache_interleave_size: int = 1) -> None:
 
         # Note(hc): each dcp rank only store
