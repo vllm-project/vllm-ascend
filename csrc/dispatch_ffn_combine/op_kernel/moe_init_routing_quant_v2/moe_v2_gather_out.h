@@ -111,7 +111,7 @@ __aicore__ inline void MoeV2GatherOut<T>::CopyOut(int64_t progress) {
         }
         outOffset = outIndex * cols + colsLoop * this->perLoopCols;
 #ifdef __CCE_KT_TEST__
-        // CPU孪生调试无法使用多核同步，可能导致index为未初始化的脏数据，因此需要特殊处理
+        // CPU twin debugging cannot use multi-core sync, so index may contain uninitialized dirty data; handle specially
         if (outOffset > expandedXGm.GetSize()) {
             continue;
         }

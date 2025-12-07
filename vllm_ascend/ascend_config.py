@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional
+from uuid import uuid4
 
 from vllm.logger import logger
 
@@ -25,6 +26,37 @@ def _check_torchair_supported(model_type: str):
         if supported_model in model_type.lower():
             return True
     return False
+
+
+def check_kv_extra_config(vllm_config):
+
+    def _check(name: str, config: dict):
+        tp_key = "tp_size"
+        dp_key = "dp_size"
+        if tp_key in config:
+            config_tp = config[tp_key]
+            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
+            if config_tp != vllm_tp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
+                    f"Expected {vllm_tp}, but got {config_tp}.")
+        if dp_key in config:
+            config_dp = config[dp_key]
+            vllm_dp = vllm_config.parallel_config.data_parallel_size
+            if config_dp != vllm_dp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting data parallel size. "
+                    f"Expected {vllm_dp}, but got {config_dp}.")
+
+    if vllm_config.kv_transfer_config.is_kv_producer:
+        _check(
+            "prefill",
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {}))
+    if vllm_config.kv_transfer_config.is_kv_consumer:
+        _check(
+            "decode",
+            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
 
 
 class AscendConfig:
@@ -111,6 +143,10 @@ class AscendConfig:
                 )
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
+
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -143,6 +179,11 @@ class AscendConfig:
             get_flashcomm2_oproj_tp_size_and_validate_config
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
             self, vllm_config)
+        kv_cfg = vllm_config.kv_transfer_config
+        if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
+                                              False):
+            kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
+            kv_cfg._engine_id_patched = True
 
 
 class AscendCompilationConfig:

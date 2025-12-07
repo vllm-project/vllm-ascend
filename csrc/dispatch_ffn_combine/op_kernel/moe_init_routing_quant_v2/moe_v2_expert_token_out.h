@@ -151,7 +151,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
     return;
   }
 #ifdef __CCE_KT_TEST__
-    // CPU孪生调试无法使用多核同步，可能导致index为未初始化的脏数据，因此需要特殊处理
+    // CPU twin debugging cannot use multi-core sync, so index may contain uninitialized dirty data; handle specially
     if (this->firstExpertId > expertTokensCountOrCumsumGm.GetSize()) {
         return;
     }
@@ -202,7 +202,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCount(bool isTail
   int64_t copyLength = isTail ? this->lastExpertId - this->firstExpertId + 1 : this->expertNumUbAlign;
   DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
 #ifdef __CCE_KT_TEST__
-    // CPU孪生调试不进行输出拷贝
+    // CPU twin debugging skips output copies
     return;
 #endif
   SetAtomicAdd<int32_t>();
