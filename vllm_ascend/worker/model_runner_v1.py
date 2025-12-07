@@ -2846,7 +2846,15 @@ class NPUModelRunner(GPUModelRunner):
                              f"support:{min_ag_support}) "
                              "; please try cudagraph_mode=PIECEWISE, "
                              "and make sure compilation level is piecewise")
-
+        if (aclgraph_mode.decode_mode() == CUDAGraphMode.FULL
+                and aclgraph_mode.separate_routine()
+                and self.uniform_decode_query_len > 1):
+            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size)
+            capture_sizes = self.compilation_config.cudagraph_capture_sizes
+            self.aclgraph_batch_sizes = (capture_sizes
+                                         if capture_sizes is not None else [])
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
