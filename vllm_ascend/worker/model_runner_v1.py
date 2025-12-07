@@ -856,11 +856,11 @@ class NPUModelRunner(GPUModelRunner):
             maybe_padded_num_tokens)
 
         if get_pp_group().is_first_rank:
-            intermediate_tensors = None
+            intermediate_tensors = None # noqa
         else:
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
-            for k, v in intermediate_tensors.items():
+            for k, v in intermediate_tensors.items(): # noqa
                 self.intermediate_tensors[k][:num_input_tokens].copy_(
                     v[:num_input_tokens], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
@@ -1511,11 +1511,11 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             hidden_states,
             sample_hidden_states,
-            aux_hidden_states,
+            aux_hidden_states, # noqa
             kv_connector_output,
             attn_metadata,
             positions,
-        ) = self.execute_model_state
+        ) = self.execute_model_state # noqa
         # Clear ephemeral state.
         self.execute_model_state = None
 
@@ -1987,7 +1987,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.positions.gpu[:num_tokens]
 
             if get_pp_group().is_first_rank:
-                intermediate_tensors = None
+                intermediate_tensors = None # noqa
             else:
                 if self.intermediate_tensors is None:
                     self.intermediate_tensors = (
@@ -1997,7 +1997,7 @@ class NPUModelRunner(GPUModelRunner):
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
                     k: v[:num_tokens]
-                    for k, v in self.intermediate_tensors.items()
+                    for k, v in self.intermediate_tensors.items() # noqa
                 })
             has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
             # filter out the valid batch descriptor
@@ -2672,14 +2672,14 @@ class NPUModelRunner(GPUModelRunner):
         is compatible (e.g., decode threshold is the same)
         """
         for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.get_metadata_builder()
-            if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):
+            attn_metadata_builder_i = group.get_metadata_builder() 
+            if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"): # noqa
                 # check that if any backends reorder batches; that the reordering
                 # is compatible (e.g., decode threshold is the same)
                 reorder_batch_threshold_i = (
-                    attn_metadata_builder_i.reorder_batch_threshold)
-                if reorder_batch_threshold_i is not None:
-                    if self.reorder_batch_threshold is not None:
+                    attn_metadata_builder_i.reorder_batch_threshold) # noqa
+                if reorder_batch_threshold_i is not None: # noqa
+                    if self.reorder_batch_threshold is not None: # noqa
                         if reorder_batch_threshold_i != \
                             self.reorder_batch_threshold:
                             raise ValueError(
@@ -2688,7 +2688,7 @@ class NPUModelRunner(GPUModelRunner):
                                 f"backend uses threshold "
                                 f"{self.reorder_batch_threshold}")
                     else:
-                        self.reorder_batch_threshold = reorder_batch_threshold_i
+                        self.reorder_batch_threshold = reorder_batch_threshold_i # noqa
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
