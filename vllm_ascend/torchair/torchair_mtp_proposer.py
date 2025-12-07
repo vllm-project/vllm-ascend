@@ -110,7 +110,6 @@ class TorchairMtpProposer(MtpProposer):
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0):
@@ -351,7 +350,6 @@ class TorchairMtpProposer(MtpProposer):
                     num_tokens=num_input_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
