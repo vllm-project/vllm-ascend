@@ -41,7 +41,6 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
-    "use_ascend_direct": true,
     "alloc_in_same_node": true,
     "master_server_address": "xx.xx.xx.xx:50088",
     "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
@@ -52,7 +51,6 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Configured for Ascend to use Mooncake's HCCL communication.  
 **device_name**: ""  
-**use_ascend_direct**: Indicator for using ADXL engine.  
 **alloc_in_same_node**: Indicator for preferring local buffer allocation strategy.  
 **master_server_address**: Configured with the IP and port of the master service.  
 **global_segment_size**: Expands the kvcache size registered by the PD node to the master.
@@ -133,7 +131,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                     }  
         ]
     }
-    }' > p.log 2>&1
+    }'
 ```
 
 `decode` Node：
@@ -177,7 +175,6 @@ python3 -m vllm.entrypoints.openai.api_server \
                 "kv_role": "kv_consumer",
                 "kv_port": "20002",
                 "kv_connector_extra_config": {
-                    "use_ascend_direct": true,
                     "prefill": {
                         "dp_size": 1,
                         "tp_size": 1
@@ -196,7 +193,7 @@ python3 -m vllm.entrypoints.openai.api_server \
             }
         ]
     }
-    }' > d.log 2>&1
+    }'
 ```
 
 #### 2、Start proxy_server.
