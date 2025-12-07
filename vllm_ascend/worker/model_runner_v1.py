@@ -2846,6 +2846,7 @@ class NPUModelRunner(GPUModelRunner):
                              f"support:{min_ag_support}) "
                              "; please try cudagraph_mode=PIECEWISE, "
                              "and make sure compilation level is piecewise")
+
         if (aclgraph_mode.decode_mode() == CUDAGraphMode.FULL
                 and aclgraph_mode.separate_routine()
                 and self.uniform_decode_query_len > 1):
@@ -2855,6 +2856,7 @@ class NPUModelRunner(GPUModelRunner):
             capture_sizes = self.compilation_config.cudagraph_capture_sizes
             self.aclgraph_batch_sizes = (capture_sizes
                                          if capture_sizes is not None else [])
+
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
@@ -2950,17 +2952,8 @@ class NPUModelRunner(GPUModelRunner):
                     x for x in self.cudagraph_batch_sizes if x <= max_num_tokens
                     and x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = sorted(decode_cudagraph_batch_sizes)
-                # TODO: refactor this when vLLM supports mtp>1
-                if not all(x % self.uniform_decode_query_len == 0
-                           for x in decode_cudagraph_batch_sizes):
-                    raise ValueError(
-                        "In the MTP fullgraph scenario, each graph size must be an integer multiple of "
-                        f"(num_speculative_tokens + 1): {self.uniform_decode_query_len}. "
-                        f"Please modify the cudagraph_capture_sizes variable to be integer multiple of {self.uniform_decode_query_len}, "
-                        f"while ensuring the maximum cudagraph_capture_sizes does not exceed max_num_seqs * (num_speculative_tokens + 1): {max_num_tokens}. "
-                        "For example, with MTP=2 and max_num_seqs=16, we recommend setting cudagraph_capture_sizes to [48]."
-                    )
+                compilation_cases_decode = list(
+                    reversed(decode_cudagraph_batch_sizes))
                 self._capture_aclgraphs(
                     compilation_cases=compilation_cases_decode,
                     aclgraph_runtime_mode=CUDAGraphMode.FULL,
