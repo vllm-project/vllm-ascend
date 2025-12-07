@@ -430,7 +430,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -510,7 +509,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "1",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -590,7 +588,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "2",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -670,7 +667,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "3",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
