@@ -77,7 +77,7 @@ class EagleProposer(Proposer):
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-        self.attn_mask_builder = AttentionMaskBuilder()
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(

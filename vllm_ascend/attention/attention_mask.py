@@ -33,7 +33,7 @@ class AttentionMaskBuilder:
 
     def __init__(
         self,
-        device: torch.device = None,
+        device: torch.device
     ):
         self.attn_mask_cache = None
         self._seq_len_cached = 0
@@ -43,8 +43,7 @@ class AttentionMaskBuilder:
         self.chunked_prefill_attn_mask = None
         self.pcp_mla_mask = None
 
-    def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype,
-                      device: torch.device):
+    def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
             self.attn_mask_cache = _generate_attn_mask(max_seq_len, dtype)
             self._seq_len_cached = max_seq_len
@@ -52,13 +51,13 @@ class AttentionMaskBuilder:
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
-        ).to(device, non_blocking=True)
+        ).to(self.device, non_blocking=True)
 
-    def get_pooling_mask(self, device):
+    def get_pooling_mask(self):
         if self.pooling_mask is None:
             # the compressed attention mask for npu_fusion_attention sparse mode 4
             self.pooling_mask = torch.triu(torch.ones(
-                2048, 2048), diagonal=1).to(torch.bool).to(device,
+                2048, 2048), diagonal=1).to(torch.bool).to(self.device,
                                                            non_blocking=True)
         return self.pooling_mask
 

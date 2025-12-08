@@ -21,32 +21,23 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 
 class TestAttentionMaskBuilder(TestBase):
 
-    def test_init_attention_mask_builder(self):
-        # generate attention_mask_builder with bfloat16
-        attention_mask_builder = AttentionMaskBuilder()
-        self.assertEqual(
-            attention_mask_builder.chunked_prefill_attn_mask.dtype, torch.int8)
-        self.assertEqual(
-            attention_mask_builder.chunked_prefill_attn_mask.shape,
-            (2048, 2048))
-
     def test_get_attn_mask(self):
         # if the len is less than max_seq_len, the attn_mask_cache will not be updated
-        attention_mask_builder = AttentionMaskBuilder()
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
         attn_mask = attention_mask_builder.get_attn_mask(
-            max_seq_len=512, dtype=torch.float16, device=torch.device("cpu"))
+            max_seq_len=512, dtype=torch.float16)
         self.assertEqual(attn_mask.shape, (512, 512))
         self.assertEqual(attn_mask[0][-1],
                          torch.tensor(float("-inf"), dtype=torch.float16))
-        self.assertEqual(attention_mask_builder._seq_len_cached, 1024)
+        self.assertEqual(attention_mask_builder._seq_len_cached, 512)
         self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
-                         (1024, 1024))
+                         (512, 512))
         self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
                          torch.tensor(float("-inf"), dtype=torch.float16))
 
         # if the len is greater than max_seq_len, the attn_mask_cache will be updated
         attn_mask = attention_mask_builder.get_attn_mask(
-            max_seq_len=2048, dtype=torch.float16, device=torch.device("cpu"))
+            max_seq_len=2048, dtype=torch.float16)
         self.assertEqual(attn_mask.shape, (2048, 2048))
         self.assertEqual(attn_mask[0][-1],
                          torch.tensor(float("-inf"), dtype=torch.float16))
@@ -57,6 +48,6 @@ class TestAttentionMaskBuilder(TestBase):
                          torch.tensor(float("-inf"), dtype=torch.float16))
 
     def test_get_splitfuse_attn_mask(self):
-        attention_mask_builder = AttentionMaskBuilder()
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask()
         self.assertEqual(attn_mask.shape, (2048, 2048))
