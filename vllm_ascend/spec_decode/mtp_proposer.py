@@ -32,7 +32,6 @@ from vllm_ascend.ascend_forward_context import (MoECommType,
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
-                                               set_mtp_graph_params,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
@@ -214,8 +213,6 @@ class MtpProposer(Proposer):
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ):
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            set_mtp_graph_params(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)

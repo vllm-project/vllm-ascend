@@ -124,6 +124,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_graph_params,
+                                               set_mtp_graph_params,
                                                update_attn_dcp_pcp_params,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
@@ -3411,7 +3412,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            set_graph_params(self.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
@@ -4129,6 +4129,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             capture_sizes = self.compilation_config.cudagraph_capture_sizes
             self.aclgraph_batch_sizes = (capture_sizes
                                          if capture_sizes is not None else [])
+
+        # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
+        # we set the graph params right before initializing the keys.
+        set_graph_params(self.aclgraph_batch_sizes)
+        if self.speculative_config:
+            set_mtp_graph_params(self.aclgraph_batch_sizes)
 
         self.aclgraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,

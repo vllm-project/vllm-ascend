@@ -427,7 +427,7 @@ class GraphParams:
 _graph_params: Optional[GraphParams] = None
 
 
-def set_graph_params(aclgraph_capture_sizes: set[int]):
+def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
@@ -456,7 +456,7 @@ def get_graph_params():
 _mtp_graph_params: Optional[GraphParams] = None
 
 
-def set_mtp_graph_params(aclgraph_capture_sizes: set[int]):
+def set_mtp_graph_params(aclgraph_capture_sizes: list[int]):
     global _mtp_graph_params
     if _mtp_graph_params is not None:
         raise ValueError("MTPGraph parameters have already been set!")
