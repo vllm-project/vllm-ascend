@@ -415,7 +415,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                    dtype=self.dtype,
                                    device=self.device)
         # For GQA models.
-        elif not self.vllm_config.model_config.use_mla and not self.model_config.enforce_eager:
+        elif not self.vllm_config.model_config.use_mla:
             self.cos = torch.ones(1,
                                   self.max_num_tokens,
                                   1,
@@ -2528,8 +2528,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
                     weight_prefetch_method=self.weight_prefetch_method,
-                    cos=self.cos[:, :maybe_padded_num_tokens],
-                    sin=self.sin[:, :maybe_padded_num_tokens]):
+                    cos=self.cos[:, :maybe_padded_num_tokens] if self.cos is not None else None,
+                    sin=self.sin[:, :maybe_padded_num_tokens] if self.sin is not None else None):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -3259,8 +3259,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
                     weight_prefetch_method=self.weight_prefetch_method,
-                    cos=self.cos[:, :num_tokens],
-                    sin=self.sin[:, :num_tokens]):
+                    cos=self.cos[:, :num_tokens] if self.cos is not None else None,
+                    sin=self.sin[:, :num_tokens] if self.sin is not None else None):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)
