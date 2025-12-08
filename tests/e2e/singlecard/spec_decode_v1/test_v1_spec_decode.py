@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
 import random
 from typing import Any
 
@@ -8,6 +9,8 @@ import pytest
 from vllm import LLM, SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
@@ -61,7 +64,6 @@ def eagle3_model_name():
     return "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
-@pytest.mark.skip("TODO: Revert me after ngram oom issue on ci is fixed")
 def test_ngram_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -71,9 +73,11 @@ def test_ngram_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
-    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=False)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
+
+    with VllmRunner(model_name, max_model_len=1024,
+                    enforce_eager=False) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
     with VllmRunner(model_name,
                     speculative_config={
                         "method": "ngram",
@@ -110,7 +114,7 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    pytest.skip("exist OOM error")
+    pytest.skip("To be aligned with GPU")
     ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=False)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
@@ -156,9 +160,10 @@ def test_suffix_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
-    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=False)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
+    with VllmRunner(model_name, max_model_len=1024,
+                    enforce_eager=False) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
     with VllmRunner(model_name,
                     speculative_config={
                         "method": "suffix",
