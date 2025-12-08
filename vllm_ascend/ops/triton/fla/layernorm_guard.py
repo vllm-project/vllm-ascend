@@ -17,6 +17,10 @@ from vllm.triton_utils import tl, triton
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+import torch_npu
+import triton.runtime.driver as driver
+import torch_npu._inductor
+
 MAX_CORES = 65535
 UNIFIED_BUFFER_SIZE = 1572864
 
