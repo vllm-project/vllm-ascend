@@ -1,5 +1,3 @@
-from typing import Union
-
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
@@ -50,8 +48,6 @@ class NpuBlockTable(BlockTable):
             dtype=torch.int32)
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
-    
-
     def compute_slot_mapping(self, req_indices: np.ndarray,
                              positions: np.ndarray) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -101,7 +97,6 @@ class NpuBlockTable(BlockTable):
                 block_offsets,
                 out=self.slot_mapping.np[:req_indices.shape[0]],
             )
-
 
 
 class NpuMultiGroupBlockTable(MultiGroupBlockTable):

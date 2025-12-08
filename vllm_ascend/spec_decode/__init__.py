@@ -32,7 +32,7 @@ def get_spec_decode_method(method,
         return NgramProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3"):
         return EagleProposer(vllm_config, device, runner)
-    elif method in ('mtp', 'qwen3_next_mtp'):
+    elif method == "mtp":
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
         return MtpProposer(vllm_config, device, runner)
