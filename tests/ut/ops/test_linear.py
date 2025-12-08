@@ -96,16 +96,15 @@ class TestAscendRowParallelLinear(BaseLinearTest):
     def test_oproj_tp(self):
 
         config._current_vllm_config = MagicMock()
-        
+
         from vllm.config import SchedulerConfig
         mock_scheduler_config = SchedulerConfig(
             max_num_batched_tokens=2048,
             max_num_seqs=128,
-            max_model_len=2048,  
-            is_encoder_decoder=False,  
+            max_model_len=2048,
+            is_encoder_decoder=False,
         )
         config._current_vllm_config.scheduler_config = mock_scheduler_config
-     
 
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.oproj_tensor_parallel_size = 2
