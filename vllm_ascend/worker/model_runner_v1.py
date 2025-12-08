@@ -1680,7 +1680,7 @@ class NPUModelRunner(GPUModelRunner):
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.method in ("mtp", "qwen3_next_mtp") and \
+                    self.speculative_config.method == "mtp" and \
                     not self.speculative_config.disable_padded_drafter_batch
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens

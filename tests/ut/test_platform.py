@@ -32,6 +32,7 @@ class TestNPUPlatform(TestBase):
     def mock_vllm_ascend_config():
         mock_ascend_config = MagicMock()
         mock_ascend_config.torchair_graph_config.enabled = False
+        mock_ascend_config.xlite_graph_config.enabled = False
         mock_ascend_config.enable_shared_expert_dp = False
         return mock_ascend_config
 
@@ -510,6 +511,16 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(
             vllm_config.parallel_config.worker_cls,
             "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker",
+        )
+
+        test_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        test_ascend_config.xlite_graph_config.enabled = True
+        mock_init_ascend.return_value = test_ascend_config
+        vllm_config.parallel_config.worker_cls = "auto"
+        self.platform.check_and_update_config(vllm_config)
+        self.assertEqual(
+            vllm_config.parallel_config.worker_cls,
+            "vllm_ascend.xlite.xlite_worker.XliteWorker",
         )
 
     @patch("vllm_ascend.ascend_config.check_ascend_config")
