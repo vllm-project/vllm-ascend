@@ -334,7 +334,7 @@ class AscendRMSNormGated(RMSNormGated):
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
         """
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
+        super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)
