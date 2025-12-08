@@ -642,13 +642,18 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.enable_asnyc_exp = envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL
         if self.enable_asnyc_exp not in (0, 1, 2):
             # Add invalid input check.
-            logger.info("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL can ONLY be set to 0, 1, 2. \
-                        Invalid input will be set to default 0!")
+            logger.info(
+                "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL can ONLY be set to 0, 1, 2. \
+                        Invalid input will be set to default 0!"
+            )
             self.enable_asnyc_exp = 0
-        if self.enable_asnyc_exp == 2 and not hasattr(torch_npu, "npu_sim_exponential_"):
+        if self.enable_asnyc_exp == 2 and not hasattr(torch_npu, 
+                                                      "npu_sim_exponential_"):
             # Add AI-core support check.
-            logger.info("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL is set to 2 but AI-core exponential \
-                        is NOT support!. Invalid input will be set to default 0!")
+            logger.info(
+                "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL is set to 2 but AI-core exponential \
+                        is NOT support!. Invalid input will be set to default 0!"
+            )
             self.enable_asnyc_exp = 0
         if self.enable_asnyc_exp != 0 and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
             logger.info("Enable async exponential while model executing.")
@@ -4617,7 +4622,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     torch_npu.npu_sim_exponential_(q)
                 if generators:
                     for i, generator in generators.items():
-                        torch_npu.npu_sim_exponential_(q[i], generator=generator)
+                        torch_npu.npu_sim_exponential_(q[i], 
+                                                       generator=generator)
             else:
                 # If self.enable_asnyc_exp not equals 2
                 # Goes to asnyc exponential with AI-CPU exponential or default exponential.

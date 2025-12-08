@@ -18,6 +18,7 @@
 #
 import os
 from unittest.mock import patch
+
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
@@ -51,7 +52,7 @@ def test_models_prompt_logprobs() -> None:
                                         num_logprobs=1)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL": 1})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL": "1"})
 def test_exponential_overlap() -> None:
     example_prompts = [
         "Hello, my name is",
