@@ -24,10 +24,11 @@ class TestAttentionMaskBuilder(TestBase):
     def test_init_attention_mask_builder(self):
         # generate attention_mask_builder with bfloat16
         attention_mask_builder = AttentionMaskBuilder()
-        self.assertEqual(attention_mask_builder.chunked_prefill_attn_mask.dtype,
-                         torch.int8)
-        self.assertEqual(attention_mask_builder.chunked_prefill_attn_mask.shape,
-                         (2048, 2048))
+        self.assertEqual(
+            attention_mask_builder.chunked_prefill_attn_mask.dtype, torch.int8)
+        self.assertEqual(
+            attention_mask_builder.chunked_prefill_attn_mask.shape,
+            (2048, 2048))
 
     def test_get_attn_mask(self):
         # if the len is less than max_seq_len, the attn_mask_cache will not be updated
