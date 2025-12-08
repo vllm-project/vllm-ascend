@@ -8,10 +8,10 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 
-# We find that _npu_paged_attention still performes better than
+# We find that _npu_paged_attention still performs better than
 # npu_fused_infer_attention_score in some cases. We allow to execute
 # _npu_paged_attention in this cases. This should be removed once
-# npu_fused_infer_attention_score performes better on all scenarios.
+# npu_fused_infer_attention_score performs better on all scenarios.
 PAGED_ATTENTION_LIST = [1, 2, 3, 4]
 
 
