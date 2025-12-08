@@ -275,7 +275,7 @@ class RemoteOpenAIServer:
                 not_ready_nodes = [n for n, ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
-                    f"Timeout: these nodes did not become ready: {not_ready_nodes}"
+                    f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
                 ) from None
 
             time.sleep(5)
