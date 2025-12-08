@@ -201,6 +201,16 @@ class MtpProposer(Proposer):
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
 
+        # check if mtp model use main model's embedding and LMhead
+        main_model = model
+        if torch.equal(self.model.model.embed_tokens.weight,
+                       main_model.model.embed_tokens.weight):
+            self.model.model.embed_tokens = main_model.model.embed_tokens
+        for _, layer_module in self.model.model.layers.items():
+            if torch.equal(layer_module.shared_head.head.weight,
+                           main_model.lm_head.weight):
+                layer_module.shared_head.head = main_model.lm_head
+
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ):
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
@@ -889,10 +899,9 @@ class MtpProposer(Proposer):
             attn_metadata_i.seq_lens = attn_metadata_i.seq_lens + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-            exceeds_max_model_len_cpu = exceeds_max_model_len.to(
-                attn_metadata_i.seq_lens.device, non_blocking=False)
-            attn_metadata_i.seq_lens[:batch_size].masked_fill_(
-                exceeds_max_model_len_cpu, 1)
+            exceeds_mask = attn_metadata_i.seq_lens[:batch_size] > \
+                self.runner.model_config.max_model_len
+            attn_metadata_i.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.

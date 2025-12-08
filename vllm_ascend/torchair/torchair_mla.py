@@ -317,7 +317,7 @@ class AscendMLATorchairMetadataBuilder:
                          dtype=self.model_config.dtype,
                          device=device)
         if self.vllm_config.speculative_config is not None and\
-            self.vllm_config.speculative_config.method == 'deepseek_mtp':
+            self.vllm_config.speculative_config.method == 'mtp':
             attn_state = AscendAttentionState.SpecDecoding
             num_decode_tokens = 2
         else:
