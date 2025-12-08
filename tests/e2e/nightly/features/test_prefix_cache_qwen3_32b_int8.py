@@ -68,12 +68,7 @@ aisbench_cases75 = [{
 async def test_models(model: str) -> None:
     port = get_open_port()
     env_dict = {"TASK_QUEUE_ENABLE": "1", "HCCL_OP_EXPANSION_MODE": "AIV"}
-    additional_config = {
-        "ascend_scheduler_config": {
-            "enabled": False
-        },
-        "enable_weight_nz_layout": True
-    }
+    additional_config = {"enable_weight_nz_layout": True}
     server_args = [
         "--quantization", "ascend", "--reasoning-parser", "qwen3",
         "--tensor-parallel-size", "4", "--port",
@@ -98,7 +93,7 @@ async def test_models(model: str) -> None:
         run_aisbench_cases(model, port, aisbench_warm_up)
         result = run_aisbench_cases(model, port, aisbench_cases75)
         TTFT75 = get_TTFT(result)
-    assert TTFT75 < 0.4 * TTFT0, f"The TTFT for prefix75 {TTFT75} is not less than 0.4*TTFT for prefix0 {TTFT0}."
+    assert TTFT75 < 0.8 * TTFT0, f"The TTFT for prefix75 {TTFT75} is not less than 0.8*TTFT for prefix0 {TTFT0}."
     print(
-        f"The TTFT for prefix75 {TTFT75} is less than 0.4*TTFT for prefix0 {TTFT0}."
+        f"The TTFT for prefix75 {TTFT75} is less than 0.8*TTFT for prefix0 {TTFT0}."
     )

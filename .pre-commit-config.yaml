@@ -12,8 +12,8 @@ repos:
     - id: codespell
       args: [
         --toml, pyproject.toml,
-        '--skip', 'tests/e2e/multicard/test_torchair_graph_mode.py,csrc/mla_preprocess/**,tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,.github/**,typos.toml',
-        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND'
+        '--skip', 'tests/e2e/multicard/test_torchair_graph_mode.py,csrc/**,tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,.github/**,typos.toml',
+        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND'
       ]
       additional_dependencies:
         - tomli
@@ -37,7 +37,7 @@ repos:
   - id: typos
     args: [
       "--force-exclude",
-      "--exclude", "csrc/mla_preprocess/**"
+      "--exclude", "csrc/**"
     ]
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
@@ -68,13 +68,6 @@ repos:
   #   language: system
   #   types: [python]
   #   stages: [pre-commit] # Don't run in CI
-  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.9
-    entry: tools/mypy.sh 1 "3.9"
-    # Use system python because vllm installation is required
-    language: system
-    types: [python]
-    stages: [manual] # Only run in CI
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: tools/mypy.sh 1 "3.10"

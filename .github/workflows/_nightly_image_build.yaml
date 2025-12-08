@@ -1,0 +1,59 @@
+name: 'image / nightly / Ubuntu / test'
+
+on:
+  schedule:
+    - cron: '0 0,4,8,12,15 * * *'
+
+# This workflow builds and pushes Docker images for nightly-ci
+# It will be built base on the quay.io/ascend/vllm-ascend:main
+# And have some customizations for nightly testing, pushing to Huawei Cloud SWR
+jobs:
+  build-and-sync:
+    runs-on: ubuntu-22.04-arm
+
+    strategy:
+      matrix:
+        target: ['a2', 'a3']
+
+    outputs:
+      image-tag: ${{ steps.build-image.outputs.image-tag }}
+
+    steps:
+      - uses: actions/checkout@v6.0.0
+
+      - name: Show build target
+        run: |
+          echo "Building target: ${{ matrix.target }}"
+
+      - name: Login to Huawei Cloud SWR
+        id: login-swr
+        if: ${{ env.HW_USERNAME != '' && env.HW_TOKEN != '' }}
+        run: |
+          echo "${{ env.HW_TOKEN }}" | docker login -u "${{ env.HW_USERNAME }}" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
+        env:
+          HW_USERNAME: ${{ secrets.HW_USERNAME }}
+          HW_TOKEN: ${{ secrets.HW_TOKEN }}
+
+      - name: Build image
+        id: build-image
+        run: |
+          TARGET="${{ matrix.target }}"
+          IMAGE_TAG="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${TARGET}"
+
+          echo "Building image: $IMAGE_TAG"
+          docker build \
+            --network host \
+            --platform linux/arm64 \
+            -f .github/Dockerfile.nightly.${TARGET} \
+            --build-arg CANN_VERSION="8.3.rc2" \
+            --build-arg UBUNTU_VERSION="22.04" \
+            --build-arg PYTHON_VERSION="3.11" \
+            -t "$IMAGE_TAG" .
+
+          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # To avoid pushing images from forks, only push when the repository owner is 'vllm-project'
+      - name: Push image to SWR
+        if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
+        run: |
+          docker push ${{ steps.build-image.outputs.image-tag }}

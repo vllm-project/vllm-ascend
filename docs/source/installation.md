@@ -80,19 +80,19 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run --full
-# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc1_linux-aarch64.run
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run --full
+# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc2_linux-aarch64.run
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -157,11 +157,13 @@ cd ..
 # Install vLLM Ascend.
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+git submodule update --init --recursive
 pip install -v -e .
 cd ..
 ```
 
 vllm-ascend will build custom operators by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has Internet access.
 :::
 
 ```{note}
@@ -261,8 +263,14 @@ for output in outputs:
 Then run:
 
 ```bash
-# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
-# to speed up download if huggingface is not reachable.
+python example.py
+```
+
+If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
+
+```bash
+export VLLM_USE_MODELSCOPE = true
+pip install modelscope
 python example.py
 ```
 

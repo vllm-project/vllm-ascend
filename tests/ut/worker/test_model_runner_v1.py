@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import AscendSocVersion
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -26,21 +26,21 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
     "soc_version, enable_expert_parallel, world_size, num_tokens, mc2_tokens_capacity, quant_type, expected_method",
     [
         # Case 1: Expert parallel is disabled, should always be 'allgather'
-        (AscendSocVersion.A2, False, 8, 100, 256, None, MoECommType.ALLGATHER),
-        (AscendSocVersion.A3, False, 16, 500, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910B, False, 8, 100, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910_93, False, 16, 500, 256, None, MoECommType.ALLGATHER),
 
         # Case 2: A2 SOC with w4a8_dynamic -> use alltoall when not mc2
-        (AscendSocVersion.A2, True, 8, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendSocVersion.A2, True, 16, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendSocVersion.A2, True, 16, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
+        (AscendDeviceType._910B, True, 8, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
+        (AscendDeviceType._910B, True, 16, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
+        (AscendDeviceType._910B, True, 16, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
 
         # Case 3: A2 SOC without w4a8_dynamic -> fallback to allgather
-        (AscendSocVersion.A2, True, 8, 100, 256, None, MoECommType.ALLGATHER),
-        (AscendSocVersion.A2, True, 16, 257, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910B, True, 8, 100, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910B, True, 16, 257, 256, None, MoECommType.ALLGATHER),
 
         # Case 4: A3 SOC
-        (AscendSocVersion.A3, True, 8, 100, 256, None, MoECommType.MC2),
-        (AscendSocVersion.A3, True, 8, 257, 256, None, MoECommType.ALLTOALL),
+        (AscendDeviceType._910_93, True, 8, 100, 256, None, MoECommType.MC2),
+        (AscendDeviceType._910_93, True, 8, 257, 256, None, MoECommType.ALLTOALL),
     ])
 # yapf: enable
 def test_select_moe_comm_method(soc_version, enable_expert_parallel,
@@ -66,7 +66,7 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
     mock_runner.vllm_config = mock_vllm_config
 
     # Patch the helper functions
-    with patch('vllm_ascend.worker.model_runner_v1.get_ascend_soc_version',
+    with patch('vllm_ascend.worker.model_runner_v1.get_ascend_device_type',
                return_value=soc_version), \
          patch('vllm_ascend.worker.model_runner_v1.is_global_first_rank',
                return_value=True), \
@@ -75,7 +75,7 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
 
         # Bind the real method to the mock object
         method = NPUModelRunner._select_moe_comm_method(
-            mock_runner, num_tokens, False)
+            mock_runner, num_tokens)
 
         # Assert the result
         assert method == expected_method
@@ -101,7 +101,7 @@ def test_select_moe_comm_method_unsupported_soc():
 
     unsupported_soc = "UnsupportedSOC"
 
-    with patch('vllm_ascend.worker.model_runner_v1.get_ascend_soc_version',
+    with patch('vllm_ascend.worker.model_runner_v1.get_ascend_device_type',
                return_value=unsupported_soc), \
          patch('vllm_ascend.worker.model_runner_v1.is_global_first_rank',
                return_value=True), \
@@ -155,3 +155,4 @@ def test_init_creates_transfer_event_and_pinned_memory(mock_torch,
                                         dtype=torch.int64,
                                         device="cpu",
                                         pin_memory=True)
+        NPUModelRunner._select_moe_comm_method(mock_runner, 100)

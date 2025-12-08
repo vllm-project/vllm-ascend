@@ -1,0 +1,165 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'ascend test'
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 1 card / 4 cards test type
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: ./.github/workflows/pre-commit.yml
+    with:
+      vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
+      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+    steps:
+      - uses: actions/checkout@v6.0.0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            e2e_tracker:
+              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
+              - 'vllm_ascend/**'
+              - 'csrc/**'
+              - 'cmake/**'
+              - 'tests/e2e/**'
+              - 'CMakeLists.txt'
+              - 'setup.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'requirements-lint.txt'
+              - 'packages.txt'
+            ut_tracker:
+              - 'tests/ut/**'
+              - '.github/workflows/vllm_ascend_test_pr_light.yaml'
+
+  ut:
+    needs: [lint, changes]
+    name: unit test
+    # only trigger unit test after lint passed and the change is e2e and ut related.
+    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    runs-on: ubuntu-22.04-arm
+    container:
+      # fixme: vllm-ascend install failed with 8.3.rc2 on github action
+      image: quay.io/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        SOC_VERSION: ascend910b1
+    strategy:
+      matrix:
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
+
+    steps:
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Install packages
+        run: |
+          apt-get update -y
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6.0.0
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ matrix.vllm_version }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty python3 -m pip install .
+          python3 -m pip uninstall -y triton
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6.0.0
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/devlib
+          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install -v .
+
+      - name: Run unit test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/devlib
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
+            --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
+            --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+            --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
+            --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
+            --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
+            --ignore tests/ut/kv_connector/test_llmdatadist_connector.py \
+            --ignore tests/ut/core/test_scheduler_dynamic_batch.py
+
+      - name: Upload coverage to Codecov
+        # only upload coverage when commits merged
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: vllm-ascend
+          verbose: true
+
+  e2e-light:
+    name: e2e-light
+    strategy:
+      matrix:
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
+    # Note (yikun): If CI resource are limited we can split job into two chain jobs
+    needs: [lint, changes]
+    # only trigger e2e test after lint passed and the change is e2e related with pull request.
+    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    uses: ./.github/workflows/_e2e_test.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      runner: linux-aarch64-a2
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      type: light

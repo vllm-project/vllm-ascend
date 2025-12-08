@@ -74,10 +74,11 @@ class TestAttentionMaskBuilder(TestBase):
         attn_mask = attention_mask_builder.get_attn_mask(
             max_seq_len=2048, dtype=torch.float16, device=torch.device("cpu"))
         self.assertEqual(attn_mask.shape, (2048, 2048))
-        self.assertEqual(attn_mask[0][-1], torch.tensor(True))
-        self.assertEqual(attention_mask_builder._seq_len_cached, 1024)
+        self.assertEqual(attn_mask[0][-1],
+                         torch.tensor(float("-inf"), dtype=torch.float16))
+        self.assertEqual(attention_mask_builder._seq_len_cached, 2048)
         self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
-                         (1024, 1024))
+                         (2048, 2048))
         self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
                          torch.tensor(float("-inf"), dtype=torch.float16))
 
