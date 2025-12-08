@@ -20,6 +20,7 @@ import torch
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.transformers_utils.config import patch_rope_parameters
 
 from vllm_ascend.torchair.models.torchair_deepseek_v2 import (
     TorchairDeepseekV2DecoderLayer, TorchairDeepseekV2ForCausalLM,
@@ -59,6 +60,7 @@ def base_config():
         topk_group=1,
         vocab_size=10000,
     )
+    patch_rope_parameters(config)
     return config
 
 
