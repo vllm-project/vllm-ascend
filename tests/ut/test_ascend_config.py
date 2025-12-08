@@ -14,7 +14,6 @@
 #
 
 import os
-from unittest import mock
 
 from transformers import PretrainedConfig
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
@@ -102,9 +101,7 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_enable_npugraph_ex(self):
         with self.assertRaises(AssertionError):
             test_vllm_config = VllmConfig()
-            test_vllm_config.additional_config = {
-                "enable_npugraph_ex": True
-            }
+            test_vllm_config.additional_config = {"enable_npugraph_ex": True}
             init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config

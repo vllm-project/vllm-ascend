@@ -25,6 +25,7 @@ from vllm.logger import logger
 
 
 @functools.lru_cache(None)
+# The replacement registered here will be actually executed after AOT.
 def _register_replacement(epsilon):
     if 'torch_npu' not in sys.modules:
         logger.info(
@@ -101,13 +102,11 @@ def _register_replacement(epsilon):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
-        fake_mode = FakeTensorMode()
-        with fake_mode:
-            rms_norm_input = torch.randn(2, 4, device="npu")
-            residual = torch.randn(2, 4, device="npu")
-            rms_norm_weight = torch.randn(4, device="npu")
-            scale = torch.tensor([1.0], device="npu")
-            offset = torch.tensor([0.0], device="npu")
+        rms_norm_input = torch.randn(2, 4, device="npu")
+        residual = torch.randn(2, 4, device="npu")
+        rms_norm_weight = torch.randn(4, device="npu")
+        scale = torch.tensor([1.0], device="npu")
+        offset = torch.tensor([0.0], device="npu")
         return [rms_norm_input, residual, rms_norm_weight, scale, offset]
 
     torchair.register_replacement(search_fn=pattern,
@@ -116,7 +115,7 @@ def _register_replacement(epsilon):
                                   extra_check=_extra_stream_scope_check)
 
 
-### register converter for pass
+# register converter for pass
 common_epsilons = [1e-5, 1e-6]
 for eps in common_epsilons:
     logger.info(
