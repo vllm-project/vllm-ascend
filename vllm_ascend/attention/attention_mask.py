@@ -31,10 +31,7 @@ def _generate_attn_mask(max_seq_len, dtype):
 
 class AttentionMaskBuilder:
 
-    def __init__(
-        self,
-        device: torch.device
-    ):
+    def __init__(self, device: torch.device):
         self.attn_mask_cache = None
         self._seq_len_cached = 0
         self.device = device
