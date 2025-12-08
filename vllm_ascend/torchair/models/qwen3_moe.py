@@ -56,6 +56,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.torchair.ops.sequence_parallel import (MetadataForPadding,
                                                         init_metadata_for_sp)
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
+from vllm_ascend.utils import vllm_version_is
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -313,10 +314,11 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-
-        self.enable_sequence_parallelism = (
-            vllm_config.compilation_config.pass_config.enable_sp
-            if vllm_config is not None else False)
+        self.enable_sequence_parallelism = False
+        if vllm_config is not None:
+            self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism if vllm_version_is(
+                "0.12.0"
+            ) else vllm_config.compilation_config.pass_config.enable_sp
 
     def forward(
         self,
@@ -488,7 +490,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sp
+        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
         # Set MoE hyperparameters
         self.expert_weights: list[torch.Tensor] = []
 

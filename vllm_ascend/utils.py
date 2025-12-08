@@ -752,9 +752,10 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         if vllm_config is None:
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
+        vllm_enable_sp = vllm_config.compilation_config.pass_config.enable_sequence_parallelism if vllm_version_is(
+            "0.12.0") else vllm_config.compilation_config.pass_config.enable_sp
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.enable_sp
-            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            vllm_enable_sp or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
