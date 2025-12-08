@@ -628,6 +628,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
+    from vllm_ascend.ops.triton.fla.layernorm_guard import AscendRMSNormGated
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -662,6 +663,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
+        "RMSNormGated": AscendRMSNormGated,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():

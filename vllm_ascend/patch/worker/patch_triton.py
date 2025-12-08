@@ -1,7 +1,7 @@
 import vllm.model_executor.layers.mamba.ops.causal_conv1d
 
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
-from vllm_ascend.ops.triton.fla.layernorm_guard import RMSNormGated
+from vllm_ascend.ops.triton.fla.layernorm_guard import AscendRMSNormGated as RMSNormGated
 from vllm_ascend.ops.triton.fla.sigmoid_gating import \
     fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import (
