@@ -48,6 +48,7 @@ class AttentionMaskBuilder:
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
             self.attn_mask_cache = _generate_attn_mask(max_seq_len, dtype)
             self._seq_len_cached = max_seq_len
+        assert self.attn_mask_cache is not None, "Something is wrong in generate_attn_mask."
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(

@@ -1660,11 +1660,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.positions[:num_input_tokens].copy_(
             self.positions_cpu[:num_input_tokens], non_blocking=True)
 
-        # Make Attention metadata
-        positions_cpu = self.positions_cpu[:num_input_tokens]
-        positions = self.positions[:num_input_tokens]
-        seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
-
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
                                             num_valid_tokens)
         self.attn_mask = self._make_attention_mask(attn_state)
