@@ -92,7 +92,7 @@ def npugraph_ex_compile(
         fx_graph.recompile()
 
     import torchair
-    
+
     import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
