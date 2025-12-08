@@ -34,16 +34,22 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
-        if self.model.config.model_type == "qwen3_moe":
-            self.num_dense_layers = 0
-            self.global_expert_num = self.model.config.num_experts
-        else:
-            self.num_dense_layers = self.model.config.first_k_dense_replace
-            self.global_expert_num = self.model.config.n_routed_experts
-        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
+        self.init_eplb_params()
+        assert self.num_dense_layers is not None \
+            and self.global_expert_num is not None \
+            and self.num_moe_layers is not None, \
+            "adaptor hasn't been initialized yet"
+        self.init_eplb_param_dict()
+        self.init_expert_maps()
 
+    def init_eplb_params(self):
+        self.num_dense_layers = None
+        self.global_expert_num = None
+        self.num_moe_layers = None
+
+    def init_eplb_param_dict(self):
         for i in range(self.num_dense_layers,
                        self.model.config.num_hidden_layers):
             self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_list"] = \
@@ -64,6 +70,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
+    def init_expert_maps(self):
         self.expert_map_per_layer = dict(
         )  # reference to expert map on device for expert map update
         self.expert_map_per_layer_cpu = dict(
@@ -156,21 +163,16 @@ class VllmEplbAdaptor(EplbAdaptor):
         return all_expert_maps
 
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
-
         try:
-            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(
+            expert_map_tensor, _, _ = self._expert_file_to_tensor(
                 expert_map_path)
             expert_map_all = self.local2global(expert_map_tensor)
         except (TypeError, FileNotFoundError, OSError):
             expert_map_all = self.determine_expert_map_all()
 
         for layer_idx in range(num_moe_layers):
-            if self.model.config.model_type == "qwen3_moe":
-                self.expert_map_per_layer_cpu[layer_idx] = \
-                    expert_map_all[layer_idx][self.rank_id]
-            else:
-                self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
-                    expert_map_all[layer_idx][self.rank_id]
+            self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
+                expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
     def _expert_file_to_tensor(self, expert_map_path: str):

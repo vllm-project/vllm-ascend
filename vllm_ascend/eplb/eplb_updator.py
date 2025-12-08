@@ -23,8 +23,9 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.eplb.utils import moe_load_async_stream
+from vllm_ascend.eplb.core.eplb_utils import moe_load_async_stream
 from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
 
 class EplbUpdator:
@@ -38,7 +39,7 @@ class EplbUpdator:
         self.shared_dict = self.eplb_process.shared_dict
         self.moe_imbalance_dict: dict[int, float] = {}
 
-    def set_adaptor(self, adaptor):
+    def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         self.global_expert_num = self.adaptor.global_expert_num
