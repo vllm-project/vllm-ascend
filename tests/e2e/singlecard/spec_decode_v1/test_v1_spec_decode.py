@@ -114,7 +114,7 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    pytest.skip("exist OOM error")
+    pytest.skip("To be aligned with GPU")
     ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=False)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
