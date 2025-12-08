@@ -199,7 +199,7 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+    def __init__(self, enable_quantization_fusion: bool = True, enable_fuse_deep_atten: bool = False, **kwargs):
         """
         Initialize the configuration.
         
@@ -212,6 +212,7 @@ class AscendCompilationConfig:
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable_quantization_fusion = enable_quantization_fusion
+        self.enable_fuse_deep_atten = enable_fuse_deep_atten
         # Add more compilation related configs here as needed
 
 
@@ -409,6 +410,11 @@ def check_ascend_config(vllm_config, enforce_eager):
             if ascend_config.ascend_compilation_config.enable_quantization_fusion:
                 logger.info(
                     "Quantization fusion enabled! op fusion on quantization are expected. "
+                )
+
+            if ascend_config.ascend_compilation_config.enable_fuse_deep_atten:
+                logger.info(
+                    "Fuse deep atten enabled! op fusion on matmul_allreduce_add_rmsnorm are expected. "
                 )
 
             if vllm_config.model_config:

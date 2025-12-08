@@ -25,7 +25,7 @@ from torch._inductor.compile_fx import (graph_returns_tuple,
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
-
+import logging
 
 def compile_fx(graph: GraphModule, example_inputs: list,
                inner_compile: Callable, decompositions: dict) -> Callable:
@@ -55,6 +55,9 @@ class AscendCompiler(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+
+        logging.warning("=========AscendCompiler========")
+        logging.warning(f"graph {graph.graph}")
 
         def compile_inner(graph, example_inputs):
             current_pass_manager = compiler_config["graph_fusion_manager"]

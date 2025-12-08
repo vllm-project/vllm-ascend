@@ -50,4 +50,8 @@ class GraphFusionPassManager:
                                               True):
             from .passes.quant_fusion_pass import AddRMSNormQuantFusionPass
             self.passes.append(AddRMSNormQuantFusionPass(config))
+        if self.ascend_compilation_config.get("enable_fuse_deep_atten",
+                                              True):
+            from .passes.fuse_deep_atten import FuseDeepAttnPass
+            self.passes.append(FuseDeepAttnPass(config))
         # Add more passes here as needed
