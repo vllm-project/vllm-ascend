@@ -4619,5 +4619,5 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 if generators:
                     for i, generator in generators.items():
                         q[i].exponential_(generator=generator)
-                self._async_exponential_event.record()
+            self._async_exponential_event.record()
         self.sampler.set_q_event(q, self._async_exponential_event)
