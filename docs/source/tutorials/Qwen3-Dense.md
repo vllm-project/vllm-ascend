@@ -45,7 +45,6 @@ You can using our official docker image for supporting Qwen3 Dense models.
 Currently, we provide the all-in-one images.[Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
 
 #### Docker Pull (by tag)
-
 ```{code-block} bash
    :substitutions:
 
