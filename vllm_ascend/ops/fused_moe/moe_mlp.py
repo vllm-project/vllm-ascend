@@ -127,8 +127,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            group_diff = torch.diff(group_list)
-            new_group = torch.cat([group_diff[0].unsqueeze(0), group_diff], dim=0)
             hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
                 x=hidden_states,
                 weight_scale=w1_scale,
@@ -136,7 +134,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 bias=None,
                 quant_scale=None,
                 quant_offset=None,
-                group_index=new_group,
+                group_index=group_list,
                 activate_left=True,
                 quant_mode=1,
             )
@@ -298,3 +296,4 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                  group_list_type=group_list_type,
                                  topk_scales=topk_scales,
                                  need_trans=need_trans)
+
