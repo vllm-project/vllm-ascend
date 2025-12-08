@@ -174,9 +174,9 @@ class AscendSFAMetadataBuilder:
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
-        query_start_loc = common_attn_metadata.query_start_loc
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
-        has_prefill = any(query_lens > self.decode_threshold)
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        has_prefill = any(query_lens_cpu > self.decode_threshold)
 
         if self.cos_cache is None:
             self.cos_cache = model.model.layers[

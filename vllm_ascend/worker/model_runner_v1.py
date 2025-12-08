@@ -2835,9 +2835,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             cu_num_tokens, arange = self._get_cumsum_and_arange(
                 num_scheduled_tokens)
 
-            self.query_start_loc[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
             self.query_start_loc_cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
+            self.query_start_loc = self.query_start_loc_cpu.pin_memory().to(
+                self.device, non_blocking=True)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
             assigned_mask_dim = 2048

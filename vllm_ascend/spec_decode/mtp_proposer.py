@@ -235,7 +235,13 @@ class MtpProposer(Proposer):
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
-
+        if self.use_async_scheduling:
+            # there is synchronization between mtp steps when enabling aclgraph,
+            # disable aclgraph when use async scheduling to avoid the
+            # synchronization overhead.
+            # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
+            # and _propose.
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         if skip_attn:
@@ -735,9 +741,11 @@ class MtpProposer(Proposer):
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
         if self.use_async_scheduling:
-            # there is synchronize between mtp steps when enable aclgraph,
+            # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
-            # synchronize overhead.
+            # synchronization overhead.
+            # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
+            # and _propose.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
