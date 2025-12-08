@@ -40,7 +40,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Install system dependencies
         run: |
@@ -48,7 +48,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -133,7 +133,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Install system dependencies
         run: |
@@ -141,7 +141,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -205,6 +205,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv tests/e2e/multicard/test_offline_weight_load.py
 
   e2e-4-cards:
     name: multicard-4
@@ -231,7 +232,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           path: ./vllm-ascend
 
@@ -241,7 +242,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
