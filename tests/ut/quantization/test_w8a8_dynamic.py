@@ -33,13 +33,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             mock_get_ep_group.return_value = mock_ep_group
             mock_ascend_config = Mock()
 
-            # 创建一个具有具体属性的 Mock 对象来表示 ascend_scheduler_config
-            mock_ascend_scheduler_config = Mock()
-            mock_ascend_scheduler_config.enabled = False
-            mock_ascend_scheduler_config.max_num_batched_tokens = 1024
-            mock_ascend_scheduler_config.max_model_len = 2048
-            mock_ascend_config.ascend_scheduler_config = mock_ascend_scheduler_config
-
             mock_ascend_config.torchair_graph_config = Mock(enabled=False)
             mock_ascend_config.enable_chunked_prefill = False
             mock_get_ascend_config.return_value = mock_ascend_config

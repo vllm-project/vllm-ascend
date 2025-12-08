@@ -21,7 +21,8 @@ from typing import Any, List, Optional, Union
 import torch
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CompilationMode, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -137,8 +138,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         head_dim: Optional[int] = None,
         rms_norm_eps: float = 1e-06,
@@ -167,7 +167,6 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(hidden_size,
@@ -188,8 +187,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -270,16 +268,13 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
 
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         self.self_attn = CustomQwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, 'attention_bias', False),
@@ -320,8 +315,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                                 eps=config.rms_norm_eps)
 
         self.enable_sequence_parallelism = (
-            vllm_config.compilation_config.pass_config.
-            enable_sequence_parallelism if vllm_config is not None else False)
+            vllm_config.compilation_config.pass_config.enable_sp
+            if vllm_config is not None else False)
 
     def forward(
         self,
@@ -493,7 +488,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sp
         # Set MoE hyperparameters
         self.expert_weights: list[torch.Tensor] = []
 

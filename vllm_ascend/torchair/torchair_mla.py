@@ -170,7 +170,7 @@ class AscendMLATorchairMetadataBuilder:
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
@@ -317,7 +317,7 @@ class AscendMLATorchairMetadataBuilder:
                          dtype=self.model_config.dtype,
                          device=device)
         if self.vllm_config.speculative_config is not None and\
-            self.vllm_config.speculative_config.method == 'deepseek_mtp':
+            self.vllm_config.speculative_config.method == 'mtp':
             attn_state = AscendAttentionState.SpecDecoding
             num_decode_tokens = 2
         else:
