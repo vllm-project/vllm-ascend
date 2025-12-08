@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
-from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
@@ -11,8 +10,7 @@ from vllm.attention.backends.abstract import MultipleOf
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.distributed.parallel_state import (GroupCoordinator,
-                                             cleanup_dist_env_and_memory,
+from vllm.distributed.parallel_state import (cleanup_dist_env_and_memory,
                                              init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.platforms import current_platform
@@ -45,56 +43,6 @@ def dist_init():
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory()
-
-
-@pytest.fixture
-def mock_distributed():
-    tp_group = Mock(spec=GroupCoordinator)
-    tp_group.rank_in_group = 0
-    tp_group.world_size = 1
-    tp_group.device_group = Mock()
-
-    dp_group = Mock(spec=GroupCoordinator)
-    dp_group.rank_in_group = 0
-    dp_group.world_size = 1
-
-    ep_group = Mock(spec=GroupCoordinator)
-    ep_group.rank_in_group = 0
-    ep_group.world_size = 1
-
-    pp_group = Mock(spec=GroupCoordinator)
-    pp_group.rank_in_group = 0
-    pp_group.world_size = 1
-
-    dcp_group = MagicMock(spec=GroupCoordinator)
-    dcp_group.rank_in_group = 0
-    dcp_group.world_size = 1
-    dcp_group.device_group = MagicMock()
-
-    pcp_group = MagicMock(spec=GroupCoordinator)
-    pcp_group.rank_in_group = 0
-    pcp_group.world_size = 1
-    pcp_group.device_group = MagicMock()
-
-    mlp_tp_group = Mock(spec=GroupCoordinator)
-    mlp_tp_group.rank_in_group = 0
-    mlp_tp_group.world_size = 1
-    mlp_tp_group.all_gather = Mock(return_value=torch.randn(2, 4, 128))
-
-    mock_vllm_config = Mock()
-    mock_vllm_config.scheduler_config = Mock(max_num_seqs=256)
-    mock_vllm_config.model_config = Mock(max_model_len=2048, quant_config=None)
-
-    with patch('vllm.distributed.parallel_state.get_dcp_group', return_value=dcp_group), \
-            patch('vllm.distributed.parallel_state._DCP', new_callable=lambda: MagicMock(spec=GroupCoordinator)), \
-            patch("vllm.distributed.get_decode_context_model_parallel_world_size", return_value=1),\
-            patch('vllm.distributed.parallel_state.get_pcp_group', return_value=pcp_group), \
-            patch('vllm.distributed.parallel_state._PCP', new_callable=lambda: MagicMock(spec=GroupCoordinator)), \
-            patch("vllm.distributed.get_prefill_context_model_parallel_world_size", return_value=1),\
-            patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
-                       _PP=pp_group), \
-            patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group):
-        yield
 
 
 def initialize_kv_cache(runner: NPUModelRunner):
