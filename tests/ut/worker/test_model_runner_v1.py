@@ -138,7 +138,7 @@ def initialize_kv_cache(runner: NPUModelRunner):
 
 def get_vllm_config():
     model_config = ModelConfig(
-        model="/mnt/nfs/weight/DeepSeek-V2-Lite-W8A8",
+        model="facebook/opt-125m",
         dtype="bfloat16",
         seed=42,
     )
