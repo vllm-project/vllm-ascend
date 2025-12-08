@@ -20,6 +20,7 @@
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
+#include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl.h"
@@ -37,59 +38,60 @@
 namespace vllm_ascend {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
-                 const torch::Tensor& block_mapping, aclrtStream stream) {
-  torch::Device src_device = src.device();
-  torch::Device dst_device = dst.device();
-  aclrtMemcpyKind memcpy_type;
+                 const torch::Tensor& block_mapping, aclrtStream stream)
+{
+    torch::Device src_device = src.device();
+    torch::Device dst_device = dst.device();
+    aclrtMemcpyKind memcpy_type;
 
-  if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
-    TORCH_CHECK(src_device.index() == dst_device.index(),
-                "src and dst must be on the same npu");
-    memcpy_type = ACL_MEMCPY_DEVICE_TO_DEVICE;
-  } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
-    memcpy_type = ACL_MEMCPY_DEVICE_TO_HOST;
-  } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
-    memcpy_type = ACL_MEMCPY_HOST_TO_DEVICE;
-  } else {
-    TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
-  }
+    if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
+        TORCH_CHECK(src_device.index() == dst_device.index(),
+                    "src and dst must be on the same npu");
+        memcpy_type = ACL_MEMCPY_DEVICE_TO_DEVICE;
+    } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
+        memcpy_type = ACL_MEMCPY_DEVICE_TO_HOST;
+    } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
+        memcpy_type = ACL_MEMCPY_HOST_TO_DEVICE;
+    } else {
+        TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
+    }
 
-  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+    TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
 
-  char* src_ptr = static_cast<char*>(src.data_ptr());
-  char* dst_ptr = static_cast<char*>(dst.data_ptr());
+    char* src_ptr = static_cast<char*>(src.data_ptr());
+    char* dst_ptr = static_cast<char*>(dst.data_ptr());
 
-  const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
-  
-  const int64_t num_blocks = block_mapping.size(0);
-  const int64_t max_src_block = src.size(0);
-  const int64_t max_dst_block = dst.size(0);
-  for (size_t i = 0; i < num_blocks; i++) {
-    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
-    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
-    TORCH_CHECK(src_block_number >= 0 && src_block_number <= max_src_block,
-                    "src block index ", src_block_number, " out of range (max: ", max_src_block, ")");
-    TORCH_CHECK(dst_block_number >= 0 && dst_block_number <= max_dst_block,
-                    "dst block index ", dst_block_number, " out of range (max: ", max_dst_block, ")");
+    const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
     
-    int64_t src_offset = src_block_number * block_size_in_bytes;
-    int64_t dst_offset = dst_block_number * block_size_in_bytes;
+    const int64_t num_blocks = block_mapping.size(0);
+    const int64_t max_src_block = src.size(0);
+    const int64_t max_dst_block = dst.size(0);
+    for (size_t i = 0; i < num_blocks; i++) {
+        int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+        int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
+        TORCH_CHECK(src_block_number >= 0 && src_block_number <= max_src_block,
+                    "src block index ", src_block_number, " out of range (max: ", max_src_block, ")");
+        TORCH_CHECK(dst_block_number >= 0 && dst_block_number <= max_dst_block,
+                    "dst block index ", dst_block_number, " out of range (max: ", max_dst_block, ")");
+        
+        int64_t src_offset = src_block_number * block_size_in_bytes;
+        int64_t dst_offset = dst_block_number * block_size_in_bytes;
 
-    aclrtMemcpyAsync(dst_ptr + dst_offset, block_size_in_bytes,
-                          src_ptr + src_offset, block_size_in_bytes,
-                          memcpy_type, stream);
-  }
+        aclrtMemcpyAsync(dst_ptr + dst_offset, block_size_in_bytes,
+                         src_ptr + src_offset, block_size_in_bytes,
+                         memcpy_type, stream);
+    }
 }
 
 void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
 {    
   
-  const c10_npu::OptionalNPUGuard npuGuard(
+    const c10_npu::OptionalNPUGuard npuGuard(
         (!x.device().is_cpu()) ? x.device() : y.device()
     );
-  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();                       
-  swap_blocks_impl(x, y, z, stream);           
-  return;
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();                       
+    swap_blocks_impl(x, y, z, stream);           
+    return;
 }
 
 AscendType get_dtype_from_torch(at::ScalarType scalarType)
@@ -172,7 +174,7 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     return {query_dst, key_dst};
 }
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const at::Tensor &descale0, const at::Tensor &gamma1, const at::Tensor &beta1, const at::Tensor &wuq,
     const at::Tensor &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
@@ -180,8 +182,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     const at::Tensor &quant_scale0, const at::Tensor &quant_offset0, const at::Tensor &bias0,
     const at::Tensor &quant_scale1, const at::Tensor &quant_offset1, const at::Tensor &bias1,
     const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, at::Tensor &q_out0,
-    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1)
+    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
+    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1, at::Tensor &inner_out)
 {
     at::Tensor CtkvScale =
         ctkv_scale.has_value()
@@ -191,12 +193,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
         q_nope_scale.has_value()
             ? q_nope_scale.value()
             : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
+    bool enableInnerOut =
+        enable_inner_out.has_value()
+            ? enable_inner_out.value()
+            : false;
     
     auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
         hiddenState,
         wuk,
         cache_mode,
-        quant_mode
+        quant_mode,
+        enableInnerOut
     );
 
     void *hidden_state_ptr = hiddenState.data_ptr();
@@ -224,6 +231,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     void *kv_cache_out0_ptr = kv_cache_out0.data_ptr();
     void *q_out1_ptr = q_out1.data_ptr();
     void *kv_cache_out1_ptr = kv_cache_out1.data_ptr();
+    void *inner_out_ptr = inner_out.data_ptr();
     void *workspace_ptr = workspace_tensor.data_ptr();
     void *tiling_ptr = tiling.data_ptr();
 
@@ -234,17 +242,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     cmd.SetCustomHandler([stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                           gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr,
                           kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
+                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                           tiling_ptr, block_dim]() -> int {
         mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                             gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr, sin_ptr, cos_ptr,
                             kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
+                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                             tiling_ptr, block_dim);
         return 0;
     });
     cmd.Run();
-    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1);
+    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out);
 }
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
@@ -588,6 +596,64 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(
+    const at::Tensor &x,
+    const at::Tensor &expert_ids,
+    const at::Tensor &gmm1_permuted_weight,
+    const at::Tensor &gmm1_permuted_weight_scale,
+    const at::Tensor &gmm2_weight,
+    const at::Tensor &gmm2_weight_scale,
+    const c10::optional<at::Tensor> &expert_smooth_scales,
+    const c10::optional<at::Tensor> &expert_scales,
+    c10::string_view group_ep,
+    int64_t ep_rank_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs)
+{
+    auto x_shape = x.sizes();
+    int bs = x_shape[0];
+    int h = x_shape[1];
+
+    at::Tensor output = at::empty({bs, h}, x.options());
+
+    bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
+    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
+    at::Tensor ep_recv_count = at::empty({num_local_experts * ep_rank_size}, expert_ids.options());
+
+    vector<char> group_ep_chrs(group_ep.begin(), group_ep.end());
+    group_ep_chrs.push_back('\0');
+    char *group_ep_ptr = &group_ep_chrs[0];
+    EXEC_NPU_CMD(
+        // op api
+        aclnnDispatchGmmCombineDecode,
+        // input tensors
+        x,
+        expert_ids,
+        gmm1_permuted_weight,
+        gmm1_permuted_weight_scale,
+        gmm2_weight,
+        gmm2_weight_scale,
+        expert_smooth_scales,
+        expert_scales,
+        //input attrs
+        group_ep_ptr,
+        ep_rank_size,
+        ep_rank_id,
+        moe_expert_num,
+        shared_expert_num,
+        shared_expert_rank_num,
+        quant_mode,
+        global_bs,
+        // output tensors
+        output,
+        ep_recv_count);
+    return {output, ep_recv_count};
+}
+
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
                                     c10::optional<c10::string_view> format_mode,
                                     c10::optional<c10::string_view> quant_mode)
@@ -617,7 +683,33 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     });
     cmd.Run();
     return;
+}
 
+at::Tensor& dispatch_ffn_combine(
+    const at::Tensor& x,
+    const at::Tensor& weight1,
+    const at::Tensor& weight2,
+    const at::Tensor& expert_idx,
+    const at::Tensor& scale1,
+    const at::Tensor& scale2,
+    const at::Tensor& probs,
+    c10::string_view group,
+    int64_t max_output_size,
+    at::Tensor& out
+) {
+    char *group_ep_ptr = const_cast<char *>(group.data());
+    EXEC_NPU_CMD(aclnnDispatchFFNCombine,
+                 x,
+                 weight1,
+                 weight2,
+                 expert_idx,
+                 scale1,
+                 scale2,
+                 probs,
+                 group_ep_ptr,
+                 max_output_size,
+                 out);
+    return out;
 }
 
 at::Tensor npu_lightning_indexer(
@@ -717,6 +809,246 @@ at::Tensor npu_sparse_flash_attention(
     return output;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> get_dispatch_layout(const at::Tensor& topk_idx, int64_t num_experts,
+                                                                   int64_t num_ranks) {
+    TORCH_BIND_ASSERT(topk_idx.dim() == 2);
+    TORCH_BIND_ASSERT(topk_idx.is_contiguous());
+    TORCH_BIND_ASSERT(num_experts > 0);
+
+    const int num_tokens = topk_idx.size(0);
+    const int num_topk = topk_idx.size(1);
+
+    auto device = topk_idx.device();
+    auto num_tokens_per_expert = at::zeros({num_experts}, at::dtype(at::kInt).device(device));
+    auto num_tokens_per_rank = at::zeros({num_ranks}, at::dtype(at::kInt).device(device));
+    auto is_token_in_rank = at::zeros({num_tokens, num_ranks}, at::dtype(at::kInt).device(device));
+
+    EXEC_NPU_CMD(aclnnDispatchLayout,
+        topk_idx,
+        num_tokens,
+        num_ranks,
+        num_experts,
+        num_topk,
+        num_tokens_per_rank,
+        num_tokens_per_expert,
+        is_token_in_rank);
+
+    auto is_token_in_rank_bool = is_token_in_rank.to(at::kBool);
+
+    return std::make_tuple(num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank_bool);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> dispatch_prefill(
+    const at::Tensor& x, const at::Tensor& topk_idx, const at::Tensor& topk_weights,
+    const at::Tensor& num_tokens_per_rank, const at::Tensor& is_token_in_rank, at::Tensor& num_tokens_per_expert,
+    int64_t num_worst_tokens, c10::string_view groupEp, int64_t rank, int64_t num_ranks) {
+    std::vector<char> group_ep_chrs(groupEp.begin(), groupEp.end());
+    group_ep_chrs.push_back('\0');
+    char* group_ep_ptr = &group_ep_chrs[0];
+    at::Tensor new_x = x;
+
+    // Type checks
+    TORCH_BIND_ASSERT(is_token_in_rank.scalar_type() == at::kBool);
+    TORCH_BIND_ASSERT(num_tokens_per_expert.scalar_type() == at::kInt);
+    TORCH_BIND_ASSERT(num_tokens_per_rank.scalar_type() == at::kInt);
+
+    // Shape and contiguous checks
+    TORCH_BIND_ASSERT(new_x.dim() == 2 and new_x.is_contiguous());
+    // TORCH_BIND_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
+    TORCH_BIND_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous());
+    TORCH_BIND_ASSERT(is_token_in_rank.size(0) == new_x.size(0) and is_token_in_rank.size(1) == num_ranks);
+    TORCH_BIND_ASSERT(num_tokens_per_expert.dim() == 1 and num_tokens_per_expert.is_contiguous());
+    TORCH_BIND_ASSERT(num_tokens_per_expert.size(0) % num_ranks == 0);
+    TORCH_BIND_ASSERT(num_tokens_per_rank.dim() == 1 and num_tokens_per_rank.is_contiguous());
+    TORCH_BIND_ASSERT(num_tokens_per_rank.size(0) == num_ranks);
+
+    auto num_tokens = static_cast<int>(new_x.size(0));
+    auto hidden = static_cast<int>(new_x.size(1));
+    auto num_experts = static_cast<int64_t>(num_tokens_per_expert.size(0));
+    auto num_local_experts = static_cast<int>(num_experts / num_ranks);
+
+    // Top-k checks
+    int num_topk = 0;
+    num_topk = static_cast<int>(topk_idx.size(1));
+    TORCH_BIND_ASSERT(num_experts > 0);
+    TORCH_BIND_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
+    TORCH_BIND_ASSERT(topk_weights.dim() == 2 and topk_weights.is_contiguous());
+    TORCH_BIND_ASSERT(num_tokens == topk_idx.size(0));
+    TORCH_BIND_ASSERT(num_topk == topk_weights.size(1));
+    TORCH_BIND_ASSERT(topk_weights.scalar_type() == at::kFloat);
+
+    int send_per_group = 3;  // (send_to_expert_num, send_to_expert_offset, send_rank_tokens)
+
+    auto send_data = at::empty({num_experts * send_per_group}, at::dtype(at::kInt).device(x.device()));
+    int64_t send_count = send_per_group * num_local_experts * num_ranks;
+
+    auto send_data_offset = at::empty({num_experts}, at::dtype(at::kInt).device(x.device()));
+    at::Tensor recv_data = at::empty({num_experts * send_per_group}, at::dtype(at::kInt).device(x.device()));
+
+    int64_t local_rank_size = num_ranks;
+    int64_t local_rank_id = rank % local_rank_size;
+
+    EXEC_NPU_CMD(aclnnNotifyDispatch,
+        send_data,
+        num_tokens_per_expert, 
+        send_count,
+        num_tokens,
+        group_ep_ptr,  // commGroup
+        num_ranks,     // rankSize
+        rank,          // rankId
+        local_rank_size,
+        local_rank_id,
+        send_data_offset,
+        recv_data);
+
+    auto options_cpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    std::vector<int32_t> local_expert_acc(num_experts, 0);
+    auto send_token_idx_cpu = at::empty({num_tokens, num_topk}, options_cpu);
+    auto send_token_idx_ptr = send_token_idx_cpu.data_ptr<int>();
+
+    auto topk_idx_cpu = topk_idx.to(at::kCPU);
+    auto topk_idx_ptr = topk_idx_cpu.data_ptr<int64_t>();
+    for (int i = 0; i < num_tokens; ++i) {
+        for (int j = 0; j < num_topk; ++j) {
+            int64_t expert_idx = topk_idx_ptr[i * num_topk + j];
+            if (expert_idx >= 0) {
+                int32_t cnt = local_expert_acc[expert_idx];
+                send_token_idx_ptr[i * num_topk + j] = cnt;
+                local_expert_acc[expert_idx]++;
+            }
+        }
+    }
+
+    TORCH_BIND_ASSERT(recv_data.dim() == 1 and recv_data.is_contiguous());
+    TORCH_BIND_ASSERT(recv_data.size(0) % num_experts == 0);
+    at::Tensor recv_offset_cpu = at::empty({num_experts}, options_cpu);
+    at::Tensor recv_count_cpu = at::empty({num_experts}, options_cpu);
+    auto recv_data_cpu = recv_data.to(at::kCPU);
+    auto recv_data_ptr = recv_data_cpu.data_ptr<int>();
+    auto recv_count_ptr = recv_count_cpu.data_ptr<int>();
+    auto recv_offset_ptr = recv_offset_cpu.data_ptr<int>();
+    int64_t total_recv_tokens = 0;
+    int64_t num_max_dispatch_tokens_per_rank = 0;
+    std::vector<int64_t> num_recv_tokens_per_expert_list;
+
+    for (int64_t local_e = 0; local_e < num_local_experts; ++local_e) {
+        int64_t local_expert_recv_tokens = 0;
+        for (int64_t src_rank = 0; src_rank < num_ranks; ++src_rank) {
+            int64_t index = local_e * num_ranks + src_rank;
+            int64_t pair_idx = send_per_group * (src_rank * num_local_experts + local_e);
+
+            int recv_cnt = recv_data_ptr[pair_idx];                 // count from this src_rank for
+                                                                    // this global_expert
+            int recv_off = recv_data_ptr[pair_idx + 1];             // offset in that src_rank's window
+            int64_t send_num_tokens = recv_data_ptr[pair_idx + 2];  // all bs from rank
+
+            total_recv_tokens += recv_cnt;
+            recv_count_ptr[index] = total_recv_tokens;
+            recv_offset_ptr[index] = recv_off;
+            num_max_dispatch_tokens_per_rank = std::max(num_max_dispatch_tokens_per_rank, send_num_tokens);
+
+            local_expert_recv_tokens += recv_cnt;
+        }
+        num_recv_tokens_per_expert_list.push_back(local_expert_recv_tokens);
+    }
+    auto option = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+    at::Tensor num_recv_tokens_per_expert = torch::from_blob(
+        num_recv_tokens_per_expert_list.data(), {static_cast<int64_t>(num_recv_tokens_per_expert_list.size())}, option)
+        .clone();
+
+    at::Tensor expert_ids = topk_idx.to(at::kInt);
+    int64_t tp_size = 1;
+    int64_t tp_rank = 0;
+    int64_t quant_mode = 0;
+    int64_t global_bs = static_cast<int64_t>(
+        std::max(num_max_dispatch_tokens_per_rank * num_ranks, static_cast<int64_t>(num_worst_tokens)));
+
+    auto send_token_idx = send_token_idx_cpu.to(x.device());
+    auto recv_offset = recv_offset_cpu.to(x.device());
+    auto recv_count = recv_count_cpu.to(x.device());
+
+    int total_cnt = total_recv_tokens;
+    if (total_cnt == 0) {
+        total_cnt = 1;
+    }
+    auto expandx_out = at::empty({total_cnt, hidden}, x.options());
+    auto dynamic_scales_out = at::empty({total_cnt}, at::dtype(at::kFloat).device(x.device()));
+    auto expand_idx_out = at::empty({total_cnt * 3}, at::dtype(at::kInt).device(x.device()));
+
+    EXEC_NPU_CMD(aclnnMoeDispatchNormal,
+        new_x,
+        expert_ids,
+        send_data_offset,
+        send_token_idx,
+        recv_offset,
+        recv_count,
+        group_ep_ptr,  // commGroup
+        num_ranks,     // rankSize
+        rank,          // rankId
+        group_ep_ptr,
+        tp_size,
+        tp_rank,
+        num_experts,
+        quant_mode,
+        global_bs,
+        expandx_out,
+        dynamic_scales_out,
+        expand_idx_out);
+
+    // Return values
+    return {expandx_out, expand_idx_out, recv_count, num_recv_tokens_per_expert};
+}
+
+at::Tensor combine_prefill(const at::Tensor& x, const at::Tensor& topk_idx, const at::Tensor& topk_weights,
+                           const at::Tensor& src_idx, const at::Tensor& send_head, c10::string_view groupEp,
+                           int64_t rank, int64_t num_ranks) {
+    std::vector<char> group_ep_chrs(groupEp.begin(), groupEp.end());
+    group_ep_chrs.push_back('\0');
+    char* group_ep_ptr = &group_ep_chrs[0];
+
+    TORCH_BIND_ASSERT(x.dim() == 2 and x.is_contiguous());
+    at::Tensor recv_x = x;
+
+    at::Tensor topk_idx_p = topk_idx;
+
+    auto topk_idx_int32 = topk_idx_p.to(at::kInt);
+    at::Tensor expand_ids = topk_idx_int32;
+    at::Tensor token_src_info = src_idx;
+    at::Tensor ep_send_counts = send_head;
+    auto device = x.device();
+
+    const int num_tokens = topk_idx_p.size(0);
+    const int num_topk = topk_idx_p.size(1);
+
+    int64_t hidden = static_cast<int>(recv_x.size(1));
+    at::Tensor tp_send_counts = at::empty({1}, at::dtype(at::kInt).device(device));
+    int64_t tp_world_size = 1;
+    int64_t tp_rankId = 0;
+    int64_t moe_expert_number = send_head.size(0);
+    int64_t global_bs = topk_idx_p.size(0) * num_ranks;
+
+    // Combine data
+    auto combined_x = torch::empty({topk_weights.size(0), hidden}, x.options());
+
+    EXEC_NPU_CMD(aclnnMoeCombineNormal,
+        recv_x,
+        token_src_info,
+        ep_send_counts,
+        topk_weights,
+        tp_send_counts,
+        group_ep_ptr,
+        num_ranks,
+        rank,
+        group_ep_ptr,
+        tp_world_size,
+        tp_rankId,
+        moe_expert_number,
+        global_bs,
+        combined_x);
+
+    return combined_x;
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -765,9 +1097,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "               Tensor kv_cache_rope, Tensor slotmapping, Tensor quant_scale0,"
         "               Tensor quant_offset0, Tensor bias0, Tensor quant_scale1, Tensor quant_offset1,"
         "               Tensor bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
-        "               str? quant_mode, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
-        "               Tensor! kv_cache_out1) -> (Tensor q_out0, Tensor kv_cache_out0,"
-        "                                          Tensor q_out1, Tensor kv_cache_out1)"
+        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
+        "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
@@ -784,6 +1116,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            Tensor group_list, *, Tensor? bias=None,"
         "                            Tensor? offset=None) -> (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant);
+
+    ops.def(
+        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor gmm1_permuted_weight,"
+        "                            Tensor gmm1_permuted_weight_scale,"
+        "                            Tensor gmm2_weight, Tensor gmm2_weight_scale,"
+        "                            Tensor? expert_smooth_scales=None, Tensor? expert_scales=None,"
+        "                            str group_ep='',"
+        "                            int ep_rank_size=0, int ep_rank_id=0, int moe_expert_num=0,"
+        "                            int shared_expert_num=1, int shared_expert_rank_num=0,"
+        "                            int quant_mode=0,"
+        "                            int global_bs=0) -> (Tensor output, Tensor ep_recv_count)"
+    );
+    ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
@@ -810,4 +1155,32 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "dispatch_ffn_combine(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
+        "                     Tensor scale1, Tensor scale2, Tensor probs, str group,"
+        "                     int max_output_size, Tensor! out) -> Tensor"
+    );
+    ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+    ops.def("get_dispatch_layout(Tensor topk_idx, int num_experts, int "
+            "num_ranks) -> (Tensor num_tokens_per_rank, Tensor "
+            "num_tokens_per_expert, Tensor is_token_in_rank_bool)");
+    ops.impl("get_dispatch_layout", torch::kPrivateUse1,
+             &vllm_ascend::get_dispatch_layout);
+
+    ops.def(
+        "dispatch_prefill(Tensor x, Tensor topk_idx, Tensor topk_weights, "
+        "Tensor num_tokens_per_rank, Tensor is_token_in_rank, Tensor "
+        "num_tokens_per_expert, int num_worst_tokens, str groupEp, int rank, "
+        "int num_ranks) -> (Tensor expandx_out, Tensor expand_idx_out, Tensor "
+        "recv_count, Tensor num_recv_tokens_per_expert)");
+    ops.impl("dispatch_prefill", torch::kPrivateUse1,
+             &vllm_ascend::dispatch_prefill);
+
+    ops.def("combine_prefill(Tensor x, Tensor topk_idx, Tensor topk_weights, "
+            "Tensor src_idx, Tensor send_head, str grouEp, int rank, int "
+            "num_ranks) -> Tensor");
+    ops.impl("combine_prefill", torch::kPrivateUse1,
+             &vllm_ascend::combine_prefill);
 }

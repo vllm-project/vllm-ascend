@@ -315,8 +315,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                                 eps=config.rms_norm_eps)
 
         self.enable_sequence_parallelism = (
-            vllm_config.compilation_config.pass_config.
-            enable_sequence_parallelism if vllm_config is not None else False)
+            vllm_config.compilation_config.pass_config.enable_sp
+            if vllm_config is not None else False)
 
     def forward(
         self,
@@ -488,7 +488,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sp
         # Set MoE hyperparameters
         self.expert_weights: list[torch.Tensor] = []
 
