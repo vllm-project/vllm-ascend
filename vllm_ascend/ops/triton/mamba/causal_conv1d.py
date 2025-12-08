@@ -1,4 +1,4 @@
-# adapted from vllm/model_executor/layers/mamba/ops/casual_conv1d.py
+# adapted from vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # SPDX-License-Identifier: Apache-2.0
 
