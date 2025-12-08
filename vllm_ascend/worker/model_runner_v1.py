@@ -4625,7 +4625,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                                        generator=generator)
             else:
                 # If self.enable_async_exp not equals 2
-                # Goes to asnyc exponential with AI-CPU exponential or default exponential.
+                # Goes to async exponential with AI-CPU exponential or default exponential.
                 if len(generators) != q.shape[0]:
                     q.exponential_()
                 if generators:
