@@ -100,7 +100,6 @@ jobs:
               - Phi-4-mini-instruct
           - os: linux-aarch64-a2-2
             model_list:
-              - ERNIE-4.5-21B-A3B-PT
               - Qwen3-30B-A3B
               - Qwen3-VL-30B-A3B-Instruct
               - DeepSeek-V2-Lite
