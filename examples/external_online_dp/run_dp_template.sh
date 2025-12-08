@@ -29,4 +29,4 @@ vllm serve model_path \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
-    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+    --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'

@@ -21,7 +21,7 @@ class TestNPUTorchairModelRunner(PytestBase):
         runner.vllm_config = MagicMock(spec=VllmConfig)
 
         runner.speculative_config = MagicMock(
-            method="deepseek_mtp",
+            method="mtp",
             num_speculative_tokens=4,
             disable_padded_drafter_batch=False)
 
