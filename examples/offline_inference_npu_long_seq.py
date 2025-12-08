@@ -33,7 +33,6 @@ if __name__ == "__main__":
     llm = LLM(
         model=args.model_path,
         trust_remote_code=True,
-        enforce_eager=True,
         tensor_parallel_size=args.tp,
         prefill_context_parallel_size=args.pcp,
         decode_context_parallel_size=args.dcp,

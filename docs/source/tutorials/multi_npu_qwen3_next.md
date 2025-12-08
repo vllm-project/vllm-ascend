@@ -129,7 +129,6 @@ if __name__ == '__main__':
     sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
     llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
               tensor_parallel_size=4,
-              enforce_eager=True,
               distributed_executor_backend="mp",
               gpu_memory_utilization=0.7,
               max_model_len=4096)

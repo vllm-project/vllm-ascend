@@ -51,7 +51,6 @@ def test_models_with_enable_shared_expert_dp(model: str) -> None:
             model,
             max_model_len=1024,
             tensor_parallel_size=2,
-            enforce_eager=False,
             compilation_config={
                 "cudagraph_capture_sizes": [1, 4, 8, 16],
                 "cudagraph_mode": "FULL_DECODE_ONLY",

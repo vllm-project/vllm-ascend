@@ -47,7 +47,6 @@ def test_models_with_xlite_decode_only(
             model,
             block_size=128,
             max_model_len=1024,
-            enforce_eager=False,
             additional_config={"xlite_graph_config": {
                 "enabled": True
             }},
@@ -95,7 +94,6 @@ def test_models_with_xlite_full_mode(
             model,
             block_size=128,
             max_model_len=1024,
-            enforce_eager=False,
             additional_config={
                 "xlite_graph_config": {
                     "enabled": True,

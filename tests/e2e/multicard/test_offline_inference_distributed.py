@@ -61,7 +61,6 @@ def test_models_distributed_QwQ():
             dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -149,7 +148,6 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
-            enforce_eager=True,
             enable_expert_parallel=True,
             additional_config={"torchair_graph_config": {
                 "enabled": False,
@@ -171,13 +169,10 @@ def test_sp_for_qwen3_moe() -> None:
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
-                    compilation_config={
-                        "pass_config": {
-                            "enable_sequence_parallelism": True
-                        }
-                    },
-                    enable_expert_parallel=True,
-                    enforce_eager=True) as vllm_model:
+                    compilation_config={"pass_config": {
+                        "enable_sp": True
+                    }},
+                    enable_expert_parallel=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
@@ -196,8 +191,7 @@ def test_fc2_for_qwen3_moe() -> None:
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
-                    enable_expert_parallel=True,
-                    enforce_eager=True) as vllm_model:
+                    enable_expert_parallel=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
@@ -215,7 +209,6 @@ def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
-                    enforce_eager=True,
                     quantization="ascend") as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -232,7 +225,6 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
@@ -252,7 +244,6 @@ def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",

@@ -55,7 +55,6 @@ def test_single_prompt_embeds_inference(model_name):
     with VllmRunner(
             model_name,
             enable_prompt_embeds=True,
-            enforce_eager=True,
     ) as vllm_runner:
         outputs = vllm_runner.model.generate({
             "prompt_embeds": prompt_embeds,
@@ -123,11 +122,10 @@ def test_prompt_embeds_with_aclgraph(model_name):
     chat = [{"role": "user", "content": "What is the capital of China?"}]
     prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
 
-    # Run with ACL graph enabled (enforce_eager=False)
+    # Run with ACL graph enabled
     with VllmRunner(
             model_name,
             enable_prompt_embeds=True,
-            enforce_eager=False,
     ) as vllm_aclgraph_runner:
         aclgraph_outputs = vllm_aclgraph_runner.model.generate({
             "prompt_embeds":
@@ -176,7 +174,6 @@ def test_mixed_prompt_embeds_and_text(model_name):
     with VllmRunner(
             model_name,
             enable_prompt_embeds=True,
-            enforce_eager=True,
     ) as vllm_runner:
         # Test prompt embeddings
         embeds_output = vllm_runner.model.generate({

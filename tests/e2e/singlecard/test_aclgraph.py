@@ -50,7 +50,6 @@ def test_models_with_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 quantization="ascend",
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
@@ -68,7 +67,6 @@ def test_models_with_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
@@ -155,7 +153,6 @@ def test_models_with_aclgraph_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
                 quantization="ascend",
         ) as runner:
@@ -166,7 +163,6 @@ def test_models_with_aclgraph_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 compilation_config={
                     "cudagraph_capture_sizes": [4, 8, 32, 64],
                     "cudagraph_mode": "FULL_DECODE_ONLY"

@@ -44,8 +44,7 @@ def test_multimodal_vl(prompt_template):
                         "min_pixels": 28 * 28,
                         "max_pixels": 1280 * 28 * 28,
                         "fps": 1,
-                    },
-                    enforce_eager=False) as vllm_model:
+                    }) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts=prompts,
                                              images=images,
                                              max_tokens=64)

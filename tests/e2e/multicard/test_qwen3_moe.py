@@ -53,7 +53,6 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_EP():
             tensor_parallel_size=2,
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -99,7 +98,6 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH_AIV():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -116,6 +114,5 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

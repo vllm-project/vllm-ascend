@@ -36,7 +36,6 @@ def mtp_torchair_correctness(
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
-                    enforce_eager=False,
                     additional_config={
                         "torchair_graph_config": {
                             "enabled": True,
@@ -61,7 +60,6 @@ def mtp_torchair_correctness(
                         "method": "mtp",
                         "num_speculative_tokens": 1,
                     },
-                    enforce_eager=False,
                     max_model_len=2000,
                     compilation_config=CompilationConfig(
                         cudagraph_mode=graph_mode_str),

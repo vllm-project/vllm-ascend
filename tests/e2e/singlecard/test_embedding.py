@@ -29,7 +29,6 @@ def test_embed_models_correctness():
     with VllmRunner(
             model_name,
             runner="pooling",
-            enforce_eager=False,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)
 

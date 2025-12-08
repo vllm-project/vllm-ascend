@@ -39,7 +39,6 @@ def main():
     # Create an LLM.
     llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite",
               tensor_parallel_size=2,
-              enforce_eager=True,
               trust_remote_code=True,
               max_model_len=1024)
 

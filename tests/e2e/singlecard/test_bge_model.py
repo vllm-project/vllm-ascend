@@ -29,7 +29,6 @@ def test_bge_model_correctness():
     with VllmRunner(
             model_name,
             runner="pooling",
-            enforce_eager=True,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)
 
