@@ -23,16 +23,13 @@ import itertools
 import math
 import time
 from collections import defaultdict
-from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import (TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional,
-                    Union, cast)
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
 
 import numpy as np
-import numpy.typing as npt
 import regex as re
 import torch
 import torch._dynamo.cache_size
@@ -64,33 +61,33 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport, CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         MambaSpec, MLAAttentionSpec,
                                         UniformTypeKVCacheSpecs)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, ModelRunnerOutput,
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             ModelRunnerOutput,
                              make_empty_encoder_model_runner_output)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
-
+from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
+                                             GPUModelRunner)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
-from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,)
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner, AsyncGPUModelRunnerOutput
+from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (MoECommType,
+                                                get_mc2_tokens_capacity,
                                                 set_ascend_forward_context,
-                                                set_cos_and_sin,
-                                                set_mc2_mask,
-                                                set_mc2_tokens_capacity,
-                                                get_mc2_tokens_capacity)
+                                                set_cos_and_sin, set_mc2_mask,
+                                                set_mc2_tokens_capacity)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -124,7 +121,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
                                is_moe_model, lmhead_tp_enable)
-from vllm_ascend.worker.npu_input_batch import  NpuInputBatch
+from vllm_ascend.worker.npu_input_batch import NpuInputBatch
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -196,11 +193,13 @@ class ExecuteModelState(NamedTuple):
     attn_metadata: dict[str, Any]
     positions: torch.Tensor
 
+
 class NPUModelRunner(GPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dcp_size = get_dcp_group().world_size
@@ -263,8 +262,10 @@ class NPUModelRunner(GPUModelRunner):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        set_cos_and_sin(vllm_config, self.max_num_reqs, self.uniform_decode_query_len, self.dtype, self.device)
-        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.uniform_decode_query_len)
+        set_cos_and_sin(vllm_config, self.max_num_reqs,
+                        self.uniform_decode_query_len, self.dtype, self.device)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs,
+                                self.uniform_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         self.pcp_allgather_restore_idx = torch.zeros(
             self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
@@ -282,7 +283,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_actual_tokens_pcp_padded = 0
         if self.speculative_config and self.pcp_size > 1:
             self.input_ids_pcp_full = self._make_buffer(self.max_num_tokens,
-                                                       dtype=torch.int32)
+                                                        dtype=torch.int32)
             self.query_start_loc_pcp_full = torch.zeros(self.max_num_reqs + 1,
                                                         dtype=torch.int32,
                                                         device=self.device)
@@ -386,13 +387,17 @@ class NPUModelRunner(GPUModelRunner):
             device="cpu",
             pin_memory=self.pin_memory,
         )
+        # None in the first PP rank. The rest are set after load_model.
+        self.intermediate_tensors: IntermediateTensors | None = None
+        self.execute_model_state: ExecuteModelState | None = None
+        self.reorder_batch_threshold: int | None = None
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
-    
+
     def _sync_device(self) -> None:
         torch.npu.synchronize()
-    
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -489,7 +494,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
         return self.attn_mask_builder.get_splitfuse_attn_mask()
-
 
     def generate_kv_idx(self, scheduler_output):
         if not self.pcp_size > 1:
@@ -731,7 +735,7 @@ class NPUModelRunner(GPUModelRunner):
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
         self.seq_lens.gpu[:num_reqs].copy_(self.seq_lens.cpu[:num_reqs],
-                                       non_blocking=True)
+                                           non_blocking=True)
 
         # Fill unused with -1. Needed for reshape_and_cache
         self.query_start_loc.gpu[num_reqs + 1:].fill_(-1)
@@ -740,8 +744,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Copy the tensors to the NPU.
-        self._prepare_input_ids(scheduler_output,
-                                total_num_scheduled_tokens,
+        self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens,
                                 cu_num_tokens)
         self.positions.cpu[total_num_scheduled_tokens:num_input_tokens].zero_()
         self.positions.gpu[:num_input_tokens].copy_(
@@ -855,12 +858,13 @@ class NPUModelRunner(GPUModelRunner):
             input_ids, positions, num_input_tokens, with_prefill,
             maybe_padded_num_tokens)
 
+        # type: ignore
         if get_pp_group().is_first_rank:
-            intermediate_tensors = None # noqa
+            intermediate_tensors = None  # type: ignore
         else:
             assert intermediate_tensors is not None
-            assert self.intermediate_tensors is not None
-            for k, v in intermediate_tensors.items(): # noqa
+            assert self.intermediate_tensors is not None  # type: ignore
+            for k, v in intermediate_tensors.items():
                 self.intermediate_tensors[k][:num_input_tokens].copy_(
                     v[:num_input_tokens], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
@@ -951,9 +955,9 @@ class NPUModelRunner(GPUModelRunner):
                 blk_table.slot_mapping.gpu[slot_mapping_size:].fill_(0)
                 if self.pcp_size > 1:
                     slot_mapping_for_pcp = blk_table.slot_mapping.gpu[:
-                                                                  long_seq_metadata
-                                                                  .
-                                                                  num_actual_tokens_pcp_padded]
+                                                                      long_seq_metadata
+                                                                      .
+                                                                      num_actual_tokens_pcp_padded]
                     slot_mapping_for_pcp[slot_mapping_size:].fill_(-1)
                     assert pcp_unpad_mask is not None
                     pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[:
@@ -1338,7 +1342,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output.finished_req_ids)
         return None, None
 
-
+    # type: ignore
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1511,13 +1515,13 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             hidden_states,
             sample_hidden_states,
-            aux_hidden_states, # noqa
+            aux_hidden_states,  # noqa
             kv_connector_output,
             attn_metadata,
             positions,
-        ) = self.execute_model_state # noqa
+        ) = self.execute_model_state  # type: ignore
         # Clear ephemeral state.
-        self.execute_model_state = None
+        self.execute_model_state = None  # type: ignore
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -1756,7 +1760,8 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_tokens, arange = self._get_cumsum_and_arange(
                 num_scheduled_tokens)
 
-            self.query_start_loc.gpu[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
+            self.query_start_loc.gpu[1:num_reqs +
+                                     1] = torch.Tensor(cu_num_tokens)
             self.query_start_loc.cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
@@ -1987,7 +1992,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.positions.gpu[:num_tokens]
 
             if get_pp_group().is_first_rank:
-                intermediate_tensors = None # noqa
+                intermediate_tensors = None
             else:
                 if self.intermediate_tensors is None:
                     self.intermediate_tensors = (
@@ -1997,7 +2002,7 @@ class NPUModelRunner(GPUModelRunner):
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
                     k: v[:num_tokens]
-                    for k, v in self.intermediate_tensors.items() # noqa
+                    for k, v in self.intermediate_tensors.items()
                 })
             has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
             # filter out the valid batch descriptor
@@ -2596,7 +2601,6 @@ class NPUModelRunner(GPUModelRunner):
                 kernel_block_sizes=kernel_block_sizes,
             )
 
-
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
@@ -2665,21 +2669,22 @@ class NPUModelRunner(GPUModelRunner):
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
-
     def calculate_reorder_batch_threshold(self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)
         """
         for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.get_metadata_builder() 
-            if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"): # noqa
+            attn_metadata_builder_i = group.get_metadata_builder()
+            if hasattr(attn_metadata_builder_i,
+                       "reorder_batch_threshold"):  # noqa
                 # check that if any backends reorder batches; that the reordering
                 # is compatible (e.g., decode threshold is the same)
                 reorder_batch_threshold_i = (
-                    attn_metadata_builder_i.reorder_batch_threshold) # noqa
-                if reorder_batch_threshold_i is not None: # noqa
-                    if self.reorder_batch_threshold is not None: # noqa
+                    attn_metadata_builder_i.reorder_batch_threshold
+                )  # type: ignore
+                if reorder_batch_threshold_i is not None:  # noqa
+                    if self.reorder_batch_threshold is not None:  # type: ignore
                         if reorder_batch_threshold_i != \
                             self.reorder_batch_threshold:
                             raise ValueError(
@@ -2688,7 +2693,7 @@ class NPUModelRunner(GPUModelRunner):
                                 f"backend uses threshold "
                                 f"{self.reorder_batch_threshold}")
                     else:
-                        self.reorder_batch_threshold = reorder_batch_threshold_i # noqa
+                        self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -2846,6 +2851,7 @@ class NPUModelRunner(GPUModelRunner):
                              f"support:{min_ag_support}) "
                              "; please try cudagraph_mode=PIECEWISE, "
                              "and make sure compilation level is piecewise")
+
         if (aclgraph_mode.decode_mode() == CUDAGraphMode.FULL
                 and aclgraph_mode.separate_routine()
                 and self.uniform_decode_query_len > 1):
@@ -2855,6 +2861,7 @@ class NPUModelRunner(GPUModelRunner):
             capture_sizes = self.compilation_config.cudagraph_capture_sizes
             self.aclgraph_batch_sizes = (capture_sizes
                                          if capture_sizes is not None else [])
+
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
@@ -2947,20 +2954,11 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
                 decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes if x <= max_num_tokens
-                    and x >= self.uniform_decode_query_len
+                    x for x in self.cudagraph_batch_sizes if
+                    x <= max_num_tokens and x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = sorted(decode_cudagraph_batch_sizes)
-                # TODO: refactor this when vLLM supports mtp>1
-                if not all(x % self.uniform_decode_query_len == 0
-                           for x in decode_cudagraph_batch_sizes):
-                    raise ValueError(
-                        "In the MTP fullgraph scenario, each graph size must be an integer multiple of "
-                        f"(num_speculative_tokens + 1): {self.uniform_decode_query_len}. "
-                        f"Please modify the cudagraph_capture_sizes variable to be integer multiple of {self.uniform_decode_query_len}, "
-                        f"while ensuring the maximum cudagraph_capture_sizes does not exceed max_num_seqs * (num_speculative_tokens + 1): {max_num_tokens}. "
-                        "For example, with MTP=2 and max_num_seqs=16, we recommend setting cudagraph_capture_sizes to [48]."
-                    )
+                compilation_cases_decode = list(
+                    reversed(decode_cudagraph_batch_sizes))
                 self._capture_aclgraphs(
                     compilation_cases=compilation_cases_decode,
                     aclgraph_runtime_mode=CUDAGraphMode.FULL,
@@ -3287,12 +3285,11 @@ class NPUModelRunner(GPUModelRunner):
         token_indices_pcp_full = (
             positions_pcp_full_np +
             req_indices_pcp_full * self.input_batch.token_ids_cpu.shape[1])
-        torch.index_select(
-            self.input_batch.token_ids_cpu_tensor.flatten(),
-            0,
-            torch.from_numpy(token_indices_pcp_full),
-            out=self.
-            input_ids_pcp_full.cpu[:total_num_scheduled_tokens_pcp_full])
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
+                           0,
+                           torch.from_numpy(token_indices_pcp_full),
+                           out=self.input_ids_pcp_full.
+                           cpu[:total_num_scheduled_tokens_pcp_full])
         self.query_start_loc_pcp_full[:num_reqs + 1].copy_(
             self.query_start_loc_pcp_full_cpu[:num_reqs + 1],
             non_blocking=True,
@@ -3302,9 +3299,12 @@ class NPUModelRunner(GPUModelRunner):
             non_blocking=True,
         )
 
+
 @contextmanager
 def _torch_cuda_wrapper():
+
     class _EventPlaceholder:
+
         def __init__(self, *args, **kwargs) -> None:
             self.record = lambda: None
             self.synchronize = lambda: None

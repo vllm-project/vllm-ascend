@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
@@ -39,7 +40,6 @@ from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_enable_nz, weak_ref_tensors)
-from vllm_ascend.ascend_forward_context import get_cos_and_sin
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

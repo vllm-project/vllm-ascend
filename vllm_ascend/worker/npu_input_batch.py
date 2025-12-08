@@ -17,10 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
-from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Optional
 
-import numpy as np
 import torch
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -47,20 +45,21 @@ class NpuInputBatch(InputBatch):
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
     ):
-        super().__init__(max_num_reqs,
-                         max_model_len,
-                         max_num_batched_tokens, 
-                         device,
-                         pin_memory,
-                         vocab_size,
-                         block_sizes, 
-                         kernel_block_sizes=kernel_block_sizes,
-                         logitsprocs=logitsprocs,
-                         logitsprocs_need_output_token_ids=logitsprocs_need_output_token_ids,
-                         is_spec_decode=is_spec_decode,
-                         is_pooling_model=is_pooling_model,
-                         num_speculative_tokens=num_speculative_tokens,
-                         cp_kv_cache_interleave_size=cp_kv_cache_interleave_size)
+        super().__init__(
+            max_num_reqs,
+            max_model_len,
+            max_num_batched_tokens,
+            device,
+            pin_memory,
+            vocab_size,
+            block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
+            logitsprocs=logitsprocs,
+            logitsprocs_need_output_token_ids=logitsprocs_need_output_token_ids,
+            is_spec_decode=is_spec_decode,
+            is_pooling_model=is_pooling_model,
+            num_speculative_tokens=num_speculative_tokens,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size)
 
         # Block table.
         self.block_table = NpuMultiGroupBlockTable(

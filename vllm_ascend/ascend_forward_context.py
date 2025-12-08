@@ -201,10 +201,11 @@ def set_ascend_forward_context(
 _mc2_tokens_capacity: Optional[int] = None
 _reserved_mc2_mask: Optional[torch.Tensor] = None
 _sin: Optional[torch.Tensor] = None
-_cos:  Optional[torch.Tensor] = None
+_cos: Optional[torch.Tensor] = None
 
 
-def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
+def set_mc2_tokens_capacity(vllm_config, max_num_reqs,
+                            uniform_decode_query_len):
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         raise ValueError("mc2_tokens_capacity have already been set!")
@@ -218,6 +219,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
+
 def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
@@ -227,17 +229,19 @@ def set_mc2_mask(vllm_config, device):
     if _reserved_mc2_mask is not None:
         raise ValueError("_reserved_mc2_mask have already been set!")
     if is_moe_model(vllm_config):
-        _reserved_mc2_mask = torch.zeros(
-                get_mc2_tokens_capacity(),
-                dtype=torch.bool,
-                device=device)
+        _reserved_mc2_mask = torch.zeros(get_mc2_tokens_capacity(),
+                                         dtype=torch.bool,
+                                         device=device)
     else:
         _reserved_mc2_mask = None
+
 
 def get_mc2_mask():
     return _reserved_mc2_mask
 
-def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
+
+def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
+                    device):
     global _cos
     global _sin
     if _cos is not None:
@@ -246,23 +250,22 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
     model_config = vllm_config.model_config
     if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
         rope_dim = model_config.hf_text_config.qk_rope_head_dim
-        _cos = torch.ones(max_num_reqs *decode_token_per_req,
+        _cos = torch.ones(max_num_reqs * decode_token_per_req,
                           1,
                           1,
                           rope_dim,
                           dtype=dtype,
                           device=device)
-        _sin = torch.zeros(max_num_reqs *decode_token_per_req,
-                          1,
-                          1,
-                          rope_dim,
-                          dtype=dtype,
-                          device=device)
+        _sin = torch.zeros(max_num_reqs * decode_token_per_req,
+                           1,
+                           1,
+                           rope_dim,
+                           dtype=dtype,
+                           device=device)
     else:
         _cos = None
         _sin = None
 
+
 def get_cos_and_sin():
-    return _cos,_sin
-
-
+    return _cos, _sin

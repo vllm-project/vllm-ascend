@@ -236,9 +236,10 @@ class MtpProposer(Proposer):
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.runner.query_start_loc.gpu[:num_reqs + 1],
-                    query_start_loc_cpu=self.runner.
-                    query_start_loc.cpu[:num_reqs + 1],
+                    query_start_loc=self.runner.query_start_loc.gpu[:num_reqs +
+                                                                    1],
+                    query_start_loc_cpu=self.runner.query_start_loc.
+                    cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens.cpu,
                     seq_lens=self.runner.seq_lens.cpu[:num_reqs],
                     num_reqs=num_reqs,
@@ -382,7 +383,8 @@ class MtpProposer(Proposer):
             else:
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
-                target_token_ids = self.runner.input_ids.gpu[:num_scheduled_tokens]
+                target_token_ids = self.runner.input_ids.gpu[:
+                                                             num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
                 target_hidden_states = hidden_states[:num_scheduled_tokens]
         else:
