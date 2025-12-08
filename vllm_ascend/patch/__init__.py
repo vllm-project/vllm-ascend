@@ -138,3 +138,4 @@
 #    Future Plan:
 #       Remove this patch when adapted vllm version contains the above PR.
 #
+from vllm_ascend.patch.worker import patch_deepseekv3

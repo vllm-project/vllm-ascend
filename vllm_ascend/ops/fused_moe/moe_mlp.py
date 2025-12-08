@@ -299,3 +299,4 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                  group_list_type=group_list_type,
                                  topk_scales=topk_scales,
                                  need_trans=need_trans)
+
