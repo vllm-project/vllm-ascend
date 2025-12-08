@@ -68,7 +68,6 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
                                     (query, key, value))
             mixed_qkv = torch.cat((query, key, value), dim=-1)
 
-
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
