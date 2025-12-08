@@ -138,3 +138,21 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
+  custom-ops-tests:
+    name: test ops
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: multi-node-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: custom-op-dispatch_gmm_combine_decode
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/multicard_ops/test_dispatch_gmm_combine_decode.py
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      vllm: v0.12.0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
