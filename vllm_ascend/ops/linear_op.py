@@ -284,14 +284,6 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             get_tp_group().world_size)
         self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
         self.layer._quant_comm_config = {}
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer(self.layer)):
-            from vllm_ascend.distributed.parallel_state import \
-                get_shared_weight_group
-            register_layer_to_shared_weight_series(
-                series_name="o_proj",
-                group=get_shared_weight_group(),
-                layer=self.layer,
-                prefetch_step=1)
 
     @property
     def comm_group(self):
@@ -405,11 +397,11 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
 
         return output, output_bias
     
-    def post_process_after_weight_loading(self):
-        if flashcomm2_o_shared_enabled():
-            post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
-            if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
-                reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+    # def post_process_after_weight_loading(self):
+    #     if flashcomm2_o_shared_enabled():
+    #         post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+    #         if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
+    #             reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
 
     def update_attrs(self):
         super().update_attrs()

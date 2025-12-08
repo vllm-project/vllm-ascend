@@ -112,16 +112,24 @@ class SeriesMetadata:
         # The index of the layer to be prefetched.
         next_layer_idx = (layer_idx + self.prefetch_step
                           ) % self.num_layers + self.start_layer
+        print(f"next_layer_idx={next_layer_idx}")
         next_layer = self.layers[next_layer_idx - self.start_layer]
+        print(f"next_layer={next_layer}")
         # The index of the window to store the weight for the coming layer.
         next_layer.window_idx = self.window_offset
+        print(f"window_idx={next_layer.window_idx}")
         window = self.shared_windows[next_layer.window_idx]
+        print(f"window={window}")
         # When the layer not intended to be stored in this device, link to the corresponding window's tensor.
         if not self.is_source(next_layer_idx):
+            print(f"not self.is_source(next_layer_idx)")
             next_layer.weight.set_(window.weight)
         # Update `window_offset` by rolling one step.
         self.window_offset = (self.window_offset + 1) % (self.prefetch_step +
                                                          1)
+        print(f"self.window_offset={self.window_offset}")
+        print(f"window.data_layer_idx={window.data_layer_idx}")
+        print(f"next_layer_idx={next_layer_idx}")
         assert window.data_layer_idx != next_layer_idx
         window.data_layer_idx = next_layer_idx
         # Start asynchronous broadcast work.
@@ -243,10 +251,12 @@ def post_process_after_loading_for_shared_weight_series(layer: LinearBase):
 
 def reach_layer_for_shared_weight_series(layer: LinearBase):
     ext = _layer_external_dict[id(layer)]
+    print(f"ext={ext}")
     ext.series.reach_layer(ext.layer_idx)
 
 
 def is_hidden_layer(vllm_config, layer: LinearBase) -> bool:
-    num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
-    layer_idx = extract_layer_index(layer.prefix)
-    return layer_idx < num_hidden_layers
+    return True
+    # num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+    # layer_idx = extract_layer_index(layer.prefix)
+    # return layer_idx < num_hidden_layers

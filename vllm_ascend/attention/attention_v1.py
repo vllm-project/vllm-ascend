@@ -559,8 +559,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         print(f"AscendAttentionBackendImpl************************process_weights_after_loading")
         if flashcomm2_o_shared_enabled():
             post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
-            if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
-                reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())        
+            # if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
+            #     reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())        
 
     def full_graph_attention(self,
                              query: torch.Tensor,
