@@ -76,10 +76,7 @@ async def test_models(model: str, mode: str) -> None:
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
     }
-    speculative_config = {
-        "num_speculative_tokens": 1,
-        "method": "deepseek_mtp"
-    }
+    speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
