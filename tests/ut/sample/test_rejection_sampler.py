@@ -26,18 +26,21 @@ PLACEHOLDER_TOKEN_ID = -1
 GREEDY_TEMPERATURE = 0.0
 MAX_SPEC_LEN = 8  # Used as MAX_NUM_TOKENS in expand_batch_to_tokens
 
-original_tensor = torch.tensor
 
-
-def mock_tensor_pin_memory(*args, **kwargs):
-    if kwargs.get('pin_memory', False):
-        kwargs['pin_memory'] = False
-    return original_tensor(*args, **kwargs)
+def mock_pin_memory(original_func):
+    def mock_tensor_pin_memory(*args, **kwargs):
+        if kwargs.get('pin_memory', False):
+            kwargs['pin_memory'] = False
+        return original_func(*args, **kwargs)
+    return mock_tensor_pin_memory
 
 
 class TestAscendRejectionSampler(TestBase):
 
-    @patch('torch.tensor', new=mock_tensor_pin_memory)
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_rejection_greedy_sample_pytorch(self):
         """Test greedy rejection sampling: stop when draft doesn't match, otherwise append bonus token"""
         batch_size = 2
@@ -69,7 +72,10 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[1, 0].item() == 20
         assert output_token_ids[1, 2].item() == PLACEHOLDER_TOKEN_ID
 
-    @patch('torch.tensor', new=mock_tensor_pin_memory)
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_rejection_random_sample_pytorch(self):
         """Test random rejection sampling: accept based on uniform probability"""
         batch_size = 2
@@ -114,7 +120,10 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0, 1].item() == 0
         assert output_token_ids[0, 2].item() == 100
 
-    @patch('torch.tensor', new=mock_tensor_pin_memory)
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_expand_pytorch(self):
         """Test expand_pytorch functionality"""
         input_ptr = torch.tensor([10, 20, 30], dtype=torch.int32)
@@ -133,7 +142,10 @@ class TestAscendRejectionSampler(TestBase):
         expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
         assert torch.equal(output_ptr, expected)
 
-    @patch('torch.tensor', new=mock_tensor_pin_memory)
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_expand_batch_to_tokens(self):
         """Test expand_batch_to_tokens wrapper"""
         x = torch.tensor([10, 20, 30])
@@ -153,7 +165,10 @@ class TestAscendRejectionSampler(TestBase):
         expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
         assert torch.equal(result, expected)
 
-    @patch('torch.tensor', new=mock_tensor_pin_memory)
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_sample_recovered_tokens_pytorch_ngram(self):
         """Test recovered token sampling under n-gram mode"""
         output_token_ids = torch.empty(2, dtype=torch.int32)
@@ -184,7 +199,10 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 1
 
-    @patch('torch.tensor', new=mock_tensor_pin_memory)
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_sample_recovered_tokens_pytorch_autoregressive(self):
         """Test recovered token sampling for autoregressive models"""
         output_token_ids = torch.empty(2, dtype=torch.int32)
