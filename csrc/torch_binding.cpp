@@ -808,6 +808,126 @@ at::Tensor npu_sparse_flash_attention(
     return output;
 }
 
+constexpr int64_t DIM_X = 2;
+constexpr int64_t DIM_EXPERT_IDX = 2;
+constexpr int64_t LENGTH_ACTIVE_EXPERT_RANGE = 2;
+constexpr int64_t EXPERT_TOKENS_COUNT = 1;
+constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
+constexpr int64_t QUANT_MODE_UNQUANT = -1;
+constexpr int64_t QUANT_MODE_DYNAMIC_QUANT = 1;
+
+using npu_preparation = at_npu::native::OpPreparation;
+using npu_utils = at_npu::native::NpuUtils;
+using tensor_list = std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>;
+
+tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &expert_idx,
+    const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
+    int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
+    bool expert_tokens_num_flag, int64_t quant_mode, at::IntArrayRef active_expert_range, int64_t row_idx_type)
+{   
+    if (active_expert_range.empty()) {
+        active_expert_range =  at::IntArrayRef({0, expert_num});
+    }
+
+    int64_t x_dim = x.dim();
+    TORCH_CHECK(x_dim == DIM_X,
+        "The x should be ",
+        DIM_X,
+        "-Dimension, current is ",
+        x_dim,
+        "-Dimension.",
+        OPS_ERROR(ErrCode::PARAM));
+
+    int64_t expert_idx_dim = expert_idx.dim();
+    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX,
+        "The expert_idx should be ",
+        DIM_EXPERT_IDX,
+        "-Dimension, current is ",
+        expert_idx,
+        "-Dimension.",
+        OPS_ERROR(ErrCode::PARAM));
+
+    int64_t active_expert_range_length = active_expert_range.size();
+    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE,
+        "The length of list active_expert_range should be ",
+        LENGTH_ACTIVE_EXPERT_RANGE,
+        ", current is ",
+        active_expert_range_length,
+        ".",
+        OPS_ERROR(ErrCode::PARAM));
+
+    int expert_length = active_expert_range[1] - active_expert_range[0];
+    auto x_size = x.sizes();
+    auto expert_idx_size = expert_idx.sizes();
+    const at::Tensor &p_scale = c10::value_or_else(scale, [] { return at::Tensor(); });
+    const at::Tensor &p_offset = c10::value_or_else(offset, [] { return at::Tensor(); });
+
+    int bs = x_size[0];
+    int h = x_size[1];
+    int k = expert_idx_size[1];
+    int64_t expanded_scale_len = 0;
+    at::Tensor expanded_x;
+
+    if (drop_pad_mode == 1) { // Drop/Pad
+        if (quant_mode == QUANT_MODE_UNQUANT) {
+            expanded_x = npu_preparation::apply_tensor_without_format(x, {expert_num, expert_capacity, h});
+        } else {
+            expanded_x = npu_preparation::apply_tensor_without_format({expert_num, expert_capacity, h}, x.options().dtype(at::kChar));
+        }
+        expanded_scale_len = expert_num * expert_capacity;
+    } else { // Dropless / Active
+        if (active_num > 0) { // Active
+            int64_t num_out_tokens = std::min((int64_t)bs * k, active_num);
+            if (quant_mode == QUANT_MODE_UNQUANT) {
+                expanded_x = npu_preparation::apply_tensor_without_format(x, {num_out_tokens, h});
+            } else {
+                expanded_x = npu_preparation::apply_tensor_without_format({num_out_tokens, h}, x.options().dtype(at::kChar));
+            }
+            expanded_scale_len = num_out_tokens;
+        } else { // Dropless
+            if (quant_mode == QUANT_MODE_UNQUANT) {
+                expanded_x = npu_preparation::apply_tensor_without_format(x, {bs * k, h});
+            } else {
+                expanded_x = npu_preparation::apply_tensor_without_format({bs * k, h}, x.options().dtype(at::kChar));
+            }
+            expanded_scale_len = bs * k;
+        }
+    }
+
+    at::Tensor expanded_row_idx = npu_preparation::apply_tensor_without_format(expert_idx, {bs * k});
+    at::Tensor expert_tokens_count_or_cumsum;
+    if (expert_tokens_num_type >= CUMSUM && expert_tokens_num_type <= COUNT) {
+        // expert_tokens_count_or_cumsum in [end-start, ]
+        expert_tokens_count_or_cumsum =
+            npu_preparation::apply_tensor_without_format({expert_length}, x.options().dtype(at::kLong));
+    } else if (expert_tokens_num_type == KEY_VALUE) {
+        // key_value in [2, end-start]
+        expert_tokens_count_or_cumsum =
+            npu_preparation::apply_tensor_without_format({expert_num, 2}, x.options().dtype(at::kLong));
+    }
+
+    at::Tensor expanded_scale = npu_preparation::apply_tensor_without_format({expanded_scale_len}, x.options().dtype(at::kFloat));
+    EXEC_NPU_CMD(aclnnMoeInitRoutingV3,
+        x,
+        expert_idx,
+        p_scale,
+        p_offset,
+        active_num,
+        expert_capacity,
+        expert_num,
+        drop_pad_mode,
+        expert_tokens_num_type,
+        expert_tokens_num_flag,
+        quant_mode,
+        active_expert_range,
+        row_idx_type,
+        expanded_x,
+        expanded_row_idx,
+        expert_tokens_count_or_cumsum,
+        expanded_scale);
+    return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale);
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -921,4 +1041,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     int max_output_size, Tensor! out) -> Tensor"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+    ops.def(
+        "npu_moe_init_routing_v2(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
+        "                        int expert_capacity=-1, int expert_num=-1, int drop_pad_mode=0, int expert_tokens_num_type=0, "
+        "                        bool expert_tokens_num_flag=False, int quant_mode=0, int[2] active_expert_range=[], "
+        "                        int row_idx_type=0) -> (Tensor, Tensor, Tensor, Tensor)"
+    );
+    ops.impl("npu_moe_init_routing_v2", torch::kPrivateUse1, &vllm_ascend::npu_moe_init_routing_v2);
 }
