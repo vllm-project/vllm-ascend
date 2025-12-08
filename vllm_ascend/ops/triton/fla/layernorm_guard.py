@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from vllm.triton_utils import tl, triton
+from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 MAX_CORES = 65535
@@ -318,7 +319,7 @@ class LayerNormGated(nn.Module):
                             norm_before_gate=self.norm_before_gate)
 
 
-class RMSNormGated(nn.Module):
+class AscendRMSNormGated(RMSNormGated):
 
     def __init__(
         self,
@@ -344,7 +345,7 @@ class RMSNormGated(nn.Module):
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
 
-    def forward(self, x, z=None):
+    def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
         """
         return rmsnorm_fn(x,
