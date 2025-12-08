@@ -17,9 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-import copy
 import gc
-import itertools
 import math
 import time
 from collections import defaultdict
@@ -860,11 +858,11 @@ class NPUModelRunner(GPUModelRunner):
         
         # type: ignore
         if get_pp_group().is_first_rank:
-            intermediate_tensors = None # type: ignore
+            intermediate_tensors = None
         else:
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
-            for k, v in intermediate_tensors.items(): # type: ignore
+            for k, v in intermediate_tensors.items():
                 self.intermediate_tensors[k][:num_input_tokens].copy_(
                     v[:num_input_tokens], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
@@ -1342,7 +1340,6 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output.finished_req_ids)
         return None, None
 
-    # type: ignore
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1519,9 +1516,9 @@ class NPUModelRunner(GPUModelRunner):
             kv_connector_output,
             attn_metadata,
             positions,
-        ) = self.execute_model_state # type: ignore
+        ) = self.execute_model_state
         # Clear ephemeral state.
-        self.execute_model_state = None # type: ignore
+        self.execute_model_state = None
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -1992,7 +1989,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.positions.gpu[:num_tokens]
 
             if get_pp_group().is_first_rank:
-                intermediate_tensors = None # # type: ignore
+                intermediate_tensors = None
             else:
                 if self.intermediate_tensors is None:
                     self.intermediate_tensors = (
@@ -2002,7 +1999,7 @@ class NPUModelRunner(GPUModelRunner):
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
                     k: v[:num_tokens]
-                    for k, v in self.intermediate_tensors.items() # type: ignore
+                    for k, v in self.intermediate_tensors.items()
                 })
             has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
             # filter out the valid batch descriptor
@@ -2681,9 +2678,9 @@ class NPUModelRunner(GPUModelRunner):
                 # check that if any backends reorder batches; that the reordering
                 # is compatible (e.g., decode threshold is the same)
                 reorder_batch_threshold_i = (
-                    attn_metadata_builder_i.reorder_batch_threshold) # type: ignore
+                    attn_metadata_builder_i.reorder_batch_threshold)
                 if reorder_batch_threshold_i is not None: # noqa
-                    if self.reorder_batch_threshold is not None: # type: ignore
+                    if self.reorder_batch_threshold is not None:
                         if reorder_batch_threshold_i != \
                             self.reorder_batch_threshold:
                             raise ValueError(
