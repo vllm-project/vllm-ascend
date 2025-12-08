@@ -2,9 +2,8 @@ from collections.abc import Iterator
 from typing import Optional
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.config import VllmConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager

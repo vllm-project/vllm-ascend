@@ -65,12 +65,12 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
+        include_num_layers_dimension: bool = False,) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         # (num_blocks, num_layers, block_size, num_kv_heads, head_size)
-        return (1, 0, 2, 3, 4) if include_num_layers_dimension else (0, 1, 2, 3)
+        return (1, 0, 2, 3, 4) if include_num_layers_dimension else (0, 1, 2, 
+                                                                     3)
     
     @staticmethod
     def get_impl_cls() -> Type["MLAAttentionImpl"]:
