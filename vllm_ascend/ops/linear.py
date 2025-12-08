@@ -37,8 +37,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer, is_enable_nz
-from vllm_ascend.ops.shared_weight_layer import is_hidden_layer, post_process_after_loading_for_shared_weight_series, reach_layer_for_shared_weight_series
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
@@ -51,10 +50,6 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
                 in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-        # if flashcomm2_o_shared_enabled():
-        #     post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
-        #     if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
-        #         reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group

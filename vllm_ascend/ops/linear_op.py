@@ -51,6 +51,7 @@ from vllm.distributed import (split_tensor_along_last_dim,
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
@@ -60,9 +61,9 @@ from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                flashcomm2_enable, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable, shared_expert_dp_enabled)
+                               oproj_tp_enable, register_flashcomm2_o_shard_layer, shared_expert_dp_enabled)
 from vllm_ascend.ops.shared_weight_layer import (
-    is_hidden_layer, post_process_after_loading_for_shared_weight_series,
+    is_hidden_layer,
     reach_layer_for_shared_weight_series,
     register_layer_to_shared_weight_series)
 from vllm.config import get_current_vllm_config
@@ -396,18 +397,12 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         output_bias = self.bias if self.skip_bias_add else None
 
         return output, output_bias
-    
-    # def post_process_after_weight_loading(self):
-    #     if flashcomm2_o_shared_enabled():
-    #         post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer())
-    #         if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
-    #             reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
 
     def update_attrs(self):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer(self.layer)):
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), register_flashcomm2_o_shard_layer(self.layer)):
             from vllm_ascend.distributed.parallel_state import \
                 get_shared_weight_group
             register_layer_to_shared_weight_series(
@@ -515,8 +510,9 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
         assert self.quant_method is not None
 
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer()):
-            reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer())
+        layer_idx = extract_layer_index(self.layer.prefix)
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer(layer_idx)):
+            reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer(layer_idx))
         # if flashcomm2_o_shared_enable():
         #     from vllm_ascend.multistream.context import get_multistream_microbatch_context
         #     if get_multistream_microbatch_context() != 0:
