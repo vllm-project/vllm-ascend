@@ -80,7 +80,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,) -> tuple[int, ...]:
+        include_num_layers_dimension: bool = False, ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()

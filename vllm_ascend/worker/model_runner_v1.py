@@ -39,7 +39,6 @@ import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
-from vllm.config.cache import CacheDType
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.attention.selector import get_attn_backend
@@ -47,6 +46,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.config.cache import CacheDType
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -3773,6 +3773,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 kernel_block_sizes=kernel_block_sizes,
             )
 
+        return kernel_block_sizes
+
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
         Add encoder-only layers to the KV cache config.
@@ -4683,7 +4685,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         cache_dtype: CacheDType,
         device: torch.device,
         kernel_block_sizes: list[int],
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, type[AttentionBackend]]:
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor, type[AttentionBackend]]:
         """
         Initializes and reshapes KV caches for the simple case where all
         layers have the same layout.
@@ -4747,9 +4749,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                        for i in kv_cache_stride_order 
                                        if kv_cache_shape[i] != 2)
         else :
-            new_kv_cache_shape = tuple(kv_cache_shape[i] 
-                                       for i in kv_cache_stride_order)
+            new_kv_cache_shape = [kv_cache_shape[i] 
+                                       for i in kv_cache_stride_order]
             new_kv_cache_shape[-1] = new_kv_cache_shape[-1] // 2
+            new_kv_cache_shape = tuple(new_kv_cache_shape)
         logger.info("Allocating a cross layer KV cache of shape %s", 
                     new_kv_cache_shape)
 
