@@ -987,42 +987,6 @@ class MooncakeConnectorWorker:
             device_index = self.pcp_rank * self.tp_size + self.pcp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-
-        # get tp device id
-        # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
-        # introducing some changes
-        device_ids_str = envs_ascend.PHYSICAL_DEVICES
-        if device_ids_str is None:
-            device_ids = list(
-                range(
-                    self.dp_rank * self.tp_size * self.pcp_size * self.pp_size,
-                    (self.dp_rank + 1) * self.tp_size * self.pcp_size *
-                    self.pp_size))
-        else:
-            device_ids = list(map(int, device_ids_str.split(',')))
-            start_index = self.dp_rank * self.tp_size * self.pcp_size * self.pp_size
-            end_index = start_index + self.tp_size * self.pcp_size * self.pp_size
-
-            if len(device_ids) < end_index:
-                raise ValueError(
-                    f"Not enough physical devices available for DP rank {self.dp_rank}. "
-                    f"Expected at least {end_index} devices, but found {len(device_ids)} "
-                    "in PHYSICAL_DEVICES.")
-            device_ids = device_ids[start_index:end_index]
-        device_index = (self.pp_rank +
-                        self.pcp_rank) * self.tp_size + self.tp_rank
-        assert len(
-            device_ids) > (self.pp_rank + self.pcp_rank
-                           ) * self.tp_size + self.tp_rank  # type: ignore
-        assert len(device_ids) > self.tp_rank * self.pp_rank  # type: ignore
-        self.device_id = device_ids[device_index]  # type: ignore
-
-        if vllm_config.kv_transfer_config.get_from_extra_config(
-                'use_ascend_direct', True):
-            hostname = self.side_channel_host
-        else:
-            hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
-        logger.info("Initializing Mooncake work %s", engine_id)
         self.engine = global_te.get_transfer_engine(self.side_channel_host,
                                                     device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
