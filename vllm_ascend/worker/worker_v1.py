@@ -30,6 +30,7 @@ from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
@@ -52,7 +53,6 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
-                               prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -93,21 +93,6 @@ class NPUWorker(WorkerBase):
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         check_ascend_device_type()
-        use_sparse = False
-        if vllm_config.model_config is not None:
-            use_sparse = hasattr(vllm_config.model_config.hf_config,
-                                 "index_topk")
-        if use_sparse:
-            # Direct import instead of using try_register_lib to ensure proper error handling when
-            # custom_ops is necessary but not available (e.g., in DeepSeek v3.2 deployments)
-            # yapf: disable
-            import custom_ops  # type: ignore # noqa
-
-            # yapf: enable
-            logger.info(
-                "custom_ops module loaded successfully. Custom operators like "
-                "torch.ops.custom.npu_sparse_flash_attention are now available."
-            )
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -419,19 +404,14 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
-        if prefill_context_parallel_enable():
-            ensure_model_parallel_initialized(
-                self.parallel_config.tensor_parallel_size,
-                self.parallel_config.pipeline_parallel_size,
-                self.parallel_config.prefill_context_parallel_size,
-                self.parallel_config.decode_context_parallel_size)
-        else:
-            ensure_model_parallel_initialized(
-                self.parallel_config.tensor_parallel_size,
-                self.parallel_config.pipeline_parallel_size,
-                self.parallel_config.decode_context_parallel_size)
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.prefill_context_parallel_size,
+            self.parallel_config.decode_context_parallel_size)
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
+        ensure_ec_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:

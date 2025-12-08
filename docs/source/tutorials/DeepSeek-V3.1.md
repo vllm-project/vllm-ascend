@@ -254,7 +254,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 
 ### Prefill-Decode Disaggregation
 
-There are two ways to deploy `Prefill-Decode Disaggregation`: [Llmdatadist](./multi_node_pd_disaggregation_llmdatadist.md) and [Mooncake](./multi_node_pd_disaggregation_mooncake.md). We recommend use Mooncake for deploy.
+We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
  - `DeepSeek-V3.1_w8a8mix_mtp 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
@@ -430,7 +430,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -510,7 +509,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "1",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -590,7 +588,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "2",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -670,7 +667,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "3",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8

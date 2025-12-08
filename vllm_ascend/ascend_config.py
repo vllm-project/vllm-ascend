@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional
+from uuid import uuid4
 
 from vllm.logger import logger
 
@@ -27,6 +28,37 @@ def _check_torchair_supported(model_type: str):
     return False
 
 
+def check_kv_extra_config(vllm_config):
+
+    def _check(name: str, config: dict):
+        tp_key = "tp_size"
+        dp_key = "dp_size"
+        if tp_key in config:
+            config_tp = config[tp_key]
+            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
+            if config_tp != vllm_tp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
+                    f"Expected {vllm_tp}, but got {config_tp}.")
+        if dp_key in config:
+            config_dp = config[dp_key]
+            vllm_dp = vllm_config.parallel_config.data_parallel_size
+            if config_dp != vllm_dp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting data parallel size. "
+                    f"Expected {vllm_dp}, but got {config_dp}.")
+
+    if vllm_config.kv_transfer_config.is_kv_producer:
+        _check(
+            "prefill",
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {}))
+    if vllm_config.kv_transfer_config.is_kv_consumer:
+        _check(
+            "decode",
+            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -36,13 +68,18 @@ class AscendConfig:
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
+
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
 
-        ascend_scheduler_config = additional_config.get(
-            "ascend_scheduler_config", {})
-        self.ascend_scheduler_config = AscendSchedulerConfig(
-            ascend_scheduler_config)
+        xlite_graph_config = additional_config.get("xlite_graph_config", {})
+        self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
+                                                   vllm_config)
+
+        ascend_compilation_config = additional_config.get(
+            "ascend_compilation_config", {})
+        self.ascend_compilation_config = AscendCompilationConfig(
+            **ascend_compilation_config)
 
         # Dump / PrecisionDebugger configuration
         dump_config_path = additional_config.get("dump_config", None)
@@ -110,6 +147,10 @@ class AscendConfig:
                 )
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
+
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -142,6 +183,36 @@ class AscendConfig:
             get_flashcomm2_oproj_tp_size_and_validate_config
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
             self, vllm_config)
+        kv_cfg = vllm_config.kv_transfer_config
+        if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
+                                              False):
+            kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
+            kv_cfg._engine_id_patched = True
+
+
+class AscendCompilationConfig:
+    """
+    Configuration for controlling the behavior of Ascend graph optimization.
+
+    This class provides a way to configure graph fusion optimizations.
+    These configurations directly impact the performance and behavior of models
+    deployed on Ascend platforms.
+    """
+
+    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+        """
+        Initialize the configuration.
+        
+        Args:
+            enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
+                When set to True, the system will optimize quantization-related operations,
+                reducing the number of quantization/dequantization nodes.
+                Default: True
+                
+            **kwargs: Additional optional parameters for forward compatibility and configuration extension.
+        """
+        self.enable_quantization_fusion = enable_quantization_fusion
+        # Add more compilation related configs here as needed
 
 
 class TorchairGraphConfig:
@@ -224,18 +295,27 @@ class TorchairGraphConfig:
             )
 
 
-class AscendSchedulerConfig:
+class XliteGraphConfig:
     """
-    Configuration Object for ascend_scheduler_config from additional_config
+    Configuration Object for xlite_graph_config from additional_config
     """
 
-    def __init__(self, ascend_scheduler_config: dict):
-        self.enabled = ascend_scheduler_config.get("enabled", False)
-        # Ascend scheduler is based on vllm v0 scheduler, so we should support
-        # all vllm v0 scheduler configs as well.
-        for k, v in ascend_scheduler_config.items():
-            if not hasattr(self, k):
-                setattr(self, k, v)
+    def __init__(self, xlite_graph_config, vllm_config):
+        self.enabled = xlite_graph_config.get("enabled", False)
+        self.full_mode = xlite_graph_config.get("full_mode", False)
+        if self.enabled:
+            if bool(vllm_config.speculative_config):
+                raise RuntimeError(
+                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
+                )
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                raise RuntimeError(
+                    "Xlite graph mode is not compatible with pipeline parallelism. Please set pipeline_parallel_size to 1."
+                )
+            if vllm_config.cache_config.block_size != 128:
+                raise RuntimeError(
+                    "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
+                )
 
 
 class DumpConfig:
@@ -326,6 +406,11 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
+            if ascend_config.ascend_compilation_config.enable_quantization_fusion:
+                logger.info(
+                    "Quantization fusion enabled! op fusion on quantization are expected. "
+                )
+
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
                 if "qwen" not in model_type:

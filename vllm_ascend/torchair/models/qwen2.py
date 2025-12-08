@@ -23,7 +23,7 @@ import torch.nn.functional as F
 import vllm
 from torch import nn
 from transformers import Qwen2Config
-from vllm.attention import AttentionMetadata, AttentionType
+from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, tensor_model_parallel_all_gather,
@@ -40,6 +40,7 @@ from vllm.model_executor.models.qwen2 import Qwen2MLP, Qwen2Model
 from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               PPMissingLayer, maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -72,11 +73,10 @@ class CustomQwen2Attention(Qwen2Attention):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_parameters: Optional[dict[str, Any]] = None,
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        rope_scaling: Optional[tuple] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: Optional[dict[str, Any]] = None,
@@ -86,13 +86,13 @@ class CustomQwen2Attention(Qwen2Attention):
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             max_position=max_position,
-            rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
             prefix=prefix,
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config)
+            dual_chunk_attention_config=dual_chunk_attention_config,
+            rope_parameters=rope_parameters)
+
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
@@ -145,9 +145,9 @@ class CustomQwen2DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+
+        set_default_rope_theta(config, default_theta=1000000)
+
         dual_chunk_attention_config = getattr(config,
                                               "dual_chunk_attention_config",
                                               None)
@@ -166,10 +166,9 @@ class CustomQwen2DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
+            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
