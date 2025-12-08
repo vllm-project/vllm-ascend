@@ -28,11 +28,13 @@ MAX_SPEC_LEN = 8  # Used as MAX_NUM_TOKENS in expand_batch_to_tokens
 
 
 def mock_pin_memory(original_func):
-    def mock_tensor_pin_memory(*args, **kwargs):
+
+    def func_wo_pin_memory(*args, **kwargs):
         if kwargs.get('pin_memory', False):
             kwargs['pin_memory'] = False
         return original_func(*args, **kwargs)
-    return mock_tensor_pin_memory
+
+    return func_wo_pin_memory
 
 
 class TestAscendRejectionSampler(TestBase):
