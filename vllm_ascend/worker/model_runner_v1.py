@@ -3356,15 +3356,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         kernel_block_sizes = self.may_reinitialize_input_batch(kv_cache_config)
-        kv_caches = self.initialize_kv_cache_tensors(kv_cache_config, kernel_block_sizes=[i[0] for i in  kernel_block_sizes])
+        kv_caches = self.initialize_kv_cache_tensors(
+            kv_cache_config, 
+            kernel_block_sizes=[i[0] for i in  kernel_block_sizes])
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
             if self.cross_layers_kv_cache is not None:
                 assert self.cross_layers_attn_backend is not None
                 kv_transfer_group.register_cross_layers_kv_cache(
-                    self.cross_layers_kv_cache, self.cross_layers_attn_backend
-                )
+                    self.cross_layers_kv_cache, self.cross_layers_attn_backend)
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
 
@@ -3376,7 +3377,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         return tensor[int(offset):]
 
     def initialize_kv_cache_tensors(
-            self, kv_cache_config: KVCacheConfig, 
+            self, kv_cache_config: KVCacheConfig,
             kernel_block_sizes) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
@@ -3396,7 +3397,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     self.attn_groups,
                     cache_dtype,
                     self.device,
-                    kernel_block_sizes,))
+                    kernel_block_sizes,
+                ))
             self.cross_layers_kv_cache = (cross_layers_k_cache, 
                                           cross_layers_v_cache)
             self.cross_layers_attn_backend = attn_backend
@@ -3405,7 +3407,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             kv_cache_raw_tensors = self._allocate_kv_cache_tensors(
                 kv_cache_config)
             # Change the memory buffer to the desired shape
-            kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, 
+            kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
                                                        kv_cache_raw_tensors)
 
         bind_kv_cache(kv_caches,
@@ -3693,7 +3695,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         return kv_caches
 
     def may_reinitialize_input_batch(self,
-                                     kv_cache_config: KVCacheConfig) -> None:
+                                     kv_cache_config: KVCacheConfig) -> list:
         """
         Re-initialize the input batch if the block sizes are different from
         `[self.cache_config.block_size]`. This usually happens when there
@@ -4670,8 +4672,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
+                include_num_layers_dimension=True)
         except (AttributeError, NotImplementedError):
             return False
 
@@ -4685,7 +4686,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         cache_dtype: CacheDType,
         device: torch.device,
         kernel_block_sizes: list[int],
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor, type[AttentionBackend]]:
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor,
+               type[AttentionBackend]]:
         """
         Initializes and reshapes KV caches for the simple case where all
         layers have the same layout.
@@ -4710,7 +4712,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         assert isinstance(kv_cache_spec, AttentionSpec)
 
         tensor_sizes = set(
-            kv_cache_tensor.size 
+            kv_cache_tensor.size
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors)
         assert len(tensor_sizes) == 1
         tensor_size = tensor_sizes.pop()
@@ -4745,37 +4747,38 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
         if not self.model_config.is_deepseek_mla:
-            new_kv_cache_shape = tuple(kv_cache_shape[i] 
-                                       for i in kv_cache_stride_order 
+            new_kv_cache_shape = tuple(kv_cache_shape[i]
+                                       for i in kv_cache_stride_order
                                        if kv_cache_shape[i] != 2)
-        else :
-            new_kv_cache_shape = [kv_cache_shape[i] 
-                                       for i in kv_cache_stride_order]
-            new_kv_cache_shape[-1] = new_kv_cache_shape[-1] // 2
-            new_kv_cache_shape = tuple(new_kv_cache_shape)
-        logger.info("Allocating a cross layer KV cache of shape %s", 
+        else:
+            new_kv_cache_shape_list = [
+                kv_cache_shape[i] for i in kv_cache_stride_order
+            ]
+            new_kv_cache_shape_list[-1] = new_kv_cache_shape_list[-1] // 2
+            new_kv_cache_shape = tuple(new_kv_cache_shape_list)
+        logger.info("Allocating a cross layer KV cache of shape %s",
                     new_kv_cache_shape)
 
         # allocate one contiguous buffer for all layers
         cross_layers_k_cache = (torch.zeros(
-            total_size // 2, dtype=torch.int8, 
+            total_size // 2, dtype=torch.int8,
             device=device).view(kv_cache_spec.dtype).view(new_kv_cache_shape))
         cross_layers_v_cache = (torch.zeros(
-            total_size // 2, dtype=torch.int8, 
+            total_size // 2, dtype=torch.int8,
             device=device).view(kv_cache_spec.dtype).view(new_kv_cache_shape))
 
         if not self.model_config.is_deepseek_mla:
             # Maintain original KV shape view.
             inv_order = [
-                kv_cache_stride_order.index(i) 
-                for i in range(len(kv_cache_stride_order)) 
+                kv_cache_stride_order.index(i)
+                for i in range(len(kv_cache_stride_order))
                 if kv_cache_shape[kv_cache_stride_order[i]] != 2
             ]
             if len(new_kv_cache_shape) != len(kv_cache_shape):
                 inv_order = [i - 1 for i in inv_order]
         else:
             inv_order = [
-                kv_cache_stride_order.index(i) 
+                kv_cache_stride_order.index(i)
                 for i in range(len(kv_cache_stride_order))
             ]
 
