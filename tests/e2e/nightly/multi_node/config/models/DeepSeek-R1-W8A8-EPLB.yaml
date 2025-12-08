@@ -39,7 +39,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
-          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "LLMDataDistCMgrConnector",
           "kv_buffer_device": "npu",
@@ -69,7 +69,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
-          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "LLMDataDistCMgrConnector",
           "kv_buffer_device": "npu",
@@ -100,7 +100,7 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+        --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "LLMDataDistCMgrConnector",
         "kv_buffer_device": "npu",
@@ -130,7 +130,7 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+        --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "LLMDataDistCMgrConnector",
         "kv_buffer_device": "npu",
