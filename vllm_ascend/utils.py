@@ -571,26 +571,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
 
-    # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
-    # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
-    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
-    if vllm_config.speculative_config is not None and \
-        vllm_config.speculative_config.num_speculative_tokens > 1:
-        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        original_sizes, compilation_config.cudagraph_capture_sizes = \
-            compilation_config.cudagraph_capture_sizes, None
-        assert len(original_sizes) > 0
-        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
-            enlarged_sizes = [(num_speculative_tokens + 1) * size
-                              for size in original_sizes]
-            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
-            logger.info(
-                "Adjusted ACL graphs: %s → %s for speculative decoding",
-                original_sizes, enlarged_sizes)
-        else:
-            compilation_config.cudagraph_capture_sizes = original_sizes
-
 
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
@@ -1067,3 +1047,15 @@ def refresh_block_size(vllm_config):
                 "Block size is set to 128 if prefix cache or chunked prefill is enabled."
             )
             cache_config.block_size = 128
+
+
+def dispose_layer(layer: Any):
+    for attr_name in dir(layer):
+        attr_value = getattr(layer, attr_name)
+        if isinstance(attr_value, torch.Tensor):
+            dispose_tensor(attr_value)
+
+
+def replace_layer(original_layer: Any, new_layer: Any):
+    original_layer.__class__ = new_layer.__class__
+    original_layer.__dict__ = new_layer.__dict__
