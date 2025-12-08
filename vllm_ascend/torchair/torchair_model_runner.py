@@ -501,7 +501,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
     def update_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the max number of tokens
         # first pad according to the number of requests
-        if self.is_kv_consumer and self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+        if self.is_kv_consumer and self.speculative_config and self.speculative_config.method == 'mtp':
             # pd disaggregation scenario may incorrectly calculate the batch in mtp scenario, so we force set it to max_num_reqs
             self.torchair_graph_batch_sizes = [self.max_num_reqs]
             logger.warning(

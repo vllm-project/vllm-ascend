@@ -19,7 +19,7 @@ class TestTorchairMtpProposer(PytestBase):
         vllm_config.speculative_config = MagicMock()
         vllm_config.speculative_config.draft_model_config = MagicMock()
         vllm_config.speculative_config.draft_model_config.dtype = torch.float16
-        vllm_config.speculative_config.method = "deepseek_mtp"
+        vllm_config.speculative_config.method = "mtp"
         vllm_config.speculative_config.num_speculative_tokens = 5
         vllm_config.load_config = MagicMock()
         cache_config = CacheConfig(block_size=16)
