@@ -153,9 +153,11 @@ def rejection_sample(
         if HAS_TRITON:
             vec_len = batch_size
             n = cu_num_draft_tokens.numel()
+
             # grid = lambda meta: (triton.cdiv(n, meta['BLOCK_SIZE']), )
             def grid(meta):
                 return (triton.cdiv(n, meta['BLOCK_SIZE']), )
+
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
                 rejection_greedy_sample_spec_len_1_triton[grid](
@@ -290,8 +292,10 @@ def expand_batch_to_tokens(
     if HAS_TRITON:
         vec_len = batch_size
         n = cu_num_tokens.numel()
+
         def grid(meta):
-            return (triton.cdiv(n, meta['BLOCK_SIZE']),)
+            return (triton.cdiv(n, meta['BLOCK_SIZE']), )
+
         expand_kernel[grid](
             expanded_x,
             x,
@@ -602,6 +606,7 @@ def get_autotune_config():
         triton.Config({'BLOCK_SIZE': 512}),
     ]
 
+
 @triton.autotune(
     configs=get_autotune_config(),  # a list of configuration
     key=[],
@@ -807,7 +812,6 @@ def expand_kernel(
         tl.store(output_ptr + start_idx1 + offset1,
                  src_val1,
                  mask=offset1 < num_tokens1)
-
 
 
 @triton.jit
