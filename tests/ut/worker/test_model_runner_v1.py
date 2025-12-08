@@ -13,7 +13,6 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.distributed.parallel_state import (cleanup_dist_env_and_memory,
                                              init_distributed_environment,
                                              initialize_model_parallel)
-from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
