@@ -16,6 +16,7 @@
 from typing import Optional
 from uuid import uuid4
 
+import torch
 from vllm.logger import logger
 
 TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2", "qwen"]
@@ -185,6 +186,8 @@ class AscendConfig:
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
+        if self.enable_npugraph_ex and not torch.version.cann.startswith("8.5"):
+            raise AssertionError("enable_npugraph_ex is only supported with CANN >= 8.5")
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
                                               False):

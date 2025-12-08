@@ -80,23 +80,22 @@ def npugraph_ex_compile(
     # This process causes the output to no longer be
     # wrapped as a tuple when the fx graph has a single
     # output, but torch.compile has a mandatory check.
-    graph = graph.graph
-    output_node = graph.output_node()
-    return_value = output_node.args[0]
-    if not (isinstance(return_value, tuple) or
-            (isinstance(return_value, fx.Node) and return_value.op
-             == "call_function" and return_value.target is tuple)):
-        with graph.inserting_before(output_node):
-            tuple_node = graph.create_node("call_function",
+    fx_graph = graph.graph
+    output_node = fx_graph.output_node()
+    if not graph_returns_tuple(graph):
+        with fx_graph.inserting_before(output_node):
+            return_value = output_node.args[0]
+            tuple_node = fx_graph.create_node("call_function",
                                            tuple,
                                            args=([return_value], ))
         output_node.args = (tuple_node, )
-        graph.recompile()
+        fx_graph.recompile()
 
     import torchair
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
+    config.mode = "reduce-overhead"
     config.debug.run_eagerly = True
     config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
 
