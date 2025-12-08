@@ -29,7 +29,7 @@ from . import is_cuda_graph
 
 
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
