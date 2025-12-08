@@ -281,9 +281,22 @@ class TestNPUWorker(TestBase):
         mock_allocator = MagicMock()
         mock_allocator_class.get_instance.return_value = mock_allocator
 
+        mock_hidden_size = MagicMock()
+        mock_hf_config = MagicMock()
+        mock_hf_config.hidden_size = mock_hidden_size
+        mock_model_config = MagicMock()
+        mock_model_config.hf_config = mock_hf_config
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config = mock_model_config
+
+        mock_model_runner = MagicMock()
+        mock_model_runner.model = MagicMock()
+
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_runner = mock_model_runner
+            worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
