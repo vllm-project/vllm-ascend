@@ -176,7 +176,6 @@ def graph_capture(device: torch.device):
         yield graph_capture_context
 
 
-
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -855,7 +854,7 @@ class NPUModelRunner(GPUModelRunner):
         input_ids, positions = self._update_input_ids_and_positions(
             input_ids, positions, num_input_tokens, with_prefill,
             maybe_padded_num_tokens)
-        
+
         # type: ignore
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -2679,7 +2678,7 @@ class NPUModelRunner(GPUModelRunner):
                 # is compatible (e.g., decode threshold is the same)
                 reorder_batch_threshold_i = (
                     attn_metadata_builder_i.reorder_batch_threshold)
-                if reorder_batch_threshold_i is not None: # noqa
+                if reorder_batch_threshold_i is not None:  # noqa
                     if self.reorder_batch_threshold is not None:
                         if reorder_batch_threshold_i != \
                             self.reorder_batch_threshold:
