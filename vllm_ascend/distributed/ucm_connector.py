@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from ucm.integration.vllm.ucm_connector import UCMConnector
@@ -13,6 +13,8 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorPromMetrics, KVConnectorStats, PromMetric, PromMetricT)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -194,3 +196,42 @@ class UCMConnectorV1(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._ucm_engine.request_finished(request, block_ids)
+
+    # ==============================
+    # Metrics & Stats
+    # ==============================
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: dict[str, Any] | None = None
+    ) -> Optional["KVConnectorStats"]:
+        """
+        KVConnectorStats resolution method. This method allows dynamically
+        registered connectors to return their own KVConnectorStats object,
+        which can implement custom aggregation logic on the data dict.
+        """
+        return UCMConnector.build_kv_connector_stats(data)
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: "VllmConfig",
+        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> Optional["KVConnectorPromMetrics"]:
+        """
+        Create a KVConnectorPromMetrics subclass which should register
+        per-connector Prometheus metrics and implement observe() to
+        expose connector transfer stats via Prometheus.
+
+        This implementation forwards the call to the underlying
+        UCMConnector engine.
+        """
+        return UCMConnector.build_prom_metrics(
+            vllm_config,
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
+        )
