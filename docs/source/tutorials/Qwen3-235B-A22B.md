@@ -120,12 +120,12 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
 --rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \
---compilation-config '{"cudagraph_capture_sizes":[1,4],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
 ```
 
 **Notice:**
-- for vllm version below `v0.12.0` use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}'`
+- for vllm version below `v0.12.0` use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`
 - for vllm version `v0.12.0` use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":4,"original_max_position_embeddings":32768}}' \`
 
 The parameters are explained as follows:
