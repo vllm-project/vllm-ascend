@@ -35,7 +35,7 @@ def fused_qkvzba_split_reshape_cat_kernel(
                  i_qk * QKVZ_DIM_T + tl.arange(0, q_end))
     k_end: tl.constexpr = q_end + HEAD_QK
     blk_k_ptr = (mixed_qkvz + i_bs * NUM_HEADS_QK * QKVZ_DIM_T +
-                 i_qk * QKVZ_DIM_T + tl.arange(q_end, k_end)))
+                 i_qk * QKVZ_DIM_T + tl.arange(q_end, k_end))
     v_end: tl.constexpr = k_end + NUM_HEADS_V // NUM_HEADS_QK * HEAD_V
     blk_v_ptr = (mixed_qkvz + i_bs * NUM_HEADS_QK * QKVZ_DIM_T +
                  i_qk * QKVZ_DIM_T + tl.arange(k_end, v_end))
