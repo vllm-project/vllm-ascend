@@ -27,7 +27,7 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE = current_platform.device_type
+DEVICE = "cpu"
 
 
 @pytest.fixture
