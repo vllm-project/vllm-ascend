@@ -732,7 +732,7 @@ class MtpProposer(Proposer):
             uniform_decode = False
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+            self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
         if self.use_async_scheduling:
             # there is synchronize between mtp steps when enable aclgraph,
             # disable aclgraph when use async scheduling to avoid the
