@@ -1030,7 +1030,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # pcp situation.
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
-            # Pooling situation.
+        # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
 

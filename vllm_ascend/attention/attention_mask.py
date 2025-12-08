@@ -69,7 +69,7 @@ class AttentionMaskBuilder:
         return self.chunked_prefill_attn_mask
 
     def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:
-        if self.mla_mask is None:
+        if self.mla_mask is None or self.mla_mask.dtype != dtype:
             if dtype == torch.float16:
                 mask_value = torch.finfo(torch.float32).min
             else:
@@ -81,7 +81,7 @@ class AttentionMaskBuilder:
         return self.mla_mask
 
     def get_pcp_mla_mask(self, dtype: torch.dtype):
-        if self.pcp_mla_mask is None:
+        if self.pcp_mla_mask is None or self.pcp_mla_mask.dtype != dtype:
             self.pcp_mla_mask = torch.triu(
                 torch.ones(512, 512, device=self.device, dtype=dtype), 1)
         return self.pcp_mla_mask
