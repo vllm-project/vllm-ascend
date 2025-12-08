@@ -3,13 +3,13 @@ from typing import Optional
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
-                                             get_tp_group, get_world_group,
+                                             get_pp_group, get_tp_group,
+                                             get_world_group,
                                              init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import (flashcomm2_enable,
-                               prefill_context_parallel_enable)
+from vllm_ascend.utils import enable_sp, flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -19,6 +19,7 @@ _LMTP: Optional[GroupCoordinator] = None
 _P_TP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
+_SHARED_WEIGHT: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -48,6 +49,13 @@ def get_flashcomm2_odp_group() -> GroupCoordinator:
     return _FLASHCOMM2_ODP
 
 
+def get_shared_weight_group() -> GroupCoordinator:
+    assert _SHARED_WEIGHT is not None, (
+        "output shared weight parallel group for flashcomm2 is not initialized"
+    )
+    return _SHARED_WEIGHT
+
+
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
     return _MLP_TP
@@ -73,15 +81,10 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
-    if prefill_context_parallel_enable():
-        all_ranks = torch.arange(world_size).reshape(
-            -1, parallel_config.data_parallel_size *
-            parallel_config.prefill_context_parallel_size *
-            parallel_config.tensor_parallel_size)
-    else:
-        all_ranks = torch.arange(world_size).reshape(
-            -1, parallel_config.data_parallel_size *
-            parallel_config.tensor_parallel_size)
+    all_ranks = torch.arange(world_size).reshape(
+        -1, parallel_config.data_parallel_size *
+        parallel_config.prefill_context_parallel_size *
+        parallel_config.tensor_parallel_size)
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
@@ -185,6 +188,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         ).flashcomm2_oproj_tensor_parallel_size
         global_tp_size = get_tp_group().world_size
         global_dp_size = get_dp_group().world_size
+        global_pp_size = get_pp_group().world_size
         num_fc2_oproj_tensor_parallel_groups: int = (global_tp_size //
                                                      flashcomm2_otp_size)
 
@@ -197,18 +201,27 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         if flashcomm2_otp_size > 1:
             otp_group_ranks = []
             odp_group_ranks: list[list[int]] = [
-                [] for _ in range(flashcomm2_otp_size * global_dp_size)
+                [] for _ in range(flashcomm2_otp_size * global_dp_size *
+                                  global_pp_size)
             ]
-
             for dp_group_index in range(global_dp_size):
-                for i in range(num_fc2_oproj_tensor_parallel_groups):
-                    ranks = []
-                    for j in range(flashcomm2_otp_size):
-                        rank_idx = dp_group_index * global_tp_size + i + j * num_fc2_oproj_tensor_parallel_groups
-                        ranks.append(rank_idx)
-                        odp_group_index = dp_group_index * flashcomm2_otp_size + j
-                        odp_group_ranks[odp_group_index].append(rank_idx)
-                    otp_group_ranks.append(ranks)
+                for pp_group_index in range(global_pp_size):
+                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
+                    tp_base_rank = dp_pp_serial_index * global_tp_size
+                    odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
+
+                    for i in range(num_fc2_oproj_tensor_parallel_groups):
+                        ranks = []
+                        for j in range(flashcomm2_otp_size):
+                            tp_local_rank = i + j * num_fc2_oproj_tensor_parallel_groups
+                            assert tp_local_rank < global_tp_size
+                            global_rank = tp_base_rank + tp_local_rank
+                            ranks.append(global_rank)
+
+                            odp_group_index = odp_base_index + j
+                            odp_group_ranks[odp_group_index].append(
+                                global_rank)
+                        otp_group_ranks.append(ranks)
 
             _FLASHCOMM2_OTP = init_model_parallel_group(
                 otp_group_ranks,
@@ -220,6 +233,18 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 get_world_group().local_rank,
                 backend,
                 group_name="flashcomm2_odp")
+
+    vllm_config = get_current_vllm_config()
+    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
+    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
+    if enable_sp() and is_ds_v32:
+        global _SHARED_WEIGHT
+        group_ranks = [list(range(torch.distributed.get_world_size()))]
+        _SHARED_WEIGHT = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="CP_shared_weight")
 
 
 def get_mlp_tensor_model_parallel_world_size():
@@ -269,3 +294,8 @@ def destroy_ascend_model_parallel():
     ).flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
+
+    global _SHARED_WEIGHT
+    if _SHARED_WEIGHT:
+        _SHARED_WEIGHT.destroy()
+    _SHARED_WEIGHT = None

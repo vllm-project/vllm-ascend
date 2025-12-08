@@ -74,9 +74,6 @@ async def test_models(model: str) -> None:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
     additional_config = {
-        "ascend_scheduler_config": {
-            "enabled": False
-        },
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_moe": False,
@@ -87,10 +84,7 @@ async def test_models(model: str) -> None:
         "chunked_prefill_for_mla": True,
         "enable_weight_nz_layout": True
     }
-    speculative_config = {
-        "num_speculative_tokens": 1,
-        "method": "deepseek_mtp"
-    }
+    speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     server_args = [
         "--quantization", "ascend", "--data-parallel-size", "2",
         "--tensor-parallel-size", "8", "--enable-expert-parallel", "--port",

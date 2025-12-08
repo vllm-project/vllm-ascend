@@ -51,7 +51,7 @@ class EagleProposer(Proposer):
                                not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
-            reversed(
+            sorted(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # persistent buffers for cuda graph
@@ -79,7 +79,7 @@ class EagleProposer(Proposer):
                                    dtype=torch.int32)
         attn_mask_len = self.vllm_config.model_config.max_model_len
         self.attn_mask_builder = AttentionMaskBuilder(
-            attn_mask_len, self.vllm_config.model_config.dtype)
+            attn_mask_len, self.vllm_config.model_config.dtype, device=device)
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -123,7 +123,8 @@ class EagleProposer(Proposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None):
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None):
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
@@ -134,9 +135,11 @@ class EagleProposer(Proposer):
                 positions=self.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
+            dummy_compute_logits(self.hidden_states)
 
     def generate_token_ids(self,
-                           valid_sampled_token_ids: list[np.ndarray],
+                           valid_sampled_token_ids: torch.Tensor
+                           | list[list[int]],
                            sampling_metadata: SamplingMetadata = None,
                            scheduler_output: SchedulerOutput = None,
                            spec_decode_metadata: SpecDecodeMetadata = None,
@@ -149,7 +152,7 @@ class EagleProposer(Proposer):
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -161,7 +164,7 @@ class EagleProposer(Proposer):
                            scheduler_output.num_scheduled_tokens[req_id])
 
                 next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id.item())
+            next_token_ids.append(next_token_id)
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
@@ -181,7 +184,7 @@ class EagleProposer(Proposer):
         else:
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
-                n + 1 - valid_sampled_token_ids[i].shape[0] if n > 0 else 0
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
@@ -427,9 +430,7 @@ class EagleProposer(Proposer):
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
-        attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-            seq_lens, target_positions, self.vllm_config.model_config.dtype,
-            self.device)
+        attn_mask = self.runner.attn_mask
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens.to(device),
@@ -504,9 +505,15 @@ class EagleProposer(Proposer):
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        attn_metadata.query_start_loc_list = attn_metadata.query_start_loc[
+            1:].tolist()
+        attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
+        attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
         query_lens.fill_(1)
         attn_metadata.query_lens = query_lens
 
+        attn_metadata.actual_seq_lengths_q = [1 + i for i in range(batch_size)]
+        attn_metadata.seq_lens_list = seq_lens.tolist()
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(
                 self.vllm_config.speculative_config.num_speculative_tokens -
@@ -533,6 +540,9 @@ class EagleProposer(Proposer):
             # TODO: Increment the sequence lengths.
 
             attn_metadata.seq_lens += 1
+            attn_metadata.seq_lens_list = [
+                _ + 1 for _ in attn_metadata.seq_lens_list
+            ]
             # TODO: Consider max model length.
             # attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
             #                                 self.max_model_len)
