@@ -16,7 +16,7 @@
 #
 from typing import List
 
-# import pytest
+import pytest
 import torch
 import torch.nn as nn
 import torch_npu
@@ -165,10 +165,10 @@ class TestQKNormRopeModelWithBias(nn.Module):
         return [torch.ops.vllm.qkv_rmsnorm_rope.default]
 
 
-# @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-# @pytest.mark.parametrize("seq_len", [1, 128, 257])
-# @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-# @pytest.mark.parametrize("with_bias", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("seq_len", [1, 128])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("with_bias", [False])
 def test_qknorm_rope_fusion(
     dtype: torch.dtype,
     seq_len: int,
@@ -228,20 +228,11 @@ def test_qknorm_rope_fusion(
         print(f"Unfused result shapes: {[t.shape for t in result_unfused]}")
         
         # Compile with fusion
-        model_fused = torch.compile(model, backend=backend)
-        result_fused = model_fused(x)
+        with torch.no_grad():
+            model_fused = torch.compile(model, backend=backend)
+            result_fused = model_fused(x)
         print(f"Fused result shapes: {[t.shape for t in result_fused]}")
         
         print("=== Checking operator fusion ===")
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
-
-
-if __name__ == "__main__":
-    
-    test_qknorm_rope_fusion(
-        dtype=torch.float16,
-        seq_len=128,
-        eps=1e-6,
-        with_bias=False,
-    )
