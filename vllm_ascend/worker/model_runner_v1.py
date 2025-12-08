@@ -3357,7 +3357,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         kernel_block_sizes = self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config, 
+            kv_cache_config,
             kernel_block_sizes=[i[0] for i in  kernel_block_sizes])
 
         if has_kv_transfer_group():
@@ -3399,7 +3399,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     self.device,
                     kernel_block_sizes,
                 ))
-            self.cross_layers_kv_cache = (cross_layers_k_cache, 
+            self.cross_layers_kv_cache = (cross_layers_k_cache,
                                           cross_layers_v_cache)
             self.cross_layers_attn_backend = attn_backend
         else:
@@ -3414,7 +3414,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                       self.compilation_config.static_forward_context,
                       self.kv_caches)
         return kv_caches
-    
+
     def _allocate_kv_cache_tensors(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
@@ -4612,7 +4612,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
-
 
     def use_uniform_kv_cache(
         self,
