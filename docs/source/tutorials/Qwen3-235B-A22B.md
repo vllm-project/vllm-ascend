@@ -119,7 +119,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
---rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}'
+--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \
 --compilation-config '{"cudagraph_capture_sizes":[1,4],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
 ```
