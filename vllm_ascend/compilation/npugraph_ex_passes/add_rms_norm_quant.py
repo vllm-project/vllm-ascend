@@ -20,7 +20,6 @@ import sys
 
 import torch
 from torch._inductor.pattern_matcher import Match
-from torch._subclasses.fake_tensor import FakeTensorMode
 from vllm.logger import logger
 
 
