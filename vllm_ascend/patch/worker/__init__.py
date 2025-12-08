@@ -21,7 +21,7 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
 
 from vllm.config import CUDAGraphMode, get_current_vllm_config
- 
+
 is_cuda_graph = get_current_vllm_config(
 ).compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 

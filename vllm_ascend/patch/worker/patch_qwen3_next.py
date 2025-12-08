@@ -15,7 +15,6 @@
 # limitations under the License.
 #from collections.abc import Iterable
 
-
 import torch
 from einops import rearrange
 from torch import nn
@@ -28,7 +27,9 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
 
 from . import is_cuda_graph
 
+
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
