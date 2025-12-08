@@ -19,6 +19,7 @@ import os.path
 import random
 import sys
 
+import numpy as np
 import torch
 from vllm.logger import logger
 
@@ -27,25 +28,25 @@ import vllm_ascend.envs as envs_ascend
 
 def generate_experts_map(ep_rank, ep_size, n_expert, n_redundant):
     def split_and_insert(n, k, m):
-        all_experts = torch.arange(n)
-        groups = torch.array_split(all_experts, k)
+        all_experts =np.arange(n)
+        groups = np.array_split(all_experts, k)
         for i in range(m):
             j = i % k + 1
             if len(groups[-j]) == 0:
-                groups[-j] = torch.append(groups[-j], j)
+                groups[-j] =np.append(groups[-j], j)
             else:
-                groups[-j] = torch.append(groups[-j], (groups[-j][-1] + 1) % n_expert)
-        return torch.concatenate(groups)
+                groups[-j] =np.append(groups[-j], (groups[-j][-1] + 1) % n_expert)
+        return torch.tensor(np.concatenate(groups), device="npu")
 
     random_placement = split_and_insert(n_expert, ep_size, n_redundant)
     global_num_experts = random_placement.shape[0]
     local_num_experts = global_num_experts // ep_size
 
-    expert_map = torch.full((random_placement.shape[0]), -1, dtype=torch.int32)
+    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device="npu")
     expert_map[ep_rank * local_num_experts: (ep_rank + 1) * local_num_experts] = \
         random_placement[ep_rank * local_num_experts: (ep_rank + 1) * local_num_experts]
 
-    return expert_map
+    return local_num_experts, expert_map
 
 
 def generate_log2phy_map(expert_map):
