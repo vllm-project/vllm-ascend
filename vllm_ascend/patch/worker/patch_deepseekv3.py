@@ -16,8 +16,8 @@ from vllm.distributed import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from collections.abc import Callable, Iterable
-# from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+# from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, get_spec_layer_idx_from_weight_name, DeepseekV2MLP, DeepseekV2MoE
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.config import ParallelConfig
