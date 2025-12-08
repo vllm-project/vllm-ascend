@@ -195,8 +195,8 @@ class AscendFusedMoE(FusedMoE):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
-            # self.global_redundant_expert_num = (
-            #     self.expert_load_balancer.get_global_redundant_expert_num())
+            self.global_redundant_expert_num = (
+                self.expert_load_balancer.get_global_redundant_expert_num())
             self.global_num_experts = num_experts + self.global_redundant_expert_num
             try:
                 self.local_num_experts, self.expert_map = (
