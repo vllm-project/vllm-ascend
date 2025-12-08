@@ -123,7 +123,6 @@ class TestDisptachFFNCombine:
             scale2=scale2,
             probs=probs,
             group=self.hcomm_info,
-            max_output_size=512,
             out=out,
         )
         return True

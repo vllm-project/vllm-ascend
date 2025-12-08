@@ -693,7 +693,6 @@ at::Tensor& dispatch_ffn_combine(
     const at::Tensor& scale2,
     const at::Tensor& probs,
     c10::string_view group,
-    int64_t max_output_size,
     at::Tensor& out
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
@@ -706,7 +705,6 @@ at::Tensor& dispatch_ffn_combine(
                  scale2,
                  probs,
                  group_ep_ptr,
-                 max_output_size,
                  out);
     return out;
 }
@@ -918,7 +916,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
         "                     Tensor scale1, Tensor scale2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out) -> Tensor"
+        "                     Tensor! out) -> Tensor"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 }

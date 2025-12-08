@@ -229,10 +229,9 @@ class MtpProposer(Proposer):
 
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         # TODO: remove this after moe_comm_type selection logic is finalized
-        moe_comm_type = (MoECommType.ALLTOALL
-                         if moe_comm_type == MoECommType.FUSED_ALLTOALL else
-                         MoECommType.MC2 if moe_comm_type
-                         == MoECommType.FUSED_MC2 else moe_comm_type)
+        if moe_comm_type == MoECommType.FUSED_MC2:
+            moe_comm_type = (MoECommType.ALLTOALL
+                             if with_prefill else MoECommType.MC2)
 
         if skip_attn:
             attn_metadata = None

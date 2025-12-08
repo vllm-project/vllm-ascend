@@ -52,8 +52,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_pcp_group, get_pp_group,
-                                             get_tp_group,
+                                             get_ep_group, get_pcp_group,
+                                             get_pp_group, get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -2347,10 +2347,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     moe_comm_type = MoECommType.ALLGATHER
 
         elif soc_version in {AscendDeviceType._910_93}:
-            if quant_type == "w8a8_dynamic":
-                moe_comm_type = (MoECommType.FUSED_MC2
-                                 if num_tokens <= self.mc2_tokens_capacity else
-                                 MoECommType.FUSED_ALLTOALL)
+            # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+            if (quant_type == "w8a8_dynamic"
+                    and get_ep_group().world_size <= 16):
+                moe_comm_type = MoECommType.FUSED_MC2
             else:
                 moe_comm_type = (MoECommType.MC2
                                  if num_tokens <= self.mc2_tokens_capacity else

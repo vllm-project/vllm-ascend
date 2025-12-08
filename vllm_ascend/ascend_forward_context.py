@@ -52,8 +52,7 @@ class MoECommType(Enum):
     ALLGATHER = 0
     MC2 = 1
     ALLTOALL = 2
-    FUSED_ALLTOALL = 3
-    FUSED_MC2 = 4
+    FUSED_MC2 = 3
 
 
 @contextmanager
