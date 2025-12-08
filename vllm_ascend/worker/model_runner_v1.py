@@ -196,14 +196,23 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group(
-        ).rank_in_group if self.pcp_size > 1 else 0
+        try:
+            self.dp_size = vllm_config.parallel_config.data_parallel_size
+            self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+            self.dcp_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+            self.pcp_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group(
+            ).rank_in_group if self.pcp_size > 1 else 0
+        except Exception:
+            self.dcp_size = 1
+            self.dcp_rank = 0
+            self.pcp_size = 1
+            self.pcp_rank = 0
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
         if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
@@ -281,16 +290,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.speculative_config and self.pcp_size > 1:
             self.input_ids_pcp_full = self._make_buffer(self.max_num_tokens,
                                                         dtype=torch.int32)
-            self.query_start_loc_pcp_full = torch.zeros(self.max_num_reqs + 1,
-                                                        dtype=torch.int32,
-                                                        device=self.device)
-            self.query_start_loc_pcp_full_cpu = \
-                torch.zeros(self.max_num_reqs + 1,
-                            dtype=torch.int32,
-                            device="cpu",
-                            pin_memory=True)
-            self.query_start_loc_pcp_full_np = \
-                self.query_start_loc_pcp_full_cpu.numpy()
+            self.query_start_loc_pcp_full = self._make_buffer(
+                self.max_num_reqs + 1, dtype=torch.int32)
             self.positions_pcp_full = torch.zeros(self.max_num_tokens,
                                                   dtype=torch.int64,
                                                   device="cpu",
@@ -1003,8 +1004,8 @@ class NPUModelRunner(GPUModelRunner):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
-                    self.query_start_loc_pcp_full_cpu[:num_reqs]
+                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs+1] - \
+                    self.query_start_loc_pcp_full.cpu[:num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
                 num_decode_reqs = num_reqs - num_prefill_reqs
@@ -3263,10 +3264,10 @@ class NPUModelRunner(GPUModelRunner):
         req_indices_pcp_full = np.repeat(self.arange_np[:num_reqs],
                                          num_scheduled_tokens_pcp_full)
         cu_num_tokens_pcp_full = np.cumsum(num_scheduled_tokens_pcp_full)
-        self.query_start_loc_pcp_full_np[0] = 0
-        self.query_start_loc_pcp_full_np[1:num_reqs +
+        self.query_start_loc_pcp_full.np[0] = 0
+        self.query_start_loc_pcp_full.np[1:num_reqs +
                                          1] = cu_num_tokens_pcp_full
-        self.query_start_loc_pcp_full_np[num_reqs + 1:].fill(-1)
+        self.query_start_loc_pcp_full.np[num_reqs + 1:].fill(-1)
         cumsums_offsets_pcp_full = np.repeat(
             cu_num_tokens_pcp_full - num_scheduled_tokens_pcp_full,
             num_scheduled_tokens_pcp_full)
@@ -3285,10 +3286,7 @@ class NPUModelRunner(GPUModelRunner):
                            torch.from_numpy(token_indices_pcp_full),
                            out=self.input_ids_pcp_full.
                            cpu[:total_num_scheduled_tokens_pcp_full])
-        self.query_start_loc_pcp_full[:num_reqs + 1].copy_(
-            self.query_start_loc_pcp_full_cpu[:num_reqs + 1],
-            non_blocking=True,
-        )
+        self.query_start_loc_pcp_full.copy_to_gpu()
         self.input_ids_pcp_full.gpu[:total_num_scheduled_tokens_pcp_full].copy_(
             self.input_ids_pcp_full.cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
@@ -3315,3 +3313,7 @@ def _torch_cuda_wrapper():
     finally:
         # if anything goes wrong, just patch it with a placeholder
         torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = torch.cuda.Stream
+        torch.cuda.default_stream = torch.npu.default_stream
+        torch.cuda.current_stream = torch.npu.current_stream
+        torch.cuda.stream = torch.npu.stream

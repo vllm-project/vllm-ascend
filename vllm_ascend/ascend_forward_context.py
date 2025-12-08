@@ -208,7 +208,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs,
                             uniform_decode_query_len):
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
-        raise ValueError("mc2_tokens_capacity have already been set!")
+        return
     if vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
     else:
@@ -227,7 +227,7 @@ def get_mc2_tokens_capacity():
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
-        raise ValueError("_reserved_mc2_mask have already been set!")
+        return
     if is_moe_model(vllm_config):
         _reserved_mc2_mask = torch.zeros(get_mc2_tokens_capacity(),
                                          dtype=torch.bool,
@@ -245,7 +245,7 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
     global _cos
     global _sin
     if _cos is not None:
-        raise ValueError("_cos have already been set!")
+        return
     compilation_config = vllm_config.compilation_config
     model_config = vllm_config.model_config
     if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:

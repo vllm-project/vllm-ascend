@@ -24,9 +24,11 @@ from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
-from vllm_ascend.worker.block_table import BlockTable, MultiGroupBlockTable
-from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+from vllm_ascend.worker.block_table import (NpuBlockTable,
+                                            NpuMultiGroupBlockTable)
+from vllm_ascend.worker.npu_input_batch import NpuInputBatch
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -58,11 +60,11 @@ def _compare_objs(obj1,
         elif isinstance(a, np.ndarray):
             if np.allclose(a, b):
                 is_same = True
-        elif isinstance(a, MultiGroupBlockTable):
+        elif isinstance(a, NpuMultiGroupBlockTable):
             for a_i, b_i in zip(a.block_tables, b.block_tables):
                 _compare_objs(a_i, b_i)
             is_same = True
-        elif isinstance(a, (BlockTable, SamplingMetadata, PoolingMetadata)):
+        elif isinstance(a, (NpuBlockTable, SamplingMetadata, PoolingMetadata)):
             _compare_objs(a, b)
             is_same = True  # if we make it here must be same
         elif a == b:
@@ -71,7 +73,7 @@ def _compare_objs(obj1,
             f" in {obj1} and {obj2}: {a} != {b}"
 
 
-def _remove_requests(input_batch: InputBatch, batch_size: int,
+def _remove_requests(input_batch: NpuInputBatch, batch_size: int,
                      reqs: list[CachedRequestState]) -> set[str]:
     """
     Remove some requests randomly from the batch and returns
@@ -223,9 +225,9 @@ def _construct_cached_request_state(req_id_suffix: int):
 @pytest.mark.parametrize("batch_size", [1, 2, 32, 64])
 def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     """
-    Tests the logic for managing sampling metadata in the InputBatch.
+    Tests the logic for managing sampling metadata in the NpuInputBatch.
 
-    This test involves adding a set of requests to the InputBatch,
+    This test involves adding a set of requests to the NpuInputBatch,
     followed by removing a subset of them. Afterward, the batch is compacted,
     and the `make_sampling_metadata` method is invoked on the batch. The
     output of `make_sampling_metadata` is then compared against the expected
@@ -233,7 +235,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 
     Note: Ignore logits processor logic, which is tested separately
     """
-    input_batch: InputBatch = InputBatch(
+    input_batch: NpuInputBatch = NpuInputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
         max_num_batched_tokens=1024,
@@ -314,7 +316,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 def test_swap_states_in_input_batch(device: str, batch_size: int,
                                     swap_list: list):
     """
-    Tests the logic for managing sampling metadata in the InputBatch.
+    Tests the logic for managing sampling metadata in the NpuInputBatch.
 
     This test involves adding a set of requests to the InputBatch,
     followed by removing a subset of them. Afterward, the batch is compacted,
@@ -324,7 +326,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
 
     Note: Ignore logits processor logic, which is tested separately
     """
-    input_batch: InputBatch = InputBatch(
+    input_batch: NpuInputBatch = NpuInputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
         max_num_batched_tokens=1024,
@@ -333,7 +335,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         vocab_size=1024,
         block_sizes=[1],
     )
-    ref_input_batch: InputBatch = InputBatch(
+    ref_input_batch: NpuInputBatch = NpuInputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
         max_num_batched_tokens=1024,
