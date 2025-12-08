@@ -58,7 +58,7 @@ def mtp_torchair_correctness(
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
                     speculative_config={
-                        "method": "deepseek_mtp",
+                        "method": "mtp",
                         "num_speculative_tokens": 1,
                     },
                     enforce_eager=False,
