@@ -13,7 +13,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
+                              get_pcp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -37,17 +37,9 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, prefill_context_parallel_enable,
-                               weak_ref_tensors)
+                               is_enable_nz, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_pcp_group,
-                                  get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-# isort: on
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -265,15 +257,13 @@ class AscendMLAMetadataBuilder:
         self.cos_cache = None
         self.sin_cache = None
 
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
-        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size if prefill_context_parallel_enable(
-        ) else 1
+        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
                                       0)
@@ -566,35 +556,43 @@ class AscendMLAMetadataBuilder:
                         out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
                         dtype=torch.int32,
                     )
-                    chunked_context_metadata = \
-                    AscendMLAPrefillMetadata.ChunkedContextMetadata(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=local_chunk_starts.to(device, non_blocking=True),
-                        seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
+                    chunked_context_metadata = AscendMLAPrefillMetadata.ChunkedContextMetadata(
+                        cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(
+                            device, non_blocking=True),
+                        starts=local_chunk_starts.pin_memory().to(
+                            device, non_blocking=True),
+                        seq_tot=padded_local_chunk_seq_lens.sum(
+                            dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         chunk_seq_lens=chunk_seq_lens,
                         chunk_seq_lens_npu=chunk_seq_lens.npu(),
                         workspace=self.chunked_prefill_workspace,
-                        padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.npu(),
-                        padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
-                        local_context_lens_allranks=local_context_lens_allranks.tolist(),
-                        padded_local_cu_seq_lens=padded_local_cu_chunk_seq_lens_cpu.to(
-                            device, non_blocking=True
-                        ),
+                        padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.
+                        npu(),
+                        padded_local_chunk_seq_lens=padded_local_chunk_seq_lens
+                        .tolist(),
+                        local_context_lens_allranks=local_context_lens_allranks
+                        .tolist(),
+                        padded_local_cu_seq_lens=
+                        padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(
+                            device, non_blocking=True),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                         chunk_size=padded_local_max_context_chunk_across_ranks,
                     )
                 else:
-                    chunked_context_metadata = \
+                    chunked_context_metadata = (
                         AscendMLAPrefillMetadata.ChunkedContextMetadata(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=chunk_starts.to(device, non_blocking=True),
-                        seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-                        max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-                        chunk_seq_lens=chunk_seq_lens,
-                        chunk_seq_lens_npu=chunk_seq_lens.npu(),
-                        workspace=self.chunked_prefill_workspace,
-                    )
+                            cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(
+                                device, non_blocking=True),
+                            starts=chunk_starts.pin_memory().to(
+                                device, non_blocking=True),
+                            seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
+                            max_seq_lens=chunk_seq_lens.max(
+                                dim=1).values.tolist(),
+                            chunk_seq_lens=chunk_seq_lens,
+                            chunk_seq_lens_npu=chunk_seq_lens.npu(),
+                            workspace=self.chunked_prefill_workspace,
+                        ))
             prefill_input_positions = input_positions[tokens_start:]
             cos = self.cos_cache[
                 prefill_input_positions].unsqueeze(  # type: ignore
@@ -626,7 +624,8 @@ class AscendMLAMetadataBuilder:
             cos = common_attn_metadata.cos
             sin = common_attn_metadata.sin
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
-            actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
+            actual_seq_lengths_q = query_start_loc_cpu[1:num_decodes +
+                                                       1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
@@ -868,10 +867,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 

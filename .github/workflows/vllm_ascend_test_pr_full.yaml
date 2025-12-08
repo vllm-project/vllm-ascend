@@ -50,7 +50,7 @@ jobs:
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
+              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
               - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
@@ -69,7 +69,7 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [86e178f7c4d8c3b0eaf3c8e3f810a83f63b90e24]
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
