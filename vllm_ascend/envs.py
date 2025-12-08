@@ -181,7 +181,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Set to 1 is to enable exponential overlap, using default exponential or AI-CPU exponential.
     # Set to 2 is to enable exponential overlap, using AI-Core exponential. 
     "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL":
-    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL", '0')),
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL", 0)),
 }
 
 # end-env-vars-definition

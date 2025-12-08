@@ -16,6 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
+from unittest.mock import patch
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
@@ -47,3 +49,19 @@ def test_models_prompt_logprobs() -> None:
         runner.generate_greedy_logprobs(example_prompts,
                                         max_tokens=5,
                                         num_logprobs=1)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL": 1})
+def test_exponential_overlap() -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=1.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner("Qwen/Qwen3-0.6B",
+                    max_model_len=8192,
+                    gpu_memory_utilization=0.7) as runner:
+        runner.generate(example_prompts, sampling_params)
