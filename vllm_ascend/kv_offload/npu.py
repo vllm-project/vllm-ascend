@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
@@ -45,18 +46,12 @@ class NPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def get_handlers(
-        self, kv_caches: dict[str, torch.Tensor]
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec],
                         OffloadingHandler]]:
         if not self._handler:
-            layer_names = list(kv_caches.keys())
-            layers = get_layers_from_vllm_config(self.vllm_config,
-                                                 AttentionLayerBase,
-                                                 layer_names)
-            attn_backends = {
-                layer_name: layers[layer_name].get_attn_backend()
-                for layer_name in layer_names
-            }
 
             self._handler = CpuNpuOffloadingHandler(
                 attn_backends=attn_backends,
