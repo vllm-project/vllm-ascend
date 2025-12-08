@@ -830,31 +830,16 @@ tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &exper
     }
 
     int64_t x_dim = x.dim();
-    TORCH_CHECK(x_dim == DIM_X,
-        "The x should be ",
-        DIM_X,
-        "-Dimension, current is ",
-        x_dim,
-        "-Dimension.",
-        OPS_ERROR(ErrCode::PARAM));
+    TORCH_CHECK(x_dim == DIM_X, "The x should be ", DIM_X, 
+                "-Dimension, current is ", x_dim, "-Dimension.");
 
     int64_t expert_idx_dim = expert_idx.dim();
-    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX,
-        "The expert_idx should be ",
-        DIM_EXPERT_IDX,
-        "-Dimension, current is ",
-        expert_idx,
-        "-Dimension.",
-        OPS_ERROR(ErrCode::PARAM));
+    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX, "The expert_idx should be ", DIM_EXPERT_IDX, 
+                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
 
     int64_t active_expert_range_length = active_expert_range.size();
-    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE,
-        "The length of list active_expert_range should be ",
-        LENGTH_ACTIVE_EXPERT_RANGE,
-        ", current is ",
-        active_expert_range_length,
-        ".",
-        OPS_ERROR(ErrCode::PARAM));
+    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE, "The active_expert_range should be ", LENGTH_ACTIVE_EXPERT_RANGE, 
+                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
 
     int expert_length = active_expert_range[1] - active_expert_range[0];
     auto x_size = x.sizes();
