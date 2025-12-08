@@ -254,10 +254,6 @@ def _wait_for_multiple_servers(self,
                 if resp.status_code == 200:
                     ready[node_ip] = True
                     logger.info(f"[READY] Node {node_ip} is ready.")
-                else:
-                    all_ready = False
-                    if should_log:
-                        logger.info(f"[WAIT] {url}: HTTP {resp.status_code}")
             except RequestException:
                 all_ready = False
                 if should_log:
