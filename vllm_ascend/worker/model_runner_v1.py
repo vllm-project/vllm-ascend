@@ -2214,7 +2214,7 @@ class NPUModelRunner(GPUModelRunner):
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
-            self.eplb_adaptor_cls = EplbAdaptorFactory.get_eplb_adapator(self.model)
+            self.eplb_adaptor_cls = EplbAdaptorFactory.get_eplb_adapator(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
             if get_ascend_device_type() == AscendDeviceType._310P:
