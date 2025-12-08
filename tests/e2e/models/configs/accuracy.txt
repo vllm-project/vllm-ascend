@@ -6,6 +6,9 @@ Qwen3-VL-30B-A3B-Instruct.yaml
 Qwen3-VL-8B-Instruct.yaml
 Qwen2.5-Omni-7B.yaml
 Meta-Llama-3.1-8B-Instruct.yaml
+InternVL2-8B.yaml
+InternVL2_5-8B.yaml
+InternVL3-8B.yaml
 InternVL3_5-8B.yaml
 ERNIE-4.5-21B-A3B-PT.yaml
 gemma-3-4b-it.yaml

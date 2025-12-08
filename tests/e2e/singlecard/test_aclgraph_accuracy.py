@@ -36,7 +36,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_models_with_aclgraph(
+def test_output_between_eager_and_aclgraph(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -100,7 +100,7 @@ def test_models_with_aclgraph(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_models_with_aclgraph_full_decode_only(
+def test_output_between_eager_and_full_decode_only(
     model: str,
     max_tokens: int,
 ) -> None:
