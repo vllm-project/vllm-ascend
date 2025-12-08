@@ -2352,8 +2352,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
             moe_comm_type = (
                 MoECommType.MC2 if num_tokens <= self.mc2_tokens_capacity else
-                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
-                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
+                MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
