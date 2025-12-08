@@ -1844,8 +1844,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             # NOTE: This is strange, why did we use total_num_scheduled_tokens before?
-            slot_mapping_size = (num_input_tokens if self.pcp_size == 1 else
-                                 num_input_tokens * self.pcp_size -
+            slot_mapping_size = (total_num_scheduled_tokens
+                                 if self.pcp_size == 1 else
+                                 total_num_scheduled_tokens * self.pcp_size -
                                  total_num_pcp_pads)
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
@@ -1864,7 +1865,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()
-                slot_mapping = blk_table.slot_mapping[:slot_mapping_size]
                 blk_table.slot_mapping[slot_mapping_size:].fill_(0)
                 if self.pcp_size > 1:
                     slot_mapping_for_pcp = blk_table.slot_mapping[:
@@ -1884,7 +1884,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                                                slot_mapping_size]
                     slot_mapping_for_pcp[:long_seq_metadata.
                                          num_actual_tokens_pcp_padded] = pcp_padded_slot_mapping
-                    slot_mapping = slot_mapping_for_pcp
+                    blk_table.slot_mapping[:long_seq_metadata.num_actual_tokens_pcp_padded] = \
+                        slot_mapping_for_pcp
+                slot_mapping = blk_table.slot_mapping
 
             # NOTE: This is a temporary hack, now in GPUModelRunner, this prepare_inputs
             # has been split to multiple parts, and there are 3 parts that is related to this
