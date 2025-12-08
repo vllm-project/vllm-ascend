@@ -644,10 +644,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             # Add invalid input check.
             logger.info(
                 "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL can ONLY be set to 0, 1, 2. \
-                        Invalid input will be set to default 0!"
-            )
+                        Invalid input will be set to default 0!")
             self.enable_asnyc_exp = 0
-        if self.enable_asnyc_exp == 2 and not hasattr(torch_npu, 
+        if self.enable_asnyc_exp == 2 and not hasattr(torch_npu,
                                                       "npu_sim_exponential_"):
             # Add AI-core support check.
             logger.info(
