@@ -138,3 +138,28 @@
 #    Future Plan:
 #       Remove this patch when adapted vllm version contains the above PR.
 #
+# ** File: worker/patch_qwen3_next_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.utils.bind_kv_cache`
+#    Why:
+#       'bind_kv_cache' func will raise an exception when current_platform is npu.
+#    How：
+#       Replace with a new bind_kv_cache.
+#       Skip the raise.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/4770
+#    Future Plan:
+#       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
+#
+# ** File: worker/patch_module.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
+#    Why:
+#       'torch.argsort' func of npu does not support bool.
+#    How：
+#       Replace with a new torch.argsort that will cast the input to torch.int32.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/4770
+#    Future Plan:
+#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#
