@@ -62,10 +62,7 @@ async def test_models(model: str) -> None:
         "DISABLE_L2_CACHE": "1",
         "DYNAMIC_EPLB": "true",
     }
-    speculative_config = {
-        "num_speculative_tokens": 1,
-        "method": "deepseek_mtp"
-    }
+    speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     compilation_config = {
         "cudagraph_capture_sizes": [24],
         "cudagraph_mode": "FULL_DECODE_ONLY"
