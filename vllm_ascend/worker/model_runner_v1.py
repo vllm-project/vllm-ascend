@@ -2156,8 +2156,8 @@ class NPUModelRunner(GPUModelRunner):
             cos, sin = cos_sin_cache.reshape(-1, 2, last_dim // 2).repeat(
                 1, 1, 2).chunk(2, dim=-2)
             # BSNH
-            self.cos[:, :maybe_padded_num_tokens] = cos.view(1, -1, 1, last_dim).contiguous()
-            self.sin[:, :maybe_padded_num_tokens] = sin.view(1, -1, 1, last_dim).contiguous()
+            self.cos[:, :num_tokens] = cos.view(1, -1, 1, last_dim).contiguous()
+            self.sin[:, :num_tokens] = sin.view(1, -1, 1, last_dim).contiguous()
 
             with set_ascend_forward_context(
                     attn_metadata,
@@ -2171,7 +2171,7 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_metho,
+                    weight_prefetch_method=self.weight_prefetch_method,
                     cos=self.cos[:, :num_tokens],
                     sin=self.sin[:, :num_tokens]):
                 hidden_states = self._generate_dummy_run_hidden_states(
