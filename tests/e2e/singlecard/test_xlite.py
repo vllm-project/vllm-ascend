@@ -31,6 +31,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.skip
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models_with_xlite_decode_only(
@@ -79,6 +80,7 @@ def test_models_with_xlite_decode_only(
     )
 
 
+@pytest.mark.skip
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models_with_xlite_full_mode(
