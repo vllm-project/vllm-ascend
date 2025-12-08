@@ -224,56 +224,65 @@ class RemoteOpenAIServer:
         # Then wait for all api_server nodes
         self._wait_for_multiple_servers(targets=targets, timeout=timeout)
 
-    def _wait_for_multiple_servers(self, targets, timeout: float):
-        """
-        targets: List[(node_ip, url)]
-        """
-        start = time.time()
-        client = requests
 
-        # track readiness
-        ready = {node_ip: False for node_ip, _ in targets}
+def _wait_for_multiple_servers(self,
+                               targets,
+                               timeout: float,
+                               log_interval: float = 30.0):
+    """
+    targets: List[(node_ip, url)]
+    log_interval
+    """
+    start = time.time()
+    client = requests
 
-        # polling loop
-        while True:
-            all_ready = True
+    ready = {node_ip: False for node_ip, _ in targets}
 
-            for node_ip, url in targets:
-                if ready[node_ip]:
-                    continue  # already ready
+    last_log_time = 0.0
 
-                try:
-                    resp = client.get(url)
-                    if resp.status_code == 200:
-                        ready[node_ip] = True
-                        logger.info(f"[READY] Node {node_ip} is ready.")
-                    else:
-                        all_ready = False
-                        logger.info(f"[WAIT] {url}: HTTP {resp.status_code}")
-                except RequestException:
+    while True:
+        now = time.time()
+        all_ready = True
+        should_log = (now - last_log_time) >= log_interval
+
+        for node_ip, url in targets:
+            if ready[node_ip]:
+                continue
+
+            try:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    ready[node_ip] = True
+                    logger.info(f"[READY] Node {node_ip} is ready.")
+                else:
                     all_ready = False
+                    if should_log:
+                        logger.info(f"[WAIT] {url}: HTTP {resp.status_code}")
+            except RequestException:
+                all_ready = False
+                if should_log:
                     logger.info(f"[WAIT] {url}: connection failed")
 
-                    # underlying process died?
-                    result = self._poll()
-                    if result is not None and result != 0:
-                        raise RuntimeError(
-                            f"Server at {node_ip} exited unexpectedly."
-                        ) from None
+                # check unexpected exit
+                result = self._poll()
+                if result is not None and result != 0:
+                    raise RuntimeError(
+                        f"Server at {node_ip} exited unexpectedly.") from None
 
-            # if all nodes ready, exit
-            if all_ready:
-                break
+        if should_log:
+            last_log_time = now
 
-            # check timeout
-            if time.time() - start > timeout:
-                not_ready_nodes = [n for n, ok in ready.items() if not ok]
-                self._terminate_server()
-                raise RuntimeError(
-                    f"Timeout: these nodes did not become ready: {not_ready_nodes}"
-                ) from None
+        if all_ready:
+            break
 
-            time.sleep(5)
+        if now - start > timeout:
+            not_ready_nodes = [n for n, ok in ready.items() if not ok]
+            self._terminate_server()
+            raise RuntimeError(
+                f"Timeout: these nodes did not become ready: {not_ready_nodes}"
+            ) from None
+
+        time.sleep(5)
 
     @property
     def url_root(self) -> str:
