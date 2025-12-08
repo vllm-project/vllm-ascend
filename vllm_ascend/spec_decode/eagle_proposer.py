@@ -626,9 +626,9 @@ class EagleProposer(Proposer):
         return cu_num_tokens, token_indices
 
     def _prepare_eagle_input_sequential(self, out_tensor: torch.Tensor,
-                              cu_query_lens: torch.Tensor,
-                              cu_num_tokens: torch.Tensor,
-                              block_size: int):
+                                        cu_query_lens: torch.Tensor,
+                                        cu_num_tokens: torch.Tensor,
+                                        block_size: int):
         device = cu_query_lens.device
         dtype = out_tensor.dtype
 
