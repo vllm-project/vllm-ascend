@@ -1,19 +1,37 @@
-__all__ = []
-
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 import functools
 import sys
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
 from torch._inductor.pattern_matcher import Match
+from torch._subclasses.fake_tensor import FakeTensorMode
+from vllm.logger import logger
 
 
 @functools.lru_cache(None)
 def _register_replacement(epsilon):
     if 'torch_npu' not in sys.modules:
-        logger.info(f'The AddRMSNormQuant fusion will only be enabled in a torch npu env.'
-                    'When there is no torch_npu in the env, skip fusion.')
+        logger.info(
+            'The AddRMSNormQuant fusion will only be enabled in a torch npu env.'
+            'When there is no torch_npu in the env, skip fusion.')
         return
+
     import torchair
 
     def _extra_stream_scope_check(match: Match) -> bool:
@@ -42,8 +60,7 @@ def _register_replacement(epsilon):
             torchair.logger.debug(
                 f"Cross-stream operation detected in pattern match for AddRMSNormQuant. "
                 f"Multiple streams found: {non_default_streams}. "
-                f"Fusion is not supported for cross-stream operations."
-            )
+                f"Fusion is not supported for cross-stream operations.")
             return False
 
         return True
@@ -58,8 +75,8 @@ def _register_replacement(epsilon):
                                                 rms_norm_weight, epsilon)
         out0 = output[0]
         out1 = output[2]
-        quantized_output = torch.ops.npu.npu_quantize(
-            out0, scale, offset, torch.qint8, -1, False)
+        quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset,
+                                                      torch.qint8, -1, False)
         return quantized_output, out1
 
     def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -93,16 +110,16 @@ def _register_replacement(epsilon):
             offset = torch.tensor([0.0], device="npu")
         return [rms_norm_input, residual, rms_norm_weight, scale, offset]
 
-    torchair.register_replacement(
-        search_fn=pattern,
-        replace_fn=replacement,
-        example_inputs=get_inputs(),
-        extra_check=_extra_stream_scope_check
-    )
+    torchair.register_replacement(search_fn=pattern,
+                                  replace_fn=replacement,
+                                  example_inputs=get_inputs(),
+                                  extra_check=_extra_stream_scope_check)
 
 
 ### register converter for pass
 common_epsilons = [1e-5, 1e-6]
 for eps in common_epsilons:
-    print(f"Start register fusion pattern for AddRMSNormQuant with epsilons={eps}")
+    logger.info(
+        f"Start register fusion pattern for AddRMSNormQuant with epsilons={eps}"
+    )
     _register_replacement(eps)

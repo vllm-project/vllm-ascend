@@ -81,13 +81,13 @@ def npugraph_ex_compile(
     # wrapped as a tuple when the fx graph has a single
     # output, but torch.compile has a mandatory check.
     fx_graph = graph.graph
-    output_node = fx_graph.output_node()
     if not graph_returns_tuple(graph):
+        output_node = fx_graph.output_node()
         with fx_graph.inserting_before(output_node):
             return_value = output_node.args[0]
             tuple_node = fx_graph.create_node("call_function",
-                                           tuple,
-                                           args=([return_value], ))
+                                              tuple,
+                                              args=([return_value], ))
         output_node.args = (tuple_node, )
         fx_graph.recompile()
 

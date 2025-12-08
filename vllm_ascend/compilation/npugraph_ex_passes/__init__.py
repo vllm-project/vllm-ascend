@@ -15,4 +15,4 @@
 # limitations under the License.
 #
 
-import  add_rms_norm_quant # noqa
+from vllm_ascend.compilation.npugraph_ex_passes import add_rms_norm_quant # noqa

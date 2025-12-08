@@ -62,43 +62,50 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     def test_init_ascend_config_with_additional_config(self):
-        with mock.patch("torch.version.cann", "8.5.0"):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "torchair_graph_config": {
+                "enabled": True,
+                "use_cached_graph": True,
+                "graph_batch_sizes": [1, 2, 4],
+                "graph_batch_sizes_init": False,
+                "enable_multistream_mla": True,
+                "enable_view_optimize": True,
+                "enable_frozen_parameter": True,
+                "enable_kv_nz": True
+            },
+            "ascend_compilation_config": {
+                "enable_quantization_fusion": False,
+            },
+            "multistream_overlap_shared_expert": True,
+            "expert_map_path": "test_expert_map_path",
+            "refresh": True,
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
+        self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertFalse(ascend_config.enable_npugraph_ex)
+
+        torchair_graph_config = ascend_config.torchair_graph_config
+        self.assertTrue(torchair_graph_config.enabled)
+        self.assertTrue(torchair_graph_config.use_cached_graph)
+        self.assertEqual(torchair_graph_config.graph_batch_sizes, [1, 2, 4])
+        self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
+        self.assertTrue(torchair_graph_config.enable_multistream_mla)
+        self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
+        self.assertTrue(torchair_graph_config.enable_kv_nz)
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        self.assertFalse(ascend_compilation_config.enable_quantization_fusion)
+
+    @_clean_up_ascend_config
+    def test_init_ascend_config_enable_npugraph_ex(self):
+        with self.assertRaises(AssertionError):
             test_vllm_config = VllmConfig()
             test_vllm_config.additional_config = {
-                "torchair_graph_config": {
-                    "enabled": True,
-                    "use_cached_graph": True,
-                    "graph_batch_sizes": [1, 2, 4],
-                    "graph_batch_sizes_init": False,
-                    "enable_multistream_mla": True,
-                    "enable_view_optimize": True,
-                    "enable_frozen_parameter": True,
-                    "enable_kv_nz": True
-                },
-                "ascend_compilation_config": {
-                    "enable_quantization_fusion": False,
-                },
-                "multistream_overlap_shared_expert": True,
-                "expert_map_path": "test_expert_map_path",
-                "enable_npugraph_ex": True,
-                "refresh": True,
+                "enable_npugraph_ex": True
             }
-            ascend_config = init_ascend_config(test_vllm_config)
-            self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
-            self.assertTrue(ascend_config.multistream_overlap_shared_expert)
-            self.assertTrue(ascend_config.enable_npugraph_ex)
-
-            torchair_graph_config = ascend_config.torchair_graph_config
-            self.assertTrue(torchair_graph_config.enabled)
-            self.assertTrue(torchair_graph_config.use_cached_graph)
-            self.assertEqual(torchair_graph_config.graph_batch_sizes, [1, 2, 4])
-            self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
-            self.assertTrue(torchair_graph_config.enable_multistream_mla)
-            self.assertTrue(torchair_graph_config.enable_view_optimize)
-            self.assertTrue(torchair_graph_config.enable_frozen_parameter)
-            self.assertTrue(torchair_graph_config.enable_kv_nz)
-            ascend_compilation_config = ascend_config.ascend_compilation_config
-            self.assertFalse(ascend_compilation_config.enable_quantization_fusion)
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     def test_init_ascend_config_with_refresh(self):
