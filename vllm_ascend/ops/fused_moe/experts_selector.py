@@ -20,6 +20,7 @@ import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as envs_ascend
 
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
@@ -68,7 +69,7 @@ def select_experts(hidden_states: torch.Tensor,
         scoring_func=scoring_func,
         custom_routing_function=custom_routing_function)
 
-    if is_support_npu_moe_gating_top_k:
+    if is_support_npu_moe_gating_top_k and not envs_ascend.TRAIN_INFER_CONSISTENCY:
         topk_weights, topk_ids = _select_experts_with_fusion_ops(
             hidden_states=hidden_states,
             router_logits=router_logits,

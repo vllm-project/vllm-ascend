@@ -21,6 +21,7 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
+import vllm_ascend.envs as envs_ascend
 
 class AscendRMSNorm(RMSNorm):
 
@@ -50,7 +51,8 @@ class AscendRMSNorm(RMSNorm):
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if get_ascend_device_type() == AscendDeviceType._310P:
+            if get_ascend_device_type() == AscendDeviceType._310P or \
+                    envs_ascend.TRAIN_INFER_CONSISTENCY:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)
