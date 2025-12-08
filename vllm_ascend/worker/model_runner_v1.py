@@ -646,10 +646,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.spec_attn_mask = torch.triu(torch.ones(2048,
-                                                        2048,
-                                                        dtype=torch.bool),
-                                             diagonal=1).to(self.device)
+            self.spec_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
@@ -1028,21 +1025,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         return tuple(tasks)
 
-    def _make_attention_mask(self, seq_lens, position,
-                             attn_state) -> torch.Tensor:
+    def _make_attention_mask(self, attn_state) -> torch.Tensor:
         # pcp situation.
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
-        if self.pcp_size > 1 and self.vllm_config.model_config.use_mla:
-            return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
-        # dcp situation.
-        if self.dcp_size > 1:
-            return self.attn_mask_builder.get_splitfuse_attn_mask()
-        if self.vllm_config.model_config.use_mla:
-            return self.attn_mask_builder.get_mla_mask(self.dtype)
-        # Pooling situation.
+            # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
+
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size > 1:
+                return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
+            # mla prefill
+            if attn_state != AscendAttentionState.DecodeOnly:
+                return self.attn_mask_builder.get_mla_mask(self.dtype)
         return self.attn_mask_builder.get_splitfuse_attn_mask()
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
@@ -1670,9 +1666,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
                                             num_valid_tokens)
-        self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
-                                                   position=positions_cpu,
-                                                   attn_state=attn_state)
+        self.attn_mask = self._make_attention_mask(attn_state)
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -2834,12 +2828,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.query_start_loc_cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
-            assigned_mask_dim = 2048
-            self.attn_mask = torch.triu(torch.ones(assigned_mask_dim,
-                                                   assigned_mask_dim),
-                                        diagonal=1).to(torch.int8).to(
-                                            self.device)
+            self.attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
