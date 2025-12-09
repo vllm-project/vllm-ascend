@@ -33,7 +33,7 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 QWEN_DENSE_MODELS = [
-    "vllm-ascend/Qwen3-0.6B-Instruct-W8A8"
+    "vllm-ascend/Qwen3-0.6B-Instruct-W8A8",
 ]
 
 QWEN_W4A8_MODELS = [
@@ -41,7 +41,7 @@ QWEN_W4A8_MODELS = [
 ]
 
 DEEPSEEK_W4A8_MODELS = [
-    "vllm-ascend/DeepSeek-V3.1-W4A8-puring"
+    "vllm-ascend/DeepSeek-V3.1-W4A8-puring",
 ]
 
 KIMI_W4A16_MODELS = [
@@ -117,10 +117,10 @@ def test_sp_for_qwen3_moe() -> None:
                         "pass_config": {
                             "enable_sequence_parallelism": True
                         }
-    },
-            enable_expert_parallel=True,
-            enforce_eager=True) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)
+                    },
+                    enable_expert_parallel=True,
+                    enforce_eager=True) as vllm_model:
+                        vllm_model.generate(example_prompts, sampling_params)
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
