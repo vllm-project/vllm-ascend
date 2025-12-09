@@ -78,10 +78,9 @@ def create_vllm_config(
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
-        kv_connector="LLMDataDistCMgrConnector",
+        kv_connector="MooncakeConnector",
         kv_role="kv_both",
-        kv_connector_module_path=
-        "vllm_ascend.distributed.llmdatadist_c_mgr_connector")
+        kv_connector_module_path="vllm_ascend.distributed.mooncake_connector")
     return VllmConfig(scheduler_config=scheduler_config,
                       model_config=model_config,
                       cache_config=cache_config,
