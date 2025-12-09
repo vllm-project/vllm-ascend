@@ -2,6 +2,10 @@ name: pre-commit
 
 on:
     workflow_call:
+      inputs:
+        vllm:
+          required: true
+          type: string
 
 permissions:
   contents: read
