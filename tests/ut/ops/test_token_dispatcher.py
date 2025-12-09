@@ -122,6 +122,7 @@ class TestTokenDispatcherWithMC2(TestBase):
 
     def test_get_combine_mc_kwargs_with_quant(self):
         self.dispatcher.with_quant = True
+        self.dispatcher.moe_expert_num = 8
         hidden_states = torch.randn(10, 128)
         self.dispatcher.topk_ids = torch.randint(0, 8, (10, 1))
         self.dispatcher.topk_weights = torch.randint(0, 8, (10, 1))
