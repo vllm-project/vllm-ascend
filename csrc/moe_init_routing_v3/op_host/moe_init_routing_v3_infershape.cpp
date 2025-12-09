@@ -20,6 +20,18 @@
 #include "log/ops_log.h"
 #include "platform/platform_info.h"
 
+#define unlikely(x) __builtin_expect((x), 0)
+#define OP_CHECK_NULL_WITH_CONTEXT(context, ptr)                                                           \
+    do {                                                                                                   \
+        if (unlikely((ptr) == nullptr)) {                                                                  \
+            const char* name = (unlikely(((context) == nullptr) || (context)->GetNodeName() == nullptr)) ? \
+                                   "nil" :                                                                 \
+                                   (context)->GetNodeName();                                               \
+            OPS_LOG_E(name, "%s is nullptr!", #ptr);                                                         \
+            return ge::GRAPH_FAILED;                                                                       \
+        }                                                                                                  \
+    } while (0)
+
 using namespace ge;
 namespace ops {
 static constexpr size_t DIM_ONE = 1U;
@@ -463,11 +475,11 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     // 1. Get and check input shape
     // 1.1 Get and check input_x
     const gert::Shape *xShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_X);
-    OP_CHECK((xShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The xShape cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
 
     // 1.2 Get and check expert_idx
     const gert::Shape *expertIdxShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_EXPERT_IDX);
-    OP_CHECK((expertIdxShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expertIdxShape cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expertIdxShape);
 
     // 1.3 Get scale shape without checking null, because scale is optional and can be none.
     const gert::Shape *scaleShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_SCALE);
@@ -476,8 +488,7 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     const gert::Shape *offsetShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_OFFSET);
     // 2. Get and check attrs
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
-    OP_CHECK((attrs == nullptr), OPS_LOG_E(context->GetNodeName(), "The attrs cannot be none."), return ge::GRAPH_FAILED);
-    
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     // 2.1 Get and check active_expert_range attr
     int64_t expertStart = static_cast<int64_t>(-1);
@@ -552,14 +563,14 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     // 3. Infer output shape
     // 3.1 Prepare output shape
     gert::Shape *expandedXShape = context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_X);
-    OP_CHECK((expandedXShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expandedXShape cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expandedXShape);
     gert::Shape *expandedRowIdxShape = context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_ROW_IDX);
-    OP_CHECK((expandedRowIdxShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expandedRowIdxShape cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expandedRowIdxShape);
     gert::Shape *expertTokenCumsumOrCountShape =
         context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPERT_TOKEN_CUMSUM_OR_COUNT);
-    OP_CHECK((expertTokenCumsumOrCountShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expertTokenCumsumOrCountShape cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expertTokenCumsumOrCountShape);
     gert::Shape *expandedScaleShape = context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_SCALE);
-    OP_CHECK((expandedScaleShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expandedScaleShape cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expandedScaleShape);
 
     int64_t x_n = xShape->GetDimNum() == DIM_ONE ? NEG_ONE : xShape->GetDim(0);
     int64_t cols = xShape->GetDimNum() == DIM_ONE ? NEG_ONE : xShape->GetDim(1);
@@ -627,7 +638,7 @@ static ge::graphStatus InferDataType4MoeInitRoutingV3(gert::InferDataTypeContext
 
     // Get and check quant_mode attr
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
-    OP_CHECK((attrs == nullptr), OPS_LOG_E(context->GetNodeName(), "The attrs cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
     int64_t quantMode = static_cast<int64_t>(-1);
     const int64_t *quantModePtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_QUANT_MODE);
     if (nullptr == quantModePtr) {
@@ -660,13 +671,13 @@ static ge::graphStatus InferShapeRange4MoeInitRoutingV3(gert::InferShapeRangeCon
 
     // Get and check the pointers of all the outputs' shape range object
     auto expanded_x = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_X);
-    OP_CHECK((expanded_x == nullptr), OPS_LOG_E(context->GetNodeName(), "The expanded_x cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expanded_x);
     auto expanded_row_idx = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_ROW_IDX);
-    OP_CHECK((expanded_row_idx == nullptr), OPS_LOG_E(context->GetNodeName(), "The expanded_row_idx cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expanded_row_idx);
     auto count = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPERT_TOKEN_CUMSUM_OR_COUNT);
-    OP_CHECK((count == nullptr), OPS_LOG_E(context->GetNodeName(), "The count cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, count);
     auto expanded_scale = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_SCALE);
-    OP_CHECK((expanded_scale == nullptr), OPS_LOG_E(context->GetNodeName(), "The expanded_scale cannot be none."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, expanded_scale);
 
     // Print the shape ranges of the outputs before InferShapeRange
     OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_x->GetMin() = %s",
