@@ -505,9 +505,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
-            # If the TI-Consistency switch is set to ON
+            # If the TI-matching switch is set to ON
             # We use fusion attention instead of npu_fused_infer_attention_score.
-            if env_ascend.TRAIN_INFER_CONSISTENCY:
+            if env_ascend.TRAIN_INFER_MATCHING:
                 num_tokens = attn_metadata.actual_seq_lengths_q[-1]
                 query = query[:num_tokens]
                 n_head = self.num_heads

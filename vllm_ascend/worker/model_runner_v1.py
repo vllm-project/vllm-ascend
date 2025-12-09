@@ -634,9 +634,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         self.transfer_event = torch.npu.Event()
 
-        if envs_ascend.TRAIN_INFER_CONSISTENCY:
+        if envs_ascend.TRAIN_INFER_MATCHING:
             logger.info(
-                "Train-Inference consistency is ENABLED, this might cause performance drop!"
+                "Train-Inference matching is ENABLED, this might cause performance drop!"
             )
 
     def _set_up_drafter(self):
@@ -1036,9 +1036,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
         # Only calls in PrefillNoCache situation
-        # and when TI-consistency switch is ON.
+        # and when TI-matching switch is ON.
         if attn_state == AscendAttentionState.PrefillNoCache and \
-                envs_ascend.TRAIN_INFER_CONSISTENCY:
+                envs_ascend.TRAIN_INFER_MATCHING:
             num_reqs = self.input_batch.num_reqs
             seq_lens = self.seq_lens_cpu[:num_reqs]
             max_seq_len = max(seq_lens.max().item(), 0)

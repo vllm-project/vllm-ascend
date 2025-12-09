@@ -53,7 +53,7 @@ class AscendRMSNorm(RMSNorm):
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
             if get_ascend_device_type() == AscendDeviceType._310P or \
-                    envs_ascend.TRAIN_INFER_CONSISTENCY:
+                    envs_ascend.TRAIN_INFER_MATCHING:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)
