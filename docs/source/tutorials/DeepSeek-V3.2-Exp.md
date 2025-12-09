@@ -206,7 +206,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
@@ -248,7 +248,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
@@ -295,9 +295,8 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
@@ -340,9 +339,8 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
