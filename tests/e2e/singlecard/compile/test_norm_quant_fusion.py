@@ -21,10 +21,12 @@ import torch
 import torch.nn as nn
 import torch_npu
 import vllm.config
-from vllm.config import VllmConfig, ModelConfig
 from vllm.compilation.fx_utils import OpOverload
+from vllm.config import ModelConfig, VllmConfig
+
 from tests.e2e.singlecard.compile.backend import TestBackend
-from vllm_ascend.compilation.passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
+from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
+    AddRMSNormQuantFusionPass
 
 
 class TestModel(nn.Module):
@@ -89,7 +91,8 @@ def test_rmsnorm_quant_fusion(dtype: torch.dtype, hidden_size: int,
     vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
 
     with vllm.config.set_current_vllm_config(vllm_config):
-        backend = TestBackend(custom_passes=[AddRMSNormQuantFusionPass(vllm_config=vllm_config)])
+        backend = TestBackend(
+            custom_passes=[AddRMSNormQuantFusionPass(vllm_config=vllm_config)])
         model = TestModel(hidden_size, eps, device="npu")
         model = model.to("npu")
 
