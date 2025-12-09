@@ -227,7 +227,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         context_metadata = {
             "topk_ids": topk_ids,
             "topk_weights": topk_weights,
-            "mc2_mask": mc2_mask,
             "expert_map": expert_map,
             "ep_recv_counts": ep_recv_counts,
             "tp_recv_counts": tp_recv_counts,
@@ -256,7 +255,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         ep_recv_counts = context_metadata["ep_recv_counts"]
         tp_recv_counts = context_metadata["tp_recv_counts"]
         assist_info_for_combine = context_metadata["assist_info_for_combine"]
-        mc2_mask = context_metadata["mc2_mask"]
         expand_scales = context_metadata["expand_scales"]
 
         assert expert_map is not None

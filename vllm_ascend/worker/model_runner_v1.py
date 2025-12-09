@@ -442,7 +442,7 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: Here we can skip the all_reduce operation and avoid paading tokens
         # to max_tokens_acrodd_dp in D nodes. In MoE models, we must ensure that
         # num_tokens DOES NOT exceed mc2_tokens_capacity which means that moe_comm_method
-        # of each rank is MC2. It is recommended to enable recompute scheduler for D Noes.
+        # of each rank is MC2. It is recommended to enable recompute scheduler for D Nodes.
         if self.is_kv_consumer and not self.in_profile_run:
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
