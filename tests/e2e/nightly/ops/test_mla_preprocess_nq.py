@@ -51,6 +51,11 @@ def test_mla_preprocess_kernel():
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
+    q_down = torch.empty(
+        (hidden_states.shape[0], 1536),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
     q_nope_old = q_nope_out.clone()
     q_rope_old = q_rope_out.clone()
 
@@ -79,10 +84,12 @@ def test_mla_preprocess_kernel():
         None,
         cache_mode="krope_ctkv",
         quant_mode="no_quant",
+        enable_inner_out=False,
         q_out0=q_nope_out,
         kv_cache_out0=kv_cache,
         q_out1=q_rope_out,
         kv_cache_out1=kv_cache_rope,
+        inner_out=q_down,
     )
     assert not torch.equal(q_nope_out, q_nope_old)
     assert not torch.equal(q_rope_out, q_rope_old)
