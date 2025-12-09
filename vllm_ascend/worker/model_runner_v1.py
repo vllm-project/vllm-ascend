@@ -1445,8 +1445,10 @@ class NPUModelRunner(GPUModelRunner):
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
                     weight_prefetch_method=self.weight_prefetch_method,
-                    cos=self.cos[:, :maybe_padded_num_tokens] if self.cos is not None else None,
-                    sin=self.sin[:, :maybe_padded_num_tokens] if self.sin is not None else None):
+                    cos=self.cos[:, :maybe_padded_num_tokens]
+                    if self.cos is not None else None,
+                    sin=self.sin[:, :maybe_padded_num_tokens]
+                    if self.sin is not None else None):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -2148,16 +2150,20 @@ class NPUModelRunner(GPUModelRunner):
                         self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
-            
+
             # initialize rope
-            cos_sin_cache=self.model.model.layers[
-                    self.model.model.start_layer].self_attn.rotary_emb.cos_sin_cache.index_select(0, positions)
+            cos_sin_cache = self.model.model.layers[
+                self.model.model.
+                start_layer].self_attn.rotary_emb.cos_sin_cache.index_select(
+                    0, positions)
             last_dim = cos_sin_cache.size()[-1]
             cos, sin = cos_sin_cache.reshape(-1, 2, last_dim // 2).repeat(
                 1, 1, 2).chunk(2, dim=-2)
             # BSNH
-            self.cos[:, :num_tokens] = cos.view(1, -1, 1, last_dim).contiguous()
-            self.sin[:, :num_tokens] = sin.view(1, -1, 1, last_dim).contiguous()
+            self.cos[:, :num_tokens] = cos.view(1, -1, 1,
+                                                last_dim).contiguous()
+            self.sin[:, :num_tokens] = sin.view(1, -1, 1,
+                                                last_dim).contiguous()
 
             with set_ascend_forward_context(
                     attn_metadata,
@@ -2172,8 +2178,10 @@ class NPUModelRunner(GPUModelRunner):
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
                     weight_prefetch_method=self.weight_prefetch_method,
-                    cos=self.cos[:, :num_tokens] if self.cos is not None else None,
-                    sin=self.sin[:, :num_tokens] if self.sin is not None else None):
+                    cos=self.cos[:, :num_tokens]
+                    if self.cos is not None else None,
+                    sin=self.sin[:, :num_tokens]
+                    if self.sin is not None else None):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)

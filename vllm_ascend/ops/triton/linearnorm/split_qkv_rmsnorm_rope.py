@@ -22,6 +22,8 @@ import triton.language as tl
 import triton.runtime.driver as driver
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 
 @triton.jit
 def split_qkv_rmsnorm_rope_kernel(
@@ -198,17 +200,6 @@ def split_qkv_rmsnorm_rope_kernel(
         output_offset += output_offset_step
 
 
-kernels = {}
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
-
-num_vectorcore = get_npu_properties()["num_vectorcore"]
-
-
 def split_qkv_rmsnorm_rope_impl(
     input: torch.Tensor,
     sin: torch.Tensor,
@@ -241,6 +232,7 @@ def split_qkv_rmsnorm_rope_impl(
                            device=input.device,
                            dtype=input.dtype)
     n_cols = kv_hidden_size // KV_BLOCK_SIZE
+    num_vectorcore = get_vectorcore_num()
     assert num_vectorcore % n_cols == 0
     n_rows = num_vectorcore // n_cols
     BIAS = q_bias is not None
