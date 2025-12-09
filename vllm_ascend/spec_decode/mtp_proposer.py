@@ -512,6 +512,7 @@ class MtpProposer(Proposer):
         #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
+        num_actual_reqs = len(num_draft_tokens)
         num_rejected_tokens = [
             n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
             for i, n in enumerate(num_draft_tokens)
@@ -520,8 +521,11 @@ class MtpProposer(Proposer):
                                            dtype=torch.int32)
 
         device = common_attn_metadata.query_start_loc.device
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
+                                                                       num_actual_reqs
+                                                                       + 1]
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
+        new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[
