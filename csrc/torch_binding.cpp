@@ -815,9 +815,11 @@ constexpr int64_t EXPERT_TOKENS_COUNT = 1;
 constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
 constexpr int64_t QUANT_MODE_UNQUANT = -1;
 constexpr int64_t QUANT_MODE_DYNAMIC_QUANT = 1;
+constexpr int64_t CUMSUM = 0;
+constexpr int64_t COUNT = 1;
+constexpr int64_t KEY_VALUE = 2;
 
-using npu_preparation = at_npu::native::OpPreparation;
-using npu_utils = at_npu::native::NpuUtils;
+
 using tensor_list = std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>;
 
 tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &expert_idx,
@@ -844,8 +846,6 @@ tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &exper
     int expert_length = active_expert_range[1] - active_expert_range[0];
     auto x_size = x.sizes();
     auto expert_idx_size = expert_idx.sizes();
-    const at::Tensor &p_scale = c10::value_or_else(scale, [] { return at::Tensor(); });
-    const at::Tensor &p_offset = c10::value_or_else(offset, [] { return at::Tensor(); });
 
     int bs = x_size[0];
     int h = x_size[1];
@@ -855,48 +855,46 @@ tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &exper
 
     if (drop_pad_mode == 1) { // Drop/Pad
         if (quant_mode == QUANT_MODE_UNQUANT) {
-            expanded_x = npu_preparation::apply_tensor_without_format(x, {expert_num, expert_capacity, h});
+            expanded_x = at::empty({expert_num, expert_capacity, h}, x.options());
         } else {
-            expanded_x = npu_preparation::apply_tensor_without_format({expert_num, expert_capacity, h}, x.options().dtype(at::kChar));
+            expanded_x = at::empty({expert_num, expert_capacity, h}, x.options().dtype(at::kChar));
         }
         expanded_scale_len = expert_num * expert_capacity;
     } else { // Dropless / Active
         if (active_num > 0) { // Active
             int64_t num_out_tokens = std::min((int64_t)bs * k, active_num);
             if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = npu_preparation::apply_tensor_without_format(x, {num_out_tokens, h});
+                expanded_x = at::empty({num_out_tokens, h}, x.options());
             } else {
-                expanded_x = npu_preparation::apply_tensor_without_format({num_out_tokens, h}, x.options().dtype(at::kChar));
+                expanded_x = at::empty({num_out_tokens, h}, x.options().dtype(at::kChar));
             }
             expanded_scale_len = num_out_tokens;
         } else { // Dropless
             if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = npu_preparation::apply_tensor_without_format(x, {bs * k, h});
+                expanded_x = at::empty({bs * k, h}, x.options());
             } else {
-                expanded_x = npu_preparation::apply_tensor_without_format({bs * k, h}, x.options().dtype(at::kChar));
+                expanded_x = at::empty({bs * k, h}, x.options().dtype(at::kChar));
             }
             expanded_scale_len = bs * k;
         }
     }
 
-    at::Tensor expanded_row_idx = npu_preparation::apply_tensor_without_format(expert_idx, {bs * k});
+    at::Tensor expanded_row_idx = at::empty({bs * k}, expert_idx.options());
     at::Tensor expert_tokens_count_or_cumsum;
     if (expert_tokens_num_type >= CUMSUM && expert_tokens_num_type <= COUNT) {
         // expert_tokens_count_or_cumsum in [end-start, ]
-        expert_tokens_count_or_cumsum =
-            npu_preparation::apply_tensor_without_format({expert_length}, x.options().dtype(at::kLong));
+        expert_tokens_count_or_cumsum = at::empty({expert_length}, x.options().dtype(at::kLong));
     } else if (expert_tokens_num_type == KEY_VALUE) {
         // key_value in [2, end-start]
-        expert_tokens_count_or_cumsum =
-            npu_preparation::apply_tensor_without_format({expert_num, 2}, x.options().dtype(at::kLong));
+        expert_tokens_count_or_cumsum = at::empty({expert_num, 2}, x.options().dtype(at::kLong));
     }
 
-    at::Tensor expanded_scale = npu_preparation::apply_tensor_without_format({expanded_scale_len}, x.options().dtype(at::kFloat));
+    at::Tensor expanded_scale = at::empty({expanded_scale_len}, x.options().dtype(at::kFloat));
     EXEC_NPU_CMD(aclnnMoeInitRoutingV3,
         x,
         expert_idx,
-        p_scale,
-        p_offset,
+        scale,
+        offset,
         active_num,
         expert_capacity,
         expert_num,

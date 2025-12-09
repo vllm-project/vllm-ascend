@@ -278,6 +278,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_routing_v3_m
     constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
     constexpr int64_t QUANT_MODE_UNQUANT = -1;
     constexpr int64_t QUANT_MODE_DYNAMIC_QUANT = 1;
+    constexpr int64_t CUMSUM = 0;
+    constexpr int64_t COUNT = 1;
+    constexpr int64_t KEY_VALUE = 2;
 
     if (active_expert_range.empty()) {
         active_expert_range =  at::IntArrayRef({0, expert_num});
@@ -376,5 +379,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
+    // MoE dispatch-ffn-combine
+    ops.impl("npu_moe_init_routing_v2", &vllm_ascend::meta::moe_init_routing_v3_meta);
 }
 }
