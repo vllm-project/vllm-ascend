@@ -18,7 +18,7 @@ from typing import Optional
 
 import torch
 import triton
-import triton.language as tl
+import triton.language as tl # type: ignore
 import triton.runtime.driver as driver
 from vllm.utils.torch_utils import direct_register_custom_op
 
