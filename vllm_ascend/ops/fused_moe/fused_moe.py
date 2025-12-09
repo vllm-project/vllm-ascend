@@ -176,6 +176,7 @@ class AscendFusedMoE(FusedMoE):
         # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
         # workaround to bypass a quantization check that fails with float weights.
         init_eplb_enable = False
+        num_experts+=1 if getattr(self.ascend_config, "mix_placement",False) else 0
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -183,8 +184,8 @@ class AscendFusedMoE(FusedMoE):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, num_experts)
             self.expert_load_balancer.check_expert_map_tensor()
-            # self.global_redundant_expert_num = (
-            #     self.expert_load_balancer.get_global_redundant_expert_num())
+            self.global_redundant_expert_num = (
+                self.expert_load_balancer.get_global_redundant_expert_num())
             self.global_num_experts = num_experts + self.global_redundant_expert_num
             try:
                 self.local_num_experts, self.expert_map = (
