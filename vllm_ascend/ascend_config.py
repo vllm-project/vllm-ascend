@@ -186,7 +186,7 @@ class AscendConfig:
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
         if self.enable_npugraph_ex:
-            raise AssertionError(
+            raise NotImplementedError(
                 "This feature is still in the experiment and will be supported soon."
             )
         kv_cfg = vllm_config.kv_transfer_config

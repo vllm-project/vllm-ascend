@@ -32,8 +32,6 @@ def _register_replacement(epsilon):
             'When there is no torch_npu in the env, skip fusion.')
         return
 
-    import torchair
-
     def _extra_stream_scope_check(match: Match) -> bool:
         """
         Checks if all nodes in the same stream.
@@ -49,7 +47,7 @@ def _register_replacement(epsilon):
                 else:
                     non_default_streams.add(current_stream)
                     if len(non_default_streams) > 1:
-                        torchair.logger.debug(
+                        logger.debug(
                             f"Cross-stream operation detected in pattern match for AddRMSNormQuant. "
                             f"Multiple streams found: {non_default_streams}. "
                             f"Fusion is not supported for cross-stream operations."
@@ -57,7 +55,7 @@ def _register_replacement(epsilon):
                         return False
 
         if has_default and len(non_default_streams) > 0:
-            torchair.logger.debug(
+            logger.debug(
                 f"Cross-stream operation detected in pattern match for AddRMSNormQuant. "
                 f"Multiple streams found: {non_default_streams}. "
                 f"Fusion is not supported for cross-stream operations.")
@@ -107,6 +105,8 @@ def _register_replacement(epsilon):
         scale = torch.tensor([1.0], device="npu")
         offset = torch.tensor([0.0], device="npu")
         return [rms_norm_input, residual, rms_norm_weight, scale, offset]
+
+    import torchair
 
     torchair.register_replacement(search_fn=pattern,
                                   replace_fn=replacement,

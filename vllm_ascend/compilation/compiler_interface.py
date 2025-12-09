@@ -93,12 +93,17 @@ def npugraph_ex_compile(
 
     import torchair
 
+    # TODO: use a better way to lazy register replacement, instead of import one by one
+    # As an example, we directly import here to register replacement.
     import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
+    # use aclgraph mode
     config.mode = "reduce-overhead"
+    # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
+    # static kernel switch, suitable for static shapes or scenes with less shape changes.
     config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
