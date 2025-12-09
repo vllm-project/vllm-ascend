@@ -44,12 +44,13 @@ jobs:
     with:
       vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
   changes:
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6.0.1
+      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
