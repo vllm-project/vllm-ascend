@@ -120,7 +120,7 @@ def test_sp_for_qwen3_moe() -> None:
                     },
                     enable_expert_parallel=True,
                     enforce_eager=True) as vllm_model:
-                        vllm_model.generate(example_prompts, sampling_params)
+        vllm_model.generate(example_prompts, sampling_params)
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
