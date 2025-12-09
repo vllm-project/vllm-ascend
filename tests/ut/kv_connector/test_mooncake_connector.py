@@ -175,6 +175,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
             kv_caches_base_addr=[12345678],
             num_blocks=2,
         )
+        vllm_config = MockVllmConfig()
         host = "127.0.0.1"
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
@@ -186,6 +187,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
                                       side_channel_host=host,
                                       side_channel_port=base_port,
                                       metadata=metadata,
+                                      vllm_config=vllm_config,
                                       ready_event=ready_event,
                                       kv_caches={},
                                       pcp_rank=0)
