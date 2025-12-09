@@ -40,7 +40,7 @@ export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_ASCEND_LLMDD_RPC_PORT=5559
 
 vllm serve /models/deepseek_r1_w8a8 \
@@ -80,7 +80,7 @@ export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_ASCEND_LLMDD_RPC_PORT=5659
 
 vllm serve /models/deepseek_r1_w8a8 \
@@ -123,7 +123,7 @@ export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_ASCEND_LLMDD_RPC_PORT=5759
 
 vllm serve /models/deepseek_r1_w8a8 \
@@ -164,7 +164,7 @@ export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_ASCEND_LLMDD_RPC_PORT=5859
 
 vllm serve /models/deepseek_r1_w8a8 \
