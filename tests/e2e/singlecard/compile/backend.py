@@ -16,67 +16,11 @@
 #
 from copy import deepcopy
 from typing import Any, Callable, List, Optional, Sequence
-
-import pytest
-import torch
 import torch.fx as fx
-import torch.nn as nn
-import torch_npu
-import vllm.config
 from torch._inductor.decomposition import select_decomp_table
 from vllm.compilation.fx_utils import OpOverload
-from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
-
+from vllm.config import get_current_vllm_config
 from vllm_ascend.compilation.compiler_interface import compile_fx
-from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
-    AddRMSNormQuantFusionPass
-
-
-class TestModel(nn.Module):
-    """
-    A minimal test model that simulates the pattern:
-        AddRMSNorm → Quantization
-    """
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6, device="npu"):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.eps = eps
-        self.rms_norm_weight = nn.Parameter(
-            torch.randn(hidden_size, device=device))
-        self.quant_scale = torch.tensor([1.0], device=device)
-        self.quant_offset = torch.tensor([0.0], device=device)
-
-    def forward(self, x):
-        """
-        Forward pass:
-          1. Perform npu_add_rms_norm
-          2. Quantize the normalized output to int8
-        Returns both quantized output and updated residual.
-        """
-        residual = torch.zeros_like(x)
-
-        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.rms_norm_weight, self.eps)
-
-        quantized_output = torch_npu.npu_quantize(norm_output,
-                                                  self.quant_scale,
-                                                  self.quant_offset,
-                                                  torch.qint8, -1, False)
-
-        return quantized_output, new_residual
-
-    def ops_in_model_before(self) -> List[OpOverload]:
-        """Return the list of expected operators BEFORE fusion."""
-        return [
-            torch.ops.npu.npu_add_rms_norm.default,
-            torch.ops.npu.npu_quantize.default
-        ]
-
-    def ops_in_model_after(self) -> List[OpOverload]:
-        """Return the list of expected operators AFTER successful fusion."""
-        return [torch.ops.npu.npu_add_rms_norm_quant.default]
-
 
 class TestBackend:
     """
@@ -85,14 +29,12 @@ class TestBackend:
     records the FX graph before and after the transformation.
     """
 
-    def __init__(self):
+    def __init__(self, custom_passes: Optional[List[Any]] = None):
         vllm_config = get_current_vllm_config()
         compile_config = vllm_config.compilation_config
-        self.custom_passes = [
-            AddRMSNormQuantFusionPass(vllm_config=vllm_config)
-        ]
         self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config["graph_fusion_manager"] = self.post_pass
+        self.custom_passes = custom_passes
 
         # Placeholders to store FX graphs for verification
         self.graph_pre_pass = None
@@ -180,40 +122,3 @@ class TestBackend:
             num_post = len(self.find_nodes_by_target(self.graph_post_pass, op))
             print(f"Op {op}: post={num_post}")
             assert num_post > 0, f"Op {op} not found in post-pass graph"
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("hidden_size", [64])
-@pytest.mark.parametrize("num_tokens", [257])
-@pytest.mark.parametrize("eps", [1e-5, 1e-6])
-def test_rmsnorm_quant_fusion(dtype: torch.dtype, hidden_size: int,
-                              num_tokens: int, eps: float):
-    """
-    End-to-end test for AddRMSNorm+Quantize fusion.
-    Compares: Operator presence/absence before and after graph transformation
-    """
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(1)
-
-    vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
-
-    with vllm.config.set_current_vllm_config(vllm_config):
-        backend = TestBackend()
-        model = TestModel(hidden_size, eps, device="npu")
-        model = model.to("npu")
-
-        x = torch.rand(num_tokens,
-                       hidden_size,
-                       device="npu",
-                       dtype=dtype,
-                       requires_grad=False)
-
-        result_unfused = model(x)
-        print("Unfused result:", [t.shape for t in result_unfused])
-        model_fused = torch.compile(model, backend=backend)
-        result_fused = model_fused(x)
-        print("Fused result:", [t.shape for t in result_fused])
-
-        print("=== Checking operator fusion ===")
-        backend.check_before_ops(model.ops_in_model_before())
-        backend.check_after_ops(model.ops_in_model_after())
