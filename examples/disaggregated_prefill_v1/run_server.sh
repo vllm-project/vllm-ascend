@@ -5,7 +5,7 @@ export HCCL_SOCKET_IFNAME="enp48s3u1u1"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=path-to-rank-table
 
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 
 vllm serve model_path \
   --host 0.0.0.0 \
