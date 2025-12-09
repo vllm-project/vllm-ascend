@@ -35,6 +35,7 @@ class MooncakeBackend(Backend):
                                                             device_name=None)
             self.local_seg = local_hostname + ":" + str(
                 transfer_engine.get_rpc_port())
+            logger.info(f"local_buffer_size: {self.config.local_buffer_size}")
             ret = self.store.setup(self.local_seg, self.config.metadata_server,
                                    self.config.global_segment_size,
                                    self.config.local_buffer_size,
@@ -95,8 +96,7 @@ class MooncakeStoreConfig:
                 config.get("global_segment_size",
                            DEFAULT_GLOBAL_SEGMENT_SIZE)),
             local_buffer_size=_parse_global_segment_size(
-                config.get("local_buffer_size",
-                            DEFAULT_LOCAL_BUFFER_SIZE)),
+                config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"))
