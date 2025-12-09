@@ -1035,6 +1035,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # pcp situation.
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
+        # Only calls in PrefillNoCache situation
+        # and when TI-consistency switch is ON.
         if attn_state == AscendAttentionState.PrefillNoCache and \
                 envs_ascend.TRAIN_INFER_CONSISTENCY:
             num_reqs = self.input_batch.num_reqs
