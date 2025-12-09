@@ -3316,7 +3316,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
-                if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                if self.speculative_config and self.speculative_config.method == 'mtp':
                     assert isinstance(self.drafter, MtpProposer), \
                         f"drafter type wrong: {type(self.drafter)}"
                     assert isinstance(self.drafter.model, (DeepSeekMTP, ACLGraphWrapper)), \

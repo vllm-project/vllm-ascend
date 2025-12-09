@@ -35,6 +35,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
         self.mtp_instance = mtp_instance
+        self.mtp_param_dict = dict(self.mtp_instance.named_parameters())
         self.num_mtp_layers = num_mtp_layers
         if self.model.config.model_type == "qwen3_moe":
             self.num_dense_layers = 0
@@ -56,15 +57,32 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.model.model.layers[i].mlp.experts.w13_weight_scale_fp32_list
             self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w2_weight_scale_list"] = \
                 self.model.model.layers[i].mlp.experts.w2_weight_scale_list
+ 
+        for i in range(self.num_mtp_layers):
+            layer_idx = self.num_dense_layers + self.num_moe_layers + i
+                                              
+            self.mtp_param_dict["model.layers." + str(layer_idx) + ".mtp_block.mlp.experts." + "w13_weight_list"] = \
+                self.mtp_instance.model.layers[str(layer_idx)].mtp_block.mlp.experts.w13_weight_list
+            self.mtp_param_dict["model.layers." + str(layer_idx) + ".mtp_block.mlp.experts." + "w2_weight_list"] = \
+                self.mtp_instance.model.layers[str(layer_idx)].mtp_block.mlp.experts.w2_weight_list
+            self.mtp_param_dict["model.layers." + str(layer_idx) + ".mtp_block.mlp.experts." + "w13_weight_scale_fp32_list"] = \
+                self.mtp_instance.model.layers[str(layer_idx)].mtp_block.mlp.experts.w13_weight_scale_fp32_list   
+            self.mtp_param_dict["model.layers." + str(layer_idx) + ".mtp_block.mlp.experts." + "w2_weight_scale_list"] = \
+                self.mtp_instance.model.layers[str(layer_idx)].mtp_block.mlp.experts.w2_weight_scale_list 
+
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
-        if self.model.quant_config is not None:
-            self.expert_weight_names = [
+        if self.mtp_instance is not None:
+            if any("w13_weight_offset" in name
+                   for name, _ in self.mtp_instance.named_parameters()):
+                self.mtp_expert_weight_names = [
                 "w13_weight_list", "w2_weight_list",
                 "w13_weight_scale_fp32_list", "w13_weight_offset",
                 "w2_weight_scale_list", "w2_weight_offset"
             ]
+            else:
+                self.mtp_expert_weight_names = ["w13_weight", "w2_weight"]
         else:
-            self.expert_weight_names = ["w13_weight", "w2_weight"]
+            self.mtp_expert_weight_names = []
 
         if self.mtp_instance is not None:
             if any("w13_weight_offset" in name
@@ -157,24 +175,27 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
         if self.mtp_instance is not None:
-            mtp_param_dict = dict(self.mtp_instance.named_parameters())
-            for mtp_layer_idx in range(self.num_mtp_layers):
-                self.expert_param_per_layer[self.num_dense_layers +
-                                            self.num_moe_layers +
-                                            mtp_layer_idx] = list()
-            for local_expert_id in range(num_local_expert):
-                for mtp_layer_idx in range(self.num_mtp_layers):
-                    self.expert_param_per_layer[
-                        self.num_dense_layers + self.num_moe_layers +
-                        mtp_layer_idx].append([
-                            mtp_param_dict["model.layers." +
-                                           str(self.num_dense_layers +
-                                               self.num_moe_layers +
-                                               mtp_layer_idx) +
-                                           ".mtp_block.mlp.experts." +
-                                           name].data[local_expert_id]
-                            for name in self.mtp_expert_weight_names
-                        ])
+            for mtp_layer_id in range(self.num_mtp_layers):
+                layer_idx = self.num_dense_layers + self.num_moe_layers + mtp_layer_id
+                self.expert_param_per_layer[layer_idx] = list()
+                for local_expert_id in range(num_local_expert):
+                    per_expert_param = list()
+                    for name in self.mtp_expert_weight_names:
+                        if name in [
+                                "w13_weight_list", "w2_weight_list",
+                                "w13_weight_scale_fp32_list",
+                                "w2_weight_scale_list"
+                        ]:
+                            per_expert_param.append(
+                                self.mtp_param_dict["model.layers." + str(layer_idx) +
+                                                ".mtp_block.mlp.experts." +
+                                                name][local_expert_id])
+                        else:
+                            per_expert_param.append(
+                                self.mtp_param_dict["model.layers." + str(layer_idx) +
+                                                ".mtp_block.mlp.experts." +
+                                                name][0].data[local_expert_id])
+                    self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
         self.moe_load = self.model.get_all_moe_loads()
