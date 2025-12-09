@@ -42,6 +42,7 @@ class EplbUpdator:
                                if self.adaptor.mtp_instance is None else
                                self.adaptor.num_moe_layers + num_mtp_layers)
         self.global_expert_num = self.adaptor.global_expert_num
+        self.total_iterations = self.num_iterations_eplb_update + self.num_wait_worker_iterations + self.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -51,6 +52,7 @@ class EplbUpdator:
         EPLBParamUtils.check_iterations(self.num_iterations_eplb_update)
         self.expert_map_path = expert_map_path
         self.expert_map_record_path = self.ascend_config.expert_map_record_path
+        self.eplb_counter = 0
 
         try:
             if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
@@ -90,11 +92,15 @@ class EplbUpdator:
             if self.adaptor.mtp_instance is not None:
                 self.adaptor.mtp_instance.model.clear_all_moe_loads()
             if not self.gate_eplb:
+                self.eplb_counter += 1
                 self.cur_iterations = 0
 
     def get_update_info_flag(self):
         return self.cur_iterations == (self.num_iterations_eplb_update +
                                        self.num_wait_worker_iterations - 1)
+
+    def moe_load_dump_flag(self):
+        return (self.eplb_counter * self.total_iterations + self.cur_iterations) % 100 == 0
 
     def wakeup_eplb_worker_flag(self):
         return self.cur_iterations == (self.num_iterations_eplb_update - 1)
@@ -146,6 +152,9 @@ class EplbUpdator:
             self.compute_and_set_moe_load(is_clear=True)
             self.wakeup_eplb_worker()
 
+        if self.moe_load_dump_flag():
+            self.compute_and_set_moe_load()
+
         if self.update_expert_weight_flag(
         ) and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
@@ -169,6 +178,9 @@ class EplbUpdator:
 
             moe_load = self._gather_buffer.permute(1, 0, 2)
             self.shared_dict["moe_load"] = moe_load.cpu()
+            moe_load_cpu = moe_load.cpu()
+            if dist.get_rank() == 0:
+                numpy.save(f"/xx/moe_load_{self.eplb_counter * self.total_iterations + self.cur_iterations}.npy", moe_load_cpu.numpy())
             logger.debug(
                 f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
             )
