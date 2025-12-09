@@ -36,7 +36,10 @@ from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
 PAD_CACHE_THRESHOLD = 128  
 
 
-def fast_pad_with_buffer(buffer_ref: torch.Tensor | None, target_pad_len: int, data_ref: torch.Tensor):
+def fast_pad_with_buffer(buffer_ref: torch.Tensor | None, 
+                         target_pad_len: int, 
+                         data_ref: torch.Tensor,
+                         last_num_tokens: int):
     """
     Optimization for NPU small-batch padding:
     We cache a small buffer to avoid overhead from nn.functional.pad (~50us)
@@ -46,7 +49,7 @@ def fast_pad_with_buffer(buffer_ref: torch.Tensor | None, target_pad_len: int, d
     expect_shape = (target_pad_len, dim)
     if buffer_ref is None or buffer_ref.shape != expect_shape:
         buffer_ref = torch.zeros(expect_shape, device=data_ref.device, dtype=data_ref.dtype)
-    else:
+    elif num_tokens < last_num_tokens:
         buffer_ref[num_tokens:].zero_()
     buffer_ref[:num_tokens].copy_(data_ref.contiguous())
     return buffer_ref
@@ -231,6 +234,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         self._restore_tp_across_dp()
         self.pad_buffer_hidden = None
         self.pad_buffer_logits = None
+        self.last_buffer_num_tokens = 0
 
     def _restore_tp_across_dp(self):
         """
@@ -281,9 +285,14 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             if pad_size > 0 and not self.enable_shared_expert_dp:
                 if target_pad_length <= PAD_CACHE_THRESHOLD:
                     hidden_states = self.pad_buffer_hidden = fast_pad_with_buffer(self.pad_buffer_hidden, 
-                                                                                  target_pad_length, hidden_states)
+                                                                                  target_pad_length, 
+                                                                                  hidden_states, 
+                                                                                  self.last_buffer_num_tokens)
                     router_logits = self.pad_buffer_logits = fast_pad_with_buffer(self.pad_buffer_logits, 
-                                                                                  target_pad_length, router_logits)
+                                                                                  target_pad_length, 
+                                                                                  router_logits, 
+                                                                                  self.last_buffer_num_tokens)
+                    self.last_buffer_num_tokens = self.num_tokens
                 else:
                     hidden_states = nn.functional.pad(hidden_states,
                                                       (0, 0, 0, pad_size))
@@ -479,5 +488,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
+
 
 
