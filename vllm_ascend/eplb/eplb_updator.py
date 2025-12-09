@@ -100,7 +100,8 @@ class EplbUpdator:
                                        self.num_wait_worker_iterations - 1)
 
     def moe_load_dump_flag(self):
-        return (self.eplb_counter * self.total_iterations + self.cur_iterations) % 100 == 0
+        #return (self.eplb_counter * self.total_iterations + self.cur_iterations) % 100 == 0
+        return self.cur_iterations % 1000 == 0
 
     def wakeup_eplb_worker_flag(self):
         return self.cur_iterations == (self.num_iterations_eplb_update - 1)
@@ -180,7 +181,7 @@ class EplbUpdator:
             self.shared_dict["moe_load"] = moe_load.cpu()
             moe_load_cpu = moe_load.cpu()
             if dist.get_rank() == 0:
-                numpy.save(f"/xx/moe_load_{self.eplb_counter * self.total_iterations + self.cur_iterations}.npy", moe_load_cpu.numpy())
+                numpy.save(f"/xx/moe_load_{self.cur_iterations}.npy", moe_load_cpu.numpy())
             logger.debug(
                 f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
             )
