@@ -19,6 +19,7 @@
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import NgramProposer
+from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 
 
@@ -31,10 +32,12 @@ def get_spec_decode_method(method,
         return NgramProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3"):
         return EagleProposer(vllm_config, device, runner)
-    elif method in ('deepseek_mtp', 'qwen3_next_mtp'):
+    elif method == "mtp":
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
         return MtpProposer(vllm_config, device, runner)
+    elif method == 'suffix':
+        return SuffixDecodingProposer(vllm_config, device, runner)
     else:
         raise ValueError("Unknown speculative decoding method: "
                          f"{method}")

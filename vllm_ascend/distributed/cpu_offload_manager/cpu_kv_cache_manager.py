@@ -2,7 +2,8 @@ import time
 from collections import defaultdict
 from typing import Optional
 
-from vllm.utils import logger, sha256
+from vllm.logger import logger
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          PrefixCachingMetrics)

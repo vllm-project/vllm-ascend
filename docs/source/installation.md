@@ -157,11 +157,13 @@ cd ..
 # Install vLLM Ascend.
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+git submodule update --init --recursive
 pip install -v -e .
 cd ..
 ```
 
 vllm-ascend will build custom operators by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has Internet access.
 :::
 
 ```{note}

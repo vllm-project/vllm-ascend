@@ -247,6 +247,7 @@ def enable_custom_op():
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
+
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
@@ -470,6 +471,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
+    if not vllm_config.model_config:
+        logger.warning(
+            "Got empty model config. This typically occurs when an empty vllm_config is "
+            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+        )
+
+        return
     hf_config = vllm_config.model_config.hf_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
@@ -563,26 +571,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
 
-    # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
-    # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
-    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
-    if vllm_config.speculative_config is not None and \
-        vllm_config.speculative_config.num_speculative_tokens > 1:
-        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        original_sizes, compilation_config.cudagraph_capture_sizes = \
-            compilation_config.cudagraph_capture_sizes, None
-        assert len(original_sizes) > 0
-        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
-            enlarged_sizes = [(num_speculative_tokens + 1) * size
-                              for size in original_sizes]
-            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
-            logger.info(
-                "Adjusted ACL graphs: %s → %s for speculative decoding",
-                original_sizes, enlarged_sizes)
-        else:
-            compilation_config.cudagraph_capture_sizes = original_sizes
-
 
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
@@ -648,7 +636,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
@@ -658,6 +645,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendQKVParallelLinear,
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
+    from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
         AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
@@ -758,19 +746,24 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
-def enable_sp(vllm_config=None) -> bool:
+def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
         if vllm_config is None:
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.
-            enable_sequence_parallelism
+            vllm_config.compilation_config.pass_config.enable_sp
             or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+        if not _ENABLE_SP and enable_shared_expert_dp:
+            _ENABLE_SP = True
+            logger.info(
+                "shared_expert_dp requires enable_sp = True. has set enable_sp to True"
+            )
 
         if not _ENABLE_SP:
             return _ENABLE_SP
@@ -817,7 +810,7 @@ def _is_contain_expert(config: Any):
 def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
-    if _IS_VL_MODEL is None and vllm_config.model_config:
+    if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         model_configs = vllm_config.model_config.hf_config.to_dict()
         _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
     return _IS_VL_MODEL
@@ -898,6 +891,9 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
+        "ep": {
+            "hccl_buffer_size": calculate_ep_buffer_size()
+        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -917,6 +913,30 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+def calculate_ep_buffer_size() -> int:
+    """
+    formula of ep buffer size:
+    batch_size * hidden_size * topk * 4
+    """
+    ep_buffer_size = _DEFAULT_BUFFER_SIZE
+    try:
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        hf_config = vllm_config.model_config.hf_config
+
+        hidden_size = hf_config.hidden_size
+        topk = getattr(hf_config, "num_experts_per_token", 1)
+        batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        int8_size = torch.iinfo(torch.int8).bits // 8
+        bf16_size = torch.finfo(torch.bfloat16).bits // 8
+        ep_buffer_size = math.ceil(
+            (batch_size * hidden_size * topk *
+             (int8_size * 2 + bf16_size)) / (1024 * 1024))
+    except Exception:
+        pass
+    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
@@ -948,7 +968,7 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     if not flashcomm2_enable():
-        logger.info("FLASHCOMM2 not enable.")
+        logger.debug("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size
 
     logger.info(
@@ -1001,3 +1021,41 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+
+def refresh_block_size(vllm_config):
+    """
+    Refresh the block size in cache config.
+    """
+    cache_config = vllm_config.cache_config
+    scheduler_config = vllm_config.scheduler_config
+    model_config = vllm_config.model_config
+
+    if not cache_config:
+        return
+
+    if cache_config.block_size is None:
+        cache_config.block_size = 128
+
+    if not scheduler_config or not model_config:
+        return
+
+    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
+    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
+            logger.info(
+                "Block size is set to 128 if prefix cache or chunked prefill is enabled."
+            )
+            cache_config.block_size = 128
+
+
+def dispose_layer(layer: Any):
+    for attr_name in dir(layer):
+        attr_value = getattr(layer, attr_name)
+        if isinstance(attr_value, torch.Tensor):
+            dispose_tensor(attr_value)
+
+
+def replace_layer(original_layer: Any, new_layer: Any):
+    original_layer.__class__ = new_layer.__class__
+    original_layer.__dict__ = new_layer.__dict__
