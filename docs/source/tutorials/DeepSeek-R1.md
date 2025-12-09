@@ -107,9 +107,8 @@ vllm serve /weights/DeepSeek-R1-W8A8 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.92 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
+  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
@@ -155,9 +154,8 @@ vllm serve /weights/DeepSeek-R1-W8A8 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
+  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' 
 ```
 
@@ -201,9 +199,8 @@ vllm serve /weights/DeepSeek-R1-W8A8 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
+  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
