@@ -185,24 +185,21 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           group_name="lmheadtp")
 
     def _create_shared_weight_group(group_name: str) -> GroupCoordinator:
-        # when global dp size is 1, shared weight group is same as tp group
-        if global_dp_size == 1:
-            return get_tp_group()
-        else:  # when global dp size > 1, need to create new group
-            group_ranks = []
-            for pp_idx in range(global_pp_size):
-                group = []
-                for dp_idx in range(global_dp_size):
-                    base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
-                    for i in range(global_tp_size):
-                        global_rank = base + i
-                        group.append(global_rank)
-                group_ranks.append(group)
+        #This communication domain is used for asynchronous broadcasting, so we will create a new communication group to avoid interference
+        group_ranks = []
+        for pp_idx in range(global_pp_size):
+            group = []
+            for dp_idx in range(global_dp_size):
+                base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
+                for i in range(global_tp_size):
+                    global_rank = base + i
+                    group.append(global_rank)
+            group_ranks.append(group)
 
-            return init_model_parallel_group(group_ranks,
-                                             get_world_group().local_rank,
-                                             backend,
-                                             group_name=group_name)
+        return init_model_parallel_group(group_ranks,
+                                         get_world_group().local_rank,
+                                         backend,
+                                         group_name=group_name)
 
     global _SHARED_WEIGHT
     # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
