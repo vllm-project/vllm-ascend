@@ -1,6 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from vllm_ascend.worker.worker_v1 import NPUWorker
+from vllm_ascend.xlite.xlite_model_runner import XliteModelRunner
 
-import os
 
-import vllm_ascend.patch.platform.patch_distributed  # noqa
-import vllm_ascend.patch.platform.patch_ec_connector  # noqa
-import vllm_ascend.patch.platform.patch_mamba_config  # noqa
-import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+class XliteWorker(NPUWorker):
+    """Xlite worker bases on NPUWorker. Only xlite specified code should be added in this class."""
 
-if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-        "EXPERT_MAP_RECORD", "false") == "true":
-    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+    def init_device(self):
+        """Override init_device to init xlite model runner"""
+        self.device = self._init_device()
+        self.model_runner = XliteModelRunner(self.vllm_config, self.device)

@@ -28,6 +28,37 @@ def _check_torchair_supported(model_type: str):
     return False
 
 
+def check_kv_extra_config(vllm_config):
+
+    def _check(name: str, config: dict):
+        tp_key = "tp_size"
+        dp_key = "dp_size"
+        if tp_key in config:
+            config_tp = config[tp_key]
+            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
+            if config_tp != vllm_tp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
+                    f"Expected {vllm_tp}, but got {config_tp}.")
+        if dp_key in config:
+            config_dp = config[dp_key]
+            vllm_dp = vllm_config.parallel_config.data_parallel_size
+            if config_dp != vllm_dp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting data parallel size. "
+                    f"Expected {vllm_dp}, but got {config_dp}.")
+
+    if vllm_config.kv_transfer_config.is_kv_producer:
+        _check(
+            "prefill",
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {}))
+    if vllm_config.kv_transfer_config.is_kv_consumer:
+        _check(
+            "decode",
+            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -40,6 +71,10 @@ class AscendConfig:
 
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
+
+        xlite_graph_config = additional_config.get("xlite_graph_config", {})
+        self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
+                                                   vllm_config)
 
         ascend_compilation_config = additional_config.get(
             "ascend_compilation_config", {})
@@ -112,6 +147,10 @@ class AscendConfig:
                 )
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
+
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -253,6 +292,29 @@ class TorchairGraphConfig:
             raise RuntimeError(
                 "use_cached_kv_cache_bytes is valid only when Torchair graph mode and use_cached_graph are enabled"
             )
+
+
+class XliteGraphConfig:
+    """
+    Configuration Object for xlite_graph_config from additional_config
+    """
+
+    def __init__(self, xlite_graph_config, vllm_config):
+        self.enabled = xlite_graph_config.get("enabled", False)
+        self.full_mode = xlite_graph_config.get("full_mode", False)
+        if self.enabled:
+            if bool(vllm_config.speculative_config):
+                raise RuntimeError(
+                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
+                )
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                raise RuntimeError(
+                    "Xlite graph mode is not compatible with pipeline parallelism. Please set pipeline_parallel_size to 1."
+                )
+            if vllm_config.cache_config.block_size != 128:
+                raise RuntimeError(
+                    "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
+                )
 
 
 class DumpConfig:
