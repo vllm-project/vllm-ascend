@@ -118,6 +118,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
     steps:
       - name: Check npu and CANN info
         run: |
