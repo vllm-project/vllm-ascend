@@ -349,4 +349,4 @@ class VllmEplbAdaptor(EplbAdaptor):
             self, "num_dense_layers") else 0
         for layer_id in range(self.num_moe_layers):
             self.model.layers[layer_id +
-                            num_dense_layers].mlp.experts.clear_moe_load()
+                              num_dense_layers].mlp.experts.clear_moe_load()
