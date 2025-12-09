@@ -119,7 +119,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         global_redundant_expert_num: int = 0,
     ):
         quant_mode = 2 if self.with_quant else 0
-        self.physics_num_experts = len(expert_map) + global_redundant_expert_num
+        self.physics_num_experts = len(
+            expert_map) + global_redundant_expert_num
 
         kwargs_mc2 = {
             "x": hidden_states,

@@ -27,8 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
-    get_compressed_expert_map)
+    FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map)
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
     SharedFusedMoE
 
@@ -184,7 +183,8 @@ class AscendFusedMoE(FusedMoE):
 
         # init moe.
         self.local_num_experts, self.expert_map = generate_experts_map(
-            self.ep_size, self.ep_rank, num_experts, self.global_redundant_expert_num)
+            self.ep_size, self.ep_rank, num_experts,
+            self.global_redundant_expert_num)
         # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
         # workaround to bypass a quantization check that fails with float weights.
         init_eplb_enable = False
