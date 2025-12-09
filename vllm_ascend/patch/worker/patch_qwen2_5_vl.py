@@ -76,8 +76,6 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         else:
             q, k, v = qkv.unbind(dim=2)
 
-        # TODO(shen-shanshan): Move codes below to MMEncoderAttention CustomOp
-        # ----------------------------------------------------------------------
         enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
                       and self.hidden_size_per_attention_head > MIN_PAD_SIZE
                       and self.hidden_size_per_attention_head < MAX_PAD_SIZE)
@@ -115,7 +113,6 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         context_layer = einops.rearrange(context_layer,
                                          "(b s) h d -> s b (h d)",
                                          b=batch_size).contiguous()
-        # ----------------------------------------------------------------------
 
         output, _ = self.proj(context_layer)
         return output

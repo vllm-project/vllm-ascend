@@ -548,19 +548,19 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         # x: [2 * b, s, head, head_dim]
         qk = einops.rearrange(
             x, "(two b) s head head_dim -> b s two head head_dim", two=2)
-        # q/k: [b, s, head, head_dim]
+        # q, k: [b, s, head, head_dim]
         q, k = qk[:, :, 0], qk[:, :, 1]
         head_dim = q.shape[-1]
 
+        # cos, sin: [s, head_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
         cos = cos.reshape(1, -1, 1, head_dim)
         sin = sin.reshape(1, -1, 1, head_dim)
-        # cos/sin: [1, s, 1, 2 * head_dim]
+        # cos/sin: [1, s, 1, head_dim]
 
         q = torch_npu.npu_rotary_mul(q, cos, sin)
         k = torch_npu.npu_rotary_mul(k, cos, sin)
 
-        # output: []
         output = torch.cat([q, k], dim=0)
         return output
