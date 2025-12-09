@@ -1,6 +1,6 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify.
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@
  */
 #include "moe_init_routing_v3_tiling.h"
 #include "register/op_def_registry.h"
-
-using Ops::Transformer::OpTiling::TilingBaseClass;
+#include "tiling/tiling_templates_registry.h"
 
 namespace optiling {
 const static int64_t NUM_TWO = 2;
@@ -114,6 +113,41 @@ enum class PerformanceMode : int32_t {
 };
 
 static constexpr int64_t KEY_VALUE_MODE_DIM0_NUM = 2;
+
+#define unlikely(x) __builtin_expect((x), 0)
+
+#define CHECK_FAIL(context, cond, ...)                      \
+    do {                                                    \
+        if (cond) {                                         \
+            OPS_LOG_E(context->GetNodeName(), ##__VA_ARGS__); \
+            return ge::GRAPH_FAILED;                        \
+        }                                                   \
+    } while (0)
+
+#define OP_CHECK_NULL_WITH_CONTEXT(context, ptr)                                                           \
+    do {                                                                                                   \
+        if (unlikely((ptr) == nullptr)) {                                                                  \
+            const char* name = (unlikely(((context) == nullptr) || (context)->GetNodeName() == nullptr)) ? \
+                                   "nil" :                                                                 \
+                                   (context)->GetNodeName();                                               \
+            OPS_LOG_E(name, "%s is nullptr!", #ptr);                                                         \
+            return ge::GRAPH_FAILED;                                                                       \
+        }                                                                                                  \
+    } while (0)
+
+template <typename T1, typename T2>
+static T1 CeilDiv(T1 a, T2 b)
+{
+    if (b == 0) {
+        return 0;
+    }
+    return (a + b - 1) / b;
+}
+
+template <typename T>
+typename std::enable_if <std::is_integral<T>::value, T>::type CeilAlign(T x, T align) {
+  return CeilDiv(x, align) * align;
+}
 
 inline static int64_t CeilLog4(int64_t x)
 {
@@ -274,123 +308,101 @@ void MoeInitRountingV3TilingBase::Reset()
 ge::graphStatus MoeInitRountingV3TilingBase::GetPlatformInfo()
 {  
     auto compileInfoPtr = reinterpret_cast<const MoeInitRoutingV3CompileInfo*>(context_->GetCompileInfo());
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context_, "compile info is null"), return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, compileInfoPtr == nullptr, "fail to get platform info");
     aivNum = compileInfoPtr->aivNum;
     aicoreParams_.blockDim = aivNum;
     aicoreParams_.ubSize = compileInfoPtr->ubSize;
     moeInitRoutingV3TilingData.set_coreNum(aivNum);
-    OP_LOGI(context_, "---PlatformInfo--- aivNum is: %ld, ubSizePlatForm is: %ld ", aivNum, aicoreParams_.ubSize);
+    OPS_LOG_I(context_->GetNodeName(), "---PlatformInfo--- aivNum is: %ld, ubSizePlatForm is: %ld ", aivNum, aicoreParams_.ubSize);
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus MoeInitRountingV3TilingBase::CheckAttr()
 {
-    OP_CHECK_IF(activeExpertRangeListPtr_->GetSize() != ATTR_EXPERT_RANGE_DIM,
-                OP_LOGE(context_, "The dim number of expert_range should be %ld.", ATTR_EXPERT_RANGE_DIM),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, activeExpertRangeListPtr_->GetSize() != ATTR_EXPERT_RANGE_DIM,
+                "The dim number of expert_range should be %ld.", ATTR_EXPERT_RANGE_DIM);
     const int64_t *expertRangeList = reinterpret_cast<const int64_t *>(activeExpertRangeListPtr_->GetData());
     expertStart_ = expertRangeList[0];
     expertEnd_ = expertRangeList[1];
     moeInitRoutingV3TilingData.set_expertStart(expertStart_);
     moeInitRoutingV3TilingData.set_expertEnd(expertEnd_);
     moeInitRoutingV3TilingData.set_actualExpertNum(expertEnd_ - expertStart_);
-    OP_LOGI(context_, "expert_start is: %ld, expert_end is: %ld, actualExpertNum is: %ld ", expertStart_, expertEnd_,
+    OPS_LOG_I(context_->GetNodeName(), "expert_start is: %ld, expert_end is: %ld, actualExpertNum is: %ld ", expertStart_, expertEnd_,
             expertEnd_ - expertStart_);
 
     quantMode_ = *quantModePtr_;
     moeInitRoutingV3TilingData.set_quantMode(quantMode_);
-    OP_LOGI(context_, "quant_mode is: %ld ", quantMode_);
+    OPS_LOG_I(context_->GetNodeName(), "quant_mode is: %ld ", quantMode_);
 
     dropPadMode_ = *dropPadModePtr_;
     moeInitRoutingV3TilingData.set_dropPadMode(dropPadMode_);
-    OP_CHECK_IF((dropPadMode_ != DROP_LESS) && (dropPadMode_ != DROP_PAD), OP_LOGE(context_,
-                "drop_pad_mode should be %ld or %ld", DROP_LESS, DROP_PAD),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, (dropPadMode_ != DROP_LESS) && (dropPadMode_ != DROP_PAD), 
+                "drop_pad_mode should be %ld or %ld", DROP_LESS, DROP_PAD);
 
     rowIdxTytpe_ = *rowIdxTypePtr_;
     moeInitRoutingV3TilingData.set_rowIdxType(rowIdxTytpe_);
-    OP_LOGI(context_, "row_idx_type is: %ld ", rowIdxTytpe_);
+    OPS_LOG_I(context_->GetNodeName(), "row_idx_type is: %ld ", rowIdxTytpe_);
 
     activeNum_ = *activeNumPtr_;
     moeInitRoutingV3TilingData.set_activeNum(activeNum_);
     if (dropPadMode_ == DROP_LESS) {
-        OP_CHECK_IF(activeNum_ < ACTIVE_NUM_MIN_VALUE,
-                OP_LOGE(context_, "active_num should be greater than or equal to 0"),
-                return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, activeNum_ < ACTIVE_NUM_MIN_VALUE,
+                "active_num should be greater than or equal to 0");
     }
     
     n_ = xShapePtr_->GetStorageShape().GetDim(0);
     expertCapacity_ = *expertCapacityPtr_;
     moeInitRoutingV3TilingData.set_expertCapacity(expertCapacity_);
     if (dropPadMode_ == DROP_PAD) {
-        OP_CHECK_IF(expertCapacity_ <= EXPERT_CAPACITY_MIN_VALUE || 
+        CHECK_FAIL(context_,expertCapacity_ <= EXPERT_CAPACITY_MIN_VALUE || 
                     expertCapacity_ > n_,
-                    OP_LOGE(context_, "expert_Capacity should be greater than 0 and less than %ld", n_),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF(rowIdxTytpe_ == SCATTER, OP_LOGE(context_, "rowIdxTytpe should be 0 when droppadmode is 1"),
-                    return ge::GRAPH_FAILED);
+                    "expert_Capacity should be greater than 0 and less than %ld", n_);
+        CHECK_FAIL(context_,rowIdxTytpe_ == SCATTER, "rowIdxTytpe should be 0 when droppadmode is 1");
     }
 
     expertNum_ = *expertNumPtr_;
     moeInitRoutingV3TilingData.set_expertNum(expertNum_);
-    OP_CHECK_IF(expertNum_ <= 0, OP_LOGE(context_, "expert_num should be greater than 0"), return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_,expertNum_ <= 0, "expert_num should be greater than 0");
 
     expertTokensNumType_ = *expertTokensNumTypePtr_;
     moeInitRoutingV3TilingData.set_expertTokensNumType(expertTokensNumType_);
-    OP_CHECK_IF((expertTokensNumType_ != COUNT) && (expertTokensNumType_ != KEY_VALUE) && (expertTokensNumType_ != CUMSUM),
-                OP_LOGE(context_, "expert_tokens_num_type currently not support %ld", expertTokensNumType_),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, (expertTokensNumType_ != COUNT) && (expertTokensNumType_ != KEY_VALUE) && (expertTokensNumType_ != CUMSUM),
+                "expert_tokens_num_type currently not support %ld", expertTokensNumType_);
 
     expertTokensNumFlag_ = *expertTokensNumFlagPtr_;
     if (dropPadMode_ == DROP_PAD && expertTokensNumFlag_) {
-        OP_CHECK_IF(expertTokensNumType_ != COUNT, OP_LOGE(context_, "In DROP_PAD mode and expert_tokens_num_flag is true, expert_tokens_num_type only supports COUNT, but got %ld", expertTokensNumType_),
-            return ge::GRAPH_FAILED);}
+        CHECK_FAIL(context_, expertTokensNumType_ != COUNT, "In DROP_PAD mode and expert_tokens_num_flag is true, expert_tokens_num_type only supports COUNT, but got %ld", expertTokensNumType_);}
     if (expertTokensNumFlag_) {
         moeInitRoutingV3TilingData.set_expertTokensNumFlag(1);
     } else {
         moeInitRoutingV3TilingData.set_expertTokensNumFlag(0);
     }
 
-    OP_CHECK_IF(expertStart_ < 0, OP_LOGE(context_, "expert_start should be greater than or equal to 0"),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(expertStart_ >= expertEnd_, OP_LOGE(context_, "expert_start should be less than expert_end"),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(expertEnd_ > expertNum_,
-                OP_LOGE(context_, "expert_end should be less than or equal to %ld", expertNum_),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, expertStart_ < 0, "expert_start should be greater than or equal to 0");
+    CHECK_FAIL(context_, expertStart_ >= expertEnd_, "expert_start should be less than expert_end");
+    CHECK_FAIL(context_, expertEnd_ > expertNum_, "expert_end should be less than or equal to %ld", expertNum_);
     if (expertTokensNumType_ == KEY_VALUE) {
-        OP_CHECK_IF(expertEnd_ > KV_MODE_EXPERT_IDX_MAX,
-                    OP_LOGE(context_, "expert_end should be less than or equal to %ld in KEY_VALUE mode",
-                            KV_MODE_EXPERT_IDX_MAX),
-                    return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, expertEnd_ > KV_MODE_EXPERT_IDX_MAX, "expert_end should be less than or equal to %ld in KEY_VALUE mode",
+                            KV_MODE_EXPERT_IDX_MAX);
     } else {
-        OP_CHECK_IF(expertEnd_ > EXPERT_IDX_MAX,
-                    OP_LOGE(context_, "expert_end should be less than or equal to %ld", EXPERT_IDX_MAX),
-                    return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, expertEnd_ > EXPERT_IDX_MAX, "expert_end should be less than or equal to %ld", EXPERT_IDX_MAX);
     }
-    OP_CHECK_IF(quantMode_ != UN_QUANT && quantMode_ != DYNAMIC_QUANT && quantMode_ != STATIC_QUANT,
-                OP_LOGE(context_, "quant_mode currently support %ld, %ld or %ld", UN_QUANT, DYNAMIC_QUANT, STATIC_QUANT),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(rowIdxTytpe_ != SCATTER && rowIdxTytpe_ != GATHER,
-                OP_LOGE(context_, "row_idx_type currently support %ld or %ld", SCATTER, GATHER),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, quantMode_ != UN_QUANT && quantMode_ != DYNAMIC_QUANT && quantMode_ != STATIC_QUANT, "quant_mode currently support %ld, %ld or %ld", UN_QUANT, DYNAMIC_QUANT, STATIC_QUANT);
+    CHECK_FAIL(context_, rowIdxTytpe_ != SCATTER && rowIdxTytpe_ != GATHER, "row_idx_type currently support %ld or %ld", SCATTER, GATHER);
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus MoeInitRountingV3TilingBase::CheckInputShape()
 {
     const gert::Shape xShape = xShapePtr_->GetStorageShape();
-    OP_LOGI(context_, "input x shape: %s ", Ops::Base::ToString(xShape).c_str());
+    OPS_LOG_I(context_->GetNodeName(), "input x shape: %s ", ops::Shape2String(xShape).c_str());
     const gert::Shape expertIdxShape = expertIdxShapePtr_->GetStorageShape();
-    OP_LOGI(context_, "input expert_idx shape: %s.", Ops::Base::ToString(expertIdxShape).c_str());
+    OPS_LOG_I(context_->GetNodeName(), "input expert_idx shape: %s.", ops::Shape2String(expertIdxShape).c_str());
 
     // 参数校验
-    OP_CHECK_IF(xShape.GetDimNum() != DIM_TWO, OP_LOGE(context_, "The dim number of x should be %lu.", DIM_TWO),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(expertIdxShape.GetDimNum() != DIM_TWO,
-                OP_LOGE(context_, "The dim number of expert_idx should be %lu.", DIM_TWO), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(xShape.GetDim(0) != expertIdxShape.GetDim(0), OP_LOGE(context_, "Input rows should be same."),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, xShape.GetDimNum() != DIM_TWO, "The dim number of x should be %lu.", DIM_TWO);
+    CHECK_FAIL(context_, expertIdxShape.GetDimNum() != DIM_TWO, "The dim number of expert_idx should be %lu.", DIM_TWO);
+    CHECK_FAIL(context_, xShape.GetDim(0) != expertIdxShape.GetDim(0), context_->GetNodeName(), "Input rows should be same.");
 
     n_ = expertIdxShape.GetDim(0);
     k_ = expertIdxShape.GetDim(1);
@@ -408,70 +420,61 @@ ge::graphStatus MoeInitRountingV3TilingBase::CheckInputShape()
 
     inuptXDtypeSize_ =
         static_cast<int64_t>(ge::GetSizeByDataType(context_->GetInputDesc(INPUT_X_INDEX)->GetDataType()));
-    OP_LOGI(context_, "Input x dtype size is: %ld. ", inuptXDtypeSize_);
+    OPS_LOG_I(context_->GetNodeName(), "Input x dtype size is: %ld. ", inuptXDtypeSize_);
 
     if (quantMode_ == UN_QUANT && scaleShapePtr_ != nullptr) {
         auto scaleShape = scaleShapePtr_->GetStorageShape();
-        OP_LOGI(context_, "input scale shape: %s", Ops::Base::ToString(scaleShape).c_str());
+        OPS_LOG_I(context_->GetNodeName(), "input scale shape: %s", ops::Shape2String(scaleShape).c_str());
         auto scaleDimNum = static_cast<int64_t>(scaleShape.GetDimNum());
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             scaleDimNum != 1, 
-            OP_LOGE(context_, "The dim number of scale should be 1, current is %ld", scaleDimNum),
-            return ge::GRAPH_FAILED);
+            context_->GetNodeName(), "The dim number of scale should be 1, current is %ld", scaleDimNum);
         auto scaleDim0 = static_cast<int64_t>(scaleShape.GetDim(0));
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             scaleDim0 != n_, 
-            OP_LOGE(context_, "The first dim of scale should be n_, current is %ld", scaleDim0),
-            return ge::GRAPH_FAILED);
+            "The first dim of scale should be n_, current is %ld", scaleDim0);
     }
 
     if (quantMode_ == STATIC_QUANT) {
-        OP_CHECK_IF(scaleShapePtr_ == nullptr, OP_LOGE(context_, "scale is null"), return ge::GRAPH_FAILED);
-        OP_CHECK_IF(offsetShapePtr_ == nullptr, OP_LOGE(context_, "offset is null"), return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, scaleShapePtr_ == nullptr, "scale is null");
+        CHECK_FAIL(context_, offsetShapePtr_ == nullptr, "offset is null");
         auto scaleShape = scaleShapePtr_->GetStorageShape();
-        OP_LOGI(context_, "input scale shape: %s", Ops::Base::ToString(scaleShape).c_str());
+        OPS_LOG_I(context_->GetNodeName(), "input scale shape: %s", ops::Shape2String(scaleShape).c_str());
         auto scaleDimNum = static_cast<int64_t>(scaleShape.GetDimNum());
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             scaleDimNum != 1, 
-            OP_LOGE(context_, "The dim number of scale should be 1, current is %ld", scaleDimNum),
-            return ge::GRAPH_FAILED);
+            "The dim number of scale should be 1, current is %ld", scaleDimNum);
         auto scaleDim0 = static_cast<int64_t>(scaleShape.GetDim(0));
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             scaleDim0 != 1, 
-            OP_LOGE(context_, "The first dim of scale should be 1, current is %ld", scaleDim0),
-            return ge::GRAPH_FAILED);
+            "The first dim of scale should be 1, current is %ld", scaleDim0);
         auto offsetShape = offsetShapePtr_->GetStorageShape();
-        OP_LOGI(context_, "input offset shape: %s", Ops::Base::ToString(offsetShape).c_str());
+        OPS_LOG_I(context_->GetNodeName(), "input offset shape: %s", ops::Shape2String(offsetShape).c_str());
         auto offsetDimNum = static_cast<int64_t>(offsetShape.GetDimNum());
-        OP_CHECK_IF(
-            offsetDimNum != 1, 
-            OP_LOGE(context_, "The dim number of offset should be 1, current is %ld", offsetDimNum),
-            return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_,
+            offsetDimNum != 1,
+            "The dim number of offset should be 1, current is %ld", offsetDimNum);
         auto offsetDim0 = static_cast<int64_t>(offsetShape.GetDim(0));
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             offsetDim0 != 1, 
-            OP_LOGE(context_, "The first dim of offset should be 1, current is %ld", offsetDim0),
-            return ge::GRAPH_FAILED);
+            "The first dim of offset should be 1, current is %ld", offsetDim0);
     }
 
     if (quantMode_ == DYNAMIC_QUANT && scaleShapePtr_ != nullptr) {
         auto scaleShape = scaleShapePtr_->GetStorageShape();
-        OP_LOGI(context_, "input scale shape: %s", Ops::Base::ToString(scaleShape).c_str());
+        OPS_LOG_I(context_->GetNodeName(), "input scale shape: %s", ops::Shape2String(scaleShape).c_str());
         auto scaleDimNum = static_cast<int64_t>(scaleShape.GetDimNum());
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             scaleDimNum != NUM_TWO, 
-            OP_LOGE(context_, "The dim number of scale should be 2, current is %ld", scaleDimNum),
-            return ge::GRAPH_FAILED);
+            "The dim number of scale should be 2, current is %ld", scaleDimNum);
         auto scaleDim0 = static_cast<int64_t>(scaleShape.GetDim(0));
-        OP_CHECK_IF(
+        CHECK_FAIL(context_,
             scaleDim0 != (expertEnd_ - expertStart_) && scaleDim0 != 1, 
-            OP_LOGE(context_, "The first dim of scale should be %ld or 1, current is %ld", (expertEnd_ - expertStart_), scaleDim0),
-            return ge::GRAPH_FAILED);
+            "The first dim of scale should be %ld or 1, current is %ld", (expertEnd_ - expertStart_), scaleDim0);
         auto scaleDim1 = static_cast<int64_t>(scaleShape.GetDim(1));
-        OP_CHECK_IF(
-            scaleDim1 != cols_, 
-            OP_LOGE(context_, "The second dim of scale should be %ld, current is %ld", cols_, scaleDim0),
-            return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_,
+            scaleDim1 != cols_,
+            "The second dim of scale should be %ld, current is %ld", cols_, scaleDim0);
         if (scaleDim0 == 1) {
             smoothType_ = scale1H;
         } else {
@@ -486,83 +489,67 @@ ge::graphStatus MoeInitRountingV3TilingBase::CheckOutShape()
 {
     // 获取输入shape
     const gert::Shape expandedXShape = context_->GetOutputShape(0)->GetStorageShape();
-    OP_LOGI(context_, "expanded_x shape: %s.", Ops::Base::ToString(expandedXShape).c_str());
+    OPS_LOG_I(context_->GetNodeName(), "expanded_x shape: %s.", ops::Shape2String(expandedXShape).c_str());
     const gert::Shape expandedRowIdxShape = context_->GetOutputShape(1)->GetStorageShape();
-    OP_LOGI(context_, "expanded_row_idx shape: %s.", Ops::Base::ToString(expandedRowIdxShape).c_str());
+    OPS_LOG_I(context_->GetNodeName(), "expanded_row_idx shape: %s.", ops::Shape2String(expandedRowIdxShape).c_str());
     const gert::Shape expertTokensCountOrCumsumShape = context_->GetOutputShape(NUM_TWO)->GetStorageShape();
-    OP_LOGI(context_, "expert_tokens_count_or_cumsum shape: %s.", Ops::Base::ToString(expertTokensCountOrCumsumShape).c_str());
+    OPS_LOG_I(context_->GetNodeName(), "expert_tokens_count_or_cumsum shape: %s.", ops::Shape2String(expertTokensCountOrCumsumShape).c_str());
 
     size_t expandedXDimNum = expandedXShape.GetDimNum();
     if (dropPadMode_ > 0) {
-        OP_CHECK_IF(expandedXDimNum != NUM_THREE, OP_LOGE(context_, "The dim number of expandedX should be 3."),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF(expandedXShape.GetDim(0) != expertNum_, OP_LOGE(context_, "The first dim of expandedX should be %ld.", expertNum_),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF(expandedXShape.GetDim(1) != expertCapacity_, OP_LOGE(context_, "The second dim of expandedX should be %ld.",
-                    expertCapacity_), return ge::GRAPH_FAILED);
-        OP_CHECK_IF(
+        CHECK_FAIL(context_, expandedXDimNum != NUM_THREE, "The dim number of expandedX should be 3.");
+        CHECK_FAIL(context_, expandedXShape.GetDim(0) != expertNum_, "The first dim of expandedX should be %ld.", expertNum_);
+        CHECK_FAIL(context_, expandedXShape.GetDim(1) != expertCapacity_, "The second dim of expandedX should be %ld.",
+                    expertCapacity_);
+        CHECK_FAIL(context_,
                     expandedXShape.GetDim(NUM_TWO) != cols_,
-                    OP_LOGE(context_, "The third dim of expandedX should be %ld.", cols_),
-                    return ge::GRAPH_FAILED);
+                    "The third dim of expandedX should be %ld.", cols_);
     } else {
-        OP_CHECK_IF(expandedXDimNum != DIM_TWO, OP_LOGE(context_, "The dim number of expandedX should be 2."), 
-                    return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_,expandedXDimNum != DIM_TWO, "The dim number of expandedX should be 2.");
         int64_t firstDim = totalLength_;
         firstDim = activeNum_ == 0 ? firstDim : std::min(firstDim, activeNum_);
-        OP_CHECK_IF(expandedXShape.GetDim(0) != firstDim, OP_LOGE(context_, "The first dim of expandedX should be %ld.", firstDim),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF(expandedXShape.GetDim(1) != cols_,
-                    OP_LOGE(context_, "The second dim of expandedX should be %ld.", cols_), return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, expandedXShape.GetDim(0) != firstDim, "The first dim of expandedX should be %ld.", firstDim);
+        CHECK_FAIL(context_, expandedXShape.GetDim(1) != cols_,
+                    "The second dim of expandedX should be %ld.", cols_);
     }
 
-    OP_CHECK_IF(expandedRowIdxShape.GetDimNum() != DIM_ONE,
-                OP_LOGE(context_, "The dim number of expanded_row_idx should be 1."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(
+    CHECK_FAIL(context_, expandedRowIdxShape.GetDimNum() != DIM_ONE,
+                "The dim number of expanded_row_idx should be 1.");
+    CHECK_FAIL(context_,
         expandedRowIdxShape.GetDim(0) != totalLength_,
-        OP_LOGE(context_, "The first dim of expanded_row_idx and expanded_expert_idx should be %ld.", totalLength_),
-        return ge::GRAPH_FAILED);
+        "The first dim of expanded_row_idx and expanded_expert_idx should be %ld.", totalLength_);
 
     if(expertTokensNumFlag_){
         if (expertTokensNumType_ == KEY_VALUE) {
-            OP_CHECK_IF(
+            CHECK_FAIL(context_,
                 expertTokensCountOrCumsumShape.GetDimNum() != DIM_TWO,
-                OP_LOGE(context_, "The dim number of expert_tokens_count_or_cumsum should be 2 when in KEY_VALUE mode."),
-                return ge::GRAPH_FAILED);
-            OP_CHECK_IF(expertTokensCountOrCumsumShape.GetDim(0) != expertNum_,
-                        OP_LOGE(context_, "The first dim of expert_tokens_count_or_cumsum should be %ld.", expertNum_),
-                        return ge::GRAPH_FAILED);
-            OP_CHECK_IF(expertTokensCountOrCumsumShape.GetDim(1) != KEY_VALUE_MODE_DIM0_NUM,
-                        OP_LOGE(context_, "The second dim of expert_tokens_count_or_cumsum should be %ld.",
-                                KEY_VALUE_MODE_DIM0_NUM),
-                        return ge::GRAPH_FAILED);
+                "The dim number of expert_tokens_count_or_cumsum should be 2 when in KEY_VALUE mode.");
+            CHECK_FAIL(context_, expertTokensCountOrCumsumShape.GetDim(0) != expertNum_,
+                        "The first dim of expert_tokens_count_or_cumsum should be %ld.", expertNum_);
+            CHECK_FAIL(context_, expertTokensCountOrCumsumShape.GetDim(1) != KEY_VALUE_MODE_DIM0_NUM,
+                        "The second dim of expert_tokens_count_or_cumsum should be %ld.",
+                                KEY_VALUE_MODE_DIM0_NUM);
         } else {
-            OP_CHECK_IF(expertTokensCountOrCumsumShape.GetDimNum() != DIM_ONE,
-                        OP_LOGE(context_,
-                                "The dim number of expert_tokens_count_or_cumsum should be 1 when not in KEY_VALUE mode."),
-                        return ge::GRAPH_FAILED);
-            OP_CHECK_IF(expertTokensCountOrCumsumShape.GetDim(0) != (expertEnd_ - expertStart_),
-                        OP_LOGE(context_, "The first dim of expert_tokens_count_or_cumsum should be %ld.",
-                                (expertEnd_ - expertStart_)),
-                        return ge::GRAPH_FAILED);
+            CHECK_FAIL(context_, expertTokensCountOrCumsumShape.GetDimNum() != DIM_ONE,
+                        "The dim number of expert_tokens_count_or_cumsum should be 1 when not in KEY_VALUE mode.");
+            CHECK_FAIL(context_, expertTokensCountOrCumsumShape.GetDim(0) != (expertEnd_ - expertStart_),
+                       "The first dim of expert_tokens_count_or_cumsum should be %ld.", (expertEnd_ - expertStart_));
         }
     }
 
     if (quantMode_ != STATIC_QUANT && scaleShapePtr_ != nullptr) {
         const gert::Shape expandedScaleShape = context_->GetOutputShape(3)->GetStorageShape();
-        OP_LOGI(context_, "expanded_scale shape: %s.", Ops::Base::ToString(expandedScaleShape).c_str());
+        OPS_LOG_I(context_->GetNodeName(), "expanded_scale shape: %s.", ops::Shape2String(expandedScaleShape).c_str());
         size_t expandedScaleDimNum = expandedScaleShape.GetDimNum();
-        OP_CHECK_IF(expandedScaleDimNum != DIM_ONE, OP_LOGE(context_, "The dim number of expanded_scale should be 1."),
-                    return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, expandedScaleDimNum != DIM_ONE, "The dim number of expanded_scale should be 1.");
         if (dropPadMode_ > 0) {
-            OP_CHECK_IF(expandedScaleShape.GetDim(0) != expertNum_ * expertCapacity_,
-                OP_LOGE(context_, "The first dim of expanded_scale should be %ld.", expertNum_ * expertCapacity_),
-                return ge::GRAPH_FAILED);
+            CHECK_FAIL(context_, expandedScaleShape.GetDim(0) != expertNum_ * expertCapacity_,
+                 "The first dim of expanded_scale should be %ld.", expertNum_ * expertCapacity_);
         } else {
             int64_t firstDim = totalLength_;
             firstDim = activeNum_ == 0 ? firstDim : std::min(firstDim, activeNum_);
-            OP_CHECK_IF(expandedScaleShape.GetDim(0) != firstDim,
-                OP_LOGE(context_, "The first dim of expanded_scale should be %ld.", firstDim),
-                return ge::GRAPH_FAILED);
+            CHECK_FAIL(context_, expandedScaleShape.GetDim(0) != firstDim,
+                "The first dim of expanded_scale should be %ld.", firstDim);
         }
     }
 
@@ -571,7 +558,7 @@ ge::graphStatus MoeInitRountingV3TilingBase::CheckOutShape()
 
 ge::graphStatus MoeInitRountingV3TilingBase::GetShapeAttrsInfo()
 {
-    OP_LOGI(context_, "TilingContext: %s.", context_->GetNodeName());
+    OPS_LOG_I(context_->GetNodeName(), "TilingContext: %s.", context_->GetNodeName());
 
     // 获取输入shape
     xShapePtr_ = context_->GetInputShape(INPUT_X_INDEX);
@@ -583,7 +570,7 @@ ge::graphStatus MoeInitRountingV3TilingBase::GetShapeAttrsInfo()
     // 可选输入scale
     scaleShapePtr_ = context_->GetOptionalInputShape(INPUT_SCALE_INDEX);
     if (scaleShapePtr_ == nullptr) {
-        OP_LOGI(context_, "optional input scale is null");
+        OPS_LOG_I(context_->GetNodeName(), "optional input scale is null");
     } else {
         isInputScale_ = 1;
     }
@@ -592,7 +579,7 @@ ge::graphStatus MoeInitRountingV3TilingBase::GetShapeAttrsInfo()
     // 可选输入offset
     offsetShapePtr_ = context_->GetOptionalInputShape(INPUT_OFFSET_INDEX);
     if (offsetShapePtr_ == nullptr) {
-        OP_LOGI(context_, "optional input offset is null");
+        OPS_LOG_I(context_->GetNodeName(), "optional input offset is null");
     } else {
         isInputOffset_ = 1;
     }
@@ -635,7 +622,7 @@ ge::graphStatus MoeInitRountingV3TilingBase::GetShapeAttrsInfo()
 void MoeInitRountingV3TilingBase::ShowTilingData()
 {   
     int64_t isFullloadInt = 1 ? isFullload_ == true : 0;
-    OP_LOGI(context_, "isFullload: %ld, gatherFirstFullload: %ld, ep: %ld", isFullloadInt, gatherFirstFullload_, ep_);
+    OPS_LOG_I(context_->GetNodeName(), "isFullload: %ld, gatherFirstFullload: %ld, ep: %ld", isFullloadInt, gatherFirstFullload_, ep_);
 }
 
 int64_t MoeInitRountingV3TilingBase::IsGatherFirstFullLoad() {
@@ -671,12 +658,12 @@ bool MoeInitRountingV3TilingBase::IsFullLoad() {
     gatherFirstFullload_ = IsGatherFirstFullLoad();
     moeInitRoutingV3TilingData.set_gatherFirstFullload(gatherFirstFullload_);
     int64_t tileLength = Align(this->totalLength_, int64_t(sizeof(int32_t)));
-    int64_t sortNum = Ops::Base::CeilDiv(tileLength, ONE_REPEAT_SORT_NUM) * ONE_REPEAT_SORT_NUM;
+    int64_t sortNum = CeilDiv(tileLength, ONE_REPEAT_SORT_NUM) * ONE_REPEAT_SORT_NUM;
 
     int64_t sortSpace = sortNum * sizeof(int32_t) * ONE_CORE_SORT_BUFFER;
     int64_t rowIdxSpace = sortNum * sizeof(int32_t) * NUM_THREE;
-    int64_t expertSpace = Ops::Base::CeilDiv(this->expertNum_ * int64_t(sizeof(int64_t)), ONE_BLOCK_BYTE) * ONE_BLOCK_BYTE * NUM_TWO;
-    int64_t gatherSpace = Ops::Base::CeilDiv(cols_ * inuptXDtypeSize_, ONE_BLOCK_BYTE) * ONE_BLOCK_BYTE * perCoreTokens;
+    int64_t expertSpace = CeilDiv(this->expertNum_ * int64_t(sizeof(int64_t)), ONE_BLOCK_BYTE) * ONE_BLOCK_BYTE * NUM_TWO;
+    int64_t gatherSpace = CeilDiv(cols_ * inuptXDtypeSize_, ONE_BLOCK_BYTE) * ONE_BLOCK_BYTE * perCoreTokens;
     int64_t remainUb = aicoreParams_.ubSize - sortSpace - rowIdxSpace - expertSpace - LENGTH_1024;
 
     if (quantMode_ == -1) {
@@ -687,7 +674,7 @@ bool MoeInitRountingV3TilingBase::IsFullLoad() {
         quantSpace = xAlignedCount * STATIC_QUANT_FULLLOAD_COLS_BUFFER * perCoreTokens;
         remainUb -= (gatherSpace + quantSpace);
     } else {
-        int64_t quantSpace = Ops::Base::CeilDiv(cols_, ONE_BLOCK_BYTE) * ONE_BLOCK_BYTE  * DYNAMIC_QUANT_FULLLOAD_COLS_BUFFER;
+        int64_t quantSpace = CeilDiv(cols_, ONE_BLOCK_BYTE) * ONE_BLOCK_BYTE  * DYNAMIC_QUANT_FULLLOAD_COLS_BUFFER;
         int64_t scaleOutSpace = ONE_BLOCK_BYTE * NUM_TWO;
         remainUb -= (quantSpace + scaleOutSpace);
     }
@@ -696,7 +683,7 @@ bool MoeInitRountingV3TilingBase::IsFullLoad() {
 
 bool MoeInitRountingV3TilingBase::IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCALE_256_7168() const
 {
-    OP_LOGI(context_, "Begin IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCALE_256_7168() ...");
+    OPS_LOG_I(context_->GetNodeName(), "Begin IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCALE_256_7168() ...");
     bool result = false;
 
     // 性能模板： 当前支持 ((1, 7168), (1, 8),(256, 7168),None) ('bfloat16', 'int32','float32','float32')
@@ -716,7 +703,7 @@ bool MoeInitRountingV3TilingBase::IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCAL
                expertEnd_ == ASSIST_NUM && quantMode_ == DYNAMIC_QUANT && expertTokensNumType_ == KEY_VALUE) {
         result = true;
     }
-    OP_LOGI(context_, "End IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCALE_256_7168() ...");
+    OPS_LOG_I(context_->GetNodeName(), "End IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCALE_256_7168() ...");
     return result;
 }
 
@@ -730,10 +717,10 @@ PerformanceMode MoeInitRountingV3TilingBase::GetPerformanceMode() const
 
     // Judge performance mode according to totalLength_
     if (totalLength_ < PERFORMANCE_MODE_MAX_ONE_CORE_GATHER) {
-        OP_LOGI(context_, "totalLength_: %ld, PerformanceMode::ONE_CORE_GATHER_SORT", totalLength_);
+        OPS_LOG_I(context_->GetNodeName(), "totalLength_: %ld, PerformanceMode::ONE_CORE_GATHER_SORT", totalLength_);
         result = PerformanceMode::ONE_CORE_GATHER_SORT;
     } else if (totalLength_ <= PERFORMANCE_MODE_MAX_BATCH_SIZE_TOP_K) {
-        OP_LOGI(context_, "totalLength_: %ld, PerformanceMode::MULTI_CORE_GATHER_SORT", totalLength_);
+        OPS_LOG_I(context_->GetNodeName(), "totalLength_: %ld, PerformanceMode::MULTI_CORE_GATHER_SORT", totalLength_);
         result = PerformanceMode::MULTI_CORE_GATHER_SORT;
     }
     return result;
@@ -742,57 +729,47 @@ PerformanceMode MoeInitRountingV3TilingBase::GetPerformanceMode() const
 ge::graphStatus MoeInitRountingV3TilingBase::CheckDtype() 
 {
     auto inputXDtype_ = context_->GetInputDesc(INPUT_X_INDEX)->GetDataType();
-    OP_CHECK_IF(inputXDtype_ != ge::DT_INT8 && inputXDtype_ != ge::DT_FLOAT16 && inputXDtype_ != ge::DT_BF16 && inputXDtype_ != ge::DT_FLOAT,
-        OP_LOGE(context_, "The data type of input_X should be INT8, FLOAT16, BF16, FLOAT."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(inputXDtype_ == ge::DT_INT8 && quantMode_ != UN_QUANT,
-        OP_LOGE(context_, "When input_X is INT8, quantization is not supported."),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, inputXDtype_ != ge::DT_INT8 && inputXDtype_ != ge::DT_FLOAT16 && inputXDtype_ != ge::DT_BF16 && inputXDtype_ != ge::DT_FLOAT,
+                "The data type of input_X should be INT8, FLOAT16, BF16, FLOAT.");
+    CHECK_FAIL(context_, inputXDtype_ == ge::DT_INT8 && quantMode_ != UN_QUANT,
+                "When input_X is INT8, quantization is not supported.");
 
     auto expertIdxDtype_ = context_->GetInputDesc(INPUT_EXPERT_IDX_INDEX)->GetDataType();
-    OP_CHECK_IF(expertIdxDtype_ != ge::DT_INT32,
-        OP_LOGE(context_, "The data type of input_expertIdx should be INT32."),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_, expertIdxDtype_ != ge::DT_INT32,
+        "The data type of input_expertIdx should be INT32.");
     
     if (quantMode_ == STATIC_QUANT) {
         auto scaleDtype_ = context_->GetOptionalInputDesc(INPUT_SCALE_INDEX)->GetDataType();
-        OP_CHECK_IF(scaleDtype_ != ge::DT_FLOAT,
-            OP_LOGE(context_, "The data type of input_scale should be FLOAT."),
-                return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, scaleDtype_ != ge::DT_FLOAT,
+            "The data type of input_scale should be FLOAT.");
         
         auto offsetDtype_ = context_->GetOptionalInputDesc(INPUT_OFFSET_INDEX)->GetDataType();
-        OP_CHECK_IF(offsetDtype_ != ge::DT_FLOAT,
-            OP_LOGE(context_, "The data type of input_offset should be FLOAT."),
-                return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_, offsetDtype_ != ge::DT_FLOAT,
+            "The data type of input_offset should be FLOAT.");
     } else {
         if (scaleShapePtr_ != nullptr) {
             auto scaleDtype_ = context_->GetOptionalInputDesc(INPUT_SCALE_INDEX)->GetDataType();
-            OP_CHECK_IF(scaleDtype_ != ge::DT_FLOAT,
-                OP_LOGE(context_, "The data type of input_scale should be FLOAT."),
-                    return ge::GRAPH_FAILED);
+            CHECK_FAIL(context_, scaleDtype_ != ge::DT_FLOAT,
+                "The data type of input_scale should be FLOAT.");
         }
     }
 
     auto expandedXDtype_ = context_->GetOutputDesc(OUTPUT_EXPANDED_X_INDEX)->GetDataType();
-    OP_CHECK_IF(expandedXDtype_ != ge::DT_INT8 && expandedXDtype_ != ge::DT_FLOAT16 && expandedXDtype_ != ge::DT_BF16 && expandedXDtype_ != ge::DT_FLOAT,
-        OP_LOGE(context_, "The data type of output_expanded_X should be INT8, FLOAT16, BF16, FLOAT."),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_,expandedXDtype_ != ge::DT_INT8 && expandedXDtype_ != ge::DT_FLOAT16 && expandedXDtype_ != ge::DT_BF16 && expandedXDtype_ != ge::DT_FLOAT,
+        "The data type of output_expanded_X should be INT8, FLOAT16, BF16, FLOAT.");
     
     auto expandedRowIdxDtype_ = context_->GetOutputDesc(OUTPUT_EXPANDED_ROW_IDX_INDEX)->GetDataType();
-    OP_CHECK_IF(expandedRowIdxDtype_ != ge::DT_INT32,
-        OP_LOGE(context_, "The data type of output_expanded_row_idx should be INT32."),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_,expandedRowIdxDtype_ != ge::DT_INT32,
+        "The data type of output_expanded_row_idx should be INT32.");
 
     auto expertTokensCountOrCusumDtype_ = context_->GetOutputDesc(OUTPUT_EXPERT_TOKENS_COUNT_INDEX)->GetDataType();
-    OP_CHECK_IF(expertTokensCountOrCusumDtype_ != ge::DT_INT64,
-        OP_LOGE(context_, "The data type of output_expert_tokens_count_or_cumsum should be INT64."),
-                return ge::GRAPH_FAILED);
+    CHECK_FAIL(context_,expertTokensCountOrCusumDtype_ != ge::DT_INT64,
+        "The data type of output_expert_tokens_count_or_cumsum should be INT64.");
     
     if (quantMode_ == DYNAMIC_QUANT || (quantMode_ == UN_QUANT && scaleShapePtr_ != nullptr)) {
         auto expandedScaleDtype_ = context_->GetOutputDesc(OUTPUT_EXPANDED_SCALE_INDEX)->GetDataType();
-        OP_CHECK_IF(expandedScaleDtype_ != ge::DT_FLOAT,
-            OP_LOGE(context_, "The data type of input_expanded_scale should be FLOAT."),
-                    return ge::GRAPH_FAILED);
+        CHECK_FAIL(context_,expandedScaleDtype_ != ge::DT_FLOAT,
+            "The data type of input_expanded_scale should be FLOAT.");
     }
 
     return ge::GRAPH_SUCCESS;
@@ -898,7 +875,7 @@ ge::graphStatus MoeInitRountingV3TilingBase::GetWorkspaceSize()
     if (dropPadMode_ == DROP_PAD) {
         workspaceSize_ += expertIdxValueWorkspaceSize;
     }
-    OP_LOGI(context_, "Allocate workspaceSize is: %ld.", workspaceSize_);
+    OPS_LOG_I(context_->GetNodeName(), "Allocate workspaceSize is: %ld.", workspaceSize_);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -927,18 +904,21 @@ void MoeInitRountingV3TilingBase::Tinlig4VBSOneCoreCompute(MoeV3VBSComputeTiling
 
 void MoeInitRountingV3TilingBase::Tinlig4VBSMultiCoreCompute(MoeV3VBSComputeTilingData *tilingData)
 {
-    int64_t needCoreNum = Ops::Base::CeilDiv(totalLength_, sortLoopMaxElement); // 向上取整
+    int64_t needCoreNum = CeilDiv(totalLength_, sortLoopMaxElement); // 向上取整
     needCoreNum = static_cast<int64_t>(std::pow(4, CeilLog4(needCoreNum)));     // 用到多核时，核数最多是4^x
     needCoreNum = std::min(needCoreNum, aivNum);                                // 不能超过物理核数
 
-    OP_CHECK_IF(needCoreNum == 0, OP_LOGE(context_, "Variale needCoreNum cannot be 0."), return;);
+    if (needCoreNum == 0) {
+        OPS_LOG_E(context_->GetNodeName(), "Variale needCoreNum cannot be 0.");
+        return;
+    }
     int64_t perCoreElements = (needCoreNum == 0) ? 0 : (totalLength_ / needCoreNum);
     int64_t alineFloorPerCoreElements = perCoreElements - perCoreElements % SORT32_ALIGN_ELEMENT;
     int64_t lastCoreElement = totalLength_ - (needCoreNum - 1) * alineFloorPerCoreElements;
     int64_t alineCeilPerCoreElements = perCoreElements + SORT32_ALIGN_ELEMENT - perCoreElements % SORT32_ALIGN_ELEMENT;
     if (lastCoreElement > alineCeilPerCoreElements) {
         perCoreElements = alineCeilPerCoreElements;
-        needCoreNum = Ops::Base::CeilDiv(totalLength_, perCoreElements);
+        needCoreNum = CeilDiv(totalLength_, perCoreElements);
     } else {
         perCoreElements = alineFloorPerCoreElements;
     }
@@ -947,7 +927,7 @@ void MoeInitRountingV3TilingBase::Tinlig4VBSMultiCoreCompute(MoeV3VBSComputeTili
     do {
         tilingData->set_perCoreElements(perCoreElements);
         tilingData->set_perCoreLoops(
-            Ops::Base::CeilDiv(tilingData->get_perCoreElements(), sortLoopMaxElement)); // 每个核处理的loop数
+            CeilDiv(tilingData->get_perCoreElements(), sortLoopMaxElement)); // 每个核处理的loop数
         tilingData->set_perCorePerLoopElements(std::min(tilingData->get_perCoreElements(), sortLoopMaxElement));
 
         tilingData->set_perCoreLastLoopElements(tilingData->get_perCoreElements() -
@@ -958,7 +938,7 @@ void MoeInitRountingV3TilingBase::Tinlig4VBSMultiCoreCompute(MoeV3VBSComputeTili
                                          (tilingData->get_needCoreNum() - 1) * tilingData->get_perCoreElements());
         tilingData->set_lastCoreLoops(tilingData->get_perCoreLoops());
         int64_t lastCorePerLoopElements =
-            Ops::Base::CeilDiv(Ops::Base::CeilDiv(tilingData->get_lastCoreElements(), tilingData->get_lastCoreLoops()),
+            CeilDiv(CeilDiv(tilingData->get_lastCoreElements(), tilingData->get_lastCoreLoops()),
                                SORT32_ALIGN_ELEMENT) *
             SORT32_ALIGN_ELEMENT;
         tilingData->set_lastCorePerLoopElements(lastCorePerLoopElements);
@@ -967,7 +947,10 @@ void MoeInitRountingV3TilingBase::Tinlig4VBSMultiCoreCompute(MoeV3VBSComputeTili
                                                      tilingData->get_lastCorePerLoopElements());
         perCoreElements -= SORT32_ALIGN_ELEMENT;
     } while (tilingData->get_lastCoreLastLoopElements() <= 0 && perCoreElements > 0);
-    OP_CHECK_IF(tilingData->get_lastCoreLastLoopElements() <= 0, OP_LOGE(context_, "vbs tiling failed"), ;);
+    if (tilingData->get_lastCoreLastLoopElements() <= 0) {
+        OPS_LOG_E(context_->GetNodeName(), "vbs tiling failed");
+        return;
+    }
 }
 
 void MoeInitRountingV3TilingBase::Tiling4VBSCompute()
@@ -995,7 +978,7 @@ void MoeInitRountingV3TilingBase::Tiling4VMSMiddleCompute()
         tilingData->set_needCoreNum(0);                            // 需要的核数
         return;
     }
-    int64_t needCoreNum = Ops::Base::CeilDiv(vbsComputeTilingData->get_needCoreNum(), MRG_LIST_NUM);
+    int64_t needCoreNum = CeilDiv(vbsComputeTilingData->get_needCoreNum(), MRG_LIST_NUM);
     tilingData->set_needCoreNum(needCoreNum); // 需要的核数
 }
 
@@ -1009,8 +992,8 @@ void MoeInitRountingV3TilingBase::Tiling4ExpertTokensCountCompute()
 {
     auto tilingData = &moeInitRoutingV3TilingData.expertTokensCountTilingDataOp;
     int64_t totalElements = moeInitRoutingV3TilingData.get_n() * moeInitRoutingV3TilingData.get_k();
-    int64_t perCoreElements = Ops::Base::CeilDiv(totalElements, aivNum);
-    int64_t needCoreNum = Ops::Base::CeilDiv(totalElements, perCoreElements);
+    int64_t perCoreElements = CeilDiv(totalElements, aivNum);
+    int64_t needCoreNum = CeilDiv(totalElements, perCoreElements);
     int64_t lastCoreElements = totalElements - (needCoreNum - 1) * perCoreElements;
     tilingData->set_needCoreNum(needCoreNum);
     tilingData->set_perCoreElements(perCoreElements);
@@ -1022,26 +1005,26 @@ void MoeInitRountingV3TilingBase::Tiling4ExpertTokensCountCompute()
 
     int64_t maxElementsPerLoop =
         (static_cast<int64_t>(aicoreParams_.ubSize) -
-         Ops::Base::CeilAlign(expertNumElement, ONE_BLOCK_BYTE) *
+         CeilAlign(expertNumElement, ONE_BLOCK_BYTE) *
              (static_cast<int64_t>(sizeof(int32_t)) * NUM_TWO + static_cast<int64_t>(sizeof(int64_t))) -
          ONE_BLOCK_BYTE) / static_cast<int64_t>(sizeof(int32_t));
-    int64_t perCoreLoops = Ops::Base::CeilDiv(perCoreElements, maxElementsPerLoop);
-    int64_t perCorePerLoopElements = Ops::Base::CeilDiv(perCoreElements, perCoreLoops);
+    int64_t perCoreLoops = CeilDiv(perCoreElements, maxElementsPerLoop);
+    int64_t perCorePerLoopElements = CeilDiv(perCoreElements, perCoreLoops);
     int64_t perCoreLastLoopElements = perCoreElements - (perCoreLoops - 1) * perCorePerLoopElements;
 
     tilingData->set_perCoreLoops(perCoreLoops);
     tilingData->set_perCorePerLoopElements(perCorePerLoopElements);
     tilingData->set_perCoreLastLoopElements(perCoreLastLoopElements);
 
-    int64_t lastCoreLoops = Ops::Base::CeilDiv(lastCoreElements, maxElementsPerLoop);
-    int64_t lastCorePerLoopElements = Ops::Base::CeilDiv(lastCoreElements, lastCoreLoops);
+    int64_t lastCoreLoops = CeilDiv(lastCoreElements, maxElementsPerLoop);
+    int64_t lastCorePerLoopElements = CeilDiv(lastCoreElements, lastCoreLoops);
     int64_t lastCoreLastLoopElements = lastCoreElements - (lastCoreLoops - 1) * lastCorePerLoopElements;
 
     tilingData->set_lastCoreLoops(lastCoreLoops);
     tilingData->set_lastCorePerLoopElements(lastCorePerLoopElements);
     tilingData->set_lastCoreLastLoopElements(lastCoreLastLoopElements);
 
-    OP_LOGI(context_,
+    OPS_LOG_I(context_->GetNodeName(),
             "ExpertTokensCountCompute Tilingdata, needCoreNum is: %ld, perCoreElements is: %ld, lastCoreElements is: "
             "%ld, maxElementsPerLoop is: %ld, perCoreLoops is: %ld, perCorePerLoopElements is: %ld, "
             "perCoreLastLoopElements "
@@ -1060,12 +1043,12 @@ void MoeInitRountingV3TilingBase::Tiling4SrcToDstDropPadCompute()
 
     auto tilingData = &moeInitRoutingV3TilingData.srcToDstDropPadParamsOp;
 
-    int64_t perCoreRows = Ops::Base::CeilDiv(totalLength_, aivNum);
+    int64_t perCoreRows = CeilDiv(totalLength_, aivNum);
     if (perCoreRows <= 0) {
         tilingData->set_needCoreNum(0);
         return;
     }
-    int64_t needCoreNum = Ops::Base::CeilDiv(totalLength_, perCoreRows);
+    int64_t needCoreNum = CeilDiv(totalLength_, perCoreRows);
     tilingData->set_needCoreNum(needCoreNum);
     int64_t cols = moeInitRoutingV3TilingData.get_cols();
     tilingData->set_perCoreRows(perCoreRows);
@@ -1150,12 +1133,12 @@ void MoeInitRountingV3TilingBase::Tiling4SrcToDstDropPadDynamicCompute()
 {
     auto tilingData = &moeInitRoutingV3TilingData.srcToDstDropPadDynamicParamsOp;
 
-    int64_t perCoreRows = Ops::Base::CeilDiv(totalLength_, aivNum);
+    int64_t perCoreRows = CeilDiv(totalLength_, aivNum);
     if (perCoreRows <= 0) {
         tilingData->set_needCoreNum(0);
         return;
     }
-    tilingData->set_needCoreNum(Ops::Base::CeilDiv(totalLength_, perCoreRows));
+    tilingData->set_needCoreNum(CeilDiv(totalLength_, perCoreRows));
     int64_t cols = moeInitRoutingV3TilingData.get_cols();
     tilingData->set_perCoreRows(perCoreRows);
     int64_t lastCoreRows = totalLength_ - perCoreRows * (tilingData->get_needCoreNum() - 1);
@@ -1184,12 +1167,12 @@ void MoeInitRountingV3TilingBase::Tiling4SrcToDstDropPadDynamicCompute()
 void MoeInitRountingV3TilingBase::Tiling4GatherOutCompute()
 {
     auto tilingData = &moeInitRoutingV3TilingData.gatherOutComputeParamsOp;
-    int64_t perCoreIndicesElements = Ops::Base::CeilDiv(totalLength_, aivNum);
+    int64_t perCoreIndicesElements = CeilDiv(totalLength_, aivNum);
     if (perCoreIndicesElements <= 0) {
         tilingData->set_needCoreNum(0);
         return;
     }
-    int64_t needCoreNum = Ops::Base::CeilDiv(totalLength_, perCoreIndicesElements);
+    int64_t needCoreNum = CeilDiv(totalLength_, perCoreIndicesElements);
     int64_t lastCoreIndicesElements = totalLength_ - (needCoreNum - 1) * perCoreIndicesElements;
 
     int64_t perLoopCols = moeInitRoutingV3TilingData.get_cols();
@@ -1208,14 +1191,14 @@ void MoeInitRountingV3TilingBase::Tiling4GatherOutCompute()
          ONE_BLOCK_BYTE * NUM_TWO) /
         rowMultiple / static_cast<int64_t>(sizeof(int32_t));
     while (perLoopMaxIndicesElements <= 0) {
-        perLoopCols = Ops::Base::CeilDiv(perLoopCols, NUM_TWO);
+        perLoopCols = CeilDiv(perLoopCols, NUM_TWO);
         perLoopMaxIndicesElements = (static_cast<int64_t>(aicoreParams_.ubSize) -
                                      Align(perLoopCols, inuptXDtypeSize_) * colMultiple - ONE_BLOCK_BYTE * NUM_TWO) /
                                     rowMultiple / static_cast<int64_t>(sizeof(int32_t));
-        OP_LOGI(context_, "perLoopCols is: %ld, perLoopMaxIndicesElements is: %ld", perLoopCols,
+        OPS_LOG_I(context_->GetNodeName(), "perLoopCols is: %ld, perLoopMaxIndicesElements is: %ld", perLoopCols,
                 perLoopMaxIndicesElements);
     }
-    int64_t colsLoops = Ops::Base::CeilDiv(moeInitRoutingV3TilingData.get_cols(), perLoopCols);
+    int64_t colsLoops = CeilDiv(moeInitRoutingV3TilingData.get_cols(), perLoopCols);
     int64_t lastLoopCols = moeInitRoutingV3TilingData.get_cols() - (colsLoops - 1) * perLoopCols;
     tilingData->set_needCoreNum(needCoreNum);
     tilingData->set_perCoreIndicesElements(perCoreIndicesElements);
@@ -1225,7 +1208,7 @@ void MoeInitRountingV3TilingBase::Tiling4GatherOutCompute()
     tilingData->set_lastLoopCols(lastLoopCols);
 
     int64_t perCorePerLoopIndicesElements = std::min(perLoopMaxIndicesElements, perCoreIndicesElements);
-    int64_t perCoreIndicesLoops = Ops::Base::CeilDiv(perCoreIndicesElements, perCorePerLoopIndicesElements);
+    int64_t perCoreIndicesLoops = CeilDiv(perCoreIndicesElements, perCorePerLoopIndicesElements);
     int64_t perCoreLastLoopIndicesElements =
         perCoreIndicesElements - (perCoreIndicesLoops - 1) * perCorePerLoopIndicesElements;
     tilingData->set_perCoreIndicesLoops(perCoreIndicesLoops);
@@ -1233,15 +1216,15 @@ void MoeInitRountingV3TilingBase::Tiling4GatherOutCompute()
     tilingData->set_perCoreLastLoopIndicesElements(perCoreLastLoopIndicesElements);
 
     int64_t lastCorePerLoopIndicesElements = std::min(perLoopMaxIndicesElements, lastCoreIndicesElements);
-    int64_t lastCoreIndicesLoops = Ops::Base::CeilDiv(lastCoreIndicesElements, lastCorePerLoopIndicesElements);
+    int64_t lastCoreIndicesLoops = CeilDiv(lastCoreIndicesElements, lastCorePerLoopIndicesElements);
     int64_t lastCoreLastLoopIndicesElements =
         lastCoreIndicesElements - (lastCoreIndicesLoops - 1) * lastCorePerLoopIndicesElements;
     tilingData->set_lastCoreIndicesLoops(lastCoreIndicesLoops);
     tilingData->set_lastCorePerLoopIndicesElements(lastCorePerLoopIndicesElements);
     tilingData->set_lastCoreLastLoopIndicesElements(lastCoreLastLoopIndicesElements);
 
-    OP_LOGI(
-        context_,
+    OPS_LOG_I(
+        context_->GetNodeName(),
         "GatherOut Tilingdata, needCoreNum is: %ld, perCoreIndicesElements is: %ld, lastCoreIndicesElements is: %ld, "
         "colsLoops is: %ld, perLoopCols is: %ld, lastLoopCols is: %ld, perCoreIndicesLoops is: %ld, "
         "perCorePerLoopIndicesElements is: %ld, perCoreLastLoopIndicesElements is: %ld, lastCoreIndicesLoops is: "
