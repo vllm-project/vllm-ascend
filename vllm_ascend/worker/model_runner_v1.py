@@ -1049,7 +1049,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # and when TI-consistency switch is ON.
         if attn_state == AscendAttentionState.PrefillNoCache and \
                 envs_ascend.TRAIN_INFER_CONSISTENCY:
-            max_seq_len = max(seq_lens.max().item, 0)
+            max_seq_len = max(seq_lens.max().item(), 0)
             return self.attn_mask_builder.get_attn_mask(
                 max_seq_len=max_seq_len, dtype=self.dtype, device=self.device)
         # Pooling situation.
