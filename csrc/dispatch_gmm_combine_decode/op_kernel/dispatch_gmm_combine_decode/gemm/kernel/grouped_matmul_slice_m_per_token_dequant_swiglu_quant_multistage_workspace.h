@@ -140,6 +140,7 @@ public:
         ubQuantScale = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
         ubOffset += CEIL_UP(tileRow * sizeof(float));
         ubInputTmp = ubAbs;
+        ubInputRightHalf = ubAbs;
         ubQuantF32 = ubAbs;
         ubQuantS32 = ubAbs.ReinterpretCast<int32_t>();
         ubQuantF16 = ubAbs.ReinterpretCast<half>();
@@ -188,10 +189,14 @@ public:
             layout::RowMajor layoutUbInput{actualTileShape, ubTileStride};
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
+            // continue swiglu computing here and then quant
             copyGmToUbInput(ubInput, gmTileInput, layoutUbInput, layoutGmTileInput);
+            copyGmToUbInput(ubInputRightHalf, gmTileInput[params.layoutInput.shape(1) >> 1], layoutUbInput, layoutGmTileInput);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(0);
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+            AscendC::Mul(ubInput, ubInput, ubInputRightHalf, tileCount);
+            AscendC::PipeBarrier<PIPE_V>();
             AscendC::Abs(ubAbs, ubInput, tileCount);
             AscendC::PipeBarrier<PIPE_V>();
 
@@ -290,6 +295,7 @@ private:
     AscendC::LocalTensor<float> ubQuantScale;
     AscendC::LocalTensor<float> ubQuantScaleBrcb;
     AscendC::LocalTensor<float> ubInputTmp;
+    AscendC::LocalTensor<float> ubInputRightHalf;
     AscendC::LocalTensor<float> ubQuantF32;
     AscendC::LocalTensor<int32_t> ubQuantS32;
     AscendC::LocalTensor<half> ubQuantF16;
@@ -1232,7 +1238,6 @@ public:
                     __gm__ float *gmSwigluOutput, uint32_t n, uint32_t k, LayoutScale layoutScale,
                     LayoutPerTokenScale wholeLayoutPerTokenScale, LayoutOutput layoutOutput)
     {
-        uint32_t nOut = n / 2;
         uint32_t coreNumPerGroup = recvCoreNum / localExpertNum;
         int64_t gmGroupOffsetScale = 0;
         int64_t gmGroupOffsetPerTokenScale = 0;
@@ -1267,7 +1272,7 @@ public:
                 GemmCoord inGroupProblemShape{currentM, n, k};
                 LayoutPerTokenScale layoutPerTokenScale =
                     wholeLayoutPerTokenScale.GetTileLayout(inGroupProblemShape.template GetCoordByAxis<0>());
-                LayoutD layoutD = layoutOutput.GetTileLayout(MakeCoord(currentM, nOut));
+                LayoutD layoutD = layout::RowMajor{currentM, n};
                 EpilogueParams epilogueParams{gmScale + gmGroupOffsetScale,
                                             layoutScale,
                                             gmTokenScale + gmGroupOffsetPerTokenScale,
@@ -1299,7 +1304,7 @@ public:
 
                 gmGroupOffsetScale += inGroupProblemShape.n();
                 gmGroupOffsetPerTokenScale += inGroupProblemShape.m();
-                gmGroupOffsetD += currentM * nOut;
+                gmGroupOffsetD += currentM * n;
 
                 startCoreIdx = (startCoreIdx + coreLoops) % aiCoreGroupNum;
             }
@@ -1514,11 +1519,13 @@ public:
             __asm__ __volatile__("");
             totalTokenCount = sendCountsGlobal.GetValue(localExpertNum * epRankSize - 1);
             AscendC::PipeBarrier<PIPE_ALL>();
+            uint32_t n = params.problemShape.n();
             uint32_t nOut = params.problemShape.n() / 2;
             uint32_t quantRowOnce = 0;
             CalQuantRow(nOut, quantRowOnce);
+            auto swigluLayout = layout::RowMajor{totalTokenCount, n};
             typename BlockQuant<ArchTag>::Params quantParams{
-                gmSwigluOutput,   params.layoutOutput, params.ptrDequantScale, params.layoutDequantScale,
+                gmSwigluOutput,   swigluLayout,        params.ptrDequantScale, params.layoutDequantScale,
                 params.ptrOutput, params.layoutOutput, quantRowOnce,           nOut};
 
             BlockQuant<ArchTag> blockQuant(resource, quantParams);
@@ -1850,6 +1857,7 @@ public:
             params.ptrWorkspace + sizeof(int32_t) * (L1TileShape::M * coreNum * WORKSPACE_STAGES * L1TileShape::N));
 
         uint32_t mActual = groupList.GetValue(params.problemCount - 1);
+        uint32_t n = params.problemShape.n();
         uint32_t nOut = params.problemShape.n() / 2;
 
         {
@@ -1866,7 +1874,7 @@ public:
                 LayoutScale layoutScale = params.layoutScale;
                 LayoutPerTokenScale layoutPerTokenScale =
                     params.layoutPerTokenScale.GetTileLayout(inGroupProblemShape.template GetCoordByAxis<0>());
-                LayoutD layoutD = params.layoutOutput.GetTileLayout(MakeCoord(currentM, nOut));
+                LayoutD layoutD = layout::RowMajor{currentM, n};
 
                 EpilogueParams epilogueParams{params.ptrScale + gmGroupOffsetScale,
                                               layoutScale,
@@ -1899,7 +1907,7 @@ public:
 
                 gmGroupOffsetScale += inGroupProblemShape.n();
                 gmGroupOffsetPerTokenScale += inGroupProblemShape.m();
-                gmGroupOffsetD += currentM * nOut;
+                gmGroupOffsetD += currentM * n;
 
                 startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
             }
@@ -1910,8 +1918,9 @@ public:
         {
             uint32_t quantRowOnce = 0;
             CalQuantRow(nOut, quantRowOnce);
+            auto swigluLayout = layout::RowMajor{mActual, n};
             typename BlockQuant<ArchTag>::Params quantParams{ptrD,
-                                                             params.layoutOutput,
+                                                             swigluLayout,
                                                              params.ptrDequantScale,
                                                              params.layoutDequantScale,
                                                              params.ptrOutput,
