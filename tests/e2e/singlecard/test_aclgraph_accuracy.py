@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without aclgraph.
 
-Run `pytest tests/compile/test_aclgraph.py`.
+Run `pytest tests/compile/test_aclgraph_accuracy.py`.
 """
 
 import os
