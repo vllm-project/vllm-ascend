@@ -121,6 +121,7 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
+from vllm_ascend.eplb.adaptor.eplb_adaptor_factory import EplbAdaptorFactory
 # yapf: enable
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \

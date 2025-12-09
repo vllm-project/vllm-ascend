@@ -3,10 +3,10 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.adaptor.deepseek_moe_adaptor import DeepSeekMoeAdaptor
 
 
-class MtpMoeAdaptor(VllmEplbAdaptor):
+class MtpMoeAdaptor(DeepSeekMoeAdaptor):
 
     def __init__(self, model, **args):
         super().__init__(model, **args)
@@ -104,6 +104,18 @@ class MtpMoeAdaptor(VllmEplbAdaptor):
             dim=0)
         if dist.is_initialized():
             world_size = dist.get_world_size()
+        gathered = torch.empty(
+            (world_size, *expert_map.shape),  # [W, L, E]
+            dtype=expert_map.dtype,
+            device=expert_map.device)
+
+        dist.all_gather_into_tensor(gathered, expert_map)
+        all_maps = gathered.permute(1, 0, 2)
+        all_expert_maps = all_maps.cpu()
+
+        for layer_idx in range(num_moe_layers):
+            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+                all_expert_maps[layer_idx][self.rank_id]
 
     def determine_expert_map_all(self):
         if self.world_size == 1:
