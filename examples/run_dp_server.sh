@@ -5,7 +5,7 @@ export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 
 export VLLM_USE_V1=1
 export VLLM_USE_MODELSCOPE=true
