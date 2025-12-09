@@ -142,6 +142,9 @@ class AscendQuantConfig(QuantizationConfig):
         prefix: str,
         fused_mapping: Mapping[str, List[str]] = MappingProxyType({})):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
+        vllm_config = get_current_vllm_config()
+        model_type = vllm_config.model_config.hf_config.model_type
+
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
             shard_prefixes = [
@@ -151,6 +154,8 @@ class AscendQuantConfig(QuantizationConfig):
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
+                if model_type=="qwen3_vl_moe" and shard_prefix.startswith("model"):
+                    shard_prefix=shard_prefix.replace("model","model.language_model")
                 is_shard_skipped = self.quant_description[shard_prefix +
                                                           '.weight'] == "FLOAT"
 
@@ -162,6 +167,12 @@ class AscendQuantConfig(QuantizationConfig):
                         "are quantized. All shards of fused layers "
                         "to have the same precision.")
         else:
+            if model_type=="qwen3_vl_moe" :
+                if prefix.startswith("visual"):
+                    prefix="model."+prefix
+                elif prefix.startswith("model"):
+                    prefix=prefix.replace("model","model.language_model")
+
             is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
 
         assert is_skipped is not None
@@ -173,6 +184,19 @@ class AscendQuantConfig(QuantizationConfig):
 
 packed_modules_model_mapping = {
     "qwen3_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen3_vl_moe": {
         "qkv_proj": [
             "q_proj",
             "k_proj",

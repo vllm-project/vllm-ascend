@@ -14,6 +14,7 @@ from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
 from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
                          AscendW8A8PDMixLinearMethod)
+from vllm.config import get_current_vllm_config
 
 ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W4A8_DYNAMIC": {
@@ -44,6 +45,8 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
 
 def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
                           packed_modules_mapping: Dict[str, Any]):
+    vllm_config = get_current_vllm_config()
+    model_type = vllm_config.model_config.hf_config.model_type
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
         quant_type = None
@@ -52,6 +55,8 @@ def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
             for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
+            if model_type=="qwen3_vl_moe" and shard_prefix.startswith("model"):
+                shard_prefix=shard_prefix.replace("model","model.language_model")
             shard_quant_type = quant_description[shard_prefix + '.weight']
 
             if quant_type is None:
@@ -62,6 +67,11 @@ def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
                     f"Shard {proj_name} uses {shard_quant_type}, but another shard"
                     f"use {quant_type}. Please check quantization config.")
     else:
+        if model_type=="qwen3_vl_moe":
+            if prefix.startswith("visual"):
+                prefix="model."+prefix
+            elif prefix.startswith("model"):
+                prefix=prefix.replace("model", "model.language_model")
         quant_type = quant_description[prefix + '.weight']
     return quant_type
 
