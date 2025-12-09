@@ -145,6 +145,7 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
             'prefill_tp_size': 4,
             'local_engine_id': 'engine_1',
             'side_channel_host': 'localhost',
+            'vllm_config': MockVllmConfig(),
             'side_channel_port': 5555,
             'metadata': {
                 "test": "metadata"
