@@ -1045,6 +1045,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             return self.attn_mask_builder.get_splitfuse_attn_mask()
         if self.vllm_config.model_config.use_mla:
             return None
+        # Only calls in PrefillNoCache situation
+        # and when TI-consistency switch is ON.
+        if attn_state == AscendAttentionState.PrefillNoCache and \
+                envs_ascend.TRAIN_INFER_CONSISTENCY:
+            max_seq_len = max(seq_lens.max().item, 0)
+            return self.attn_mask_builder.get_attn_mask(
+                max_seq_len=max_seq_len, dtype=self.dtype, device=self.device)
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)

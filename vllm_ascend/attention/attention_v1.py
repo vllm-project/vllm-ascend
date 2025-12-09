@@ -38,6 +38,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
+import vllm_ascend.envs as env_ascend
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -504,6 +505,33 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            # If the TI-Consistency switch is set to ON
+            # We use fusion attention instead of npu_fused_infer_attention_score.
+            if env_ascend.TRAIN_INFER_CONSISTENCY:
+                n_head = self.num_heads
+                shape_order = "TND"
+                scale = self.scale
+                mask = mask.to(torch.uint8)
+                attn_output = torch_npu.npu_fusion_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    head_num=n_head,
+                    input_layout=shape_order,
+                    pse=None,
+                    padding_mask=None,
+                    atten_mask=mask,
+                    scale=scale,
+                    inner_precise=0,
+                    sparse_mode=1,
+                    actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+                )[0]
+                attn_output = attn_output.view(num_tokens, self.num_heads,
+                                        self.head_size)
+                output[:num_tokens] = attn_output[:num_tokens]
+                assert output is not None
+                return output
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.query_lens.shape[0]
