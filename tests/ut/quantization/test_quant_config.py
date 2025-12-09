@@ -66,10 +66,18 @@ class TestAscendQuantConfig(TestBase):
         mock_is_available.return_value = True
         result = AscendQuantConfig.override_quantization_method(None, None)
         self.assertIsNone(result)
+        hf_quant_cfg = {"quant_method": ""}
+        result = AscendQuantConfig.override_quantization_method(
+            hf_quant_cfg, None)
+        self.assertEqual(result, "ascend")
 
         # Test when NPU is not available
         mock_is_available.return_value = False
         result = AscendQuantConfig.override_quantization_method(None, None)
+        self.assertIsNone(result)
+        hf_quant_cfg = {"quant_method": ""}
+        result = AscendQuantConfig.override_quantization_method(
+            hf_quant_cfg, None)
         self.assertIsNone(result)
 
     def test_get_quant_method_for_linear(self):
