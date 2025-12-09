@@ -33,12 +33,12 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.envs as env_ascend
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
-import vllm_ascend.envs as env_ascend
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -508,9 +508,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # If the TI-Consistency switch is set to ON
             # We use fusion attention instead of npu_fused_infer_attention_score.
             if env_ascend.TRAIN_INFER_CONSISTENCY:
+                num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+                query = query[:num_tokens]
                 n_head = self.num_heads
                 shape_order = "TND"
                 scale = self.scale
+                mask = attn_metadata.attn_mask
                 mask = mask.to(torch.uint8)
                 attn_output = torch_npu.npu_fusion_attention(
                     query=query,
@@ -528,7 +531,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
                 )[0]
                 attn_output = attn_output.view(num_tokens, self.num_heads,
-                                        self.head_size)
+                                               self.head_size)
                 output[:num_tokens] = attn_output[:num_tokens]
                 assert output is not None
                 return output

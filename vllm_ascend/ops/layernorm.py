@@ -23,6 +23,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 import vllm_ascend.envs as envs_ascend
 
+
 class AscendRMSNorm(RMSNorm):
 
     def __init__(
