@@ -640,7 +640,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.transfer_event = torch.npu.Event()
         
         if envs_ascend.TRAIN_INFER_CONSISTENCY:
-            logger.info("Train-Inference consistency is ENABLED, this might cause performance drop!")
+            logger.info(
+                "Train-Inference consistency is ENABLED, this might cause performance drop!"
+            )
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
