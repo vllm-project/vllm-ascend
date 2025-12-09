@@ -97,7 +97,7 @@ class AscendAttentionBackend(AttentionBackend):
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
-    
+
     @staticmethod
     def get_bsh_kv_cache_shape(
         num_blocks: int,

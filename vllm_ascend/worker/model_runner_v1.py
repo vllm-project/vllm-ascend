@@ -3352,13 +3352,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             for attn_group in self.attn_groups
         ])
 
-        # self.may_reinitialize_input_batch(kv_cache_config)
-        # kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
-
         kernel_block_sizes = self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config,
-            kernel_block_sizes=[i[0] for i in  kernel_block_sizes])
+            kernel_block_sizes=[i[0] for i in kernel_block_sizes])
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
@@ -4669,6 +4666,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             cache_dtype_str=cache_dtype,
         )
 
+        # `kv_cache_stride_order` indicates the permutation that gets
+        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # If an exception occurs, the subsequent allocate_uniform_kv_caches
+        # cannot be completed smoothly, so return False directly.
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
                 include_num_layers_dimension=True)
@@ -4738,7 +4739,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         # prepend a num_layers dimension into the shape
         kv_cache_shape = (num_layers, ) + kv_cache_shape
-        
+
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
                 include_num_layers_dimension=True)
