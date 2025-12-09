@@ -178,7 +178,7 @@ CATLASS_DEVICE void GmmDeqSwigluQuant(GemmCoord problemShape, uint32_t groupCoun
 template <TemplateMC2TypeClass, class L1TileShape_, class L0TileShape_, class EpilogueTileShape_, class BlockScheduler_,
           class DispatchPolicy_ = MmadAtlasA2Custom>
 CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR gmGroupList, GM_ADDR gmA,
-                       layout::RowMajor layoutA, GM_ADDR gmB, layout::nZ layoutB, GM_ADDR gmScale,
+                       layout::RowMajor layoutA, GM_ADDR gmB, layout::zN layoutB, GM_ADDR gmScale,
                        layout::VectorLayout layoutScale, GM_ADDR gmPerTokenScale,
                        layout::VectorLayout layoutPerTokenScale, GM_ADDR gmD, layout::RowMajor layoutD,
                        GM_ADDR gmWorkspace, void *combiner)
@@ -189,7 +189,7 @@ CATLASS_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR 
     using L0TileShape = L0TileShape_;
 
     using AType = Gemm::GemmType<int8_t, layout::RowMajor>;
-    using BType = Gemm::GemmType<int8_t, layout::nZ>;
+    using BType = Gemm::GemmType<int8_t, layout::zN>;
     using CType = Gemm::GemmType<int32_t, layout::RowMajor>;
 
     using BlockMmad = Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
@@ -261,12 +261,12 @@ private:
     GM_ADDR gmSmoothScales_;
     GM_ADDR gmexpertScales_;
 
-    uint32_t m_{0};
-    uint32_t n_{0};
-    uint32_t k_{0};
+    uint32_t maxTokenNum_{0};
+    uint32_t gmm1OutputDim_{0};
+    uint32_t tokenHiddenSize_{0};
     uint32_t groupCount_{0};
-    uint32_t n2_{0};
-    uint32_t k2_{0};
+    uint32_t gmm2OutputDim_{0};
+    uint32_t gmm2InputDim_{0};
     uint32_t globalRankId_{0};
     uint32_t winSizePerRank_{0};
     uint32_t blockDim_{0};
@@ -327,59 +327,62 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Init(
 
     bool isShareExpert = (epRankId_ < sharedExpertRankNum_);
     if (isShareExpert) {
-        m_ = maxBs_ * epRankSize_ / sharedExpertRankNum_;
+        maxTokenNum_ = maxBs_ * epRankSize_ / sharedExpertRankNum_;
     } else {
-        m_ = maxBs_ * epRankSize_ * (topK_ < moeExpertNumPerRank_ ? topK_ : moeExpertNumPerRank_);
+        maxTokenNum_ = maxBs_ * epRankSize_ * (topK_ < moeExpertNumPerRank_ ? topK_ : moeExpertNumPerRank_);
     }
 
-    n_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.gmm1HLen;
-    k_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
+    gmm1OutputDim_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.gmm1HLen;
+    tokenHiddenSize_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
     groupCount_ = isShareExpert ? 1 : tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.moeExpertNumPerRank;
-    n2_ = k_;
-    k2_ = n_ / 2;
+    gmm2OutputDim_ = tokenHiddenSize_;
+    gmm2InputDim_ = gmm1OutputDim_ / 2;
 }
 
 template <TemplateMC2TypeClass>
 __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
 {
-    GemmCoord gmm1ProblemShape{m_, n_, k_};
-    GemmCoord gmm2ProblemShape{m_, n2_, k2_};
+    GemmCoord gmm1ProblemShape{maxTokenNum_, gmm1OutputDim_, tokenHiddenSize_};
+    GemmCoord gmm2ProblemShape{maxTokenNum_, gmm2OutputDim_, gmm2InputDim_};
 
-    layout::RowMajor layoutX1{m_, k_};
-    layout::zN layoutWeight1 = layout::zN::template MakeLayout<int8_t>(k_, n_);
-    layout::VectorLayout layoutScale1{n_};
-    layout::VectorLayout layoutPerTokenScale1{m_};
-    layout::RowMajor layoutX2{m_, k2_};
-    layout::nZ layoutWeight2 = layout::nZ::template MakeLayout<int8_t>(k2_, n2_);
-    layout::VectorLayout layoutScale2{n2_};
-    layout::VectorLayout layoutPerTokenScale2{m_};
-    layout::RowMajor layoutOutput{m_, n2_};
+    layout::RowMajor layoutX1{maxTokenNum_, tokenHiddenSize_};
+    layout::zN layoutWeight1 = layout::zN::template MakeLayout<int8_t>(tokenHiddenSize_, gmm1OutputDim_);
+    layout::VectorLayout layoutW1Scale{gmm1OutputDim_};
+    layout::VectorLayout layoutX1Scale{maxTokenNum_};
+    layout::RowMajor layoutX2{maxTokenNum_, gmm2InputDim_};
+    layout::zN layoutWeight2 = layout::zN::template MakeLayout<int8_t>(gmm2InputDim_, gmm2OutputDim_);
+    layout::VectorLayout layoutW2Scale{gmm2OutputDim_};
+    layout::VectorLayout layoutX2Scale{maxTokenNum_};
+    layout::RowMajor layoutOutput{maxTokenNum_, gmm2OutputDim_};
 
     size_t workspaceOffset = 0;
     constexpr int32_t resveredWorkSpaceSize = 256 * 1024;
-    GM_ADDR gmX2 = workspaceGM_;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(m_) * k2_ * sizeof(int8_t));
-    GM_ADDR gmPerTokenScale2 = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(m_) * sizeof(float));
+    int64_t x1TokenSize = maxTokenNum_ * tokenHiddenSize_ * sizeof(int8_t);
+    int64_t x2TokenSize = maxTokenNum_ * gmm2InputDim_ * sizeof(int8_t);
+    int64_t maxTokenSize = x1TokenSize < x2TokenSize ? x2TokenSize : x1TokenSize;
+    int64_t tokenScaleSize = maxTokenNum_ * sizeof(float);
+    GM_ADDR gmX1 = workspaceGM_ + workspaceOffset;
+    GM_ADDR gmX2 = workspaceGM_ + workspaceOffset;
+    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(maxTokenSize);
+    GM_ADDR gmX1Scale = workspaceGM_ + workspaceOffset;
+    GM_ADDR gmX2Scale = workspaceGM_ + workspaceOffset;
+    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(tokenScaleSize);
     GM_ADDR gmWorkspace = workspaceGM_ + workspaceOffset;
-
     GM_ADDR gmCVSwap = workspaceGM_ + workspaceOffset;
     workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(blockDim_) * (GMM1_L1M * GMM1_L1N) *
                                               WORKSPACE_STAGES * sizeof(int32_t));
+    int64_t swigluOutSize = maxTokenNum_ * gmm1OutputDim_ * sizeof(float);
+    int64_t gmm2OutSize = maxTokenNum_ * tokenHiddenSize_ * sizeof(ExpandXType);
+    int64_t maxSwigluGmm2Size = swigluOutSize < gmm2OutSize ? gmm2OutSize : swigluOutSize;
     GM_ADDR gmSwigluOut = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(m_) * k2_ * sizeof(float));
+    GM_ADDR gmGmm2DepOut = workspaceGM_ + workspaceOffset;
+    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(maxSwigluGmm2Size);
     GM_ADDR gmGroupList = workspaceGM_ + workspaceOffset;
     workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(groupCount_) * sizeof(int64_t));
     GM_ADDR gmExpandIdx = workspaceGM_ + workspaceOffset;
     workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(bs_) * topK_ * sizeof(int32_t));
     GM_ADDR gmEpSendCount = workspaceGM_ + workspaceOffset;
     workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(epRankSize_) * groupCount_ * sizeof(int32_t));
-    GM_ADDR gmX1Token = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(m_) * k_ * sizeof(int8_t));
-    GM_ADDR gmX1Scale = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(m_) * sizeof(float));
-    GM_ADDR gmGmm2DepOut = workspaceGM_ + workspaceOffset;
-    workspaceOffset += RoundUp<GM_ALIGN_BYTE>(static_cast<size_t>(m_) * k_ * sizeof(ExpandXType));
     GM_ADDR gmResvered = workspaceGM_ + workspaceOffset;
     workspaceOffset += RoundUp<GM_ALIGN_BYTE>(resveredWorkSpaceSize);
 
@@ -388,7 +391,7 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
             AscendC::TPipe tpipe;
             MoeDistributeDispatchImpl::CamMoeDistributeDispatch<ExpandXType, int8_t, false, true, false, false>
                 dispatcher;
-            dispatcher.Init(gmX_, gmexpertIds_, gmSmoothScales_, gmX1Token, gmX1Scale, gmExpandIdx, gmGroupList,
+            dispatcher.Init(gmX_, gmexpertIds_, gmSmoothScales_, gmX1, gmX1Scale, gmExpandIdx, gmGroupList,
                             gmEpSendCount, gmOutputRecvCount_, nullptr, gmWorkspace, &tpipe, tilingData_);
             dispatcher.Process();
             tpipe.Destroy();
@@ -406,11 +409,11 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
     }
     GmmDeqSwigluQuant<EXEC_FLAG, ExpandXType, Gmm1L1TileShape, Gmm1L0TileShape, Gmm1EpilogueTileShape,
                       Gmm1BlockScheduler>(
-        gmm1ProblemShape, groupCount_, gmGroupList, gmX1Token, layoutX1, gmPermuteWeight1_, layoutWeight1,
-        gmPermuteScale1_, layoutScale1, gmX1Scale, layoutPerTokenScale1, gmX2, layoutX2, gmPerTokenScale2,
-        layoutPerTokenScale2, gmWorkspace, gmX_, gmSmoothScales_, gmexpertIds_, gmExpandIdx, gmEpSendCount, gmResvered,
+        gmm1ProblemShape, groupCount_, gmGroupList, gmX1, layoutX1, gmPermuteWeight1_, layoutWeight1,
+        gmPermuteScale1_, layoutW1Scale, gmX1Scale, layoutX1Scale, gmX2, layoutX2, gmX2Scale,
+        layoutX2Scale, gmWorkspace, gmX_, gmSmoothScales_, gmexpertIds_, gmExpandIdx, gmEpSendCount, gmResvered,
         gmOutputRecvCount_, epRankSize_, epRankId_, moeExpertNum_, moeExpertNumPerRank_, sharedExpertNum_,
-        sharedExpertRankNum_, quantMode_, globalBs_, bs_, topK_, k_);
+        sharedExpertRankNum_, quantMode_, globalBs_, bs_, topK_, tokenHiddenSize_);
     AscendC::PipeBarrier<PIPE_ALL>();
     Arch::CrossCoreFlag gmm1AivFinished{0};
     if constexpr (g_coreType == AscendC::AIV) {
@@ -427,7 +430,7 @@ __aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
     }
     GmmDeq<TemplateMC2TypeFunc, Gmm2L1TileShape, Gmm2L0TileShape, Gmm2EpilogueTileShape, Gmm2BlockScheduler,
            Gmm2DispatchPolicy>(gmm2ProblemShape, groupCount_, gmGroupList, gmX2, layoutX2, gmWeight2_, layoutWeight2,
-                               gmScale2_, layoutScale2, gmPerTokenScale2, layoutPerTokenScale2, gmGmm2DepOut,
+                               gmScale2_, layoutW2Scale, gmX2Scale, layoutX2Scale, gmGmm2DepOut,
                                layoutOutput, gmWorkspace, &combiner);
 }
 #endif  // DISPATCH_GMM_COMBINE_DECODE_H
