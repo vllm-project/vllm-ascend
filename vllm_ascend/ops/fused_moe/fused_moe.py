@@ -36,6 +36,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
+from vllm_ascend.eplb.utils import moe_load_async_stream
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
@@ -368,8 +369,15 @@ class AscendFusedMoE(FusedMoE):
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
-                self.moe_load += expert_tokens if group_list_type == 1 else \
-                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+                moe_load_stream = moe_load_async_stream()
+                cur_stream = torch.npu.current_stream()
+
+                moe_load_stream.wait_stream(cur_stream)
+                with npu_stream_switch(moe_load_stream):
+                    self.moe_load += expert_tokens if group_list_type == 1 else \
+                        torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                cur_stream.wait_stream(moe_load_stream)
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
