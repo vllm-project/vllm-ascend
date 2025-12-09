@@ -102,6 +102,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
             'side_channel_host': 'localhost',
             'side_channel_port': 5555,
             'metadata': MagicMock(),
+            'vllm_config': MockVllmConfig(),
             'ready_event': threading.Event(),
             'kv_caches': kv_caches,
             'pcp_rank': 0
@@ -1129,8 +1130,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             patch(
                 'vllm_ascend.distributed.mooncake_connector.get_decode_context_model_parallel_world_size',
                 return_value=1),
-            patch('vllm_ascend.distributed.mooncake_connector.get_pcp_group',
-                  return_value=self.mock_pcp_group),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.get_ascend_config',
                 return_value=MagicMock()),

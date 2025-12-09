@@ -218,8 +218,7 @@ class KVCacheSendingThread(threading.Thread):
         # NOTE(rob): we need each rank to have a unique port. This hack to keeps
         # us moving. We will switch when moving to etcd or where we have a
         # single ZMQ socket in the scheduler.
-        if self.pp_size > 1:
-            device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
+        device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
         handshake_port = self.side_channel_port + device_index
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("Starting listening on path: %s", path)
@@ -981,10 +980,8 @@ class MooncakeConnectorWorker:
             vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size *
             vllm_config.parallel_config.pipeline_parallel_size * self.pcp_size)
-        if self.pp_size > 1:
-            device_index = self.pp_rank * self.tp_size + self.tp_rank
-        else:
-            device_index = self.pcp_rank * self.tp_size + self.pcp_rank
+        device_index = (self.pp_rank +
+                        self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         self.engine = global_te.get_transfer_engine(self.side_channel_host,
