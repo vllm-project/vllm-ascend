@@ -44,7 +44,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | v0.12.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
+|     main    | ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9,  v0.12.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
 
 ## Release cadence
 
@@ -101,7 +101,8 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.2 branch |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.12.0 tag |
+| v0.11.0-dev| Maintained   | CI commitment for vLLM 0.11.0 version |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version                     |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version                     |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev                                   |

@@ -62,7 +62,15 @@ def select_experts(hidden_states: torch.Tensor,
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
-    if custom_routing_function is None:
+    is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
+        hidden_states=hidden_states,
+        top_k=top_k,
+        topk_group=topk_group,
+        num_expert_group=num_expert_group,
+        scoring_func=scoring_func,
+        custom_routing_function=custom_routing_function)
+
+    if is_support_npu_moe_gating_top_k:
         topk_weights, topk_ids = _select_experts_with_fusion_ops(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -103,6 +111,32 @@ def select_experts(hidden_states: torch.Tensor,
         topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], 
                                  dim=1)
     return topk_weights, topk_ids
+
+
+def check_npu_moe_gating_top_k(
+        hidden_states: torch.Tensor,
+        top_k: int,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        scoring_func: str = "softmax",
+        custom_routing_function: Optional[Callable] = None):
+    if custom_routing_function is not None:
+        return False
+    if scoring_func != "softmax" and scoring_func != "sigmoid":
+        return False
+    topk_group = topk_group if topk_group is not None else 1
+    num_expert_group = num_expert_group if num_expert_group is not None else 1
+    if not (num_expert_group > 0 and hidden_states.shape[-1] % num_expert_group
+            == 0 and hidden_states.shape[-1] // num_expert_group > 2):
+        return False
+    if topk_group < 1 or topk_group > num_expert_group:
+        return False
+    if top_k < 1 or \
+        top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
+        return False
+    if topk_group * hidden_states.shape[-1] / num_expert_group < top_k:
+        return False
+    return True
 
 
 def _native_grouped_topk(
@@ -187,12 +221,9 @@ def _select_experts_with_fusion_ops(
         routed_scaling_factor=1.0,
         global_num_experts: int = -1):
 
-    if scoring_func == "softmax":
-        norm_type = 0
-        topk_group = 1
-        num_expert_group = 1
-    else:
-        norm_type = 1
+    topk_group = topk_group if topk_group is not None else 1
+    num_expert_group = num_expert_group if num_expert_group is not None else 1
+    norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and \
         e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(
