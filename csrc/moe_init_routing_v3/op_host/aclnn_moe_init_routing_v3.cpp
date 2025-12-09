@@ -57,7 +57,7 @@ static inline bool CheckNotNull(const aclTensor *x,
     return true;
 }
 
-ACLNN_API aclnnStatus aclnnMoeInitRoutingV3GetWorkspaceSize(const aclTensor *x, 
+aclnnStatus aclnnMoeInitRoutingV3GetWorkspaceSize(const aclTensor *x, 
                                                             const aclTensor *expertIdx,
                                                             const aclTensor *scaleOptional,
                                                             const aclTensor *offsetOptional, 
@@ -137,7 +137,7 @@ ACLNN_API aclnnStatus aclnnMoeInitRoutingV3GetWorkspaceSize(const aclTensor *x,
     uniqueExecutor.ReleaseTo(executor);
     return ACLNN_SUCCESS;
 }
-ACLNN_API aclnnStatus aclnnMoeInitRoutingV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
+aclnnStatus aclnnMoeInitRoutingV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                             aclrtStream stream)
 {
   L2_DFX_PHASE_2(aclnnMoeInitRoutingV3);

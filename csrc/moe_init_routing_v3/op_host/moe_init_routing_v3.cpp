@@ -11,7 +11,6 @@
 #include <tuple>
 #include "moe_init_routing_v3.h"
 #include "opdev/make_op_executor.h"
-#include "opdev/aicpu/aicpu_task.h"
 #include "opdev/op_def.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_executor.h"

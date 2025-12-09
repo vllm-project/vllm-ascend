@@ -12,7 +12,6 @@
 #define OP_API_INC_MOE_INIT_ROUTING_V3_H_
 
 #include "aclnn/aclnn_base.h"
-#include "aclnn_util.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +21,7 @@ extern "C" {
  * @brief aclnnMoeInitRoutingV3的第一段接口，根据具体的计算流程，计算workspace大小。
  * @domain aclnn_ops_infer
  */
-ACLNN_API aclnnStatus aclnnMoeInitRoutingV3GetWorkspaceSize(const aclTensor *x, 
+__attribute__((visibility("default"))) aclnnStatus aclnnMoeInitRoutingV3GetWorkspaceSize(const aclTensor *x, 
                                                             const aclTensor *expertIdx,
                                                             const aclTensor *scaleOptional,
                                                             const aclTensor *offsetOptional, 
@@ -43,7 +42,7 @@ ACLNN_API aclnnStatus aclnnMoeInitRoutingV3GetWorkspaceSize(const aclTensor *x,
                                                             aclOpExecutor **executor);
                                                             
 /* @brief aclnnMoeInitRoutingV3的第二段接口，用于执行计算。 */
-ACLNN_API aclnnStatus aclnnMoeInitRoutingV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
+__attribute__((visibility("default"))) aclnnStatus aclnnMoeInitRoutingV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                                 aclrtStream stream);
 
 #ifdef __cplusplus

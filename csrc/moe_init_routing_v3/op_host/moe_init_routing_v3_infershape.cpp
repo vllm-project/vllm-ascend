@@ -1,6 +1,6 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify.
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 #include "register/op_def_registry.h"
-#include "log/log.h"
-#include "util/math_util.h"
+#include "log/ops_log.h"
+#include "platform/platform_info.h"
 
 using namespace ge;
 namespace ops {
@@ -72,11 +72,11 @@ static bool isSameDim(int64_t dim1, int64_t dim2)
 static ge::graphStatus GetAndCheckAttrActiveExpertRange(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                         int64_t &expertStart, int64_t &expertEnd)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckAttrActiveExpertRange.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckAttrActiveExpertRange.");
     // Check if active_expert_range size is 2 and if expert_start < expert_end
     auto activeExpertRangePtr = attrs->GetListInt(MOE_INIT_ROUTING_V3_ATTR_ACTIVE_EXPERT_RANGE);
     if (nullptr == activeExpertRangePtr) {
-        OP_LOGE(context, "The active_expert_range should be list int. But it is none.");
+        OPS_LOG_E(context->GetNodeName(), "The active_expert_range should be list int. But it is none.");
         return ge::GRAPH_FAILED;
     }
     int64_t activeExpertRangeSize = activeExpertRangePtr->GetSize();
@@ -84,38 +84,38 @@ static ge::graphStatus GetAndCheckAttrActiveExpertRange(const gert::RuntimeAttrs
         expertStart = activeExpertRangePtr->GetData()[0];
         expertEnd = activeExpertRangePtr->GetData()[1];
         if (expertStart >= expertEnd || expertStart < 0 || expertEnd > MOE_INIT_ROUTING_V3_EXPERT_END_BOUND) {
-            OP_LOGE(context,
+            OPS_LOG_E(context->GetNodeName(),
                     "The active_expert_range should be in [0, %ld), but the active_expert_range is [%ld, %ld).",
                     MOE_INIT_ROUTING_V3_EXPERT_END_BOUND, expertStart, expertEnd);
             return ge::GRAPH_FAILED;
         }
     } else {
-        OP_LOGE(context, "The active_expert_range size should be 2, but its size is %ld.", activeExpertRangeSize);
+        OPS_LOG_E(context->GetNodeName(), "The active_expert_range size should be 2, but its size is %ld.", activeExpertRangeSize);
         return ge::GRAPH_FAILED;
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrActiveExpertRange.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrActiveExpertRange.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrActiveNum(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                 int64_t &activeNum, int64_t &dropPadMode)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckAttrActiveNum.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckAttrActiveNum.");
     const int64_t *activeNumPtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_ACTIVE_NUM);
     if (nullptr == activeNumPtr) {
-        OP_LOGE(context, "The active_num should not be none.");
+        OPS_LOG_E(context->GetNodeName(), "The active_num should not be none.");
         return ge::GRAPH_FAILED;
     }
     activeNum = *activeNumPtr;
     if (dropPadMode == DropPadMode::NO_DROP_PAD) {
         if (activeNum < 0) {
-            OP_LOGE(context, "The active_num should be greater than or equal to 0. But it is %ld.", activeNum);
+            OPS_LOG_E(context->GetNodeName(), "The active_num should be greater than or equal to 0. But it is %ld.", activeNum);
             return ge::GRAPH_FAILED;
         }
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrActiveNum.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrActiveNum.");
     return ge::GRAPH_SUCCESS;
 }
 
@@ -123,132 +123,132 @@ static ge::graphStatus GetAndCheckAttrExpertCapacity(const gert::RuntimeAttrs *a
                                                     const gert::Shape *xShape, int64_t &expertCapacity, int64_t &dropPadMode)
 {
 
-    OP_LOGD(context, "Begin to do GetAndCheckAttrExpertCapacity.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckAttrExpertCapacity.");
     const int64_t *expertCapacityPtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_EXPERT_CAPACITY);
     if (nullptr == expertCapacityPtr) {
-        OP_LOGE(context, "The expert_capacity should not be none.");
+        OPS_LOG_E(context->GetNodeName(), "The expert_capacity should not be none.");
         return ge::GRAPH_FAILED;
     }
     expertCapacity = *expertCapacityPtr;
     if(dropPadMode == DropPadMode::DROP_PAD){
         if (expertCapacity < 0 || expertCapacity > xShape->GetDim(0)) {
-            OP_LOGE(context, "The expert_capacity should be between 0 and n. But it is %ld.", expertCapacity);
+            OPS_LOG_E(context->GetNodeName(), "The expert_capacity should be between 0 and n. But it is %ld.", expertCapacity);
             return ge::GRAPH_FAILED;
         }
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrExpertCapacity.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrExpertCapacity.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrExpertNum(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                 int64_t &experNum)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckexperNum.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckexperNum.");
     const int64_t *experNumPtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_EXPERT_NUM);
     if (nullptr == experNumPtr) {
-        OP_LOGE(context, "The expert_num should not be none.");
+        OPS_LOG_E(context->GetNodeName(), "The expert_num should not be none.");
         return ge::GRAPH_FAILED;
     }
     experNum = *experNumPtr;
     if (experNum <= 0 || experNum > MOE_INIT_ROUTING_V3_EXPERT_END_BOUND) {
-        OP_LOGE(context, "The expert_num should be greater than 0. But it is %ld.", experNum);
+        OPS_LOG_E(context->GetNodeName(), "The expert_num should be greater than 0. But it is %ld.", experNum);
         return ge::GRAPH_FAILED;
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrExpertNum.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrExpertNum.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrDropPadMode(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                 int64_t &dropPadMode)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckAttrDropPadMode.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckAttrDropPadMode.");
     const int64_t *dropPadModePtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_DROP_PAD_MODE);
     if (nullptr == dropPadModePtr) {
-        OP_LOGE(context, "The RuntimeAttrs for drop_pad_mode is none.");
+        OPS_LOG_E(context->GetNodeName(), "The RuntimeAttrs for drop_pad_mode is none.");
         return ge::GRAPH_FAILED;
     }
 
     dropPadMode = *dropPadModePtr;
     if (dropPadMode < DropPadMode::NO_DROP_PAD || dropPadMode > DropPadMode::DROP_PAD) {
-        OP_LOGE(context, "The drop_pad_mode should be %d or %d. But it is %ld.", DropPadMode::NO_DROP_PAD,
+        OPS_LOG_E(context->GetNodeName(), "The drop_pad_mode should be %d or %d. But it is %ld.", DropPadMode::NO_DROP_PAD,
                 DropPadMode::DROP_PAD, dropPadMode);
         return ge::GRAPH_FAILED;
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrDropPadMode.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrDropPadMode.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrExpertTokenNumType(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                          int64_t &experTokenNumType)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckexperTokenNumType.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckexperTokenNumType.");
     const int64_t *experTokenNumTypePtr =
         attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_EXPERT_TOKEN_NUM_TYPE);
     if (nullptr == experTokenNumTypePtr) {
-        OP_LOGE(context, "The expert_token_num_type should not be none.");
+        OPS_LOG_E(context->GetNodeName(), "The expert_token_num_type should not be none.");
         return ge::GRAPH_FAILED;
     }
     experTokenNumType = *experTokenNumTypePtr;
     if (experTokenNumType < ExpertTokenNumType::CUMSUM || experTokenNumType > ExpertTokenNumType::KEY_VALUE) {
-        OP_LOGE(context, "The expert_token_num_type should be %d, %d or %d. But it is %ld.",
+        OPS_LOG_E(context->GetNodeName(), "The expert_token_num_type should be %d, %d or %d. But it is %ld.",
                 ExpertTokenNumType::CUMSUM, ExpertTokenNumType::COUNT, ExpertTokenNumType::KEY_VALUE,
                 experTokenNumType);
         return ge::GRAPH_FAILED;
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrExpertTokenNumType.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrExpertTokenNumType.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrExpertTokenNumFlag(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                          bool &experTokenNumFlag)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckexperTokenNumType.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckexperTokenNumType.");
     const bool *experTokenNumFlagPtr =
         attrs->GetAttrPointer<bool>(MOE_INIT_ROUTING_V3_ATTR_EXPERT_TOKEN_NUM_FLAG);
     if (nullptr == experTokenNumFlagPtr) {
-        OP_LOGE(context, "The expert_token_num_flag should not be none.");
+        OPS_LOG_E(context->GetNodeName(), "The expert_token_num_flag should not be none.");
         return ge::GRAPH_FAILED;
     }
     experTokenNumFlag = *experTokenNumFlagPtr;
-    OP_LOGD(context, "End to do GetAndCheckAttrExpertTokenNumType.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrExpertTokenNumType.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrQuantMode(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                 int64_t &quantMode)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckQuantMode.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckQuantMode.");
     if (nullptr == attrs) {
-        OP_LOGE(context, "The RuntimeAttrs for quant_mode is none.");
+        OPS_LOG_E(context->GetNodeName(), "The RuntimeAttrs for quant_mode is none.");
         return ge::GRAPH_FAILED;
     }
     const int64_t *quantModePtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_QUANT_MODE);
     if (nullptr == quantModePtr) {
-        OP_LOGE(context, "The quant_mode should be %d, %d or %d. But it is none.", QuantMode::NON_QUANT,
+        OPS_LOG_E(context->GetNodeName(), "The quant_mode should be %d, %d or %d. But it is none.", QuantMode::NON_QUANT,
                 QuantMode::STATIC_QUANT, QuantMode::DYNAMIC_QUANT);
         return ge::GRAPH_FAILED;
     }
     quantMode = *quantModePtr;
     if (quantMode < QuantMode::NON_QUANT || quantMode > QuantMode::DYNAMIC_QUANT) {
-        OP_LOGE(context, "The quant_mode should be %d, %d or %d. But it is %ld.", QuantMode::NON_QUANT,
+        OPS_LOG_E(context->GetNodeName(), "The quant_mode should be %d, %d or %d. But it is %ld.", QuantMode::NON_QUANT,
                 QuantMode::STATIC_QUANT, QuantMode::DYNAMIC_QUANT, quantMode);
         return ge::GRAPH_FAILED;
     }
 
-    OP_LOGD(context, "End to do GetAndCheckQuantMode.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckQuantMode.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus GetAndCheckAttrRowIdxType(const gert::RuntimeAttrs *attrs, gert::InferShapeContext* context,
                                                  int64_t &rowIdxType, int64_t &dropPadMode)
 {
-    OP_LOGD(context, "Begin to do GetAndCheckAttrRowIdxType.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do GetAndCheckAttrRowIdxType.");
     if (nullptr == attrs) {
-        OP_LOGE(context, "The RuntimeAttrs for row_Idx_type is none.");
+        OPS_LOG_E(context->GetNodeName(), "The RuntimeAttrs for row_Idx_type is none.");
         return ge::GRAPH_FAILED;
     }
     const int64_t *dropPadModePtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_DROP_PAD_MODE);
@@ -256,23 +256,23 @@ static ge::graphStatus GetAndCheckAttrRowIdxType(const gert::RuntimeAttrs *attrs
 
     const int64_t *rowIdxTypePtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_ROW_IDX_TYPE);
     if (nullptr == rowIdxTypePtr) {
-        OP_LOGE(context, "The row_Idx_type should be 0 or 1. But it is none.");
+        OPS_LOG_E(context->GetNodeName(), "The row_Idx_type should be 0 or 1. But it is none.");
         return ge::GRAPH_FAILED;
     }
     rowIdxType = *rowIdxTypePtr;
     if(dropPadMode == DropPadMode::DROP_PAD){
         if (rowIdxType != 0) {
-            OP_LOGE(context, "The row_Idx_type should be 0 when dropPadMode is equal to 1 But it is %ld.", rowIdxType);
+            OPS_LOG_E(context->GetNodeName(), "The row_Idx_type should be 0 when dropPadMode is equal to 1 But it is %ld.", rowIdxType);
             return ge::GRAPH_FAILED;
         }
     }
 
     if (rowIdxType < 0 || rowIdxType > 1) {
-        OP_LOGE(context, "The row_Idx_type should be 0 or 1 But it is %ld.", rowIdxType);
+        OPS_LOG_E(context->GetNodeName(), "The row_Idx_type should be 0 or 1 But it is %ld.", rowIdxType);
         return ge::GRAPH_FAILED;
     }
 
-    OP_LOGD(context, "End to do GetAndCheckAttrRowIdxType.");
+    OPS_LOG_D(context->GetNodeName(), "End to do GetAndCheckAttrRowIdxType.");
     return ge::GRAPH_SUCCESS;
 }
 
@@ -281,45 +281,45 @@ static ge::graphStatus CheckInputScaleShape(gert::InferShapeContext *context, co
                                             const int64_t expertEnd, const int64_t quantMode)
 {
     // When quant_mode is STATIC_QUANT, scale cannot be none.
-    OP_CHECK_IF((nullptr == scaleShape && QuantMode::STATIC_QUANT == quantMode),
-                OP_LOGE(context, "The scale cannot be none when quant_mode is %ld.", quantMode),
+    OP_CHECK((nullptr == scaleShape && QuantMode::STATIC_QUANT == quantMode),
+                OPS_LOG_E(context->GetNodeName(), "The scale cannot be none when quant_mode is %ld.", quantMode),
                 return ge::GRAPH_FAILED);
 
     // When quant_mode is NON_QUANT or DYNAMIC_QUANT, scale can be none.
-    OP_CHECK_IF((nullptr == scaleShape && (QuantMode::NON_QUANT == quantMode || QuantMode::DYNAMIC_QUANT == quantMode)),
-                OP_LOGI(context, "When quant_mode is NON_QUANT or DYNAMIC_QUANT, scale can be none."),
+    OP_CHECK((nullptr == scaleShape && (QuantMode::NON_QUANT == quantMode || QuantMode::DYNAMIC_QUANT == quantMode)),
+                OPS_LOG_I(context->GetNodeName(), "When quant_mode is NON_QUANT or DYNAMIC_QUANT, scale can be none."),
                 return ge::GRAPH_SUCCESS);
-    OP_CHECK_IF((nullptr == scaleShape),
-                OP_LOGE(context, "The scale cannot be none when quant_mode is %ld.", quantMode),
+    OP_CHECK((nullptr == scaleShape),
+                OPS_LOG_E(context->GetNodeName(), "The scale cannot be none when quant_mode is %ld.", quantMode),
                 return ge::GRAPH_FAILED);
 
     // When quant_mode is NON_QUANT and scale is not none, the dim num of scale should be 1 and the size of scale_dim_0
     // should be same as x_shape_dim_0.
-    OP_CHECK_IF(QuantMode::NON_QUANT == quantMode &&
+    OP_CHECK(QuantMode::NON_QUANT == quantMode &&
                     (scaleShape->GetDimNum() != DIM_ONE || !isSameDim(scaleShape->GetDim(0), xShape->GetDim(0))),
-                OP_LOGE(context, "The shape of scale should be (%ld), current shape is (%s).", xShape->GetDim(0),
-                        Ops::Base::ToString(*scaleShape).c_str()),
+                OPS_LOG_E(context->GetNodeName(), "The shape of scale should be (%ld), current shape is (%s).", xShape->GetDim(0),
+                        ops::Shape2String(*scaleShape).c_str()),
                 return ge::GRAPH_FAILED);
 
     // When quant_mode is STATIC_QUANT, the scale shape should be (1,)
     int64_t activeExpertRange = expertEnd - expertStart;
-    OP_CHECK_IF(QuantMode::STATIC_QUANT == quantMode &&
+    OP_CHECK(QuantMode::STATIC_QUANT == quantMode &&
                     (scaleShape->GetDimNum() == DIM_ONE && !isSameDim(scaleShape->GetDim(0), DIM_ONE)),
-                OP_LOGE(context, "When quant_mode=%ld, the shape of scale should be 1, current shape is (%s).",
-                        quantMode, Ops::Base::ToString(*scaleShape).c_str()),
+                OPS_LOG_E(context->GetNodeName(), "When quant_mode=%ld, the shape of scale should be 1, current shape is (%s).",
+                        quantMode, ops::Shape2String(*scaleShape).c_str()),
                 return ge::GRAPH_FAILED);
 
     // When quant_mode is DYNAMIC_QUANT and scale is not none, the scale shape should be (end-start, h).
-    OP_CHECK_IF(QuantMode::DYNAMIC_QUANT == quantMode &&
+    OP_CHECK(QuantMode::DYNAMIC_QUANT == quantMode &&
                     (scaleShape->GetDimNum() == DIM_ONE && !isSameDim(scaleShape->GetDim(0), activeExpertRange)),
-                OP_LOGE(context, "When quant_mode=%ld, the scale shape should be (%ld,), current shape is (%s).",
-                        quantMode, activeExpertRange, Ops::Base::ToString(*scaleShape).c_str()),
+                OPS_LOG_E(context->GetNodeName(), "When quant_mode=%ld, the scale shape should be (%ld,), current shape is (%s).",
+                        quantMode, activeExpertRange, ops::Shape2String(*scaleShape).c_str()),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(QuantMode::DYNAMIC_QUANT == quantMode &&
+    OP_CHECK(QuantMode::DYNAMIC_QUANT == quantMode &&
                     (scaleShape->GetDimNum() == DIM_TWO && (!isSameDim(scaleShape->GetDim(0), activeExpertRange) ||
                                                             !isSameDim(scaleShape->GetDim(1), xShape->GetDim(1)))),
-                OP_LOGE(context, "When quant_mode=%ld, the scale shape should be (%ld, %ld), but its shape is (%s).",
-                        quantMode, activeExpertRange, xShape->GetDim(1), Ops::Base::ToString(*scaleShape).c_str()),
+                OPS_LOG_E(context->GetNodeName(), "When quant_mode=%ld, the scale shape should be (%ld, %ld), but its shape is (%s).",
+                        quantMode, activeExpertRange, xShape->GetDim(1), ops::Shape2String(*scaleShape).c_str()),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -339,8 +339,8 @@ static ge::graphStatus CheckInputOffsetShape(gert::InferShapeContext *context,
     int64_t activeExpertRange = expertEnd - expertStart;
     if (QuantMode::STATIC_QUANT == quantMode) {
         if (offsetShape->GetDimNum() == DIM_ONE && !isSameDim(offsetShape->GetDim(0), DIM_ONE)) {
-            OP_LOGE(context, "The shape of offset should be 1, current shape is (%s).",
-                    activeExpertRange, Ops::Base::ToString(*offsetShape).c_str());
+            OPS_LOG_E(context->GetNodeName(), "The shape of offset should be 1, current shape is (%s).",
+                    activeExpertRange, ops::Shape2String(*offsetShape).c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -356,46 +356,46 @@ static ge::graphStatus CheckInputShape(gert::InferShapeContext *context, const g
     // Check the shape of input_x
     if (xShape->GetDimNum() == DIM_ONE) {
         if (xShape->GetDim(0) != ge::UNKNOWN_DIM_NUM) {
-            OP_LOGE(context, "The dynamic dim of x should be -2, current shape is %s.",
-                    Ops::Base::ToString(*xShape).c_str());
+            OPS_LOG_E(context->GetNodeName(), "The dynamic dim of x should be -2, current shape is %s.",
+                    ops::Shape2String(*xShape).c_str());
             return ge::GRAPH_FAILED;
         }
     } else if (xShape->GetDimNum() != DIM_TWO) {
-        OP_LOGE(context, "The dim of x should be 2 or dynamic, current shape is %s.",
-                Ops::Base::ToString(*xShape).c_str());
+        OPS_LOG_E(context->GetNodeName(), "The dim of x should be 2 or dynamic, current shape is %s.",
+                ops::Shape2String(*xShape).c_str());
         return ge::GRAPH_FAILED;
     }
 
     int64_t x_n = xShape->GetDimNum() == DIM_ONE ? NEG_ONE : xShape->GetDim(0);
     int64_t cols = xShape->GetDimNum() == DIM_ONE ? NEG_ONE : xShape->GetDim(1);
     if (x_n < NEG_ONE || cols < NEG_ONE) {
-        OP_LOGE(context, "Invalid x shape, shape is %s.", Ops::Base::ToString(*xShape).c_str());
+        OPS_LOG_E(context->GetNodeName(), "Invalid x shape, shape is %s.", ops::Shape2String(*xShape).c_str());
         return ge::GRAPH_FAILED;
     }
 
     // Check the shape of expert_idx
     if (expertIdxShape->GetDimNum() == DIM_ONE) {
         if (expertIdxShape->GetDim(0) != ge::UNKNOWN_DIM_NUM) {
-            OP_LOGE(context, "The dynamic dim of expert_idx should be -2, current shape is %s.",
-                    Ops::Base::ToString(*expertIdxShape).c_str());
+            OPS_LOG_E(context->GetNodeName(), "The dynamic dim of expert_idx should be -2, current shape is %s.",
+                    ops::Shape2String(*expertIdxShape).c_str());
             return ge::GRAPH_FAILED;
         }
     } else if (expertIdxShape->GetDimNum() != DIM_TWO) {
-        OP_LOGE(context, "The dim of expert_idx should be 2 or dynamic, current shape is %s.",
-                Ops::Base::ToString(*expertIdxShape).c_str());
+        OPS_LOG_E(context->GetNodeName(), "The dim of expert_idx should be 2 or dynamic, current shape is %s.",
+                ops::Shape2String(*expertIdxShape).c_str());
         return ge::GRAPH_FAILED;
     }
 
     int64_t expert_idx_n = expertIdxShape->GetDimNum() == DIM_ONE ? NEG_ONE : expertIdxShape->GetDim(0);
     int64_t expert_idx_k = expertIdxShape->GetDimNum() == DIM_ONE ? NEG_ONE : expertIdxShape->GetDim(1);
     if (expert_idx_n < NEG_ONE || expert_idx_k < NEG_ONE) {
-        OP_LOGE(context, "Invalid expert_idx shape, shape is %s.",
-                Ops::Base::ToString(*expertIdxShape).c_str());
+        OPS_LOG_E(context->GetNodeName(), "Invalid expert_idx shape, shape is %s.",
+                ops::Shape2String(*expertIdxShape).c_str());
         return ge::GRAPH_FAILED;
     }
 
     if (!isSameDim(x_n, expert_idx_n)) {
-        OP_LOGE(context, "The first dim of x and expert_idx should be same.");
+        OPS_LOG_E(context->GetNodeName(), "The first dim of x and expert_idx should be same.");
         return ge::GRAPH_FAILED;
     }
 
@@ -418,56 +418,56 @@ static void ShowInputShapeAndAttrInfo(gert::InferShapeContext *context, const ge
                                       const int64_t expertEnd, const int64_t quantMode, const int64_t rowIdxType)
 {
     // input_x and expert_idx are all required.
-    OP_LOGD(context, "x shape is: %s.", Ops::Base::ToString(*xShape).c_str());
-    OP_LOGD(context, "expert_idx shape is: %s.", Ops::Base::ToString(*expertIdxShape).c_str());
+    OPS_LOG_D(context->GetNodeName(), "x shape is: %s.", ops::Shape2String(*xShape).c_str());
+    OPS_LOG_D(context->GetNodeName(), "expert_idx shape is: %s.", ops::Shape2String(*expertIdxShape).c_str());
 
     // scale is optional and can be none.
     if (nullptr == scaleShape) {
-        OP_LOGD(context, "scale_shape is: none.");
+        OPS_LOG_D(context->GetNodeName(), "scale_shape is: none.");
     } else {
-        OP_LOGD(context, "scale_shape is: %s.", Ops::Base::ToString(*scaleShape).c_str());
+        OPS_LOG_D(context->GetNodeName(), "scale_shape is: %s.", ops::Shape2String(*scaleShape).c_str());
     }
 
     // offset is optional and can be none.
-    OP_LOGD(context, "Begin print offset_shape.");
+    OPS_LOG_D(context->GetNodeName(), "Begin print offset_shape.");
     if (nullptr == offsetShape) {
-        OP_LOGD(context, "offset_shape is: none.");
+        OPS_LOG_D(context->GetNodeName(), "offset_shape is: none.");
     } else {
-        OP_LOGD(context, "offset_shape is: %s.", Ops::Base::ToString(*offsetShape).c_str());
+        OPS_LOG_D(context->GetNodeName(), "offset_shape is: %s.", ops::Shape2String(*offsetShape).c_str());
     }
-    OP_LOGD(context, "End print offset_shape.");
+    OPS_LOG_D(context->GetNodeName(), "End print offset_shape.");
 
     // Attrs are all required.
-    OP_LOGD(context, "active_expert_range is: [%ld, %ld).", expertStart, expertEnd);
-    OP_LOGD(context, "quant_mode is: %ld.", quantMode);
-    OP_LOGD(context, "row_Idx_type is: %ld.", rowIdxType);
+    OPS_LOG_D(context->GetNodeName(), "active_expert_range is: [%ld, %ld).", expertStart, expertEnd);
+    OPS_LOG_D(context->GetNodeName(), "quant_mode is: %ld.", quantMode);
+    OPS_LOG_D(context->GetNodeName(), "row_Idx_type is: %ld.", rowIdxType);
 }
 
 static void ShowOutputShapeInfo(gert::InferShapeContext *context, const gert::Shape *expandedXShape,
                                 const gert::Shape *expandedRowIdxShape,
                                 const gert::Shape *expertTokenCumsumOrCountShape, const gert::Shape *expandedScaleShape)
 {
-    OP_LOGD(context, "expanded_x shape is: %s after infershape.",
-            Ops::Base::ToString(*expandedXShape).c_str());
-    OP_LOGD(context, "expanded_row_idx shape is: %s after infershape.",
-            Ops::Base::ToString(*expandedRowIdxShape).c_str());
-    OP_LOGD(context, "expert_token_cumsum_or_count shape is: %s after infershape.",
-            Ops::Base::ToString(*expertTokenCumsumOrCountShape).c_str());
-    OP_LOGD(context, "expanded_scale shape is: %s after infershape.",
-            Ops::Base::ToString(*expandedScaleShape).c_str());
+    OPS_LOG_D(context->GetNodeName(), "expanded_x shape is: %s after infershape.",
+            ops::Shape2String(*expandedXShape).c_str());
+    OPS_LOG_D(context->GetNodeName(), "expanded_row_idx shape is: %s after infershape.",
+            ops::Shape2String(*expandedRowIdxShape).c_str());
+    OPS_LOG_D(context->GetNodeName(), "expert_token_cumsum_or_count shape is: %s after infershape.",
+            ops::Shape2String(*expertTokenCumsumOrCountShape).c_str());
+    OPS_LOG_D(context->GetNodeName(), "expanded_scale shape is: %s after infershape.",
+            ops::Shape2String(*expandedScaleShape).c_str());
 }
 
 static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *context)
 {
-    OP_LOGD(context, "Begin to do MoeInitRoutingV3Infershape.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do MoeInitRoutingV3Infershape.");
     // 1. Get and check input shape
     // 1.1 Get and check input_x
     const gert::Shape *xShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK((xShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The xShape cannot be none."), return ge::GRAPH_FAILED);
 
     // 1.2 Get and check expert_idx
     const gert::Shape *expertIdxShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_EXPERT_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expertIdxShape);
+    OP_CHECK((expertIdxShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expertIdxShape cannot be none."), return ge::GRAPH_FAILED);
 
     // 1.3 Get scale shape without checking null, because scale is optional and can be none.
     const gert::Shape *scaleShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_SCALE);
@@ -476,7 +476,8 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     const gert::Shape *offsetShape = context->GetInputShape(MOE_INIT_ROUTING_V3_INPUT_OFFSET);
     // 2. Get and check attrs
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK((attrs == nullptr), OPS_LOG_E(context->GetNodeName(), "The attrs cannot be none."), return ge::GRAPH_FAILED);
+    
 
     // 2.1 Get and check active_expert_range attr
     int64_t expertStart = static_cast<int64_t>(-1);
@@ -486,7 +487,7 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     }
 
     if (nullptr == attrs) {
-        OP_LOGE(context, "The attrs is none.");
+        OPS_LOG_E(context->GetNodeName(), "The attrs is none.");
         return ge::GRAPH_FAILED;
     }
 
@@ -500,13 +501,13 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     int64_t activeNum = static_cast<int64_t>(-1);
     if (GetAndCheckAttrActiveNum(attrs, context, activeNum, dropPadMode) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
-    }   
+    }
 
     // 2.4 Get and check expert_capacity attr
     int64_t expertCapacity = static_cast<int64_t>(-1);
     if (GetAndCheckAttrExpertCapacity(attrs, context, xShape, expertCapacity, dropPadMode) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
-    }  
+    }
 
     // 2.5 Get and check expert_num attr
     int64_t experNum = static_cast<int64_t>(-1);
@@ -551,14 +552,14 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
     // 3. Infer output shape
     // 3.1 Prepare output shape
     gert::Shape *expandedXShape = context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedXShape);
+    OP_CHECK((expandedXShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expandedXShape cannot be none."), return ge::GRAPH_FAILED);
     gert::Shape *expandedRowIdxShape = context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_ROW_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedRowIdxShape);
+    OP_CHECK((expandedRowIdxShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expandedRowIdxShape cannot be none."), return ge::GRAPH_FAILED);
     gert::Shape *expertTokenCumsumOrCountShape =
         context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPERT_TOKEN_CUMSUM_OR_COUNT);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expertTokenCumsumOrCountShape);
+    OP_CHECK((expertTokenCumsumOrCountShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expertTokenCumsumOrCountShape cannot be none."), return ge::GRAPH_FAILED);
     gert::Shape *expandedScaleShape = context->GetOutputShape(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_SCALE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedScaleShape);
+    OP_CHECK((expandedScaleShape == nullptr), OPS_LOG_E(context->GetNodeName(), "The expandedScaleShape cannot be none."), return ge::GRAPH_FAILED);
 
     int64_t x_n = xShape->GetDimNum() == DIM_ONE ? NEG_ONE : xShape->GetDim(0);
     int64_t cols = xShape->GetDimNum() == DIM_ONE ? NEG_ONE : xShape->GetDim(1);
@@ -616,21 +617,21 @@ static ge::graphStatus InferShape4MoeInitRoutingV3(gert::InferShapeContext *cont
 
     ShowOutputShapeInfo(context, expandedXShape, expandedRowIdxShape, expertTokenCumsumOrCountShape,
                         expandedScaleShape);
-    OP_LOGD(context, "End to do MoeInitRoutingV3Infershape.");
+    OPS_LOG_D(context->GetNodeName(), "End to do MoeInitRoutingV3Infershape.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataType4MoeInitRoutingV3(gert::InferDataTypeContext *context)
 {
-    OP_LOGD(context, "Begin to do MoeInitRoutingV3InferDataType.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do MoeInitRoutingV3InferDataType.");
 
     // Get and check quant_mode attr
     const gert::RuntimeAttrs *attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK((attrs == nullptr), OPS_LOG_E(context->GetNodeName(), "The attrs cannot be none."), return ge::GRAPH_FAILED);
     int64_t quantMode = static_cast<int64_t>(-1);
     const int64_t *quantModePtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V3_ATTR_QUANT_MODE);
     if (nullptr == quantModePtr) {
-        OP_LOGE(context, "The quant_mode should be %d, %d or %d. But it is none.", QuantMode::NON_QUANT,
+        OPS_LOG_E(context->GetNodeName(), "The quant_mode should be %d, %d or %d. But it is none.", QuantMode::NON_QUANT,
                 QuantMode::STATIC_QUANT, QuantMode::DYNAMIC_QUANT);
         return ge::GRAPH_FAILED;
     }
@@ -641,7 +642,7 @@ static ge::graphStatus InferDataType4MoeInitRoutingV3(gert::InferDataTypeContext
         context->SetOutputDataType(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_X, xDtype);
     } else if (QuantMode::STATIC_QUANT == quantMode || QuantMode::DYNAMIC_QUANT == quantMode) {
         if (ge::DT_INT8 == xDtype) {
-            OP_LOGE(context, "When quant_mode=%ld, xDtype cannot be int_8.", quantMode);
+            OPS_LOG_E(context->GetNodeName(), "When quant_mode=%ld, xDtype cannot be int_8.", quantMode);
             return ge::GRAPH_FAILED;
         }
         context->SetOutputDataType(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_X, ge::DT_INT8);
@@ -649,44 +650,44 @@ static ge::graphStatus InferDataType4MoeInitRoutingV3(gert::InferDataTypeContext
     context->SetOutputDataType(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_ROW_IDX, ge::DT_INT32);
     context->SetOutputDataType(MOE_INIT_ROUTING_V3_OUTPUT_EXPERT_TOKEN_CUMSUM_OR_COUNT, ge::DT_INT64);
     context->SetOutputDataType(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_SCALE, ge::DT_FLOAT);
-    OP_LOGD(context, "End to do MoeInitRoutingV3InferDataType.");
+    OPS_LOG_D(context->GetNodeName(), "End to do MoeInitRoutingV3InferDataType.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferShapeRange4MoeInitRoutingV3(gert::InferShapeRangeContext *context)
 {
-    OP_LOGD(context, "Begin to do MoeInitRoutingV3InferRange.");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do MoeInitRoutingV3InferRange.");
 
     // Get and check the pointers of all the outputs' shape range object
     auto expanded_x = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expanded_x);
+    OP_CHECK((expanded_x == nullptr), OPS_LOG_E(context->GetNodeName(), "The expanded_x cannot be none."), return ge::GRAPH_FAILED);
     auto expanded_row_idx = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_ROW_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expanded_row_idx);
+    OP_CHECK((expanded_row_idx == nullptr), OPS_LOG_E(context->GetNodeName(), "The expanded_row_idx cannot be none."), return ge::GRAPH_FAILED);
     auto count = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPERT_TOKEN_CUMSUM_OR_COUNT);
-    OP_CHECK_NULL_WITH_CONTEXT(context, count);
+    OP_CHECK((count == nullptr), OPS_LOG_E(context->GetNodeName(), "The count cannot be none."), return ge::GRAPH_FAILED);
     auto expanded_scale = context->GetOutputShapeRange(MOE_INIT_ROUTING_V3_OUTPUT_EXPANDED_SCALE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expanded_scale);
+    OP_CHECK((expanded_scale == nullptr), OPS_LOG_E(context->GetNodeName(), "The expanded_scale cannot be none."), return ge::GRAPH_FAILED);
 
     // Print the shape ranges of the outputs before InferShapeRange
-    OP_LOGD(context, "Before InferShapeRange, expanded_x->GetMin() = %s",
-            Ops::Base::ToString(*(expanded_x->GetMin())).c_str());
-    OP_LOGD(context, "Before InferShapeRange, expanded_x->GetMax() = %s",
-            Ops::Base::ToString(*(expanded_x->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_x->GetMin() = %s",
+            ops::Shape2String(*(expanded_x->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_x->GetMax() = %s",
+            ops::Shape2String(*(expanded_x->GetMax())).c_str());
 
-    OP_LOGD(context, "Before InferShapeRange, expanded_row_idx->GetMin() = %s",
-            Ops::Base::ToString(*(expanded_row_idx->GetMin())).c_str());
-    OP_LOGD(context, "Before InferShapeRange, expanded_row_idx->GetMax() = %s",
-            Ops::Base::ToString(*(expanded_row_idx->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_row_idx->GetMin() = %s",
+            ops::Shape2String(*(expanded_row_idx->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_row_idx->GetMax() = %s",
+            ops::Shape2String(*(expanded_row_idx->GetMax())).c_str());
 
-    OP_LOGD(context, "Before InferShapeRange, count->GetMin() = %s",
-            Ops::Base::ToString(*(count->GetMin())).c_str());
-    OP_LOGD(context, "Before InferShapeRange, count->GetMax() = %s",
-            Ops::Base::ToString(*(count->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, count->GetMin() = %s",
+            ops::Shape2String(*(count->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, count->GetMax() = %s",
+            ops::Shape2String(*(count->GetMax())).c_str());
 
-    OP_LOGD(context, "Before InferShapeRange, expanded_scale->GetMin() = %s",
-            Ops::Base::ToString(*(expanded_scale->GetMin())).c_str());
-    OP_LOGD(context, "Before InferShapeRange, expanded_scale->GetMax() = %s",
-            Ops::Base::ToString(*(expanded_scale->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_scale->GetMin() = %s",
+            ops::Shape2String(*(expanded_scale->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "Before InferShapeRange, expanded_scale->GetMax() = %s",
+            ops::Shape2String(*(expanded_scale->GetMax())).c_str());
 
     // Set the dim num and dim of the outputs' shape range object
     if (expanded_x->GetMin() != nullptr && expanded_x->GetMax() != nullptr) {
@@ -720,27 +721,27 @@ static ge::graphStatus InferShapeRange4MoeInitRoutingV3(gert::InferShapeRangeCon
     }
 
     // Print the shape ranges of the outputs after InferShapeRange
-    OP_LOGD(context, "After InferShapeRange, expanded_x->GetMin() = %s",
-            Ops::Base::ToString(*(expanded_x->GetMin())).c_str());
-    OP_LOGD(context, "After InferShapeRange, expanded_x->GetMax() = %s",
-            Ops::Base::ToString(*(expanded_x->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, expanded_x->GetMin() = %s",
+            ops::Shape2String(*(expanded_x->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, expanded_x->GetMax() = %s",
+            ops::Shape2String(*(expanded_x->GetMax())).c_str());
 
-    OP_LOGD(context, "After InferShapeRange, expanded_row_idx->GetMin() = %s",
-            Ops::Base::ToString(*(expanded_row_idx->GetMin())).c_str());
-    OP_LOGD(context, "After InferShapeRange, expanded_row_idx->GetMax() = %s",
-            Ops::Base::ToString(*(expanded_row_idx->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, expanded_row_idx->GetMin() = %s",
+            ops::Shape2String(*(expanded_row_idx->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, expanded_row_idx->GetMax() = %s",
+            ops::Shape2String(*(expanded_row_idx->GetMax())).c_str());
 
-    OP_LOGD(context, "After InferShapeRange, count->GetMin() = %s",
-            Ops::Base::ToString(*(count->GetMin())).c_str());
-    OP_LOGD(context, "After InferShapeRange, count->GetMax() = %s",
-            Ops::Base::ToString(*(count->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, count->GetMin() = %s",
+            ops::Shape2String(*(count->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, count->GetMax() = %s",
+            ops::Shape2String(*(count->GetMax())).c_str());
 
-    OP_LOGD(context, "After InferShapeRange, expanded_scale->GetMin() = %s",
-            Ops::Base::ToString(*(expanded_scale->GetMin())).c_str());
-    OP_LOGD(context, "After InferShapeRange, expanded_scale->GetMax() = %s",
-            Ops::Base::ToString(*(expanded_scale->GetMax())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, expanded_scale->GetMin() = %s",
+            ops::Shape2String(*(expanded_scale->GetMin())).c_str());
+    OPS_LOG_D(context->GetNodeName(), "After InferShapeRange, expanded_scale->GetMax() = %s",
+            ops::Shape2String(*(expanded_scale->GetMax())).c_str());
 
-    OP_LOGD(context, "End to do MoeInitRoutingV3InferRange.");
+    OPS_LOG_D(context->GetNodeName(), "End to do MoeInitRoutingV3InferRange.");
     return ge::GRAPH_SUCCESS;
 }
 
