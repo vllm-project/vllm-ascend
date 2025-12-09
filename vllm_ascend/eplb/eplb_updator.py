@@ -21,6 +21,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
@@ -36,7 +37,7 @@ class EplbUpdator:
         self.shared_dict = self.eplb_process.shared_dict
         self.moe_imbalance_dict: dict[int, float] = {}
 
-    def set_adaptor(self, adaptor):
+    def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         self.global_expert_num = self.adaptor.global_expert_num
@@ -84,7 +85,7 @@ class EplbUpdator:
                     self.shared_dict["expert_maps"],
                     self.expert_map_record_path)
 
-            self.adaptor.model.clear_all_moe_loads()
+            self.adaptor.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
 

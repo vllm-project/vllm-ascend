@@ -34,16 +34,22 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
-        if self.model.config.model_type == "qwen3_moe":
-            self.num_dense_layers = 0
-            self.global_expert_num = self.model.config.num_experts
-        else:
-            self.num_dense_layers = self.model.config.first_k_dense_replace
-            self.global_expert_num = self.model.config.n_routed_experts
-        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
+        self.init_eplb_params()
+        assert self.num_dense_layers != -1 \
+            and self.global_expert_num != -1 \
+            and self.num_moe_layers != -1, \
+            "adaptor hasn't been initialized yet"
+        self.init_eplb_param_dict()
+        self.init_expert_maps()
 
+    def init_eplb_params(self):
+        self.num_dense_layers = -1
+        self.global_expert_num = -1
+        self.num_moe_layers = -1
+
+    def init_eplb_param_dict(self):
         for i in range(self.num_dense_layers,
                        self.model.config.num_hidden_layers):
             self.param_dict["model.layers." + str(i) + ".mlp.experts." + "w13_weight_list"] = \
@@ -64,13 +70,14 @@ class VllmEplbAdaptor(EplbAdaptor):
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
+    def init_expert_maps(self):
         self.expert_map_per_layer = dict(
         )  # reference to expert map on device for expert map update
         self.expert_map_per_layer_cpu = dict(
         )  # copy of expert map on CPU to avoid device synchronize frequently
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_expert_map(self.num_dense_layers + layer_idx)
+                self.get_expert_map(self.num_dense_layers + layer_idx)
 
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(
@@ -86,7 +93,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
+                self.get_log2phy_map(self.num_dense_layers + layer_idx)
 
         self.all_topk_ids = []
 
@@ -132,11 +139,11 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
-        self.moe_load = self.model.get_all_moe_loads()
+        self.moe_load = self.get_all_moe_loads()
         return self.moe_load
 
     def get_init_expert_map(self, num_moe_layers):
-        expert_map = self.model.get_all_expert_map(num_moe_layers)
+        expert_map = self.get_all_expert_map(num_moe_layers)
         if dist.is_initialized():
             world_size = dist.get_world_size()
 
@@ -156,21 +163,16 @@ class VllmEplbAdaptor(EplbAdaptor):
         return all_expert_maps
 
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
-
         try:
-            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(
+            expert_map_tensor, _, _ = self._expert_file_to_tensor(
                 expert_map_path)
             expert_map_all = self.local2global(expert_map_tensor)
         except (TypeError, FileNotFoundError, OSError):
             expert_map_all = self.determine_expert_map_all()
 
         for layer_idx in range(num_moe_layers):
-            if self.model.config.model_type == "qwen3_moe":
-                self.expert_map_per_layer_cpu[layer_idx] = \
-                    expert_map_all[layer_idx][self.rank_id]
-            else:
-                self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
-                    expert_map_all[layer_idx][self.rank_id]
+            self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
+                expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
     def _expert_file_to_tensor(self, expert_map_path: str):
@@ -314,3 +316,37 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.num_moe_layers, -1)
 
         return expert_map_all
+
+    def get_expert_map(self, layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_map()
+
+    def get_log2phy_map(self, layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+
+    def get_all_expert_map(self, num_moe_layers):
+        all_loads = []
+        num_dense_layers = self.num_dense_layers if hasattr(
+            self, "num_dense_layers") else 0
+        for layer_id in range(num_moe_layers):
+            load_tensor = self.get_expert_map(
+                layer_id + num_dense_layers)  # (num_experts_per_layer,)
+            all_loads.append(load_tensor)
+
+        return torch.stack(all_loads, dim=0)
+
+    def get_all_moe_loads(self):
+        num_dense_layers = self.num_dense_layers if hasattr(
+            self, "num_dense_layers") else 0
+        all_moe_loads = torch.stack(
+            [self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load \
+                for layer_id in range(self.num_moe_layers)],
+            dim=0
+        )
+        return all_moe_loads
+
+    def clear_all_moe_loads(self):
+        num_dense_layers = self.num_dense_layers if hasattr(
+            self, "num_dense_layers") else 0
+        for layer_id in range(self.num_moe_layers):
+            self.model.layers[layer_id +
+                            num_dense_layers].mlp.experts.clear_moe_load()
