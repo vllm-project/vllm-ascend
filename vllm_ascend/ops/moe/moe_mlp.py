@@ -109,6 +109,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_list=group_list,
                 output_dtype=torch.int32)[0]
             # act_fn: swiglu
+            group_diff = torch.diff(group_list)
+            new_group = torch.cat([group_list[0].unsqueeze(0), group_diff],
+                                  dim=0)
             hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
                 x=hidden_states,
                 weight_scale=w1_scale,

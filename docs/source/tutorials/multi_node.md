@@ -113,7 +113,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 # The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-W8A8
@@ -158,7 +158,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 

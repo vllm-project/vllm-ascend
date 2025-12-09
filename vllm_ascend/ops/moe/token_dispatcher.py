@@ -122,18 +122,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         expert_map: torch.Tensor,
         global_redundant_expert_num: int = 0,
     ):
-        if self.with_quant:
-            quant_mode = 2
-            moe_expert_num = len(expert_map)
-        else:
-            quant_mode = 0
-            moe_expert_num = len(expert_map)
+        quant_mode = 2 if self.with_quant else 0
+        self.moe_expert_num = len(expert_map) + global_redundant_expert_num
         kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": moe_expert_num,
+            "moe_expert_num": self.moe_expert_num,
             "global_bs": 0,
             "expert_token_nums_type": 0,
         }
@@ -229,7 +225,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         assert self.topk_weights is not None
         assert self.topk_ids is not None
         assert self.output is not None
-        moe_expert_num = len(self.expert_map)
         # moeCombine
         kwargs_mc2 = {
             "expand_x": hidden_states,
@@ -237,7 +232,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_scales": self.topk_weights.to(torch.float32),
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": moe_expert_num,
+            "moe_expert_num": self.moe_expert_num,
             "global_bs": 0,
         }
         if self.with_quant:
@@ -359,7 +354,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             hidden_states = hidden_states * \
                 topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
-            global_num_experts = len(expert_map)
+            global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = (expert_map[topk_ids] != -1)
             self.topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group(
