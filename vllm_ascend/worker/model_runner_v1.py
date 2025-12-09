@@ -390,12 +390,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 use_sparse=self.use_sparse,
                 use_mm_prefix=self.model_config is not None
                 and self.model_config.is_mm_prefix_lm)
-        if self.pcp_size > 1:
-            self.attn_mask_builder = None
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
 
