@@ -11,7 +11,8 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp, has_layer_idx, is_moe_model
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable, has_layer_idx,
+                               is_moe_model)
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -28,16 +29,8 @@ class FusedMoEState(Enum):
     All2AllSeq = 5
 
 
-class MoECommType(Enum):
-    ALLGATHER = 0
-    MC2 = 1
-    ALLTOALL = 2
-    NAIVE_MULTICAST = 3
-
-
-# TODO(zzzzwwjj): add soc_version to choose branch
-def _get_fused_moe_state(ep_size: int, with_prefill: bool,
-                         is_deepseek_v3_r1: bool):
+def get_fused_moe_state(ep_size: int, with_prefill: bool,
+                        is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
     if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
@@ -53,6 +46,13 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
         return FusedMoEState.All2All
     else:
         return FusedMoEState.MC2
+
+
+class MoECommType(Enum):
+    ALLGATHER = 0
+    MC2 = 1
+    ALLTOALL = 2
+    FUSED_ALLTOALL = 3
 
 
 @contextmanager
@@ -71,7 +71,8 @@ def set_ascend_forward_context(
         batch_descriptor: Optional[BatchDescriptor] = None,
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
-        weight_prefetch_method: Optional[WeightPrefetchMethod] = None):
+        weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
+        is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -97,11 +98,12 @@ def set_ascend_forward_context(
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
 
+        # fused_moe_state is used in torchair, it will be deleted along with torchair
         is_deepseek_v3_r1 = hasattr(
             vllm_config.model_config.hf_config, 'n_routed_experts'
         ) and vllm_config.model_config.hf_config.n_routed_experts == 256
-        fused_moe_state = _get_fused_moe_state(ep_size, with_prefill,
-                                               is_deepseek_v3_r1)
+        fused_moe_state = get_fused_moe_state(ep_size, with_prefill,
+                                              is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
@@ -115,21 +117,23 @@ def set_ascend_forward_context(
         # the performance may degrade due to the switching of communication methods.
         mmrs_fusion = True
         if is_moe_model(vllm_config):
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and num_tokens is not None
+            sp_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
         else:
             sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and \
                 num_tokens is not None and num_tokens > 1000
         forward_context.mmrs_fusion = mmrs_fusion
+        forward_context.num_tokens = num_tokens
+        forward_context.sp_enabled = sp_enabled
+        #TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
+        forward_context.flashcomm_v2_enabled = flashcomm2_enable(
+        ) and tp_world_size > 1 and num_tokens is not None
 
-        if sp_enabled:
+        if (forward_context.sp_enabled
+                or forward_context.flashcomm_v2_enabled):
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
-        forward_context.sp_enabled = sp_enabled
-        forward_context.num_tokens = num_tokens
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -154,25 +158,7 @@ def set_ascend_forward_context(
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
-
-        # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
-        # It will be improved later by implementing operator fusion through the FX graph.
-        #
-        # set for addrmsnorm+quant fusion.
-        # this optim now just support dense models due to the specific operators used.
-        # Once the necessary conditions are met, support for MOE models will also be added.
-        from vllm_ascend.quantization.quant_config import AscendQuantConfig
-        model_type_scope = ["llama", "qwen2", "qwen3", "qwen3_moe"]
-        addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in model_type_scope and \
-            forward_context.layer_idx is not None
-        if addrmsnorm_quant_fusion_enabled:
-            forward_context.model_instance = model_instance
-            forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
-            forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
-            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
-                forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
-        forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
+        forward_context.is_mtp_model = is_mtp_model
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
@@ -181,7 +167,8 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             max_tokens_across_dp = \
                 forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            if sp_enabled:
+            if (forward_context.sp_enabled
+                    or forward_context.flashcomm_v2_enabled):
                 padded_length = (max_tokens_across_dp + tp_world_size -
                                  1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens

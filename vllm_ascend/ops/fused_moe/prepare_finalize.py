@@ -15,26 +15,34 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Optional
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
-    get_dp_group, get_tensor_model_parallel_rank,
+    get_dp_group, get_pcp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
+
+
+class QuantType(Enum):
+    NONE = 0
+    W8A8 = 1
+    W4A8 = 2
 
 
 class PrepareAndFinalize(ABC):
     """
     Abstract base class for MoE (Mixture-of-Experts) tensor preparation and finalization
     in distributed environments. Subclasses implement specific communication strategies
-    (e.g., AllGather, All2All, MC2, Naive Multicast) to handle tensor padding, slicing,
+    (e.g., AllGather, All2All, MC2) to handle tensor padding, slicing,
     broadcasting, and reduction across TP/DP/EP groups.
 
     Attributes:
@@ -51,7 +59,8 @@ class PrepareAndFinalize(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type: QuantType = QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -65,6 +74,7 @@ class PrepareAndFinalize(ABC):
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
             enable_shared_expert_dp (bool): Skip DP communication for shared experts
             replace_allreduce (bool): Bypass default all-reduce behavior
+            quant_type: none, w8a8 or w4a8
 
         Returns:
             Tuple of:
@@ -117,7 +127,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -213,7 +224,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -294,6 +306,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -304,7 +317,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             Tuple of (global_hidden_states, global_router_logits, None)
         """
         if enable_sp():
-            return self._prepare_with_ep_group(hidden_states, router_logits)
+            return self._prepare_with_ep_group(hidden_states, router_logits,
+                                               quant_type)
 
         return self._prepare_with_dp_group(hidden_states, router_logits,
                                            enable_shared_expert_dp,
@@ -314,12 +328,22 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
+        pertoken_scale = None
+        if quant_type == QuantType.W8A8:
+            hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
+                hidden_states)
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                pertoken_scale, True, True)
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states, True, True)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             router_logits, True, True)
+
+        if pertoken_scale is not None:
+            return (hidden_states, pertoken_scale), router_logits, None, None
 
         return hidden_states, router_logits, None, None
 
@@ -329,6 +353,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -358,6 +383,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(
                 router_logits, 0)
+
+        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states,
+                dim=0,
+            )
+            router_logits = get_pcp_group().all_gather(
+                router_logits,
+                dim=0,
+            )
+
         return hidden_states, router_logits, None, None
 
     def finalize(self,
@@ -407,103 +443,9 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[:self.num_tokens]
 
-        if reduce_results and (self.moe_config.tp_size > 1
-                               or self.moe_config.ep_size > 1):
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-
-        return hidden_states
-
-
-class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
-    """
-    MoE communication strategy using Naive Multicast (point-to-point broadcast).
-    Will be used in prefill when using allgather in decode. Each DP rank broadcasts its slice to all others.
-    Uses `cu_tokens_across_dp_cpu` (cumulative tokens) to locate slice boundaries.
-    """
-
-    def _naive_multicast(self, x: torch.Tensor,
-                         cu_tokens_across_dp_cpu: torch.Tensor):
-        """
-        Naive multicast implementation:
-          1. Create global buffer sized by total tokens across DP.
-          2. Current rank copies its slice into its designated buffer region.
-          3. Each rank broadcasts its slice to all others via P2P.
-
-        Args:
-            x (torch.Tensor): Local tensor [local_tokens, hidden_size]
-            cu_tokens_across_dp_cpu (torch.Tensor): Cumulative token counts per DP rank
-
-        Returns:
-            torch.Tensor: Global tensor [total_tokens, hidden_size]
-        """
-        assert len(x.shape) == 2, "Input must be 2D [tokens, features]"
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-
-        # Copy local slice into buffer
-        start = 0 if self.moe_config.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.moe_config.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.moe_config.dp_rank]
-        buffer[start:end, :].copy_(x)
-
-        # Broadcast each slice to all ranks
-        for idx in range(self.moe_config.dp_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-        return buffer
-
-    def prepare(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
-        """
-        Preparation steps:
-          1. Fetch cumulative token boundaries from forward context.
-          2. Multicast hidden_states and router_logits to form global tensors.
-
-        Returns:
-            Tuple of (global_hidden_states, global_router_logits, None, None)
-        """
-        self.enable_shared_expert_dp = enable_shared_expert_dp
-
-        if self.moe_config.dp_size > 1:
-            self.cu_tokens_across_dp_cpu = get_forward_context(
-            ).dp_metadata.cu_tokens_across_sp(1)
-            hidden_states = self._naive_multicast(hidden_states,
-                                                  self.cu_tokens_across_dp_cpu)
-            router_logits = self._naive_multicast(router_logits,
-                                                  self.cu_tokens_across_dp_cpu)
-
-        return hidden_states, router_logits, None, None
-
-    def finalize(self,
-                 hidden_states: torch.Tensor,
-                 reduce_results: bool,
-                 context_metadata: Optional[dict] = None) -> torch.Tensor:
-        """
-        Finalization steps:
-          1. If DP > 1 and not shared expert:
-               - All-reduce across DP
-               - Slice to current rank's token range using cu_tokens_across_dp_cpu
-          2. If `reduce_results=True` and TP/EP > 1, apply tensor_model_parallel_all_reduce.
-
-        Returns:
-            Tensor with shape [local_num_tokens, hidden_size]
-        """
-        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
-            start = 0 if self.moe_config.dp_rank == 0 else self.cu_tokens_across_dp_cpu[
-                self.moe_config.dp_rank - 1]
-            end = self.cu_tokens_across_dp_cpu[self.moe_config.dp_rank]
-            hidden_states = get_dp_group().all_reduce(
-                hidden_states)  # Sum across DP
-            hidden_states = hidden_states[start:end, :]
-
+        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states,
+                                                           dim=0)
         if reduce_results and (self.moe_config.tp_size > 1
                                or self.moe_config.ep_size > 1):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)

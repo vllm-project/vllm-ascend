@@ -209,12 +209,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
                 return_value=torch.randn(1, self.vocab_size)),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group.all_gather",
-                return_value=torch.randn(1, self.vocab_size)),
-            patch(
-                "vllm_ascend.core.schedule_config.AscendSchedulerConfig.initialize_from_config",
-                return_value=MagicMock(max_num_batched_tokens=1000,
-                                       max_model_len=512,
-                                       enable_chunked_prefill=False))
+                return_value=torch.randn(1, self.vocab_size))
         ]
 
         for p in self.patches:

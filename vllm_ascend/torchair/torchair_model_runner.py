@@ -21,6 +21,7 @@ import math
 import types
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -41,8 +42,7 @@ from vllm_ascend.torchair.utils import (
     register_torchair_model, torchair_ops_patch,
     torchair_quant_method_register, write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_310p, get_ascend_soc_version,
-                               AscendSocVersion)
+                               AscendDeviceType, get_ascend_device_type)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -117,20 +117,20 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
         # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
-        max_num_tokens = self.parallel_config.tensor_parallel_size
+        max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         max_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
             max_num_tokens, tp_size)
         self.mc2_tokens_capacity = max_graph_batch_size
 
-        if get_ascend_soc_version(
-        ) == AscendSocVersion.A3 and self.mc2_tokens_capacity > 512:
+        if get_ascend_device_type(
+        ) == AscendDeviceType._910_93 and self.mc2_tokens_capacity > 512:
             logger.error(
                 f"A3: the max number of tokens must smaller then 512, but now is {self.mc2_tokens_capacity}"
             )
-        if get_ascend_soc_version(
-        ) == AscendSocVersion.A2 and self.mc2_tokens_capacity > 256:
+        if get_ascend_device_type(
+        ) == AscendDeviceType._910B and self.mc2_tokens_capacity > 256:
             logger.error(
                 f"A2: the max number of tokens must smaller then 256, but now is {self.mc2_tokens_capacity}"
             )
@@ -178,6 +178,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
+        num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
@@ -186,7 +187,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                aclgraph_runtime_mode, force_attention)
+                num_scheduled_tokens, aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
@@ -205,7 +206,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
         if with_prefill or self.enable_shared_expert_dp:
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
             hidden_states = super()._generate_dummy_run_hidden_states(
                 with_prefill, is_torchair_compile, input_ids, positions,
@@ -228,7 +229,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     assert isinstance(kv, tuple), "kv_cache must be a tuple"
                     torch._dynamo.mark_static(kv[0])
                     torch._dynamo.mark_static(kv[1])
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_NZ)
 
             compiled_model = self._get_torchair_lazy_compiled_model(num_tokens)
@@ -369,7 +370,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             "attn_metadata": attn_metadata
         }
         if not with_prefill:
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_NZ)
             compiled_model = self._get_torchair_lazy_compiled_model(
                 padded_num_tokens_across_dp)
@@ -382,7 +383,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             )
         else:
             assert self.model is not None
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
 
             hidden_states = self.model(
@@ -412,7 +413,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         patch_for_hcom()
 
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             # on 300I Duo platform, we need to patch broadcast. however, this patch will be
             # overwritten by patch_for_hcom in torchair. so we need to re-patch it here.
             from vllm_ascend.patch.platform.patch_distributed import \
@@ -426,7 +427,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         self.ascend_config.torchair_graph_config.enable_frozen_parameter
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
-        config.experimental_config.tiling_schedule_optimize = not is_310p()
+        config.experimental_config.tiling_schedule_optimize = get_ascend_device_type(
+        ) != AscendDeviceType._310P
         config.experimental_config.enable_view_optimize = \
         self.ascend_config.torchair_graph_config.enable_view_optimize
         torch.npu.set_compile_mode(jit_compile=False)
@@ -499,7 +501,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
     def update_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the max number of tokens
         # first pad according to the number of requests
-        if self.is_kv_consumer and self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+        if self.is_kv_consumer and self.speculative_config and self.speculative_config.method == 'mtp':
             # pd disaggregation scenario may incorrectly calculate the batch in mtp scenario, so we force set it to max_num_reqs
             self.torchair_graph_batch_sizes = [self.max_num_reqs]
             logger.warning(
@@ -529,8 +531,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # NOTE: when enable_expert_parallel on A3, we need to check if `graph_batch_size` is divisible by `tp_size`
         # Because we use x_active_mask for dispatch/combine op on A3, which requires that input shape should be same
         # on all EP ranks
-        if get_ascend_soc_version(
-        ) == AscendSocVersion.A3 and self.parallel_config.enable_expert_parallel:
+        if get_ascend_device_type(
+        ) == AscendDeviceType._910_93 and self.parallel_config.enable_expert_parallel:
             self._align_graph_size_divisible_by_tp_size()
 
     def _align_graph_size_divisible_by_tp_size(self):

@@ -26,7 +26,8 @@ class NgramProposer(VllmNgramProposer, Proposer):
                   num_reqs=None,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None):
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None):
         pass
 
     def generate_token_ids(self,
@@ -39,30 +40,33 @@ class NgramProposer(VllmNgramProposer, Proposer):
                            hidden_states=None,
                            attn_metadata=None,
                            aux_hidden_states=None) -> list[list[int]]:
-        # TODO(woosuk): Optimize.
-        draft_token_ids: list[list[int]] = []
+        valid_ngram_requests = []
         for i, sampled_ids in enumerate(valid_sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
-                # Skip speculative decoding.
-                draft_token_ids.append([])
                 continue
 
-            # Skip requests that require top-p, top-k, etc.
             req_id = self.runner.input_batch.req_ids[i]
             if req_id in self.runner.input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
                 continue
 
-            # Add sampled_token_ids to token_ids_cpu.
+            num_tokens = self.runner.input_batch.num_tokens_no_spec[i]
+            if num_tokens >= self.runner.input_batch.max_model_len:
+                # Skip requests that have already reached the max model length.
+                continue
+
             start_idx = self.runner.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
             self.runner.input_batch.token_ids_cpu[
                 i, start_idx:end_idx] = sampled_ids
-            drafter_output = self.propose(
-                self.runner.input_batch.token_ids_cpu[i, :end_idx])
-            if drafter_output is None or len(drafter_output) == 0:
-                draft_token_ids.append([])
-            else:
-                draft_token_ids.append(drafter_output.tolist())
+
+            valid_ngram_requests.append(i)
+
+        draft_token_ids = self.batch_propose(
+            len(valid_sampled_token_ids),
+            valid_ngram_requests,
+            self.runner.input_batch.num_tokens_no_spec,
+            self.runner.input_batch.token_ids_cpu,
+        )
+
         return draft_token_ids

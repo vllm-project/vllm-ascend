@@ -1,0 +1,53 @@
+test_name: "test DeepSeek-V3.2-Exp-bf16 multi-dp"
+model: "Yanguan/DeepSeek-V3.2-Exp-bf16"
+num_nodes: 2
+npu_per_node: 16
+env_common:
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 100
+  HCCL_BUFFSIZE: 1024
+  SERVER_PORT: 8080
+  VLLM_ASCEND_ENABLE_MLAPO: 0
+
+deployment:
+  -
+    server_cmd: >
+        vllm serve "Yanguan/DeepSeek-V3.2-Exp-bf16"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-size 2
+        --data-parallel-size-local 1
+        --data-parallel-rpc-port 13389 
+        --tensor-parallel-size 16 
+        --seed 1024 
+        --enable-expert-parallel 
+        --max-num-seqs 16 
+        --max-model-len 17450 
+        --max-num-batched-tokens 17450 
+        --trust-remote-code 
+        --no-enable-prefix-caching 
+        --gpu-memory-utilization 0.9 
+        --additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+
+  -
+    server_cmd: >
+        vllm serve "Yanguan/DeepSeek-V3.2-Exp-bf16"
+        --headless
+        --data-parallel-size 2 
+        --data-parallel-size-local 1 
+        --data-parallel-start-rank 1 
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389 
+        --tensor-parallel-size 16 
+        --seed 1024 
+        --max-num-seqs 16 
+        --max-model-len 17450 
+        --max-num-batched-tokens 17450 
+        --enable-expert-parallel 
+        --trust-remote-code 
+        --no-enable-prefix-caching 
+        --gpu-memory-utilization 0.92 
+        --additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+benchmarks:

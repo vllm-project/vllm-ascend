@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -5,7 +6,8 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.utils import vllm_version_is
+
+init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
 
 class TestNPUWorker(TestBase):
@@ -19,7 +21,13 @@ class TestNPUWorker(TestBase):
         self.model_config_mock = MagicMock(spec=ModelConfig)
         self.model_config_mock.dtype = torch.float16
         self.model_config_mock.trust_remote_code = False
-        self.model_config_mock.hf_config = None
+
+        self.hf_config_mock = MagicMock()
+        self.hf_config_mock.model_type = "test_model"
+        if hasattr(self.hf_config_mock, 'index_topk'):
+            delattr(self.hf_config_mock, 'index_topk')
+
+        self.model_config_mock.hf_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
@@ -44,16 +52,16 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
+    @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
+        mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
         mock_register_ascend_customop,
@@ -85,7 +93,7 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions.assert_called_once()
         mock_register_ascend_customop.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
-        mock_init_ascend_soc_version.assert_called_once()
+        mock_check_ascend_device_type.assert_called_once()
 
         # Verify try_register_lib call
         mock_try_register_lib.assert_called_once_with(
@@ -106,16 +114,16 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
+    @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
+        mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
         mock_register_ascend_customop,
@@ -151,16 +159,16 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
+    @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
+        mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
         mock_register_ascend_customop,
@@ -179,26 +187,15 @@ class TestNPUWorker(TestBase):
         # Create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
-        if vllm_version_is("0.11.0"):
-            with patch("vllm.utils.STR_DTYPE_TO_TORCH_DTYPE",
-                       {"float32": torch.float32}):
-                worker = NPUWorker(
-                    vllm_config=self.vllm_config_mock,
-                    local_rank=self.local_rank,
-                    rank=self.rank,
-                    distributed_init_method=self.distributed_init_method,
-                    is_driver_worker=self.is_driver_worker,
-                )
-        else:
-            with patch("vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE",
-                       {"float32": torch.float32}):
-                worker = NPUWorker(
-                    vllm_config=self.vllm_config_mock,
-                    local_rank=self.local_rank,
-                    rank=self.rank,
-                    distributed_init_method=self.distributed_init_method,
-                    is_driver_worker=self.is_driver_worker,
-                )
+        with patch("vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE",
+                   {"float32": torch.float32}):
+            worker = NPUWorker(
+                vllm_config=self.vllm_config_mock,
+                local_rank=self.local_rank,
+                rank=self.rank,
+                distributed_init_method=self.distributed_init_method,
+                is_driver_worker=self.is_driver_worker,
+            )
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
@@ -273,6 +270,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_enabled(self, mock_allocator_class,
                                   mock_sleep_mode_enabled):
         """Test wake_up method when sleep mode is enabled"""
@@ -283,9 +281,22 @@ class TestNPUWorker(TestBase):
         mock_allocator = MagicMock()
         mock_allocator_class.get_instance.return_value = mock_allocator
 
+        mock_hidden_size = MagicMock()
+        mock_hf_config = MagicMock()
+        mock_hf_config.hidden_size = mock_hidden_size
+        mock_model_config = MagicMock()
+        mock_model_config.hf_config = mock_hf_config
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config = mock_model_config
+
+        mock_model_runner = MagicMock()
+        mock_model_runner.model = MagicMock()
+
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_runner = mock_model_runner
+            worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
@@ -295,6 +306,7 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
 
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
         """Test wake_up method raises exception when sleep mode is disabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -328,6 +340,10 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.local_rank = 1
             worker.model_config = MagicMock()
+            worker.parallel_config = MagicMock()
+            worker.parallel_config.local_world_size = 0
+            worker.parallel_config.data_parallel_size = 1
+
             worker.model_config.seed = 42
 
             # Test _init_device

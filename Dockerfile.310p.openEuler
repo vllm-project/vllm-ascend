@@ -15,12 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.2.rc1-310p-openeuler24.03-py3.11
+FROM quay.io/ascend/cann:8.3.rc2-310p-openeuler24.03-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
+ARG SOC_VERSION="ascend310p1"
 
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+ENV SOC_VERSION=$SOC_VERSION
 
 RUN yum update -y && \
     yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
@@ -34,11 +36,10 @@ COPY . /vllm-workspace/vllm-ascend/
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.11.0
-
+ARG VLLM_TAG=v0.12.0
 RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 

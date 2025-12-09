@@ -28,7 +28,7 @@ def test_bge_model_correctness():
     model_name = snapshot_download("BAAI/bge-m3")
     with VllmRunner(
             model_name,
-            task="embed",
+            runner="pooling",
             enforce_eager=True,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)

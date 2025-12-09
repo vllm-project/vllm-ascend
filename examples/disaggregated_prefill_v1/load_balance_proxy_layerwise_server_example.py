@@ -88,6 +88,7 @@ import argparse
 import asyncio
 import functools
 import heapq
+import ipaddress
 import os
 import sys
 import threading
@@ -116,6 +117,12 @@ class ServerState:
         self.host = host
         self.port = port
         self.url = f'http://{host}:{port}/v1'
+        try:
+            ip = ipaddress.ip_address(self.host)
+            if isinstance(ip, ipaddress.IPv6Address):
+                self.url = f'http://[{host}]:{port}/v1'
+        except Exception:
+            pass
         self.client = httpx.AsyncClient(timeout=None,
                                         base_url=self.url,
                                         limits=httpx.Limits(
@@ -356,6 +363,9 @@ async def send_request_to_service(client: httpx.AsyncClient,
     req_data = req_data.copy()
     req_data["stream"] = False
     req_data["max_tokens"] = 1
+    req_data["min_tokens"] = 1
+    if "max_completion_tokens" in req_data:
+        req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
@@ -447,7 +457,7 @@ def get_api_request_id(api, req_id):
 
 def get_origin_request_id(api, req_id):
     if api == "/completions":
-        return req_id.replace("cmpl-", "").replace("-0", "")
+        return req_id.replace("cmpl-", "")[:-2]
     elif api == "/chat/completions":
         return req_id.replace("chatcmpl-", "")
 
@@ -561,9 +571,12 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay)
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx,prefiller_score)
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
+        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-# Multi-NPU (Pangu Pro MoE)
+# Multi-NPU (Pangu-Pro-MoE)
 
 ## Run vllm-ascend on Multi-NPU
 
@@ -157,12 +157,7 @@ if __name__ == "__main__":
             additional_config={
             'torchair_graph_config': {
             'enabled': True,
-            },
-            'ascend_scheduler_config':{
-            'enabled': True,
-            'enable_chunked_prefill' : False,
-            'chunked_prefill_enabled': False
-            },
+            }
             })
 
     outputs = llm.generate(prompts, sampling_params)

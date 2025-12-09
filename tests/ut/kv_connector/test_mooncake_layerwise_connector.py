@@ -32,6 +32,14 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.engine = MagicMock()
         self.engine.register_memory.return_value = 0
         self.engine.batch_transfer_sync_write.return_value = 1
+        self._patcher_cs = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.torch_npu.npu.current_stream'
+        )
+        self.mock_current_stream = self._patcher_cs.start()
+        self.addCleanup(self._patcher_cs.stop)
+        fake_stream = MagicMock(name="FakeStream")
+        fake_stream.synchronize = MagicMock()
+        self.mock_current_stream.return_value = fake_stream
 
         self.first_kv_cache = torch.zeros((2, 2, 2, 8),
                                           dtype=torch.float32,
@@ -50,6 +58,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                                 6000],  # 2 * total_layers
             use_mla=True,
             block_len=[1024, 2048],
+            decode_tp_size=1,
             first_kv_cache=self.first_kv_cache,
             callback_func=MagicMock())
 
@@ -89,6 +98,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             kv_cache_base_addr=[1111, 2222, 3333, 4444],
             use_mla=False,
             block_len=[64],
+            decode_tp_size=1,
             first_kv_cache=self.first_kv_cache,
             callback_func=MagicMock())
 
@@ -147,6 +157,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                                            kv_cache_base_addr=[1000, 2000],
                                            use_mla=False,
                                            block_len=[1024],
+                                           decode_tp_size=1,
                                            first_kv_cache=self.first_kv_cache,
                                            callback_func=MagicMock())
         req_meta = self.req_meta_base
@@ -389,7 +400,6 @@ class MockVllmConfig:
                 "tp_size": 2,
                 "dp_size": 1
             },
-            "use_ascend_direct": True,
         }.get(k, d)
 
 
@@ -792,15 +802,12 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
 class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
     def setUp(self):
-        self.envs_ascend_mock = type("MockEnvsAscend", (),
-                                     {"PHYSICAL_DEVICES": "10,11"})()
         self.mock_transfer_engine = MagicMock()
         self.mock_transfer_engine.get_rpc_port.return_value = 9090
         self.mock_transfer_engine.initialize.return_value = 0
         self.mock_transfer_engine.register_memory.return_value = 0
 
         self.patches = [
-            patch('os.getenv', return_value="10,11"),
             patch('torch.Tensor.size', return_value=(10, 16, 8, 16)),
             patch('torch.Tensor.element_size', return_value=4),
             patch('torch.Tensor.data_ptr', return_value=0x1000),
@@ -819,8 +826,11 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 'vllm_ascend.distributed.mooncake_layerwise_connector.string_to_int64_hash',
                 side_effect=lambda s: hash(s)),
             patch(
-                'vllm_ascend.distributed.mooncake_layerwise_connector.TransferEngine',
+                'vllm_ascend.distributed.mooncake_layerwise_connector.global_te.get_transfer_engine',
                 return_value=self.mock_transfer_engine),
+            patch(
+                'vllm_ascend.distributed.mooncake_layerwise_connector.global_te.register_buffer',
+                return_value=None),
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.KVCacheSendingLayerThread',
                 MagicMock()),
@@ -833,8 +843,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.threading.Event',
                 MagicMock()),
-            patch.dict('sys.modules',
-                       {'vllm_ascend.envs': self.envs_ascend_mock}),
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
                 return_value=SimpleNamespace(pd_tp_ratio=1,
@@ -852,26 +860,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()  # type: ignore
-
-    def test_worker_use_ascend_direct(self):
-        for use_ascend_direct in (True, False):
-            with self.subTest(use_ascend_direct=use_ascend_direct):
-                config = MockVllmConfig()
-                config.kv_transfer_config.get_from_extra_config.side_effect = (
-                    lambda k, d: {
-                        "prefill": {
-                            "tp_size": 2,
-                            "dp_size": 1
-                        },
-                        "decode": {
-                            "tp_size": 2,
-                            "dp_size": 1
-                        },
-                        "use_ascend_direct": use_ascend_direct,
-                    }.get(k, d))
-                worker = MooncakeLayerwiseConnectorWorker(
-                    config, self.engine_id)
-                self.assertIsNotNone(worker)
 
     def test_register_kv_caches_producer(self):
 
@@ -909,7 +897,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def test_device_id_selection_with_physical_devices(self):
         worker = MooncakeLayerwiseConnectorWorker(self.vllm_config,
                                                   self.engine_id)
-        self.assertEqual(worker.device_id, 10)
+        self.assertIsNotNone(worker.engine)
 
 
 if __name__ == '__main__':

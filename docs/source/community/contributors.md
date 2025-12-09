@@ -1,4 +1,4 @@
-# Maintainers and contributors
+# Maintainers and Contributors
 
 ## Maintainers
 

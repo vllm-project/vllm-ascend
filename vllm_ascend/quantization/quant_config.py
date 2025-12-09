@@ -35,12 +35,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
+                                                    get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
-                               oproj_tp_enable)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
+                               mlp_tp_enable, oproj_tp_enable)
 
 from .utils import get_quant_method
 
@@ -92,8 +94,10 @@ class AscendQuantConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        if torch.npu.is_available():
-            return ASCEND_QUANTIZATION_METHOD
+        if hf_quant_cfg is not None:
+            quant_method = hf_quant_cfg.get("quant_method", None)
+            if quant_method is None and torch.npu.is_available():
+                return ASCEND_QUANTIZATION_METHOD
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -111,7 +115,7 @@ class AscendQuantConfig(QuantizationConfig):
                                             self.packed_modules_mapping):
                 return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
-                                      self.packed_modules_mapping)
+                                      self.packed_modules_mapping, layer)
         elif isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
@@ -124,13 +128,13 @@ class AscendQuantConfig(QuantizationConfig):
                                             self.packed_modules_mapping):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AscendFusedMoEMethod(self, prefix,
-                                        self.packed_modules_mapping)
+                                        self.packed_modules_mapping, layer)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
                 return UnquantizedEmbeddingMethod()
             return AscendEmbeddingMethod(self, prefix,
-                                         self.packed_modules_mapping)
+                                         self.packed_modules_mapping, layer)
         return None
 
     def is_layer_skipped_ascend(
@@ -220,6 +224,8 @@ packed_modules_model_mapping = {
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj": ["in_proj_qkvz", "in_proj_ba"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     },
     "qwen2_5_vl": {
         "qkv_proj": [
@@ -255,11 +261,16 @@ class AscendLinearMethod(LinearMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]) -> None:
+    def __init__(self,
+                 quant_config: AscendQuantConfig,
+                 prefix: str,
+                 packed_modules_mapping: Dict[str, Any] | None,
+                 layer: torch.nn.Module = None) -> None:
         self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "linear",
-                                             packed_modules_mapping)
+                                             prefix,
+                                             "linear",
+                                             packed_modules_mapping,
+                                             layer=layer)
 
     def create_weights(
         self,
@@ -348,6 +359,13 @@ class AscendLinearMethod(LinearMethodBase):
                 tp_rank = get_otp_group().rank_in_group
             elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
                 tp_rank = get_mlp_tp_group().rank_in_group
+            elif (layer.prefix.find("o_proj") != -1 or
+                  layer.prefix.find("out_proj") != -1) and flashcomm2_enable():
+                if get_ascend_config(
+                ).flashcomm2_oproj_tensor_parallel_size == 1:
+                    tp_rank = 0
+                else:
+                    tp_rank = get_flashcomm2_otp_group().rank_in_group
             else:
                 tp_rank = get_tensor_model_parallel_rank()
         else:
@@ -391,10 +409,14 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]):
+                 packed_modules_mapping: Dict[str,
+                                              Any], layer: torch.nn.Module):
+        super().__init__(layer.moe_config)
         self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "moe",
-                                             packed_modules_mapping)
+                                             prefix,
+                                             "moe",
+                                             packed_modules_mapping,
+                                             layer=layer)
 
     def create_weights(
         self,
@@ -474,7 +496,10 @@ class AscendEmbeddingMethod(AscendLinearMethod):
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
-                 packed_modules_mapping: Dict[str, Any]) -> None:
+                 packed_modules_mapping: Dict[str, Any],
+                 layer: torch.nn.Module) -> None:
         self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "linear",
-                                             packed_modules_mapping)
+                                             prefix,
+                                             "linear",
+                                             packed_modules_mapping,
+                                             layer=layer)

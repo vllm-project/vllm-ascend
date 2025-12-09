@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionMetadataBuilder,
@@ -34,8 +34,8 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
+                               aligned_16, get_ascend_device_type, nd_to_nz_2d)
 
 
 class AscendAttentionTorchairBackend(AscendAttentionBackend):
@@ -48,10 +48,6 @@ class AscendAttentionTorchairBackend(AscendAttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionTorchairBackendImpl"]:
         return AscendAttentionTorchairBackendImpl
-
-    @staticmethod
-    def get_metadata_cls() -> Type["AscendTorchairMetadata"]:
-        return AscendTorchairMetadata
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionTorchairMetadataBuilder"]:
@@ -189,7 +185,8 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
         attn_mask = common_attn_metadata.attn_mask
 
         attn_state = common_attn_metadata.attn_state
-        if is_310p() and attn_state == AscendAttentionState.PrefillNoCache:
+        if get_ascend_device_type(
+        ) == AscendDeviceType._310P and attn_state == AscendAttentionState.PrefillNoCache:
             mask_nz = nd_to_nz_2d(attn_mask)
             attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(), 29)
 
@@ -385,7 +382,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             key = key.view(-1, self.num_kv_heads, self.head_size)
             value = value.view(-1, self.num_kv_heads, self.head_size)
 
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 # align q k v output tensors
                 query = aligned_16(query)
                 key = aligned_16(key)
@@ -454,8 +451,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         else:
             raise NotImplementedError(
                 "Torchair graph mode with non-MLA attention backend is still experimental."
-                "v1 scheduler(chunked prefill) is not supported at this moment. Please"
-                "setting 'ascend_scheduler_config':{'enabled':true} in additional_config"
-                "to use ascend scheduler.")
+                "v1 scheduler(chunked prefill) is not supported at this moment."
+            )
 
         return output.view(num_tokens, self.hidden_size)

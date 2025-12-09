@@ -51,7 +51,7 @@ From the workflow perspective, we can see how the final test script is executed,
     #  - no headless(have api server)
     decoder_host_index: [1]
 
-    # Add each node's vllm serve cli command just like you runs locally
+    # Add each node's vllm serve cli command just like you run locally
     deployment:
     -
         server_cmd: >
@@ -90,7 +90,7 @@ currently, the multi-node test workflow defined in the [vllm_ascend_test_nightly
         uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
         with:
         soc_version: a3
-        image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+        image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
         replicas: 1
         size: ${{ matrix.test_config.size }}
         config_file_path: ${{ matrix.test_config.config_file_path }}

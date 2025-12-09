@@ -1,4 +1,4 @@
-# Single NPU (Qwen3 8B)
+# Single NPU (Qwen3-8B)
 
 ## Run vllm-ascend on Single NPU
 
@@ -44,7 +44,10 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 Run the following script to execute offline inference on a single NPU:
 
 :::::{tab-set}
+:sync-group: inference
+
 ::::{tab-item} Graph Mode
+:sync: graph mode
 
 ```{code-block} python
    :substitutions:
@@ -71,6 +74,7 @@ for output in outputs:
 ::::
 
 ::::{tab-item} Eager Mode
+:sync: eager mode
 
 ```{code-block} python
    :substitutions:
@@ -110,7 +114,10 @@ Prompt: 'The future of AI is', Generated text: ' following you. As the technolog
 Run docker container to start the vLLM server on a single NPU:
 
 :::::{tab-set}
+:sync-group: inference
+
 ::::{tab-item} Graph Mode
+:sync: graph mode
 
 ```{code-block} bash
    :substitutions:
@@ -139,6 +146,7 @@ vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ::::
 
 ::::{tab-item} Eager Mode
+:sync: eager mode
 
 ```{code-block} bash
    :substitutions:

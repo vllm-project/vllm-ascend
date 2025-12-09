@@ -50,11 +50,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
-    # The version of the Ascend chip. If not set, the default value is
-    # ASCEND910B1(Available for A2 and A3 series). It's used for package building.
+    # The version of the Ascend chip. It's used for package building.
+    # If not set, we will query chip info through `npu-smi`.
     # Please make sure that the version is correct.
     "SOC_VERSION":
-    lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
+    lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
@@ -63,7 +63,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "ASCEND_HOME_PATH":
     lambda: os.getenv("ASCEND_HOME_PATH", None),
     # The path for HCCL library, it's used by pyhccl communicator backend. If
-    # not set, the default value is libhccl.so。
+    # not set, the default value is libhccl.so.
     "HCCL_SO_PATH":
     lambda: os.environ.get("HCCL_SO_PATH", None),
     # The version of vllm is installed. This value is used for developers who
@@ -132,6 +132,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # This feature will get better performance when concurrency is large.
     "VLLM_ASCEND_ENABLE_FLASHCOMM1":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))),
+    # Whether to enable FLASHCOMM2. Setting it to 0 disables the feature, while setting it to 1 or above enables it.
+    # The specific value set will be used as the O-matrix TP group size for flashcomm2.
+    # For a detailed introduction to the parameters and the differences and applicable scenarios
+    # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
+    "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
+    lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
@@ -159,11 +165,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
-    # Timeout (in seconds) for delayed KVCache block release. In the prefill
-    # node, if a request is marked for delayed KV block release and the blocks
-    # are not freed within this timeout, they will be forcibly released.
-    "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
-    lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
     # Whether to enable transpose weight and cast format to FRACTAL_NZ.
@@ -171,7 +172,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0')))
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0'))),
+    # Whether to anbale dynamic EPLB
+    "DYNAMIC_EPLB":
+    lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
 }
 
 # end-env-vars-definition

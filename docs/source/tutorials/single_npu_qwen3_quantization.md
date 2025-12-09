@@ -1,4 +1,4 @@
-# Single-NPU (Qwen3 8B W4A8)
+# Single-NPU (Qwen3-8B-W4A8)
 
 ## Run Docker Container
 :::{note}

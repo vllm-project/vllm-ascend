@@ -30,7 +30,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
-from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                is_hierarchical_communication_enabled)
 
 
@@ -57,20 +57,23 @@ class MoETokenDispatcher(ABC):
         return get_ep_group().world_size
 
     @abstractmethod
-    def token_dispatch(self,
-                       hidden_states: torch.Tensor,
-                       topk_weights: torch.Tensor,
-                       topk_ids: torch.Tensor,
-                       expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
-                       global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[Any] = None,
-                       quantized_x_for_share: Optional[Any] = None,
-                       dynamic_scale_for_share: Optional[Any] = None,
-                       mc2_mask: Optional[torch.Tensor] = None,
-                       apply_router_weight_on_input: bool = False,
-                       with_quant: bool = False,
-                       dynamic_eplb: bool = False):
+    def token_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: Optional[torch.Tensor] = None,
+        log2phy: Optional[torch.Tensor] = None,
+        global_redundant_expert_num: int = 0,
+        shared_experts: Optional[Any] = None,
+        quantized_x_for_share: Optional[Any] = None,
+        dynamic_scale_for_share: Optional[Any] = None,
+        mc2_mask: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        with_quant: bool = False,
+        dynamic_eplb: bool = False,
+        pertoken_scale: Optional[torch.Tensor] = None,
+    ):
         raise NotImplementedError("Dispatch function not implemented.")
 
     @abstractmethod
@@ -95,11 +98,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.enable_dispatch_v2 = hasattr(torch_npu,
                                           "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = (
-            get_ascend_soc_version() == AscendSocVersion.A3)
+            get_ascend_device_type() == AscendDeviceType._910_93)
 
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = \
-            get_ascend_soc_version() == AscendSocVersion.A3
+            get_ascend_device_type() == AscendDeviceType._910_93
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
@@ -170,7 +173,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
-                       dynamic_eplb: bool = False):
+                       dynamic_eplb: bool = False,
+                       pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
 
         # Apply log2phy if needed
@@ -221,7 +225,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expand_scales": expand_scales
         }
 
-        group_list_type = 1 if dynamic_eplb else 0
+        group_list_type = 0
 
         return {
             "group_list_type": group_list_type,
@@ -339,7 +343,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
-                       dynamic_eplb: bool = False):
+                       dynamic_eplb: bool = False,
+                       pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
         self.original_shape = hidden_states.shape
 
@@ -370,12 +375,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
                 topk_ids,
+                scale=pertoken_scale,
                 active_num=num_tokens * self.top_k,
                 expert_num=global_num_experts,
                 expert_tokens_num_type=1,
                 expert_tokens_num_flag=True,
                 active_expert_range=[first_expert_idx, last_expert_idx],
-                quant_mode=1 if self.with_quant else -1,
+                quant_mode=1
+                if self.with_quant and pertoken_scale is None else -1,
             ))
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
@@ -430,7 +437,8 @@ class TokenDispatcherWithMoge(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
-                       dynamic_eplb: bool = False):
+                       dynamic_eplb: bool = False,
+                       pertoken_scale: Optional[torch.Tensor] = None):
         self.bsz, _ = hidden_states.shape
         flatten_topk_ids = topk_ids.view(-1)
         self.sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
@@ -505,6 +513,11 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                     self.local_expert_indices[i + 1] -
                     1), "local_expert_indices must be continuous"
 
+        # TODO: Try local_rank = ep_group.rank_in_group
+        local_rank = torch.distributed.get_rank(group=self.ep_group)
+        backend = self.ep_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
     def token_dispatch(self,
                        hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
@@ -518,7 +531,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
-                       dynamic_eplb: bool = False):
+                       dynamic_eplb: bool = False,
+                       pertoken_scale: Optional[torch.Tensor] = None):
         self.with_quant = with_quant
         self.hidden_shape = hidden_states.shape
 
@@ -692,33 +706,16 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         if self.with_quant:
             assert global_input_tokens_local_experts_indices is not None, \
                 "global_input_tokens_local_experts_indices must be provided"
-            expert_idx_2d = global_input_tokens_local_experts_indices.unsqueeze(
+            dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
+                dynamic_scale_after_all2all.unsqueeze(-1),
+                global_input_tokens_local_experts_indices)
+            dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(
                 -1)
-            active_num = global_input_tokens_local_experts_indices.numel()
-
-            if active_num <= 0:
-                reversed_global_input_permutation_mapping = global_input_tokens_local_experts_indices
-                return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
-
-            global_input_tokens, reversed_global_input_permutation_mapping, _, expanded_scale = torch_npu.npu_moe_init_routing_v2(
-                global_input_tokens,
-                expert_idx_2d,
-                scale=dynamic_scale_after_all2all,
-                active_num=active_num,
-                expert_capacity=0,
-                expert_num=self.num_local_experts,
-                expert_tokens_num_type=1,
-                expert_tokens_num_flag=True,
-                active_expert_range=[0, self.num_local_experts],
-                quant_mode=-1,
-                row_idx_type=0,
-            )
-            return global_input_tokens, expanded_scale, reversed_global_input_permutation_mapping
 
         # Non-quantized case
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices)
-        return global_input_tokens, None, reversed_global_input_permutation_mapping
+        return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(self, hidden_states: torch.Tensor,
                             context_metadata: dict) -> torch.Tensor:

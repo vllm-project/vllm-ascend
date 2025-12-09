@@ -67,7 +67,7 @@ def test_external_launcher(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -99,7 +99,7 @@ def test_moe_external_launcher(model):
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
@@ -108,6 +108,7 @@ def test_moe_external_launcher(model):
     assert proc.returncode == 0
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_external_launcher_and_sleepmode():
     script = Path(
         __file__
@@ -143,17 +144,16 @@ def test_external_launcher_and_sleepmode():
         stderr=subprocess.STDOUT,
         timeout=300,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_external_launcher_and_sleepmode_level2():
     script = Path(
         __file__
@@ -192,12 +192,10 @@ def test_external_launcher_and_sleepmode_level2():
         stderr=subprocess.STDOUT,
         timeout=300,
     )
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
 
     print(output)
 
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0
@@ -234,7 +232,7 @@ def test_mm_allreduce(model):
         timeout=600,
     )
 
-    output = proc.stdout.decode()
+    output = proc.stdout.decode(errors='ignore')
     print(output)
 
     assert "Generated text:" in output

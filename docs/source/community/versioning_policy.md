@@ -1,4 +1,4 @@
-# Versioning policy
+# Versioning Policy
 
 Starting with vLLM 0.7.x, the vLLM Ascend Plugin ([vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend)) project follows the [PEP 440](https://peps.python.org/pep-0440/) to publish matching with vLLM ([vllm-project/vllm](https://github.com/vllm-project/vllm)).
 
@@ -18,10 +18,13 @@ For example:
 
 ## Release compatibility matrix
 
-The table below is the release compatibility matrix for vLLM Ascend Plugin.
+The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
 |-------------|--------------|------------------|-------------|--------------------|--------------|
+| v0.11.0rc3  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1.post1            |              |
+| v0.11.0rc2  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1            |              |
+| v0.11.0rc1  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC1     | 2.7.1 / 2.7.1            |              |
 | v0.11.0rc0  | v0.11.0rc3      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
 | v0.10.2rc1  | v0.10.2      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
 | v0.10.1rc1  | v0.10.1/v0.10.1.1 | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
@@ -38,12 +41,20 @@ The table below is the release compatibility matrix for vLLM Ascend Plugin.
 | v0.7.3.post1| v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
 | v0.7.3      | v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
 
+For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
+| vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
+|-------------|--------------|------------------|-------------|--------------------|
+|     main    | ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9,  v0.12.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
+
 ## Release cadence
 
 ### Release window
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2025.12.03 | Release candidates, v0.11.0rc3            |
+| 2025.11.21 | Release candidates, v0.11.0rc2            |
+| 2025.11.10 | Release candidates, v0.11.0rc1            |
 | 2025.09.30 | Release candidates, v0.11.0rc0            |
 | 2025.09.16 | Release candidates, v0.10.2rc1            |
 | 2025.09.04 | Release candidates, v0.10.1rc1            |
@@ -90,7 +101,8 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.2 branch |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.12.0 tag |
+| v0.11.0-dev| Maintained   | CI commitment for vLLM 0.11.0 version |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version                     |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version                     |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev                                   |

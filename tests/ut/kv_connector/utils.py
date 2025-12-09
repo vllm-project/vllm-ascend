@@ -10,6 +10,7 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -19,15 +20,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import sha256
-else:
-    from vllm.utils.hashing import sha256
-
 EOS_TOKEN_ID = 50256
-os.environ["VLLM_USE_V1"] = "1"
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -112,21 +105,14 @@ def create_scheduler(
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    if vllm_version_is("0.11.0"):
-        return Scheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            log_stats=True,
-            structured_output_manager=StructuredOutputManager(vllm_config),
-        )
-    else:
-        return Scheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            log_stats=True,
-            block_size=block_size,
-            structured_output_manager=StructuredOutputManager(vllm_config),
-        )
+
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        log_stats=True,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
 
 
 _none_hash_initialized = False
@@ -165,7 +151,7 @@ def create_request(
                                   remote_host="my-host",
                                   remote_port=1234,
                                   remote_tp_size=1,
-                                  remote_cp_size=1,
+                                  remote_pcp_size=1,
                                   remote_dcp_size=1)
 
     max_tokens = 1 if do_remote_decode else max_tokens

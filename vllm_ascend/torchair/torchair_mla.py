@@ -6,14 +6,13 @@ import torch
 import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.utils import cdiv, round_down
+from vllm.utils.math_utils import cdiv, round_down
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -36,10 +35,6 @@ class AscendMLATorchairBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MLA_TORCHAIR"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AscendMLATorchairMetadata
 
     @staticmethod
     def get_builder_cls():
@@ -69,6 +64,7 @@ class AscendMLATorchairPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
         chunk_seq_lens: torch.Tensor
+        chunk_seq_lens_npu: torch.Tensor
 
     attn_mask: torch.Tensor
     query_lens: torch.Tensor
@@ -174,7 +170,7 @@ class AscendMLATorchairMetadataBuilder:
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
@@ -321,7 +317,7 @@ class AscendMLATorchairMetadataBuilder:
                          dtype=self.model_config.dtype,
                          device=device)
         if self.vllm_config.speculative_config is not None and\
-            self.vllm_config.speculative_config.method == 'deepseek_mtp':
+            self.vllm_config.speculative_config.method == 'mtp':
             attn_state = AscendAttentionState.SpecDecoding
             num_decode_tokens = 2
         else:
@@ -447,6 +443,7 @@ class AscendMLATorchairMetadataBuilder:
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
+                    chunk_seq_lens_npu=chunk_seq_lens.npu(),
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
@@ -493,6 +490,11 @@ class AscendMLATorchairMetadataBuilder:
                     num_reqs_pad_size = (
                         graph_pad_size //
                         common_attn_metadata.decode_token_per_req - num_reqs)
+                    # For the case when some request reach the max-tokens limit in this forward processing,
+                    # so in this forward new_tokens scheduled is less than decode_token_per_req(1 + spec_token_num).
+                    # Details can see PR:https://github.com/vllm-project/vllm/pull/27922
+                    num_reqs_pad_size = max(0, num_reqs_pad_size)
+
                     padded_seq_lens = seq_lens.tolist(
                     ) + [pad_value] * num_reqs_pad_size
                 else:
@@ -760,7 +762,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
 
-        seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
+        current_seq_len = torch.tensor(prefill_metadata.query_lens,
+                                       dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
@@ -768,8 +771,11 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
-            seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
-            seq_len = torch.stack([seq_len1, seq_len2])
+            context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
+                i]
+            context_seq_len_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                i]
+            seq_len = torch.stack([current_seq_len, context_seq_len])
             kv_c_normed = torch.empty(toks,
                                       num_heads,
                                       latent_kv_dim,
@@ -785,7 +791,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                seq_len2.to(query.device),
+                context_seq_len_npu,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,

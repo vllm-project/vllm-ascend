@@ -18,19 +18,16 @@
 #
 
 import gc
+import os
+from unittest.mock import patch
 
 import torch
 from vllm import SamplingParams
+from vllm.utils.mem_constants import GiB_bytes
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import fork_new_process_for_each_test
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import GiB_bytes
-else:
-    from vllm.utils.mem_constants import GiB_bytes
 
 
 @fork_new_process_for_each_test
@@ -71,6 +68,7 @@ def test_basic_camem():
 
 
 @fork_new_process_for_each_test
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_end_to_end():
     free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
