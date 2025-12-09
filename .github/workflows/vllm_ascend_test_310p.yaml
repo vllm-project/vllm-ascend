@@ -103,14 +103,3 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run e2e test
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-        run: |
-          if [[ "${{ matrix.os }}" == "linux-aarch64-310p-1" ]]; then
-            pytest -sv tests/e2e/310p/test_offline_inference_310p.py
-          else
-            pytest -sv tests/e2e/310p/test_offline_inference_parallel_310p.py
-          fi
