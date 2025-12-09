@@ -37,17 +37,17 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
         self.init_eplb_params()
-        assert self.num_dense_layers is not None \
-            and self.global_expert_num is not None \
-            and self.num_moe_layers is not None, \
+        assert self.num_dense_layers != -1 \
+            and self.global_expert_num != -1 \
+            and self.num_moe_layers != -1, \
             "adaptor hasn't been initialized yet"
         self.init_eplb_param_dict()
         self.init_expert_maps()
 
     def init_eplb_params(self):
-        self.num_dense_layers: int | None = None
-        self.global_expert_num: int | None = None
-        self.num_moe_layers: int | None = None
+        self.num_dense_layers = -1
+        self.global_expert_num = -1
+        self.num_moe_layers = -1
 
     def init_eplb_param_dict(self):
         for i in range(self.num_dense_layers,

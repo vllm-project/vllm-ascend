@@ -13,9 +13,11 @@ class EplbAdaptorFactory:
 
     @classmethod
     def get_eplb_adapator(cls, vllm_config):
-        model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
+        model_type = getattr(vllm_config.model_config.hf_config, "model_type",
+                             None)
         if model_type is None:
-            raise ValueError("model_type not found in vllm_config.model_config.hf_config")
+            raise ValueError(
+                "model_type not found in vllm_config.model_config.hf_config")
 
         adaptor_class = cls._ADAPTOR_MAP.get(model_type)
         if adaptor_class:
