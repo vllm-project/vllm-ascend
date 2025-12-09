@@ -81,7 +81,8 @@ class TestBackend:
         )
         return compiled_fn, None
 
-    def __call__(self, gm: fx.GraphModule, example_inputs: List[Any]):
+    def __call__(self, gm: fx.GraphModule,
+                 example_inputs: Optional[List[Any]]):
         """
         Make the backend callable by torch.compile().
         Returns a compiled executable function.
