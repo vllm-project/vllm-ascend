@@ -24,7 +24,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
-from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_custom_op, is_310p
@@ -406,10 +405,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        # TODO: This judgment will be removed once the mrope precision issue is fixed
-        if self.mrope_section != [
-                16, 24, 24
-        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86:
+        if self.mrope_section != [16, 24, 24]:
             return super().forward_oot(positions, query, key)
 
         import torch_npu
@@ -424,7 +420,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
                 query.dtype)  # type: ignore
 
-        query, key = torch_npu.npu_mrope(positions,
+        query, key = torch_npu.npu_mrope(positions.contiguous(),
                                          query.contiguous(),
                                          key.contiguous(),
                                          self.cos_sin_cache.contiguous(),
