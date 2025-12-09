@@ -202,7 +202,6 @@ class AscendMLAMetadataBuilder:
     understand this class
     """
 
-    # _attn_mask_builder = None
     def __init__(self,
                  kv_cache_spec,
                  layer_names,
@@ -862,7 +861,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
-        self.prefill_mask = None
 
         self.speculative_config = vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
@@ -1167,10 +1165,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            if self.pcp_size > 1:
-                mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
-            else:
-                mask = self.prefill_mask
+            mask = attn_metadata.attn_mask
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
@@ -1214,24 +1209,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                num_tokens,
                                dtype=torch.float32,
                                device=q_nope.device)
-        if self.prefill_mask is None:
-            if q_nope.dtype == torch.float16:
-                mask_value = torch.finfo(torch.float32).min
-            else:
-                mask_value = 1
-            prefill_mask = torch.triu(
-                torch.ones(self.ring_mla_mask_size,
-                           self.ring_mla_mask_size,
-                           device=q_nope.device,
-                           dtype=q_nope.dtype), 1)
-            self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
-                                            0).to(q_nope.dtype)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
                                    k_nope=k_nope,
                                    k_rope=k_pe,
                                    value=value,
-                                   mask=self.prefill_mask,
+                                   mask=attn_metadata.attn_mask,
                                    seqlen=attn_metadata.prefill.query_lens,
                                    head_num=self.num_heads,
                                    kv_head_num=self.num_heads,
@@ -1494,6 +1477,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_q_nope = decode_q_nope.view(bsz, self.num_heads,
                                            self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
+
+        if self.dcp_size > 1:
+            decode_q_no_split = torch.cat([decode_q_nope, decode_q_pe], dim=-1)
+            decode_q_no_split = get_dcp_group().all_gather(
+                decode_q_no_split, 1)
+            decode_q_nope, decode_q_pe = decode_q_no_split.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         decode_preprocess_res = DecodeMLAPreprocessResult(
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)

@@ -378,12 +378,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        if self.pcp_size > 1:
-            self.attn_mask_builder = None
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
 
@@ -656,10 +651,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.spec_attn_mask = torch.triu(torch.ones(2048,
-                                                        2048,
-                                                        dtype=torch.bool),
-                                             diagonal=1).to(self.device)
+            self.spec_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
+            )
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
@@ -1038,28 +1031,27 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         return tuple(tasks)
 
-    def _make_attention_mask(self, seq_lens, position,
-                             attn_state) -> torch.Tensor:
+    def _make_attention_mask(self, attn_state) -> torch.Tensor:
         # pcp situation.
-        if self.pcp_size > 1:
-            return None
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
-        # dcp situation.
-        if self.dcp_size > 1:
-            return self.attn_mask_builder.get_splitfuse_attn_mask()
-        if self.vllm_config.model_config.use_mla:
-            return None
-        # Only calls in PrefillNoCache situation
-        # and when TI-consistency switch is ON.
         if attn_state == AscendAttentionState.PrefillNoCache and \
                 envs_ascend.TRAIN_INFER_CONSISTENCY:
+            num_reqs = self.input_batch.num_reqs
+            seq_lens = self.seq_lens_cpu[:num_reqs]
             max_seq_len = max(seq_lens.max().item(), 0)
             return self.attn_mask_builder.get_attn_mask(
                 max_seq_len=max_seq_len, dtype=self.dtype, device=self.device)
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
-            return self.attn_mask_builder.get_pooling_mask(self.device)
+            return self.attn_mask_builder.get_pooling_mask()
+
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size > 1:
+                return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
+            # mla prefill
+            if attn_state != AscendAttentionState.DecodeOnly:
+                return self.attn_mask_builder.get_mla_mask(self.dtype)
         return self.attn_mask_builder.get_splitfuse_attn_mask()
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
@@ -1680,16 +1672,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.positions[:num_input_tokens].copy_(
             self.positions_cpu[:num_input_tokens], non_blocking=True)
 
-        # Make Attention metadata
-        positions_cpu = self.positions_cpu[:num_input_tokens]
-        positions = self.positions[:num_input_tokens]
-        seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
-
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
                                             num_valid_tokens)
-        self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
-                                                   position=positions_cpu,
-                                                   attn_state=attn_state)
+        self.attn_mask = self._make_attention_mask(attn_state)
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -2462,6 +2447,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     attn_metadata, self.with_prefill, maybe_padded_num_tokens,
                     input_ids, positions, intermediate_tensors, inputs_embeds)
 
+            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
                 scheduler_output)
 
@@ -2723,7 +2709,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
-            self.maybe_wait_for_kv_save()
+
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
@@ -2851,12 +2837,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.query_start_loc_cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
-            assigned_mask_dim = 2048
-            self.attn_mask = torch.triu(torch.ones(assigned_mask_dim,
-                                                   assigned_mask_dim),
-                                        diagonal=1).to(torch.int8).to(
-                                            self.device)
+            self.attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -3014,8 +2995,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
          with_prefill) = self._sync_metadata_across_dp(num_tokens,
                                                        with_prefill)
 
-        moe_comm_type = self._select_moe_comm_method(num_tokens)
-
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
@@ -3061,23 +3040,62 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
+        has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
+        _ag_mode, batch_descriptor = \
+            self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+
+        num_tokens_padded = batch_descriptor.num_tokens
+        num_reqs_padded = (batch_descriptor.num_reqs if
+                           batch_descriptor.num_reqs is not None else num_reqs)
+        if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
+            # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
+            num_tokens_across_dp[:] = num_tokens_padded
+            num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+
+        moe_comm_type = self._select_moe_comm_method(num_tokens_padded)
+
+        # filter out the valid batch descriptor
+        if aclgraph_runtime_mode is not None:
+            # we allow forcing NONE when the dispatcher disagrees to support
+            # warm ups for aclgraph capture
+            if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
+                raise ValueError(
+                    f"Aclgraph runtime mode mismatch at dummy_run. "
+                    f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
+        else:
+            aclgraph_runtime_mode = _ag_mode
+
+        # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
+        # and not supported in ASCEND now. We could remove it in the future.
+        attn_metadata = self._build_dummy_attn_metadata(
+            False,
+            num_reqs=num_reqs_padded,
+            num_tokens=num_tokens_padded,
+            max_query_len=max_query_len,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
+            force_attention=force_attention,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens,
                                             num_sampled_tokens):
+            # Make sure padding doesn't exceed max_num_tokens
+            assert num_tokens_padded <= self.max_num_tokens
             if self.is_multimodal_model:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             elif self.enable_prompt_embeds:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
-                input_ids = self.input_ids[:num_tokens]
+                input_ids = self.input_ids[:num_tokens_padded]
                 inputs_embeds = None
 
             if self.uses_mrope:
-                positions = self.mrope_positions[:, :num_tokens]
+                positions = self.mrope_positions[:, :num_tokens_padded]
             else:
-                positions = self.positions[:num_tokens]
+                positions = self.positions[:num_tokens_padded]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3089,39 +3107,14 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             dtype=self.dtype,
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
-                    k: v[:num_tokens]
+                    k:
+                    v[:num_tokens_padded]
                     for k, v in self.intermediate_tensors.items()
                 })
-            has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
-            # filter out the valid batch descriptor
-            _ag_mode, batch_descriptor = \
-                self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-            if aclgraph_runtime_mode is not None:
-                # we allow forcing NONE when the dispatcher disagrees to support
-                # warm ups for aclgraph capture
-                if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
-                    raise ValueError(
-                        f"Aclgraph runtime mode mismatch at dummy_run. "
-                        f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}."
-                    )
-            else:
-                aclgraph_runtime_mode = _ag_mode
-
-            # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
-            # and not supported in ASCEND now. We could remove it in the future.
-            attn_metadata = self._build_dummy_attn_metadata(
-                False,
-                num_reqs=num_reqs,
-                num_tokens=num_tokens,
-                max_query_len=max_query_len,
-                aclgraph_runtime_mode=aclgraph_runtime_mode,
-                force_attention=force_attention,
-                num_scheduled_tokens=num_scheduled_tokens,
-            )
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
-            max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
+            max_num_reqs_across_dp = num_tokens_padded if not with_prefill else max_num_reqs
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
                                         dtype=torch.int32)
 
@@ -3141,7 +3134,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
-                    num_tokens=num_tokens,
+                    num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=with_prefill,
                     in_profile_run=self.in_profile_run,
@@ -3155,15 +3148,15 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     weight_prefetch_method=self.weight_prefetch_method):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     with_prefill, is_torchair_compile, input_ids, positions,
-                    attn_metadata, num_tokens, intermediate_tensors,
+                    attn_metadata, num_tokens_padded, intermediate_tensors,
                     inputs_embeds)
                 dummy_compute_logits(hidden_states)
 
             if self.drafter:
                 self.drafter.dummy_run(
-                    num_tokens=num_tokens,
+                    num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
-                    num_reqs=num_reqs,
+                    num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
@@ -4498,18 +4491,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 tail_attn_nomask_seqlens = torch.tensor(
                     [chunk_seqlens, kv_with_q_tail_nomask_seqlens],
                     dtype=torch.int32)
-                if self.vllm_config.model_config.use_mla:
-                    pcp_prefill_mask = torch.triu(
-                        torch.ones(512,
-                                   512,
-                                   device=self.device,
-                                   dtype=self.dtype), 1)
-                else:
-                    pcp_prefill_mask = torch.triu(
-                        torch.full((2048, 2048),
-                                   True,
-                                   device=self.device,
-                                   dtype=torch.bool), 1)
+                pcp_prefill_mask = self.attn_mask
 
                 self.extra_long_seq_kwargs = {
                     'attn_mask_seqlens': attn_mask_seqlens,
