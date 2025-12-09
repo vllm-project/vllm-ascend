@@ -39,7 +39,7 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
                     max_model_len=2048,
                     enforce_eager=True,
                     compilation_config={
-                        "cudagraph_capture_sizes":[4],
+                        "cudagraph_capture_sizes": [4],
                         "custom_ops":
                         ["none", "+rms_norm", "+rotary_embedding"]
                     }) as vllm_model:
@@ -63,7 +63,7 @@ def test_vl_model_with_samples(model: str, dtype: str) -> None:
                     max_model_len=2048,
                     enforce_eager=True,
                     compilation_config={
-                        "cudagraph_capture_sizes":[4],
+                        "cudagraph_capture_sizes": [4],
                         "custom_ops":
                         ["none", "+rms_norm", "+rotary_embedding"]
                     }) as vllm_model:

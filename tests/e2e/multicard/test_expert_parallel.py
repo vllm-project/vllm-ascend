@@ -15,7 +15,8 @@ def test_deepseek_correctness_ep(model_name):
     max_tokens = 5
 
     # FIXME: Really strange that chunked prefill might lead to different results, investigate further
-    with VllmRunner(model_name, tensor_parallel_size=2,
+    with VllmRunner(model_name,
+                    tensor_parallel_size=2,
                     cudagraph_capture_sizes=[4],
                     enforce_eager=False) as vllm_model:
         tp_output = vllm_model.generate_greedy(example_prompts, max_tokens)
