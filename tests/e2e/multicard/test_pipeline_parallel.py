@@ -37,7 +37,7 @@ prompts = [
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
-def test_pp_tp_dist(model: str, tp_size: int, pp_size: int,
+def test_models_pp2(model: str, tp_size: int, pp_size: int,
                     distributed_executor_backend: str) -> None:
     with VllmRunner(model,
                     tensor_parallel_size=tp_size,
