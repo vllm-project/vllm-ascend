@@ -72,7 +72,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /mnt/sfs_turbo/.cache:/root/.cache \
+-v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
@@ -106,12 +106,8 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
-export DISABLE_L2_CACHE=1
 
 vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --host 0.0.0.0 \
@@ -123,7 +119,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 8192 \
+--max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
