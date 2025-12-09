@@ -52,7 +52,7 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """
 
     spec_config = {
-        "method": "deepseek_mtp",
+        "method": "mtp",
         "num_speculative_tokens": 2,
     }
 
