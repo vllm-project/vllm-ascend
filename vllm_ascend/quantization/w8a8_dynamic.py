@@ -233,8 +233,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2 = [layer.w2_weight]
             w2_scale = [layer.w2_weight_scale]
 
-        fused_flag = get_forward_context(
-        ).moe_comm_type == MoECommType.FUSED_ALLTOALL
+        fused_flag = get_forward_context().moe_comm_type in [
+            MoECommType.FUSED_ALLTOALL, MoECommType.FUSED_MC2
+        ]
         return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
