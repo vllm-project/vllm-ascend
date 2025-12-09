@@ -1,6 +1,6 @@
 from vllm_ascend.eplb.adaptor.deepseek_moe_adaptor import DeepSeekMoeAdaptor
 from vllm_ascend.eplb.adaptor.qwen_moe_adaptor import QwenMoeAdaptor
-
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
 class EplbAdaptorFactory:
 
@@ -12,7 +12,7 @@ class EplbAdaptorFactory:
     }
 
     @classmethod
-    def get_eplb_adapator(cls, model_config):
+    def get_eplb_adapator(cls, model_config) -> VllmEplbAdaptor:
         model_type = getattr(model_config.hf_config, "model_type",
                              None)
         if model_type is None:
