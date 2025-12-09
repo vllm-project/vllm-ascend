@@ -31,8 +31,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
 
-if prefill_context_parallel_enable():
-    from vllm.distributed import get_pcp_group
 
 # Optimization for NPU small-batch padding: Pad cache threshold set to 128 to cover typical TP/EP padding requirements in decode.
 PAD_CACHE_THRESHOLD = 128  
@@ -481,4 +479,5 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
+
 
