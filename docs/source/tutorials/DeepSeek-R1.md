@@ -57,12 +57,12 @@ docker run --rm \
 --device /dev/hisi_hdc \
 -v /usr/local/dcmi:/usr/local/dcmi \
 -v /etc/hccn.conf:/etc/hccn.conf \
+-v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
 -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
@@ -88,23 +88,15 @@ local_ip="xxxx"
 
 # AIV
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3600000
-export VLLM_TORCH_PROFILER_DIR="PATH/profile"
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
-export DISABLE_L2_CACHE=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve path/DeepSeek-R1-W8A8 \
+vllm serve /weights/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --data-parallel-size 4 \
@@ -114,14 +106,13 @@ vllm serve path/DeepSeek-R1-W8A8 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
   --max-num-seqs 16 \
-  --max-model-len 8192 \
-  --max-num-batched-tokens 2048 \
+  --max-model-len 16384 \
+  --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.92 \
   --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 ::::
@@ -141,21 +132,16 @@ local_ip="xxxx"
 
 # AIV
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve path/DeepSeek-R1-W8A8 \
+vllm serve /weights/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --data-parallel-size 4 \
@@ -167,15 +153,14 @@ vllm serve path/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
-  --max-num-seqs 20 \
-  --max-model-len 8192 \
+  --max-num-seqs 16 \
+  --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --no-enable-prefix-caching \
-  --gpu-memory-utilization 0.92 \
+  --gpu-memory-utilization 0.94 \
   --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' 
 ```
 
 **Node 1**
@@ -191,21 +176,16 @@ node0_ip="xxxx" # same as the local_IP address in node 0
 
 # AIV
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve path/DeepSeek-R1-W8A8 \
+vllm serve /weights/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --headless \
@@ -219,15 +199,14 @@ vllm serve path/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
-  --max-num-seqs 20 \
-  --max-model-len 8192 \
+  --max-num-seqs 16 \
+  --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.94 \
   --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 ::::
@@ -237,7 +216,7 @@ vllm serve path/DeepSeek-R1-W8A8 \
 
 We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
 
-For detailed configuration instructions, please refer to the corresponding section of [DeepSeek-V3.1](./DeepSeek-V3.1.md).
+This solution has been tested and demonstrates excellent performance.
 
 ## Functional Verification
 
