@@ -1,4 +1,4 @@
-# Prefill-Decode Disaggregation Llmdatadist Verification (Qwen2.5-VL)
+# Prefill-Decode Disaggregation Mooncake Verification (Qwen2.5-VL)
 
 ## Getting Start
 
@@ -45,7 +45,7 @@ bash gen_ranktable.sh --ips 192.0.0.1 \
   --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 1 --decode-device-cnt 1
 ```
 
-The rank table will be generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+If you want to run "2P1D", please set npus-per-node to 3 and prefill-device-cnt to 2. The rank table will be generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
 
 |Parameter  | Meaning |
 | --- | --- |
@@ -69,10 +69,8 @@ export HCCL_IF_IP=192.0.0.1 # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export VLLM_ASCEND_LLMDD_RPC_PORT=5959
 
 vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --host 0.0.0.0 \
@@ -85,14 +83,22 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --max-num-batched-tokens 40000  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
-  --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistCMgrConnector",
-    "kv_buffer_device": "npu",
-    "kv_role": "kv_producer",
-    "kv_parallel_size": 1,
-    "kv_port": "20001",
-    "engine_id": "0",
-    "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnector",
+  "kv_role": "kv_producer",
+  "kv_port": "30000",
+  "engine_id": "0",
+  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+  "kv_connector_extra_config": {
+            "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 1
+             },
+             "decode": {
+                    "dp_size": 1,
+                    "tp_size": 1
+             }
+      }
   }'
 ```
 
@@ -106,10 +112,8 @@ export HCCL_IF_IP=192.0.0.1  # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export VLLM_ASCEND_LLMDD_RPC_PORT=5979
 
 vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --host 0.0.0.0 \
@@ -122,20 +126,30 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --max-num-batched-tokens 40000  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
-  --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistCMgrConnector",
-  "kv_buffer_device": "npu",
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnector",
   "kv_role": "kv_consumer",
-  "kv_parallel_size": 1,
-  "kv_port": "20001",
-  "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+  "kv_port": "30100",
+  "engine_id": "1",
+  "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+  "kv_connector_extra_config": {
+            "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 1
+             },
+             "decode": {
+                    "dp_size": 1,
+                    "tp_size": 1
+             }
+      }
   }'
 ```
 
 ::::
 
 :::::
+
+If you want to run "2P1D", please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
 
 ## Example Proxy for Deployment
 
@@ -150,6 +164,12 @@ python load_balance_proxy_server_example.py \
     --decoder-hosts 192.0.0.1 \
     --decoder-ports 13701
 ```
+
+|Parameter  | Meaning |
+| --- | --- |
+| --port | Port of proxy |
+| --prefiller-port | All ports of prefill |
+| --decoder-ports | All ports of decoder |
 
 ## Verification
 

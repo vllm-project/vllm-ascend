@@ -40,7 +40,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Install system dependencies
         run: |
@@ -48,7 +48,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -103,21 +103,22 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_sampler.py
           pytest -sv tests/e2e/singlecard/test_vlm.py
           pytest -sv tests/e2e/singlecard/multi-modal/test_internvl.py
+          pytest -sv tests/e2e/singlecard/test_xlite.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_torchair_correctness.py
-          # Fix me: test_eagle_correctness OOM error
-          #pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
   e2e-2-cards:
     name: multicard-2
-    runs-on: ${{ inputs.runner }}-2
+    runs-on: linux-aarch64-a3-2
     container:
-      image: ${{ inputs.image }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
     steps:
       - name: Check npu and CANN info
         run: |
@@ -126,14 +127,16 @@ jobs:
 
       - name: Config mirrors
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          # Fix me: use nginx cache rather than the pypi
+          # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          # pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          # pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           apt-get update -y
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Install system dependencies
         run: |
@@ -141,7 +144,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -205,6 +208,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv tests/e2e/multicard/test_offline_weight_load.py
 
   e2e-4-cards:
     name: multicard-4
@@ -231,7 +235,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           path: ./vllm-ascend
 
@@ -241,7 +245,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}

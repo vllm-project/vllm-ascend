@@ -26,6 +26,7 @@ The following table lists additional configuration options available in vLLM Asc
 
 | Name                                | Type | Default | Description                                                                                                                                   |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `xlite_graph_config`                | dict | `{}`    | Configuration options for xlite graph mode                                                                                                    |
 | `torchair_graph_config`             | dict | `{}`    | Configuration options for torchair graph mode                                                                                                    |
 | `weight_prefetch_config`            | dict | `{}`    | Configuration options for weight prefetch                                                                                                        |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case.                                      |
@@ -44,6 +45,12 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
 
 The details of each configuration option are as follows:
+
+**xlite_graph_config**
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama or Qwen dense series models are supported. |
+| `full_mode` | bool | `False` | Whether to enable xlite for both the prefill and decode stages. By default, xlite is only enabled for the decode stage. |
 
 **torchair_graph_config**
 
