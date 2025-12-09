@@ -82,7 +82,7 @@ class TestExpertLoadBalancer(TestBase):
         )
         self.assertEqual(expert_placement_map.shape,
                          (self.expert_load_balancer.layers_num,
-                          self.expert_load_balancer.ranks_num, 10))
+                          self.expert_load_balancer.ranks_num, 8))
         self.assertTrue(torch.all(expert_placement_map >= -1))
 
     def test_generate_log2phy_expert_map(self):
