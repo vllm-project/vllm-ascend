@@ -88,6 +88,7 @@ class TestBackend:
         Make the backend callable by torch.compile().
         Returns a compiled executable function.
         """
+        assert example_inputs is not None
         compiled_fn, _ = self.compile(
             gm,
             example_inputs,
