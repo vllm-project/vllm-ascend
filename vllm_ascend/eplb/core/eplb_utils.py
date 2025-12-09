@@ -26,6 +26,8 @@ from vllm.logger import logger
 import vllm_ascend.envs as envs_ascend
 
 
+_MOE_LOAD_ASYNC_STREAM = None
+
 def generate_log2phy_map(expert_map):
     num_local_experts = expert_map.max() + 1
     log2phy_map = expert_map.clone()
