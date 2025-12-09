@@ -2044,13 +2044,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+            if self.speculative_config and self.speculative_config.method == 'mtp':
                 # SpecDecoding now supports seq_len=1 and seq_len=2
                 # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+            if self.speculative_config and self.speculative_config.method == 'mtp':
                 attn_state = AscendAttentionState.SpecDecoding
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
@@ -2450,6 +2450,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     attn_metadata, self.with_prefill, maybe_padded_num_tokens,
                     input_ids, positions, intermediate_tensors, inputs_embeds)
 
+            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
                 scheduler_output)
 
@@ -2701,7 +2702,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.method in ("deepseek_mtp", "qwen3_next_mtp") and \
+                    self.speculative_config.method == "mtp" and \
                     not self.speculative_config.disable_padded_drafter_batch
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens
@@ -2711,7 +2712,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
-            self.maybe_wait_for_kv_save()
+
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
@@ -2900,7 +2901,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         block_table_tensor[:num_reqs * self.decode_threshold]
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
-                        self.speculative_config.method == "deepseek_mtp":
+                        self.speculative_config.method == "mtp":
                     attn_state = AscendAttentionState.SpecDecoding
 
                 common_metadata = CommonAttentionMetadata(
@@ -3002,8 +3003,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
          with_prefill) = self._sync_metadata_across_dp(num_tokens,
                                                        with_prefill)
 
-        moe_comm_type = self._select_moe_comm_method(num_tokens)
-
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
@@ -3049,23 +3048,62 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
+        has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
+        _ag_mode, batch_descriptor = \
+            self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+
+        num_tokens_padded = batch_descriptor.num_tokens
+        num_reqs_padded = (batch_descriptor.num_reqs if
+                           batch_descriptor.num_reqs is not None else num_reqs)
+        if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
+            # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
+            num_tokens_across_dp[:] = num_tokens_padded
+            num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+
+        moe_comm_type = self._select_moe_comm_method(num_tokens_padded)
+
+        # filter out the valid batch descriptor
+        if aclgraph_runtime_mode is not None:
+            # we allow forcing NONE when the dispatcher disagrees to support
+            # warm ups for aclgraph capture
+            if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
+                raise ValueError(
+                    f"Aclgraph runtime mode mismatch at dummy_run. "
+                    f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
+        else:
+            aclgraph_runtime_mode = _ag_mode
+
+        # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
+        # and not supported in ASCEND now. We could remove it in the future.
+        attn_metadata = self._build_dummy_attn_metadata(
+            False,
+            num_reqs=num_reqs_padded,
+            num_tokens=num_tokens_padded,
+            max_query_len=max_query_len,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
+            force_attention=force_attention,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens,
                                             num_sampled_tokens):
+            # Make sure padding doesn't exceed max_num_tokens
+            assert num_tokens_padded <= self.max_num_tokens
             if self.is_multimodal_model:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             elif self.enable_prompt_embeds:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
-                input_ids = self.input_ids[:num_tokens]
+                input_ids = self.input_ids[:num_tokens_padded]
                 inputs_embeds = None
 
             if self.uses_mrope:
-                positions = self.mrope_positions[:, :num_tokens]
+                positions = self.mrope_positions[:, :num_tokens_padded]
             else:
-                positions = self.positions[:num_tokens]
+                positions = self.positions[:num_tokens_padded]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3077,39 +3115,14 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             dtype=self.dtype,
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
-                    k: v[:num_tokens]
+                    k:
+                    v[:num_tokens_padded]
                     for k, v in self.intermediate_tensors.items()
                 })
-            has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
-            # filter out the valid batch descriptor
-            _ag_mode, batch_descriptor = \
-                self.aclgraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-            if aclgraph_runtime_mode is not None:
-                # we allow forcing NONE when the dispatcher disagrees to support
-                # warm ups for aclgraph capture
-                if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
-                    raise ValueError(
-                        f"Aclgraph runtime mode mismatch at dummy_run. "
-                        f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}."
-                    )
-            else:
-                aclgraph_runtime_mode = _ag_mode
-
-            # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
-            # and not supported in ASCEND now. We could remove it in the future.
-            attn_metadata = self._build_dummy_attn_metadata(
-                False,
-                num_reqs=num_reqs,
-                num_tokens=num_tokens,
-                max_query_len=max_query_len,
-                aclgraph_runtime_mode=aclgraph_runtime_mode,
-                force_attention=force_attention,
-                num_scheduled_tokens=num_scheduled_tokens,
-            )
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
-            max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
+            max_num_reqs_across_dp = num_tokens_padded if not with_prefill else max_num_reqs
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
                                         dtype=torch.int32)
 
@@ -3129,7 +3142,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
-                    num_tokens=num_tokens,
+                    num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=with_prefill,
                     in_profile_run=self.in_profile_run,
@@ -3143,15 +3156,15 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     weight_prefetch_method=self.weight_prefetch_method):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     with_prefill, is_torchair_compile, input_ids, positions,
-                    attn_metadata, num_tokens, intermediate_tensors,
+                    attn_metadata, num_tokens_padded, intermediate_tensors,
                     inputs_embeds)
                 dummy_compute_logits(hidden_states)
 
             if self.drafter:
                 self.drafter.dummy_run(
-                    num_tokens=num_tokens,
+                    num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
-                    num_reqs=num_reqs,
+                    num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,

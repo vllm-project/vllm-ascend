@@ -44,12 +44,13 @@ jobs:
     with:
       vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
   changes:
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6.0.0
+      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -100,7 +101,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -113,7 +114,7 @@ jobs:
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Install vllm-project/vllm-ascend
         run: |
