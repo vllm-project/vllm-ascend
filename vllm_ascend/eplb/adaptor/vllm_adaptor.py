@@ -45,9 +45,9 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.init_expert_maps()
 
     def init_eplb_params(self):
-        self.num_dense_layers = None
-        self.global_expert_num = None
-        self.num_moe_layers = None
+        self.num_dense_layers: int | None = None
+        self.global_expert_num: int | None = None
+        self.num_moe_layers: int | None = None
 
     def init_eplb_param_dict(self):
         for i in range(self.num_dense_layers,
