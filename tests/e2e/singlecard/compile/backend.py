@@ -50,8 +50,9 @@ class TestBackend:
         Apply custom graph transformation passes.
         """
         self.graph_pre_pass = deepcopy(graph)
-        for pass_ in self.custom_passes:
-            pass_(graph)
+        if self.custom_passes is not None:
+            for pass_ in self.custom_passes:
+                pass_(graph)
         self.graph_post_pass = deepcopy(graph)
         return graph
 
