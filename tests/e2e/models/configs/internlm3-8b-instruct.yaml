@@ -1,4 +1,4 @@
-model_name: "Shanghai_AI_Laboratory/internlm-7b"
+model_name: "Shanghai_AI_Laboratory/internlm3-8b-instruct"
 hardware: "Atlas A2 Series"
 tasks:
 - name: "ceval-valid"

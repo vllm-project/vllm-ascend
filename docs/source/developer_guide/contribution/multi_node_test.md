@@ -82,7 +82,7 @@ currently, the multi-node test workflow defined in the [vllm_ascend_test_nightly
                 config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
                 size: 2
             - name: multi-node-qwen3-dp
-                config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+                config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A22B.yaml
                 size: 2
             - name: multi-node-dpsk-4node-pd
                 config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
