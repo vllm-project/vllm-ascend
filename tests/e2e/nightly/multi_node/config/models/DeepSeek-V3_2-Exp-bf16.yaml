@@ -29,7 +29,6 @@ deployment:
         --trust-remote-code 
         --no-enable-prefix-caching 
         --gpu-memory-utilization 0.9 
-        --additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 
   -
     server_cmd: >
@@ -49,5 +48,4 @@ deployment:
         --trust-remote-code 
         --no-enable-prefix-caching 
         --gpu-memory-utilization 0.92 
-        --additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 benchmarks:
