@@ -3,7 +3,7 @@
 ## Introduction
 
 DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language model developed by DeepSeek Company. It excels in complex logical reasoning, mathematical problem-solving, and code generation. By dynamically activating its expert networks, it delivers exceptional performance while maintaining computational efficiency. Building upon R1, DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs 8-bit integer (INT8) quantization for both weights and activations, which significantly reduces the model's memory footprint and computational requirements, enabling more efficient deployment and application in resource-constrained environments.
-This article takes the deepseek- R1-w8a8 version as an example to introduce the deployment of the R1 series models.
+This article takes the deepseek- R1-W8A8 version as an example to introduce the deployment of the R1 series models.
 
 ## Supported Features
 
@@ -15,7 +15,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `DeepSeek-R1-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
+- `DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes.
 
@@ -25,7 +25,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image to run `DeepSeek-R1-w8a8` directly.
+You can using our official docker image to run `DeepSeek-R1-W8A8` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -71,12 +71,12 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ## Deployment
 ### Service-oriented  Deployment
 
-- `DeepSeek-R1-w8a8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
+- `DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
 
 :::::{tab-set}
 :sync-group: install
 
-::::{tab-item} DeepSeek-R1-w8a8 A3 series
+::::{tab-item} DeepSeek-R1-W8A8 A3 series
 
 ```shell
 #!/bin/sh
@@ -94,7 +94,7 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/DeepSeek-R1-W8A8 \
+vllm serve /vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --data-parallel-size 4 \
@@ -113,7 +113,7 @@ vllm serve /weights/DeepSeek-R1-W8A8 \
 ```
 
 ::::
-::::{tab-item} DeepSeek-R1-w8a8 A2 series
+::::{tab-item} DeepSeek-R1-W8A8 A2 series
 
 Run the following scripts on two nodes respectively.
 
@@ -138,7 +138,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve /weights/DeepSeek-R1-W8A8 \
+vllm serve /vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --data-parallel-size 4 \
@@ -181,7 +181,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve /weights/DeepSeek-R1-W8A8 \
+vllm serve /vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
   --port 8000 \
   --headless \
@@ -236,7 +236,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `DeepSeek-R1-w8a8` in `vllm-ascend:0.11.0rc2` for reference only.
+2. After execution, you can get the result, here is the result of `DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
@@ -245,7 +245,7 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-R1-w8a8` in online mode.
+As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-R1-W8A8` in online mode.
 
 1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
 
@@ -254,7 +254,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 ```shell
 lm_eval \
   --model local-completions \
-  --model_args model=path/DeepSeek-R1-w8a8,base_url=http://<node0_ip>:<port>/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=path/DeepSeek-R1-W8A8,base_url=http://<node0_ip>:<port>/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
@@ -268,7 +268,7 @@ Refer to [Using AISBench for performance evaluation](../developer_guide/evaluati
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `DeepSeek-R1-w8a8` as an example.
+Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
@@ -281,7 +281,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model path/DeepSeek-R1-w8a8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model path/DeepSeek-R1-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
