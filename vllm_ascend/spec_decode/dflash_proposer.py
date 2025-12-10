@@ -158,6 +158,7 @@ class AscendDflashProposer(AscendEagleProposer):
         num_query_tokens = min(num_tokens, self.max_query_tokens)
 
         (
+            _,
             num_input_tokens,
             num_tokens_across_dp,
             _,
