@@ -1043,7 +1043,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             seq_lens = self.seq_lens_cpu[:num_reqs]
             max_seq_len = max(seq_lens.max().item(), 0)
             return self.attn_mask_builder.get_attn_mask(
-                max_seq_len=max_seq_len, dtype=self.dtype, device=self.device)
+                max_seq_len=max_seq_len, dtype=self.dtype)
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask()
