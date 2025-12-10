@@ -381,8 +381,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
-        self.num_decode_draft_tokens = self._make_buffer(self.max_num_reqs,
-                                                         dtype=torch.int32)
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
         self.sampled_token_ids_pinned_cpu = torch.empty(
