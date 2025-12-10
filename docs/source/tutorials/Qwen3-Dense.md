@@ -344,7 +344,7 @@ The configuration compilation_config = { "cudagraph_mode": "FULL_DECODE_ONLY"} i
 ### 8. Asynchronous Scheduling
 Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 
-This optimization is enabled by setting --async-scheduling
+This optimization is enabled by setting `--async-scheduling`. 
 
 ## Optimization Highlights
 
@@ -355,21 +355,16 @@ Setting the right prefetch buffer size is essential for optimizing weight loadin
 
 For example, in the real-world scenario mentioned above, I set the prefetch buffer size for the gate_up_proj and down_proj in the MLP to 18MB. The reason for this is that, at this value, the vector computations of RMSNorm and SiLU can effectively hide the prefetch stream, thereby accelerating the Matmul computations of the two linear layers.
 
-### 2.Max-model-len
-The max-model-len parameter controls the maximum sequence length that the model can handle. Adjusting this value allows you to optimize both memory usage and processing time. Generally speaking, I recommend setting this value to the max_input_len + max_output_len in your data scenario, if these values are known. This helps reduce the input concurrency in the profile-run stage, thereby lowering GPU memory usage and leaving more memory space for the kv_cache and activation values.
-
-For example, in the real-world scenario above, I set it to 5500, which is nearly the sum of 3.5K for the input and 1.5K for the output. After setting this, it’s clear from the service startup logs that more memory is allocated for the kv_cache. This also allows for a higher maximum concurrency during actual inference, which significantly improves end-to-end throughput.
-
-### 3.Max-num-batched-tokens
+### 2.Max-num-batched-tokens
 The max-num-batched-tokens parameter determines the maximum number of tokens that can be processed in a single batch. Adjusting this value helps to balance throughput and memory usage. Setting this value too small can negatively impact end-to-end performance, as fewer tokens are processed per batch, potentially leading to inefficiencies. Conversely, setting it too large increases the risk of Out of Memory (OOM) errors due to excessive memory consumption.
 
 In the above real-world scenario, we not only conducted extensive testing to determine the most cost-effective value, but also took into account the accumulation of decode tokens when enabling chunked prefill. If the value is set too small, a single request may be chunked multiple times, and during the early stages of inference, a batch may contain only a small number of decode tokens. This can result in the end-to-end throughput falling short of expectations.
 
-### 4.Cudagraph_capture_sizes
+### 3.Cudagraph_capture_sizes
 The cudagraph_capture_sizes parameter controls the granularity of graph captures during the inference process. Adjusting this value determines how much of the computation graph is captured at once, which can significantly impact both performance and memory usage.
 
 If this list is not manually specified, it will be filled with a series of evenly distributed values, which typically ensures good performance. However, if you want to fine-tune it further, manually specifying the values will yield better results. This is because if the batch size falls between two sizes, the framework will automatically pad the token count to the larger size. This often leads to actual performance deviating from the expected or even degrading.
 
 Therefore, like the above real-world scenario, when adjusting the benchmark request concurrency, we always ensure that the concurrency is actually included in the cudagraph_capture_sizes list. This way, during the decode phase, padding operations are essentially avoided, ensuring the reliability of the experimental data.
 
-It’s important to note that if you enable FlashComm_v1, the values in this list must be integer multiples of the TP count. Any values that do not meet this condition will be automatically filtered out. Therefore, I recommend incrementally adding concurrency based on the TP count after enabling FlashComm_v1.
+It’s important to note that if you enable FlashComm_v1, the values in this list must be integer multiples of the TP size. Any values that do not meet this condition will be automatically filtered out. Therefore, I recommend incrementally adding concurrency based on the TP size after enabling FlashComm_v1.
