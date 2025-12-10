@@ -93,7 +93,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_USE_MODELSCOPE=Ture
+export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
@@ -138,7 +138,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_USE_MODELSCOPE=Ture
+export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
@@ -182,7 +182,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_USE_MODELSCOPE=Ture
+export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --host 0.0.0.0 \
