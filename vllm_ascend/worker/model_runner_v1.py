@@ -127,6 +127,7 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
+from vllm_ascend.eplb.adaptor.eplb_adaptor_factory import EplbAdaptorFactory
 # yapf: enable
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
@@ -3269,7 +3270,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
-            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()

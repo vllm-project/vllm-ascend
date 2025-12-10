@@ -25,6 +25,10 @@ class EplbAdaptor():
         pass
 
     @abstractmethod
+    def init_eplb_params(self):
+        raise NotImplementedError
+
+    @abstractmethod
     def get_rank_expert_workload(self):
         raise NotImplementedError
 
