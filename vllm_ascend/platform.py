@@ -26,10 +26,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
-                                       init_ascend_config)
-from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
-                                        delete_torchair_cache_file)
+from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
@@ -204,25 +201,6 @@ class NPUPlatform(Platform):
                 compilation_config.mode)
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
-        if ascend_config.torchair_graph_config.enabled:
-            logger.info(
-                "Torchair compilation enabled on NPU. Setting CUDAGraphMode to NONE"
-            )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
-            # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
-            # this will increase graph compilation duration, it significantly enhances robustness and decreases
-            # graph launching time during inference.
-            if check_torchair_cache_exist(
-            ) and not ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
-                logger.warning(
-                    "Torchair cache folder is deleted here to prevent runtime issues caused by dimension "
-                    "mismatches or configuration inconsistencies when users reuse cached computation graphs. "
-                    "In order to decrease torchair graph compilation time, users can enable both use_cached_graph "
-                    "and use_cached_kv_cache_bytes in torchair_graph_config.")
-                delete_torchair_cache_file()
-
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
         # There are cases where default cudagraph_capture_sizes are not friendly
@@ -307,9 +285,7 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled:
-                parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
-            elif ascend_config.xlite_graph_config.enabled:
+            if ascend_config.xlite_graph_config.enabled:
                 logger.info(
                     "Euler Xlite enabled. See: https://gitee.com/openeuler/GVirt/tree/master/xlite"
                 )
@@ -394,29 +370,14 @@ class NPUPlatform(Platform):
         use_sparse=False,
         attn_type: str | None = None,
     ):
-        ascend_config = get_ascend_config()
-
-        if use_mla and ascend_config.enable_shared_expert_dp:
-            if use_mla and use_sparse:
-                return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
-
-        use_torchair = ascend_config.torchair_graph_config.enabled
-        # choose attention backend based on use_mla and use_torchair
+        # choose attention backend based on use_mla
         backend_map = {
-            (True, False, True):
-            "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend",
-            (True, False, False):
-            "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False, True):
-            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend",
-            (False, False, False):
+            (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, False):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-            (True, True, False):
-            "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-            (True, True, True):
-            "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
+            (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(use_mla, use_sparse, use_torchair)]
+        return backend_map[(use_mla, use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
