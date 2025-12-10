@@ -297,30 +297,11 @@ class AscendAttentionMetadataBuilder:
 
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
-        # slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
+
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
-                                                                       num_reqs
-                                                                       + 1]
-        if common_attn_metadata.num_input_tokens > num_actual_tokens:
-            padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
-            seq_lens = torch.cat([
-                seq_lens,
-                torch.tensor([padded_num_tokens
-                              ]).to(seq_lens.device).to(seq_lens.dtype)
-            ])
-            block_table_padding = torch.zeros(
-                (padded_num_tokens, ) + block_table.shape[1:],
-                dtype=block_table.dtype,
-                device=block_table.device)
-            block_table = torch.cat([block_table, block_table_padding], dim=0)
-            query_start_loc_cpu = torch.cat([
-                query_start_loc_cpu,
-                torch.tensor([query_start_loc_cpu[-1] + padded_num_tokens]).to(
-                    query_start_loc_cpu.device).to(query_start_loc_cpu.dtype)
-            ])
 
+        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(
             self.device, non_blocking=True)
         is_causal_pooling = None
