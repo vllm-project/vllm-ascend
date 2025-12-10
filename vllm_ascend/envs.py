@@ -114,6 +114,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Set the ai cube core num for the communication block when enabling dbo
+    "VLLM_ASCEND_DBO_COMM_AIC_NUM": lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIC_NUM", -1)),
+    # Set the ai vector core num for the communication block when enabling dbo,
+    # should greater than 16 for HCCL kernels
+    "VLLM_ASCEND_DBO_COMM_AIV_NUM": lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIV_NUM", -1)),
 }
 
 # end-env-vars-definition
