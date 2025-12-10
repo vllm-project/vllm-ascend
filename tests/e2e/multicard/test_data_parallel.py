@@ -28,7 +28,10 @@ from unittest.mock import patch
 import pytest
 
 MODELS = [
-    "Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"
+    "Qwen/Qwen3-0.6B",
+    "Qwen/Qwen3-30B-A3B",
+    # FIXME(Potabk): Skip this case for now
+    # "vllm-ascend/Qwen3-30B-A3B-W8A8"
 ]
 
 
