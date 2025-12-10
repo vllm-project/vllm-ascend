@@ -20,9 +20,10 @@ _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
 _EMBED_TP: Optional[GroupCoordinator] = None
 
-# flashcomm2 specific groups
+# flashcomm specific groups
 _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
+_FC3_QUANT_X: Optional[GroupCoordinator] = None
 
 # shared_weight across rank groups
 _SHARED_WEIGHT: Optional[GroupCoordinator] = None
@@ -241,6 +242,15 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
             assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
             _SHARED_WEIGHT = _create_shared_weight_group("flashcomm2_o_shared")
 
+    if get_ascend_config().multistream_overlap_gate:
+        global _FC3_QUANT_X
+        group_ranks = all_ranks.unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        _FC3_QUANT_X = init_model_parallel_group(group_ranks,
+                                                 get_world_group().local_rank,
+                                                 backend,
+                                                 group_name="fc3_quant_x")
+
 
 def model_parallel_initialized():
     return (_MC2 is not None)
@@ -343,3 +353,8 @@ def destroy_ascend_model_parallel():
     if _SHARED_WEIGHT:
         _SHARED_WEIGHT.destroy()
     _SHARED_WEIGHT = None
+
+    global _FC3_QUANT_X
+    if _FC3_QUANT_X:
+        _FC3_QUANT_X.destroy()
+    _FC3_QUANT_X = None
