@@ -1,8 +1,12 @@
 import gc
+import sys
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+if 'torch_npu._inductor' not in sys.modules:
+    sys.modules['torch_npu._inductor'] = MagicMock()
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
