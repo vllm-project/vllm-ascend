@@ -109,9 +109,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+<<<<<<< HEAD
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+=======
+    # Set the ai cube core num for the communication block when enabling dbo
+    "VLLM_ASCEND_DBO_COMM_AIC_NUM": lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIC_NUM", -1)),
+    # Set the ai vector core num for the communication block when enabling dbo,
+    # should greater than 16 for HCCL kernels
+    "VLLM_ASCEND_DBO_COMM_AIV_NUM": lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIV_NUM", -1)),
+>>>>>>> 57ce44c01 ([feat]: adapt community dbo to vllm-ascend)
 }
 
 # end-env-vars-definition

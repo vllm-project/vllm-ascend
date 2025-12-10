@@ -382,6 +382,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         is_profile=False,
     ):
         (
+            _,
             num_tokens,
             num_tokens_across_dp,
             _,
@@ -583,6 +584,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_input_tokens = num_tokens
 
         (
+            _,
             num_input_tokens,
             num_tokens_across_dp,
             _,
