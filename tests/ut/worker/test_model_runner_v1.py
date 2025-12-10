@@ -22,29 +22,30 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 # yapf: disable
 @pytest.mark.parametrize(
-    "soc_version, enable_expert_parallel, world_size, num_tokens, mc2_tokens_capacity, quant_type, expected_method",
+    "soc_version, enable_expert_parallel, world_size, pipeline_size, num_tokens, mc2_tokens_capacity, quant_type, expected_method",
     [
         # Case 1: Expert parallel is disabled, should always be 'allgather'
-        (AscendDeviceType._910B, False, 8, 100, 256, None, MoECommType.ALLGATHER),
-        (AscendDeviceType._910_93, False, 16, 500, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910B, False, 8, 2, 100, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910_93, False, 16, 2, 500, 256, None, MoECommType.ALLGATHER),
 
         # Case 2: A2 SOC with w4a8_dynamic -> use alltoall when not mc2
-        (AscendDeviceType._910B, True, 8, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendDeviceType._910B, True, 16, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendDeviceType._910B, True, 16, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
+        (AscendDeviceType._910B, True, 8, 1, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
+        (AscendDeviceType._910B, True, 16, 1, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
+        (AscendDeviceType._910B, True, 16, 1, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
 
         # Case 3: A2 SOC without w4a8_dynamic -> fallback to allgather
-        (AscendDeviceType._910B, True, 8, 100, 256, None, MoECommType.ALLGATHER),
-        (AscendDeviceType._910B, True, 16, 257, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910B, True, 8, 2, 100, 256, None, MoECommType.ALLGATHER),
+        (AscendDeviceType._910B, True, 16, 2, 257, 256, None, MoECommType.ALLGATHER),
 
         # Case 4: A3 SOC
-        (AscendDeviceType._910_93, True, 8, 100, 256, None, MoECommType.MC2),
-        (AscendDeviceType._910_93, True, 8, 257, 256, None, MoECommType.ALLTOALL),
+        (AscendDeviceType._910_93, True, 8, 2, 100, 256, None, MoECommType.MC2),
+        (AscendDeviceType._910_93, True, 8, 2, 257, 256, None, MoECommType.ALLTOALL),
     ])
 # yapf: enable
 def test_select_moe_comm_method(soc_version, enable_expert_parallel,
-                                world_size, num_tokens, mc2_tokens_capacity,
-                                quant_type, expected_method):
+                                world_size, pipeline_size, num_tokens,
+                                mc2_tokens_capacity, quant_type,
+                                expected_method):
     """
     Tests the _select_moe_comm_method with various configurations including quant_type.
     """
@@ -53,6 +54,7 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
     mock_runner.parallel_config = MagicMock()
     mock_runner.parallel_config.enable_expert_parallel = enable_expert_parallel
     mock_runner.parallel_config.world_size_across_dp = world_size
+    mock_runner.parallel_config.pipeline_parallel_size = pipeline_size
     mock_runner.mc2_tokens_capacity = mc2_tokens_capacity
 
     # Add vllm_config.model_config.hf_config mock with moe_quantize
