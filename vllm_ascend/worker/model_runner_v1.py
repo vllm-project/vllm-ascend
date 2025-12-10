@@ -860,10 +860,10 @@ class NPUModelRunner(GPUModelRunner):
                 num_input_tokens_with_flashcomm1 = (num_input_tokens +
                                                     tp_size - 1) // tp_size
             for k, v in intermediate_tensors.items():
-                self.intermediate_tensors[k][:num_input_tokens].copy_(
-                    v[:num_input_tokens], non_blocking=True)
+                self.intermediate_tensors[k][:num_input_tokens_with_flashcomm1].copy_(
+                    v[:num_input_tokens_with_flashcomm1], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
-                k: v[:num_input_tokens]
+                k: v[:num_input_tokens_with_flashcomm1]
                 for k, v in self.intermediate_tensors.items()
             })
 
