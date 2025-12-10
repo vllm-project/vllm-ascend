@@ -947,7 +947,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()
-                blk_table.slot_mapping[slot_mapping_size:].fill_(0)
+                blk_table.slot_mapping.gpu[slot_mapping_size:].fill_(0)
                 if self.pcp_size > 1:
                     slot_mapping_for_pcp = blk_table.slot_mapping.gpu[:
                                                                       long_seq_metadata
@@ -966,9 +966,9 @@ class NPUModelRunner(GPUModelRunner):
                                                                slot_mapping_size]
                     slot_mapping_for_pcp[:long_seq_metadata.
                                          num_actual_tokens_pcp_padded] = pcp_padded_slot_mapping
-                    blk_table.slot_mapping[:long_seq_metadata.num_actual_tokens_pcp_padded] = \
+                    blk_table.slot_mapping.gpu[:long_seq_metadata.num_actual_tokens_pcp_padded] = \
                         slot_mapping_for_pcp
-                slot_mapping = blk_table.slot_mapping
+                slot_mapping = blk_table.slot_mapping.gpu
 
             # NOTE: This is a temporary hack, now in GPUModelRunner, this prepare_inputs
             # has been split to multiple parts, and there are 3 parts that is related to this
