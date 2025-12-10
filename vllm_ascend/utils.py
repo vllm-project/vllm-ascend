@@ -487,9 +487,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Calculate maximum supported batch sizes considering model architecture
     resources_per_graph = num_hidden_layers + 1
-    if vllm_config.speculative_config is not None:
-        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
-        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+    # For suffix decoding, use the suffix path when no draft_model_config is provided.
+    if (spec := vllm_config.speculative_config) and \
+    (draft := spec.draft_model_config):
+        resources_per_graph += draft.hf_config.num_hidden_layers + 1
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
