@@ -168,6 +168,12 @@ class AscendConfig:
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
         self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
             self, vllm_config)
+        self.enable_npugraph_ex = additional_config.get(
+            "enable_npugraph_ex", False)
+        if self.enable_npugraph_ex:
+            raise NotImplementedError(
+                "This feature is still in the experiment and will be supported soon."
+            )
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
                                               False):
