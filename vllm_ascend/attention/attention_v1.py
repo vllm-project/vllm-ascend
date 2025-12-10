@@ -533,7 +533,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output = attn_output.view(num_tokens, self.num_heads,
                                                self.head_size)
                 output[:num_tokens] = attn_output[:num_tokens]
-                assert output is not None
+                assert output is not None, "Attention out is None!"
                 return output
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
