@@ -44,12 +44,17 @@ jobs:
     with:
       vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
   changes:
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6.0.1
+      - name: Setup git proxy
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -134,7 +139,6 @@ jobs:
             --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
-            --ignore tests/ut/kv_connector/test_llmdatadist_connector.py \
             --ignore tests/ut/core/test_scheduler_dynamic_batch.py
 
       - name: Upload coverage to Codecov
