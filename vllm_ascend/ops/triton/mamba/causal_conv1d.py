@@ -7,7 +7,7 @@
 # and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # mypy: ignore-errors
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import triton
@@ -271,6 +271,7 @@ def causal_conv1d_fn(x: torch.Tensor,
                      has_initial_state: Optional[torch.Tensor] = None,
                      activation: Optional[str] = "silu",
                      pad_slot_id: int = PAD_SLOT_ID,
+                     metadata: Optional[Any] = None,
                      validate_data=False):
     """support varlen + continuous batching when x is 2D tensor
     x: (dim,cu_seq_len)
