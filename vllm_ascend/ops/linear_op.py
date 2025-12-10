@@ -53,6 +53,7 @@ from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import (
     split_tensor_along_last_dim,
+    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
@@ -184,7 +185,13 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
         bias = self.bias if not self.skip_bias_add else None
         # Matrix multiply.
         assert self.quant_method is not None
-        input_parallel = self.comm_group.all_gather(input_, 0)
+        forward_context = get_forward_context()
+        if forward_context.dbo_enabled:
+            forward_context.dbo_template.dbo_linear_column_hook(is_record=True)
+            input_parallel = self.comm_group.all_gather(input_, 0)
+            forward_context.dbo_template.dbo_linear_column_hook(is_record=False)
+        else:
+            input_parallel = self.comm_group.all_gather(input_, 0)
         output = self.quant_method.apply(self.layer, input_parallel, bias)
 
         output_bias = self.bias if self.skip_bias_add else None
@@ -340,6 +347,12 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             recv_buf = torch.empty(total_intermediate_size * chunk_size, dtype=x.dtype, device=x.device)
 
             # Perform all-to-all communication
+
+            # for dbo + fc2 , we combine the alltoall with the next
+            # reduce scatter to achieve better overlap performance
+            forward_context = get_forward_context()
+            if forward_context.dbo_enabled:
+                forward_context.dbo_template.dbo_linear_row_hook(is_record=True)
             dist.all_to_all_single(recv_buf, send_buf, group=self.odp_group.device_group)
 
             return recv_buf.view(all2all_tp_size, chunk_size, -1).transpose(0, 1).reshape(chunk_size, -1)
@@ -373,7 +386,8 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             output = get_tp_group().all_gather(output, 0)
             if num_padding_tokens > 0:
                 output = output[:-num_padding_tokens]
-
+        if forward_context.dbo_enabled:
+            forward_context.dbo_template.dbo_linear_row_hook(is_record=False)
         # Handle bias return based on configuration
         output_bias = self.bias if self.skip_bias_add else None
 
@@ -442,7 +456,19 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        # dbo overlap for qwen3 moe with flashcomm1
+        forward_context = get_forward_context()
+        if forward_context.dbo_enabled:
+            forward_context.dbo_template.dbo_linear_column_hook(is_record=True)
+            if get_forward_context().sp_enabled:
+                input_ = tensor_model_parallel_all_gather(input_, 0)
+
+            forward_context.dbo_template.dbo_linear_column_hook(is_record=False)
+
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True, do_comm=False)
+        else:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
@@ -586,8 +612,14 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
         else:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
-            output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
-
+            # A2 DBO for FC1, overlap the o_proj + moe prepare
+            forward_context = get_forward_context()
+            if forward_context.dbo_enabled:
+                forward_context.dbo_template.dbo_linear_row_hook(is_record=True)
+                output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
+                forward_context.dbo_template.dbo_linear_row_hook(is_record=False)
+            else:
+                output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
         return output
 
     def update_attrs(self):

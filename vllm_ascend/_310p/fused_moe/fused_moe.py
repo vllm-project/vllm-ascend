@@ -151,7 +151,8 @@ class AscendFusedMoE310(FusedMoE):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
         self.quant_type = self.get_quant_type()
 
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
+        # TODO(zxdu): adapt to the list type after applying dbo
+        _MoECommMethods[MoECommType.ALLGATHER] = [AllGatherCommImpl310(self.moe_config)]
 
     def init_experts_map(self, moe_config):
         """
