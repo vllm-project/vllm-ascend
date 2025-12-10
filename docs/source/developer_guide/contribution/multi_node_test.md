@@ -67,6 +67,7 @@ From the workflow perspective, we can see how the final test script is executed,
     ```
   
 3. Running Locally(Option)
+
     Step 1st. Add cluster_hosts to config yamls
         Modify on every cluster host, commands as following:
         like [DeepSeek-V3.yaml] after the configure item `num_nodes` , for example: 
@@ -75,14 +76,14 @@ From the workflow perspective, we can see how the final test script is executed,
     Step 2nd. Install develop environment
         1) Install vllm-ascend develop packages on every cluster host
 
-        ```bash
+        ``` bash
         cd /vllm-workspace/vllm-ascend
         python3 -m pip install -r requirements-dev.txt
         ```
 
         2) Install AISBench on the first host(leader node) in `cluster_hosts`
 
-        ```bash
+        ``` bash
         export AIS_BENCH_TAG="v3.0-20250930-master"
         export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
 
@@ -95,7 +96,7 @@ From the workflow perspective, we can see how the final test script is executed,
         1) Export environments:
             On leader host(the first node xxx.xxx.xxx.188)
 
-            ```bash
+            ``` bash
             export LWS_WORKER_INDEX=0
             export WORKSPACE=/vllm-workspace
             export CONFIG_YAML_PATH=DeepSeek-V3.yaml
@@ -106,7 +107,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
             On slave host(other nodes, such as xxx.xxx.xxx.212)
 
-            ```bash
+            ``` bash
             export LWS_WORKER_INDEX=1
             export WORKSPACE=/vllm-workspace
             export CONFIG_YAML_PATH=DeepSeek-V3.yaml
@@ -120,7 +121,7 @@ From the workflow perspective, we can see how the final test script is executed,
         2) Run vllm serve instances
             Copy and Run run.sh on every cluster host, to start vllm, commands as following:
 
-            ```bash
+            ``` bash
             cp /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh /vllm-workspace/
             cd /vllm-workspace/
             bash -x run.sh
