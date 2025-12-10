@@ -64,8 +64,8 @@ from vllm.model_executor.layers.rotary_embedding import (MRotaryEmbedding,
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
-                                                   supports_xdrope,
-                                                   supports_transcription)
+                                                   supports_transcription,
+                                                   supports_xdrope)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -456,14 +456,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.xdrope_positions = torch.zeros(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1),
                 dtype=torch.int64,
-                device=self.device
-            )
+                device=self.device)
             self.xdrope_positions_cpu = torch.zeros(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1),
                 dtype=torch.int64,
                 device="cpu",
-                pin_memory=True
-            )
+                pin_memory=True)
             self.xdrope_positions_np = self.xdrope_positions_cpu.numpy()
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
@@ -975,7 +973,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             )
 
     def _init_xdrope_positions(self, req_state: CachedRequestState):
-        assert supports_xdrope(self.model), "XD-RoPE support is not implemented."
+        assert supports_xdrope(
+            self.model), "XD-RoPE support is not implemented."
         req_state.xdrope_positions = self.model.get_xdrope_input_positions(
             req_state.prompt_token_ids,
             req_state.mm_features,
@@ -1125,15 +1124,18 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             req = self.requests[req_id]
             assert req.xdrope_positions is not None
 
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[
+                index]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
             num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-                req.prompt_token_ids, req.prompt_embeds
-            )
+                req.prompt_token_ids, req.prompt_embeds)
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
-                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
-                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
+                prompt_part_len = max(0,
+                                      num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(
+                    0, num_scheduled_tokens - prompt_part_len)
             else:
                 prompt_part_len = num_scheduled_tokens
                 completion_part_len = 0
@@ -1147,9 +1149,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 src_start = num_computed_tokens
                 src_end = num_computed_tokens + prompt_part_len
 
-                self.xdrope_positions_cpu[:, dst_start:dst_end] = req.xdrope_positions[
-                    :, src_start:src_end
-                ]
+                self.xdrope_positions_cpu[:, dst_start:
+                                          dst_end] = req.xdrope_positions[:,
+                                                                          src_start:
+                                                                          src_end]
                 xdrope_pos_ptr += prompt_part_len
 
             if completion_part_len > 0:
@@ -1654,8 +1657,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self._calc_xdrope_positions(scheduler_output)
             self.xdrope_positions[:, :total_num_scheduled_tokens].copy_(
                 self.xdrope_positions_cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True
-            )
+                non_blocking=True)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
