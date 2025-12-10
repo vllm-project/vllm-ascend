@@ -286,6 +286,8 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             w2_scale: Optional[torch.Tensor] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
+            w1_offset: Optional[torch.Tensor] = None,
+            w2_offset: Optional[torch.Tensor] = None,
             # For Cube/Vector parallel
             shared_experts: Optional[Any] = None,
             quantized_x_for_share: Optional[Any] = None,
