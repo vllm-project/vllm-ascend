@@ -25,6 +25,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -118,6 +119,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -214,6 +216,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -266,6 +269,7 @@ jobs:
         run: |
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
           # pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
           # pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_W8A8_WITH_EP
           pytest -sv tests/e2e/multicard/test_data_parallel_tp2.py
