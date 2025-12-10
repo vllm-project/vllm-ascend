@@ -64,8 +64,8 @@ set(VLLM_ASCEND_CUSTOM_OP
 )
 
 # 310P 硬件检测和 MLA 排除逻辑
-# 310P 系列 (310p, ASCEND310P1, ASCEND310P3, etc.) 不支持 bfloat16 操作
-if(SOC_VERSION MATCHES "310p|ASCEND310P")
+# 310P 系列 (ascend310p3, ASCEND310P3, etc.) 不支持 bfloat16 操作
+if(SOC_VERSION MATCHES "ascend310p3|ASCEND310P3")
     message(STATUS "310P hardware detected: disabling MLA operators (bfloat16 not supported)")
     # 310P 不包含 MLA 相关操作，避免编译 bfloat16 代码
 else()
@@ -75,20 +75,20 @@ else()
     )
 endif()
 
-# batch_matmul_transpose 操作（所有硬件都支持）
-list(APPEND VLLM_ASCEND_CUSTOM_OP
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
-)
-
-# 原有的 310P 特殊处理逻辑（保留，用于排除特定操作）
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
-)
-
-# ASCEND310P3 特殊处理：排除 batch_matmul_transpose（如果需要的话）
-if(SOC_VERSION STREQUAL "ASCEND310P3")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE})
+# batch_matmul_transpose 操作（硬件条件编译）
+# 310P 硬件不支持 batch_matmul_transpose 中的 bfloat16 代码
+if(SOC_VERSION MATCHES "ascend310p3|ASCEND310P3")
+    message(STATUS "310P hardware detected: excluding batch_matmul_transpose operators (bfloat16 not supported)")
+    # 310P 不包含 batch_matmul_transpose 操作，避免 bfloat16 编译错误
+else()
+    # 非 310P 硬件包含 batch_matmul_transpose 操作（910B 系列等支持 bfloat16）
+    list(APPEND VLLM_ASCEND_CUSTOM_OP
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+    )
 endif()
+
+# 注意: 移除了原有的排除逻辑，改为条件添加逻辑
+# 这样可以确保 310P 硬件根本不会尝试编译包含 bfloat16 的文件
 
 ascendc_library(vllm_ascend_kernels SHARED
     ${VLLM_ASCEND_CUSTOM_OP}
