@@ -231,6 +231,7 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
+            ascend_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
@@ -241,12 +242,14 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
+            ascend_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             logger.info(
                 "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
+            compilation_config.splitting_ops = []
             warning_message = """\033[91m
             **********************************************************************************
             * WARNING: You have enabled the *full graph* feature.
@@ -266,6 +269,7 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_mode)
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
+            ascend_config.enable_npugraph_ex = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
