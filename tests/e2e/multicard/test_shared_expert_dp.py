@@ -53,7 +53,6 @@ def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str) -> None:
             model,
             max_model_len=1024,
             tensor_parallel_size=2,
-            cudagraph_capture_sizes=[4],
             enable_expert_parallel=True,
             compilation_config={
                 "cudagraph_capture_sizes": [1, 4, 8, 16],

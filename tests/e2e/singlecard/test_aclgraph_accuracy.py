@@ -171,7 +171,6 @@ def test_output_between_eager_and_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                cudagraph_capture_sizes=[4],
                 enforce_eager=False,
                 compilation_config={
                     "cudagraph_capture_sizes": [4, 8, 32, 64],
