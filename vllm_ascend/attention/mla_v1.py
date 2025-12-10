@@ -874,7 +874,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
 
         self.ring_mla_mask_size = 512
 
@@ -1267,7 +1266,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,
@@ -1295,7 +1294,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,
@@ -1337,18 +1336,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.enable_kv_nz:
-            k_nope = k_nope.view(-1, self.num_kv_heads,
-                                 self.kv_lora_rank // 16, block_size, 16)
-            k_pe = k_pe.view(-1, self.num_kv_heads,
-                             self.qk_rope_head_dim // 16, block_size, 16)
-            input_layout = "BSND"
-        else:
-            k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
-                                 self.kv_lora_rank)
-            k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
-                             self.qk_rope_head_dim)
-            input_layout = "BNSD"
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
+                             self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
+                         self.qk_rope_head_dim)
+        input_layout = "BNSD"
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
@@ -1365,14 +1357,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
-            if self.enable_kv_nz:
-                q_nope = q_nope.view(num_tokens, 1, self.num_heads,
-                                     -1).contiguous()
-                q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
-            else:
-                q_nope = q_nope.view(num_tokens, self.num_heads, 1,
-                                     -1).contiguous()
-                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+            q_nope = q_nope.view(num_tokens, self.num_heads, 1,
+                                 -1).contiguous()
+            q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
 

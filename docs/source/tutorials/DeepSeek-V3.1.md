@@ -128,9 +128,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 ### Multi-node Deployment
@@ -190,9 +189,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 **Node 1**
@@ -247,9 +245,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 ### Prefill-Decode Disaggregation
@@ -421,7 +418,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
