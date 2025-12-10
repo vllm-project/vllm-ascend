@@ -14,6 +14,7 @@ multi_npu_qwen3_next
 multi_npu
 multi_npu_kimi-k2-thinking
 multi_npu_moge
+Qwen3-Dense
 multi_npu_qwen3_moe
 multi_npu_quantization
 single_node_300i
