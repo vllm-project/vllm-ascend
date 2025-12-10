@@ -55,16 +55,37 @@ include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 file(GLOB KERNEL_FILES
 ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
+# 修复 310P 硬件兼容性问题：310P 不支持 bfloat16，但 MLA 操作包含 bfloat16 代码
+# 参考: v0.10.0rc1 能正常工作，后续添加的 MLA 操作导致 310P 编译失败
+# 问题文件: csrc/mla_preprocess/op_kernel/mla_preprocess_mix_bf16_qdown.hpp
+# 错误: unknown type name 'bfloat16_t'
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
+)
+
+# 310P 硬件检测和 MLA 排除逻辑
+# 310P 系列 (310p, ASCEND310P1, ASCEND310P3, etc.) 不支持 bfloat16 操作
+if(SOC_VERSION MATCHES "310p|ASCEND310P")
+    message(STATUS "310P hardware detected: disabling MLA operators (bfloat16 not supported)")
+    # 310P 不包含 MLA 相关操作，避免编译 bfloat16 代码
+else()
+    # 非 310P 硬件包含 MLA 操作（910B 系列等支持 bfloat16）
+    list(APPEND VLLM_ASCEND_CUSTOM_OP
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
+    )
+endif()
+
+# batch_matmul_transpose 操作（所有硬件都支持）
+list(APPEND VLLM_ASCEND_CUSTOM_OP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
+# 原有的 310P 特殊处理逻辑（保留，用于排除特定操作）
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
+# ASCEND310P3 特殊处理：排除 batch_matmul_transpose（如果需要的话）
 if(SOC_VERSION STREQUAL "ASCEND310P3")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE})
 endif()
