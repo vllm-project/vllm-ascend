@@ -92,8 +92,7 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --max-num-batched-tokens 8192 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.9 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--gpu-memory-utilization 0.9
 ```
 
 **Node 1**
@@ -136,8 +135,7 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--gpu-memory-utilization 0.92
 ```
 
 The deployment view looks like:
