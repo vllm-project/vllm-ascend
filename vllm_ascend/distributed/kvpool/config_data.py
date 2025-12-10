@@ -21,6 +21,8 @@ class KeyMetadata:
     pcp_rank: int
     """ Initialize the current decode context model parallel rank """
     dcp_rank: int
+    """ Initialize the current pipeline parallel rank """
+    pp_rank: int
 
 
 @dataclass(order=True)
@@ -34,6 +36,7 @@ class PoolKey:
             self.key_metadata.head_or_tp_rank,
             self.key_metadata.pcp_rank,
             self.key_metadata.dcp_rank,
+            self.key_metadata.pp_rank,
             self.chunk_hash,
         ))
 
@@ -41,8 +44,8 @@ class PoolKey:
         return (
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
-            f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}@{self.chunk_hash}"
-        )
+            f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
+            f"@pp_rank:{self.key_metadata.pp_rank}@{self.chunk_hash}")
 
     def split_layers(self, num_layers: int) -> List["LayerPoolKey"]:
         """Split the key into multiple keys for each layer"""
