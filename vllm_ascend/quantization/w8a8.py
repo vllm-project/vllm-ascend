@@ -534,12 +534,16 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
         param_dict = {}
         scale_dtype = self.params_dtype
 
-        param_dict["key_antiquant_scale"] = torch.empty(layer.num_kv_heads *
-                                                        layer.head_size,
+        # Get num_kv_heads and head_size from layer.impl (v1 architecture)
+        num_kv_heads = getattr(layer, 'num_kv_heads', None) or layer.impl.num_kv_heads
+        head_size = getattr(layer, 'head_size', None) or layer.impl.head_size
+
+        param_dict["key_antiquant_scale"] = torch.empty(num_kv_heads *
+                                                        head_size,
                                                         dtype=scale_dtype,
                                                         requires_grad=False)
-        param_dict["value_antiquant_scale"] = torch.empty(layer.num_kv_heads *
-                                                          layer.head_size,
+        param_dict["value_antiquant_scale"] = torch.empty(num_kv_heads *
+                                                          head_size,
                                                           dtype=scale_dtype,
                                                           requires_grad=False)
 
@@ -577,8 +581,13 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
         """Apply C8 KV cache quantization during forward pass."""
         num_tokens = query.shape[0]
 
+        # Get attributes from layer.impl (v1 architecture)
+        num_heads = getattr(layer, 'num_heads', None) or layer.impl.num_heads
+        num_kv_heads = getattr(layer, 'num_kv_heads', None) or layer.impl.num_kv_heads
+        head_size = getattr(layer, 'head_size', None) or layer.impl.head_size
+
         if attn_metadata is None:
-            return output.view(num_tokens, layer.num_heads * layer.head_size)
+            return output.view(num_tokens, num_heads * head_size)
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
 
@@ -589,16 +598,16 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
 
         # Quantize current key/value to int8
         quant_key = quant_per_tensor(
-            key.view(-1, layer.num_kv_heads * layer.head_size),
+            key.view(-1, num_kv_heads * head_size),
             layer.key_antiquant_scale.data.view(-1), None, True)
         quant_value = quant_per_tensor(
-            value.view(-1, layer.num_kv_heads * layer.head_size),
+            value.view(-1, num_kv_heads * head_size),
             layer.value_antiquant_scale.data.view(-1), None, True)
 
         # Reshape for attention computation
-        query = query.view(-1, layer.num_heads, layer.head_size)
-        key = key.view(-1, layer.num_kv_heads, layer.head_size)
-        value = value.view(-1, layer.num_kv_heads, layer.head_size)
+        query = query.view(-1, num_heads, head_size)
+        key = key.view(-1, num_kv_heads, head_size)
+        value = value.view(-1, num_kv_heads, head_size)
         value = value.contiguous()
 
         # Write quantized KV to cache
@@ -631,7 +640,7 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
         if has_decode:
             decode_query = query[:num_decode_tokens].view(
                 num_decode_tokens, 1,
-                layer.num_heads * layer.head_size).contiguous()
+                num_heads * head_size).contiguous()
 
             if hasattr(attn_metadata, "decode_meta"):
                 seq_lens = attn_metadata.decode_meta.seq_lens_list
@@ -642,8 +651,8 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
                 decode_query,
                 key_cache,
                 value_cache,
-                num_key_value_heads=layer.num_kv_heads,
-                num_heads=layer.num_heads,
+                num_key_value_heads=num_kv_heads,
+                num_heads=num_heads,
                 actual_seq_lengths=seq_lens,
                 scale_value=scale,
                 input_layout='BSH',
@@ -668,7 +677,7 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
 
             if has_chunked_context:
                 # Chunked prefill: load and dequantize KV from cache
-                if layer.head_size == 192:
+                if head_size == 192:
                     raise NotImplementedError(
                         "KV cache int8 quantization is not implemented for head_size == 192"
                     )
@@ -695,8 +704,8 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
                     actual_seq_lengths=attn_metadata.prefill.
                     actual_seq_lengths_q,
                     actual_seq_lengths_kv=attn_metadata.seq_lens_list,
-                    num_key_value_heads=layer.num_kv_heads,
-                    num_heads=layer.num_heads,
+                    num_key_value_heads=num_kv_heads,
+                    num_heads=num_heads,
                     scale=scale,
                     sparse_mode=3,
                 )
@@ -711,8 +720,8 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
                     mask=attn_metadata.attn_mask,
                     seq_len=attn_metadata.seq_lens,
                     scale_value=scale,
-                    num_heads=layer.num_heads,
-                    num_kv_heads=layer.num_kv_heads,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
                     out=prefill_output)
 
             output[num_decode_tokens:num_decode_tokens +
