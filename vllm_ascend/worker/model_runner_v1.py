@@ -141,6 +141,7 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
@@ -312,15 +313,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         else:
             self.prefetch_stream = None
         self.dtype = self.model_config.dtype
-        if envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
-            # TODO: drop the env config to use ascend sampler by default
-            from vllm_ascend.sample.sampler import AscendSampler
-
-            self.sampler = AscendSampler()
-        else:
-            from vllm.v1.sample.sampler import Sampler
-
-            self.sampler = Sampler()
+        self.sampler = AscendSampler()
         self.reorder_batch_threshold: Optional[int] = None
 
         # Lazy initialization, these will be set after __init__
