@@ -377,10 +377,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        pooler_config = self.model_config.pooler_config
-        is_causal = self.model_config.runner_type == "generate" or (
-            pooler_config is not None
-            and pooler_config.pooling_type.lower() == "last")
+
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
@@ -1034,8 +1031,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             raise ValueError("Attn mask builder is None")
         # Pooling situation.
         if self.model_config.runner_type == "pooling":
-            return self.attn_mask_builder.get_attn_mask(
-                2048, torch.bool, self.device)
+            return self.attn_mask_builder.get_attn_mask(2048, torch.bool)
 
         if self.vllm_config.model_config.use_mla:
             if self.pcp_size > 1:
