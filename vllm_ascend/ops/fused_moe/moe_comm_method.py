@@ -280,6 +280,7 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             apply_router_weight_on_input: bool = False,
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
+            use_int4_w4a16: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[torch.Tensor] = None,
