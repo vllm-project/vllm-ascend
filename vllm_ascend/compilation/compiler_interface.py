@@ -99,7 +99,7 @@ def npugraph_ex_compile(
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
-    # use aclgraph mode
+    # use aclgraph mode, avoid the transformation from fx graph to Ascend IR.
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
