@@ -49,13 +49,7 @@ def test_generate_with_allgather():
                     tensor_parallel_size=2,
                     max_model_len=1024,
                     dtype="auto",
-                    enable_expert_parallel=True,
-                    additional_config={
-                        "ascend_scheduler_config": {
-                            "enabled": True,
-                            "chunked_prefill_enabled": False,
-                        },
-                    }) as vllm_model:
+                    enable_expert_parallel=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
@@ -76,11 +70,5 @@ def test_generate_with_alltoall():
                     tensor_parallel_size=2,
                     max_model_len=1024,
                     dtype="auto",
-                    enable_expert_parallel=True,
-                    additional_config={
-                        "ascend_scheduler_config": {
-                            "enabled": True,
-                            "chunked_prefill_enabled": False,
-                        },
-                    }) as vllm_model:
+                    enable_expert_parallel=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)

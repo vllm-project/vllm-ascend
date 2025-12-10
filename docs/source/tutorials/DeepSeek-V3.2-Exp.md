@@ -39,7 +39,44 @@ Only AArch64 architecture are supported currently due to extra operator's instal
 ::::{tab-item} A3 series
 :sync: A3
 
-1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+1. Start the docker image on your each node.
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
 
 2. Install the package `custom-ops` to make the kernels available.
 
@@ -57,7 +94,36 @@ pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ::::{tab-item} A2 series
 :sync: A2
 
-1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+1. Start the docker image on your each node.
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
 
 2. Install the package `custom-ops` to make the kernels available.
 
@@ -108,7 +174,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ### Multi-node Deployment
@@ -140,7 +206,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
@@ -160,7 +226,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 **Node 1**
@@ -182,7 +248,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
@@ -204,7 +270,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::
@@ -229,9 +295,8 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
@@ -252,7 +317,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --quantization ascend \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 **Node 1**
@@ -274,9 +339,8 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
@@ -299,7 +363,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --quantization ascend \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::

@@ -1,9 +1,11 @@
 [build-system]
 # Should be mirrored in requirements.txt
 requires = [
+    "attrs",
     "cmake>=3.26",
     "decorator",
     "einops",
+    "googleapis-common-protos",
     "numpy<2.0.0",
     "packaging",
     "pip",
@@ -12,11 +14,12 @@ requires = [
     "scipy",
     "pandas",
     "pandas-stubs",
+    "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
     "transformers<=4.57.1",
-    "torch-npu==2.7.1",
-    "torch==2.7.1",
+    "torch-npu==2.8.0",
+    "torch==2.8.0",
     "torchvision",
     "wheel",
     "msgpack",

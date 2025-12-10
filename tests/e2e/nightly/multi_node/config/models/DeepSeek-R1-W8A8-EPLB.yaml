@@ -39,7 +39,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
-          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "LLMDataDistCMgrConnector",
           "kv_buffer_device": "npu",
@@ -50,7 +50,7 @@ deployment:
           "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
           }'
           --additional-config
-          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+          '{"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
 
   -
     server_cmd: >
@@ -69,7 +69,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
-          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "LLMDataDistCMgrConnector",
           "kv_buffer_device": "npu",
@@ -80,7 +80,7 @@ deployment:
           "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
           }'
           --additional-config
-          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+          '{"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -100,7 +100,7 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+        --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "LLMDataDistCMgrConnector",
         "kv_buffer_device": "npu",
@@ -111,7 +111,7 @@ deployment:
         "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
         }'
         --additional-config
-        '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -130,7 +130,7 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+        --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "LLMDataDistCMgrConnector",
         "kv_buffer_device": "npu",
@@ -141,7 +141,7 @@ deployment:
         "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
         }'
         --additional-config
-        '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
 benchmarks:
   perf:
     case_type: performance
