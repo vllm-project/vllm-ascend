@@ -43,9 +43,6 @@ def test_data_parallel_inference(model, max_tokens):
     quantization_models = ["vllm-ascend/Qwen3-30B-A3B-W8A8"]
     script = "examples/offline_data_parallel.py"
 
-    if model in moe_models:
-        pytest.skip("The have known issue on A3, skip it")
-
     env = os.environ.copy()
 
     cmd = [
