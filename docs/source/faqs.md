@@ -104,7 +104,7 @@ vllm-ascend is a hardware plugin for vLLM. Basically, the version of vllm-ascend
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with LLMdatadist, Mooncake backend. Take [official tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node_pd_disaggregation_llmdatadist.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node_pd_disaggregation_mooncake.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 

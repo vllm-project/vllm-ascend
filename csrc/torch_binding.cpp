@@ -37,59 +37,60 @@
 namespace vllm_ascend {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
-                 const torch::Tensor& block_mapping, aclrtStream stream) {
-  torch::Device src_device = src.device();
-  torch::Device dst_device = dst.device();
-  aclrtMemcpyKind memcpy_type;
+                 const torch::Tensor& block_mapping, aclrtStream stream)
+{
+    torch::Device src_device = src.device();
+    torch::Device dst_device = dst.device();
+    aclrtMemcpyKind memcpy_type;
 
-  if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
-    TORCH_CHECK(src_device.index() == dst_device.index(),
-                "src and dst must be on the same npu");
-    memcpy_type = ACL_MEMCPY_DEVICE_TO_DEVICE;
-  } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
-    memcpy_type = ACL_MEMCPY_DEVICE_TO_HOST;
-  } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
-    memcpy_type = ACL_MEMCPY_HOST_TO_DEVICE;
-  } else {
-    TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
-  }
+    if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
+        TORCH_CHECK(src_device.index() == dst_device.index(),
+                    "src and dst must be on the same npu");
+        memcpy_type = ACL_MEMCPY_DEVICE_TO_DEVICE;
+    } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
+        memcpy_type = ACL_MEMCPY_DEVICE_TO_HOST;
+    } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
+        memcpy_type = ACL_MEMCPY_HOST_TO_DEVICE;
+    } else {
+        TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
+    }
 
-  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+    TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
 
-  char* src_ptr = static_cast<char*>(src.data_ptr());
-  char* dst_ptr = static_cast<char*>(dst.data_ptr());
+    char* src_ptr = static_cast<char*>(src.data_ptr());
+    char* dst_ptr = static_cast<char*>(dst.data_ptr());
 
-  const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
-  
-  const int64_t num_blocks = block_mapping.size(0);
-  const int64_t max_src_block = src.size(0);
-  const int64_t max_dst_block = dst.size(0);
-  for (size_t i = 0; i < num_blocks; i++) {
-    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
-    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
-    TORCH_CHECK(src_block_number >= 0 && src_block_number <= max_src_block,
-                    "src block index ", src_block_number, " out of range (max: ", max_src_block, ")");
-    TORCH_CHECK(dst_block_number >= 0 && dst_block_number <= max_dst_block,
-                    "dst block index ", dst_block_number, " out of range (max: ", max_dst_block, ")");
+    const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
     
-    int64_t src_offset = src_block_number * block_size_in_bytes;
-    int64_t dst_offset = dst_block_number * block_size_in_bytes;
+    const int64_t num_blocks = block_mapping.size(0);
+    const int64_t max_src_block = src.size(0);
+    const int64_t max_dst_block = dst.size(0);
+    for (size_t i = 0; i < num_blocks; i++) {
+        int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+        int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
+        TORCH_CHECK(src_block_number >= 0 && src_block_number <= max_src_block,
+                    "src block index ", src_block_number, " out of range (max: ", max_src_block, ")");
+        TORCH_CHECK(dst_block_number >= 0 && dst_block_number <= max_dst_block,
+                    "dst block index ", dst_block_number, " out of range (max: ", max_dst_block, ")");
+        
+        int64_t src_offset = src_block_number * block_size_in_bytes;
+        int64_t dst_offset = dst_block_number * block_size_in_bytes;
 
-    aclrtMemcpyAsync(dst_ptr + dst_offset, block_size_in_bytes,
-                          src_ptr + src_offset, block_size_in_bytes,
-                          memcpy_type, stream);
-  }
+        aclrtMemcpyAsync(dst_ptr + dst_offset, block_size_in_bytes,
+                         src_ptr + src_offset, block_size_in_bytes,
+                         memcpy_type, stream);
+    }
 }
 
 void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
 {    
   
-  const c10_npu::OptionalNPUGuard npuGuard(
+    const c10_npu::OptionalNPUGuard npuGuard(
         (!x.device().is_cpu()) ? x.device() : y.device()
     );
-  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();                       
-  swap_blocks_impl(x, y, z, stream);           
-  return;
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();                       
+    swap_blocks_impl(x, y, z, stream);           
+    return;
 }
 
 AscendType get_dtype_from_torch(at::ScalarType scalarType)
@@ -172,7 +173,7 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     return {query_dst, key_dst};
 }
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const at::Tensor &descale0, const at::Tensor &gamma1, const at::Tensor &beta1, const at::Tensor &wuq,
     const at::Tensor &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
@@ -180,8 +181,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     const at::Tensor &quant_scale0, const at::Tensor &quant_offset0, const at::Tensor &bias0,
     const at::Tensor &quant_scale1, const at::Tensor &quant_offset1, const at::Tensor &bias1,
     const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, at::Tensor &q_out0,
-    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1)
+    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
+    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1, at::Tensor &inner_out)
 {
     at::Tensor CtkvScale =
         ctkv_scale.has_value()
@@ -191,12 +192,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
         q_nope_scale.has_value()
             ? q_nope_scale.value()
             : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
+    bool enableInnerOut =
+        enable_inner_out.has_value()
+            ? enable_inner_out.value()
+            : false;
     
     auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
         hiddenState,
         wuk,
         cache_mode,
-        quant_mode
+        quant_mode,
+        enableInnerOut
     );
 
     void *hidden_state_ptr = hiddenState.data_ptr();
@@ -224,6 +230,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     void *kv_cache_out0_ptr = kv_cache_out0.data_ptr();
     void *q_out1_ptr = q_out1.data_ptr();
     void *kv_cache_out1_ptr = kv_cache_out1.data_ptr();
+    void *inner_out_ptr = inner_out.data_ptr();
     void *workspace_ptr = workspace_tensor.data_ptr();
     void *tiling_ptr = tiling.data_ptr();
 
@@ -234,17 +241,17 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     cmd.SetCustomHandler([stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                           gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr,
                           kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
+                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                           tiling_ptr, block_dim]() -> int {
         mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                             gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr, sin_ptr, cos_ptr,
                             kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
+                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
                             tiling_ptr, block_dim);
         return 0;
     });
     cmd.Run();
-    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1);
+    return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out);
 }
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
@@ -588,6 +595,64 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(
+    const at::Tensor &x,
+    const at::Tensor &expert_ids,
+    const at::Tensor &gmm1_permuted_weight,
+    const at::Tensor &gmm1_permuted_weight_scale,
+    const at::Tensor &gmm2_weight,
+    const at::Tensor &gmm2_weight_scale,
+    const c10::optional<at::Tensor> &expert_smooth_scales,
+    const c10::optional<at::Tensor> &expert_scales,
+    c10::string_view group_ep,
+    int64_t ep_rank_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs)
+{
+    auto x_shape = x.sizes();
+    int bs = x_shape[0];
+    int h = x_shape[1];
+
+    at::Tensor output = at::empty({bs, h}, x.options());
+
+    bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
+    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
+    at::Tensor ep_recv_count = at::empty({num_local_experts * ep_rank_size}, expert_ids.options());
+
+    vector<char> group_ep_chrs(group_ep.begin(), group_ep.end());
+    group_ep_chrs.push_back('\0');
+    char *group_ep_ptr = &group_ep_chrs[0];
+    EXEC_NPU_CMD(
+        // op api
+        aclnnDispatchGmmCombineDecode,
+        // input tensors
+        x,
+        expert_ids,
+        gmm1_permuted_weight,
+        gmm1_permuted_weight_scale,
+        gmm2_weight,
+        gmm2_weight_scale,
+        expert_smooth_scales,
+        expert_scales,
+        //input attrs
+        group_ep_ptr,
+        ep_rank_size,
+        ep_rank_id,
+        moe_expert_num,
+        shared_expert_num,
+        shared_expert_rank_num,
+        quant_mode,
+        global_bs,
+        // output tensors
+        output,
+        ep_recv_count);
+    return {output, ep_recv_count};
+}
+
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
                                     c10::optional<c10::string_view> format_mode,
                                     c10::optional<c10::string_view> quant_mode)
@@ -617,7 +682,33 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
     });
     cmd.Run();
     return;
+}
 
+at::Tensor& dispatch_ffn_combine(
+    const at::Tensor& x,
+    const at::Tensor& weight1,
+    const at::Tensor& weight2,
+    const at::Tensor& expert_idx,
+    const at::Tensor& scale1,
+    const at::Tensor& scale2,
+    const at::Tensor& probs,
+    c10::string_view group,
+    int64_t max_output_size,
+    at::Tensor& out
+) {
+    char *group_ep_ptr = const_cast<char *>(group.data());
+    EXEC_NPU_CMD(aclnnDispatchFFNCombine,
+                 x,
+                 weight1,
+                 weight2,
+                 expert_idx,
+                 scale1,
+                 scale2,
+                 probs,
+                 group_ep_ptr,
+                 max_output_size,
+                 out);
+    return out;
 }
 
 at::Tensor npu_lightning_indexer(
@@ -716,6 +807,36 @@ at::Tensor npu_sparse_flash_attention(
         output);
     return output;
 }
+std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm(
+    const at::Tensor &x1,
+    const at::Tensor &x2,
+    const at::Tensor &residual,
+    const at::Tensor &gamma,
+    c10::string_view group_tp,
+    int64_t tp_rank_size,
+    int64_t tp_rank_id,
+    double epsilon,
+    bool is_trans_b,
+    bool is_gather_add_out)
+    {
+        at::Tensor output = at::empty_like(residual);
+        at::Tensor add_out = at::empty_like(residual);
+
+        std::string group_tp_str(group_tp);
+
+        char *group_tp_ptr = group_tp_str.data();
+
+        float epsilon_f = static_cast<float>(epsilon);
+        EXEC_NPU_CMD(aclnnMatmulAllreduceAddRmsnorm,
+            // input
+            x1, x2, residual, gamma,
+            // attr
+            group_tp_ptr, tp_rank_size, tp_rank_id, epsilon_f, is_trans_b, is_gather_add_out,
+            // output
+            output, add_out);
+
+        return {output, add_out};
+    }
 
 } // namespace vllm_ascend
 
@@ -765,9 +886,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "               Tensor kv_cache_rope, Tensor slotmapping, Tensor quant_scale0,"
         "               Tensor quant_offset0, Tensor bias0, Tensor quant_scale1, Tensor quant_offset1,"
         "               Tensor bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
-        "               str? quant_mode, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
-        "               Tensor! kv_cache_out1) -> (Tensor q_out0, Tensor kv_cache_out0,"
-        "                                          Tensor q_out1, Tensor kv_cache_out1)"
+        "               str? quant_mode, bool? enable_inner_out, Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "               Tensor! kv_cache_out1, Tensor! inner_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
+        "                                          Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out)"
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
@@ -784,6 +905,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            Tensor group_list, *, Tensor? bias=None,"
         "                            Tensor? offset=None) -> (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant);
+
+    ops.def(
+        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor gmm1_permuted_weight,"
+        "                            Tensor gmm1_permuted_weight_scale,"
+        "                            Tensor gmm2_weight, Tensor gmm2_weight_scale,"
+        "                            Tensor? expert_smooth_scales=None, Tensor? expert_scales=None,"
+        "                            str group_ep='',"
+        "                            int ep_rank_size=0, int ep_rank_id=0, int moe_expert_num=0,"
+        "                            int shared_expert_num=1, int shared_expert_rank_num=0,"
+        "                            int quant_mode=0,"
+        "                            int global_bs=0) -> (Tensor output, Tensor ep_recv_count)"
+    );
+    ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
@@ -810,4 +944,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "dispatch_ffn_combine(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
+        "                     Tensor scale1, Tensor scale2, Tensor probs, str group,"
+        "                     int max_output_size, Tensor! out) -> Tensor"
+    );
+    ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+    ops.def("matmul_allreduce_add_rmsnorm(Tensor x1, Tensor x2, Tensor residual, Tensor gamma, \
+        str groupTp, int tpRankSize, int tpRankId, float epsilon, bool isTransB, bool isGatherAddOut) -> (Tensor output, Tensor add_out)");
+    ops.impl("matmul_allreduce_add_rmsnorm", torch::kPrivateUse1, &vllm_ascend::matmul_allreduce_add_rmsnorm);
 }

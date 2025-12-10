@@ -29,7 +29,6 @@ MODELS = [
 ]
 
 MODES = [
-    "torchair",
     "single",
     "aclgraph",
     "aclgraph_mlapo",
@@ -76,18 +75,8 @@ async def test_models(model: str, mode: str) -> None:
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
     }
-    speculative_config = {
-        "num_speculative_tokens": 1,
-        "method": "deepseek_mtp"
-    }
+    speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-            "enable_multistream_moe": False,
-            "enable_multistream_mla": True,
-            "graph_batch_sizes": [16],
-            "use_cached_graph": True
-        },
         "chunked_prefill_for_mla": True,
         "enable_weight_nz_layout": True
     }
@@ -102,12 +91,8 @@ async def test_models(model: str, mode: str) -> None:
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
-        additional_config["torchair_graph_config"] = {"enabled": False}
-    if mode == "aclgraph":
-        additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "aclgraph_mlapo":
         env_dict["VLLM_ASCEND_ENABLE_MLAPO"] = "1"
-        additional_config["torchair_graph_config"] = {"enabled": False}
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

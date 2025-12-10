@@ -99,7 +99,7 @@ class AscendQuantConfig(QuantizationConfig):
                                      user_quant) -> Optional[str]:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
-            if quant_method is None and torch.npu.is_available():
+            if not quant_method and torch.npu.is_available():
                 return ASCEND_QUANTIZATION_METHOD
         return None
 

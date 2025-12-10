@@ -53,7 +53,6 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
-                               prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -177,9 +176,28 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
+        hidden_size = self.vllm_config.model_config.hf_config.hidden_size
+        model = self.model_runner.model
+        for name, param in model.named_parameters():
+            if 'w2_weight' in name and param.shape[2] == hidden_size:
+                parts = name.split('.')
+                param_name = parts[-1]
+                parent_module = model.get_submodule(".".join(parts[:-1]))
+
+                w2_data = param.transpose(1, 2)
+                w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
+                setattr(parent_module, param_name, w2_data)
+            elif 'w13_weight' in name and param.shape[1] == hidden_size:
+                parts = name.split('.')
+                param_name = parts[-1]
+                parent_module = model.get_submodule(".".join(parts[:-1]))
+
+                w13_data = param.transpose(1, 2)
+                w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
+                setattr(parent_module, param_name, w13_data)
+
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
-            model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
@@ -405,17 +423,11 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
-        if prefill_context_parallel_enable():
-            ensure_model_parallel_initialized(
-                self.parallel_config.tensor_parallel_size,
-                self.parallel_config.pipeline_parallel_size,
-                self.parallel_config.prefill_context_parallel_size,
-                self.parallel_config.decode_context_parallel_size)
-        else:
-            ensure_model_parallel_initialized(
-                self.parallel_config.tensor_parallel_size,
-                self.parallel_config.pipeline_parallel_size,
-                self.parallel_config.decode_context_parallel_size)
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.prefill_context_parallel_size,
+            self.parallel_config.decode_context_parallel_size)
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
         ensure_ec_transfer_initialized(self.vllm_config)
