@@ -59,10 +59,12 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (MRotaryEmbedding,
+                                                         XDRotaryEmbedding)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    supports_mrope,
+                                                   supports_xdrope,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -448,6 +450,22 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 pin_memory=True)
             self.mrope_positions_np = self.mrope_positions_cpu.numpy()
 
+        self.uses_xdrope_dim = self.model_config.uses_xdrope_dim
+        if self.uses_xdrope_dim > 0:
+            # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
+            self.xdrope_positions = torch.zeros(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device=self.device
+            )
+            self.xdrope_positions_cpu = torch.zeros(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=True
+            )
+            self.xdrope_positions_np = self.xdrope_positions_cpu.numpy()
+
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         self.arange_np: npt.NDArray[np.int32] = np.arange(max(
             self.max_num_reqs + 1, self.model_config.max_model_len,
@@ -795,6 +813,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             if self.uses_mrope:
                 self._init_mrope_positions(self.requests[req_id])
 
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            if self.uses_xdrope_dim > 0:
+                self._init_xdrope_positions(self.requests[req_id])
+
             req_ids_to_add.append(req_id)
 
         # If this rank is an EC transfer producer,
@@ -952,6 +974,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 req_state.mm_features,
             )
 
+    def _init_xdrope_positions(self, req_state: CachedRequestState):
+        assert supports_xdrope(self.model), "XD-RoPE support is not implemented."
+        req_state.xdrope_positions = self.model.get_xdrope_input_positions(
+            req_state.prompt_token_ids,
+            req_state.mm_features,
+        )
+
     def _sync_metadata_across_dp(
             self, num_tokens: int,
             with_prefill: bool) -> tuple[int, Optional[torch.Tensor], bool]:
@@ -1089,6 +1118,53 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 )
 
                 mrope_pos_ptr += completion_part_len
+
+    def _calc_xdrope_positions(self, scheduler_output: "SchedulerOutput"):
+        xdrope_pos_ptr = 0
+        for index, req_id in enumerate(self.input_batch.req_ids):
+            req = self.requests[req_id]
+            assert req.xdrope_positions is not None
+
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                req.prompt_token_ids, req.prompt_embeds
+            )
+
+            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
+            else:
+                prompt_part_len = num_scheduled_tokens
+                completion_part_len = 0
+
+            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+
+            if prompt_part_len > 0:
+                # prompt's xdrope_positions are pre-computed
+                dst_start = xdrope_pos_ptr
+                dst_end = xdrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.xdrope_positions_cpu[:, dst_start:dst_end] = req.xdrope_positions[
+                    :, src_start:src_end
+                ]
+                xdrope_pos_ptr += prompt_part_len
+
+            if completion_part_len > 0:
+                # compute completion's xdrope_positions on-the-fly
+                dst_start = xdrope_pos_ptr
+                dst_end = xdrope_pos_ptr + completion_part_len
+
+                XDRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.xdrope_positions_np,
+                    out_offset=dst_start,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
+
+                xdrope_pos_ptr += completion_part_len
 
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -1572,6 +1648,15 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True)
 
+        # Calculate XD-RoPE positions.
+        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+        if self.uses_xdrope_dim > 0:
+            self._calc_xdrope_positions(scheduler_output)
+            self.xdrope_positions[:, :total_num_scheduled_tokens].copy_(
+                self.xdrope_positions_cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True
+            )
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -2052,6 +2137,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                         maybe_padded_num_tokens):
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
+        if self.uses_xdrope_dim:
+            positions = self.xdrope_positions[:, :num_input_tokens]
         return input_ids, positions
 
     def _calc_spec_decode_metadata(
@@ -3079,6 +3166,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
             if self.uses_mrope:
                 positions = self.mrope_positions[:, :num_tokens_padded]
+            elif self.uses_xdrope_dim:
+                positions = self.xdrope_positions[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 

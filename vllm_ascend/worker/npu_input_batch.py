@@ -59,6 +59,8 @@ class CachedRequestState:
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
 
+    xdrope_positions: torch.Tensor | None = None
+
     mm_features: Optional[list[MultiModalFeatureSpec]] = None
     # for back-compatibility, will be removed in next major release
     mm_kwargs: Optional[list[MultiModalKwargsItem]] = None
