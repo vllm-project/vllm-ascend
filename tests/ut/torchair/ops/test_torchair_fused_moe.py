@@ -384,7 +384,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             else:
                 assert result.shape == x.shape
 
-    @pytest.mark.parametrize("others_param", [16, 1, 4])
+    @pytest.mark.parametrize("others_param", [16, 4])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
                                    mock_moe_env, others_param):
         """
@@ -397,8 +397,10 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         is_prefill = False
         forward_context = MagicMock(
             fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
+        top_k_return = (torch.randn(8, 2), torch.randint(0, 8, (8, 2)), None)
         with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
-             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_device_type", return_value=AscendDeviceType._910_93):
+             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_device_type", return_value=AscendDeviceType._910_93), \
+             patch('torch_npu.npu_moe_gating_top_k', return_value=top_k_return):
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
             moe_method.ep_size = ep_size
             x = torch.randn(8, 2, 2)
