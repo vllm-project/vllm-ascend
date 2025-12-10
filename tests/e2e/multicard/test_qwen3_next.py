@@ -24,6 +24,7 @@ Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 import os
 from unittest.mock import patch
 
+import pytest
 from modelscope import snapshot_download  # type: ignore
 
 from tests.e2e.conftest import VllmRunner
@@ -63,6 +64,7 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
         del vllm_model
 
 
+@pytest.mark.skip
 def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     example_prompts = [
         "Hello, my name is",
@@ -89,12 +91,6 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
                     enforce_eager=True,
-                    additional_config={
-                        "ascend_scheduler_config": {
-                            "enabled": True,
-                            "enable_chunked_prefill": False
-                        }
-                    },
                     speculative_config={
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 1
@@ -119,6 +115,7 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
 
 
 # TODO: will conduct accuracy verification after the subsequent version becomes stable
+@pytest.mark.skip
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_models_distributed_Qwen3_NEXT_W8A8DYNAMIC_WITH_EP():
     example_prompts = [

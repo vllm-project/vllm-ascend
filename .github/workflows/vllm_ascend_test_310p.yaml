@@ -58,7 +58,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -77,7 +77,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.1
 
       - name: Install system dependencies
         run: |
@@ -85,7 +85,7 @@ jobs:
           apt-get -y install git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -100,7 +100,6 @@ jobs:
         run: |
           export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          export SOC_VERSION=ASCEND310P3 
           pip install -r requirements-dev.txt
           pip install -v -e .
 

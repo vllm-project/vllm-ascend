@@ -72,28 +72,13 @@ async def test_models(model: str, tp_size: int, dp_size: int,
     port = get_open_port()
     env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "0"}
     server_args = [
-        "--no-enable-prefix-caching",
-        "--enable-expert-parallel",
+        "--no-enable-prefix-caching", "--enable-expert-parallel",
         "--tensor-parallel-size",
-        str(tp_size),
-        "--data-parallel-size",
-        str(dp_size),
-        "--port",
-        str(port),
-        "--max-model-len",
-        "16384",
-        "--max-num-batched-tokens",
-        "16384",
-        "--block-size",
-        "16",
-        "--trust-remote-code",
-        "--quantization",
-        "ascend",
-        "--gpu-memory-utilization",
-        "0.9",
-        "--additional-config",
-        '{"ascend_scheduler_config":{"enabled":true},'
-        '"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}',
+        str(tp_size), "--data-parallel-size",
+        str(dp_size), "--port",
+        str(port), "--max-model-len", "16384", "--max-num-batched-tokens",
+        "16384", "--block-size", "16", "--trust-remote-code", "--quantization",
+        "ascend", "--gpu-memory-utilization", "0.9"
     ]
     if full_graph:
         server_args += [

@@ -154,8 +154,18 @@ namespace vllm_ascend {
         void* keycache_out,
         void* q2,
         void* keycache_out2,
+        void* inner_out,
         void* workspace,
         void* tiling,
+        const uint32_t block_dim
+    );
+
+    extern void batch_matmul_transpose_impl(
+        void* stream,
+        void* gm_a,
+        void* gm_b,
+        void* gm_c,
+        void* gm_tiling_data,
         const uint32_t block_dim
     );
 }

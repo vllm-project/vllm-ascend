@@ -36,14 +36,14 @@ jobs:
 
       - name: Get vLLM version
         run: |
-          VLLM_COMMIT=v0.11.2
+          VLLM_COMMIT=ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
           echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> $GITHUB_ENV
 
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
 
       - name: Get vLLM release version
         run: |

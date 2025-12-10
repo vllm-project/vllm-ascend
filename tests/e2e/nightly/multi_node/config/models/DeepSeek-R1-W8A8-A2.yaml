@@ -30,8 +30,8 @@ deployment:
       --quantization ascend
       --gpu-memory-utilization 0.9
       --enforce-eager
-      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-      --additional-config '{"ascend_scheduler_config":{"enabled":false},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+      --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
+      --additional-config '{"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
 
   -
     server_cmd: >
@@ -52,6 +52,6 @@ deployment:
       --quantization ascend
       --gpu-memory-utilization 0.9
       --enforce-eager
-      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-      --additional-config '{"ascend_scheduler_config":{"enabled":false},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+      --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
+      --additional-config '{"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
 benchmarks:

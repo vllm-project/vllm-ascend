@@ -69,7 +69,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 # The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
@@ -92,8 +92,7 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --max-num-batched-tokens 8192 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.9 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
+--gpu-memory-utilization 0.9
 ```
 
 **Node 1**
@@ -114,7 +113,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
@@ -136,8 +135,7 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
+--gpu-memory-utilization 0.92
 ```
 
 The deployment view looks like:

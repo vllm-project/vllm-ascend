@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
@@ -24,6 +24,7 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
@@ -72,33 +73,20 @@ class AscendW8A8DynamicLinearMethod:
     @staticmethod
     def apply(
         layer: torch.nn.Module,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        config = getattr(layer, "_ascend_quant_config", {})
-        if not isinstance(x, tuple):
-            output_dtype = config.get("output_dtype", x.dtype)
-            quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-        else:
-            assert "output_dtype" in config.keys(), (
-                f"DynamicLinearMethod needs explicitly specified `output_dtype`"
-                f"for pre-quantized input, got config [{config}]")
-            output_dtype = config["output_dtype"]
-            quantized_x, dynamic_scale = x
-        pertoken_scale = (dynamic_scale
-                          if config.get("pertoken_scale", True) else None)
-
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias,
-            output_dtype=output_dtype,
+            output_dtype=x.dtype,
         )
-        return ((output, dynamic_scale)
-                if config.get("return_scale", False) else output)
+        return output
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
@@ -123,10 +111,9 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not vllm_config.model_config.enforce_eager
-            and not ascend_config.torchair_graph_config.enabled)
+        self.use_aclgraph = (vllm_config.compilation_config.mode
+                             == CompilationMode.VLLM_COMPILE
+                             and not vllm_config.model_config.enforce_eager)
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
@@ -234,13 +221,26 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
+        if self.dynamic_eplb:
+            w1 = layer.w13_weight_list
+            w1_scale = layer.w13_weight_scale_fp32_list
+            w2 = layer.w2_weight_list
+            w2_scale = layer.w2_weight_scale_list
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale_fp32]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+
+        fused_flag = get_forward_context(
+        ).moe_comm_type == MoECommType.FUSED_ALLTOALL
         return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
-            w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
+            w1=w1[0] if fused_flag else w1,
+            w1_scale=layer.fused_w1_scale if fused_flag else w1_scale,
+            w2=w2[0] if fused_flag else w2,
+            w2_scale=layer.fused_w2_scale if fused_flag else w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
@@ -272,3 +272,39 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
+        layer.fused_w1_scale = scale_from_float_to_int64(
+            layer.w13_weight_scale.data)
+        layer.fused_w2_scale = scale_from_float_to_int64(
+            layer.w2_weight_scale.data)
+
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [
+                weight.clone()
+                for weight in layer.w13_weight.data.unbind(dim=0)
+            ]
+            layer.w2_weight_list = [
+                weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)
+            ]
+            layer.w13_weight_scale_fp32_list = [
+                weight.clone()
+                for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
+            ]
+            layer.w2_weight_scale_list = [
+                weight.clone()
+                for weight in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w13_weight_scale_fp32
+            del layer.w2_weight_scale
+            torch.npu.empty_cache()
+
+
+def scale_from_float_to_int64(scale):
+    import numpy as np
+    scale = torch.from_numpy(
+        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(),
+                      dtype=np.int32).astype(np.int64)).to(scale.device)
+    return scale

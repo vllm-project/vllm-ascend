@@ -16,17 +16,6 @@ GIT_ROOT=$(git rev-parse --show-toplevel)
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
 
-# Gen ranktable
-RANKTABLE_PATH=${GIT_ROOT}/examples/disaggregate_prefill_v1/ranktable.json
-if [ -f "$RANKTABLE_PATH" ]; then
-    rm "$RANKTABLE_PATH"
-fi
-cd ${GIT_ROOT}/examples/disaggregate_prefill_v1
-LOCAL_HOST=`hostname -I|awk -F " " '{print$1}'`
-bash gen_ranktable.sh --ips $LOCAL_HOST  --network-card-name enp189s0f0 --prefill-device-cnt 1 --decode-device-cnt 1
-cd -
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="$RANKTABLE_PATH"
-
 # Waits for vLLM to start.
 wait_for_server() {
   local port=$1
@@ -69,12 +58,14 @@ run_tests_for_model() {
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 VLLM_ASCEND_LLMDD_RPC_PORT=5559 vllm serve $model_name \
+  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 vllm serve $model_name \
   --port $PREFILL_PORT \
   --seed 1024 \
+  --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
-  --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_c_mgr_connector\"}'"
+  --distributed-executor-backend mp \
+  --kv-transfer-config '{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_producer\",\"kv_port\":\"30000\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.mooncake_connector\",\"kv_connector_extra_config\":{\"prefill\":{\"dp_size\":1,\"tp_size\":1},\"decode\":{\"dp_size\":1,\"tp_size\":1}}}'"
 
   if [ -n "$model_args" ]; then
   FULL_CMD="$BASE_CMD $model_args"
@@ -88,12 +79,14 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 VLLM_ASCEND_LLMDD_RPC_PORT=6000 vllm serve $model_name \
+  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 vllm serve $model_name \
   --port $DECODE_PORT \
   --seed 1024 \
+  --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
-  --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_c_mgr_connector\"}'"
+  --distributed-executor-backend mp \
+  --kv-transfer-config '{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_consumer\",\"kv_port\":\"30100\",\"engine_id\":\"1\",\"kv_connector_module_path\":\"vllm_ascend.distributed.mooncake_connector\",\"kv_connector_extra_config\":{\"prefill\":{\"dp_size\":1,\"tp_size\":1},\"decode\":{\"dp_size\":1,\"tp_size\":1}}}'"
 
   if [ -n "$model_args" ]; then
   FULL_CMD="$BASE_CMD $model_args"
@@ -111,7 +104,7 @@ run_tests_for_model() {
 
   # Build the command for the proxy server with all the hosts and ports
   PROXY_PORT=8192
-  PROXY_CMD="python ${GIT_ROOT}/examples/disaggregate_prefill_v1/toy_proxy_server.py --port $PROXY_PORT"
+  PROXY_CMD="python ${GIT_ROOT}/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --port $PROXY_PORT"
   PROXY_CMD+=" --prefiller-ports ${PREFILL_PORT}"
   PROXY_CMD+=" --decoder-ports ${DECODE_PORT}"
   # Start the proxy server
