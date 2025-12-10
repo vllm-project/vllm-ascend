@@ -19,10 +19,10 @@ def test_mla_preprocess_kernel():
 
     hidden_states = torch.randn((token_num, N_7168), dtype=dtype).npu()
 
-    wdqkv = torch.randint(0, 7, (1,448,2112,16), dtype=dtype).npu()
+    wdqkv = torch.randint(0, 7, (1, 448, 2112, 16), dtype=dtype).npu()
     wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
     gamma1 = torch.randn((1536), dtype=dtype).npu()
-    
+
     wuq = torch.randint(0, 7, (1, 96, head_num * 192, 16), dtype=dtype).npu()
     wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
     gamma2 = torch.randn((512), dtype=dtype).npu()
