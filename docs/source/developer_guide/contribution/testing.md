@@ -246,6 +246,8 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_offline_inference.p
 
 This will reproduce the E2E test. See [vllm_ascend_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml).
 
+Run nightly multi-node test cases locally refer to section of `Running Locally` of [Multi Node Test](./multi_node_test.md).
+
 #### E2E test example:
 
 - Offline test example: [`tests/e2e/singlecard/test_offline_inference.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_offline_inference.py)
