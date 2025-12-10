@@ -16,22 +16,32 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
+import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner, VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
+MODELS = [
+    "Qwen/Qwen3-Embedding-0.6B",  # lasttoken
+    "BAAI/bge-small-en-v1.5",  # cls_token
+    "intfloat/multilingual-e5-small"  # mean_tokens
+]
 
-def test_embed_models_correctness():
+
+@pytest.mark.parametrize("model", MODELS)
+def test_embed_models_correctness(model: str):
     queries = ['What is the capital of China?', 'Explain gravity']
 
-    model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
+    model_name = snapshot_download(model)
     with VllmRunner(
             model_name,
             runner="pooling",
             enforce_eager=False,
+            max_model_len=None,
+            cudagraph_capture_sizes=[4],
     ) as vllm_runner:
-        vllm_outputs = vllm_runner.encode(queries)
+        vllm_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
             model_name,
