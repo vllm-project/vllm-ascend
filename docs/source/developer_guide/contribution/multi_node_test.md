@@ -103,7 +103,6 @@ From the workflow perspective, we can see how the final test script is executed,
         export WORKSPACE=/vllm-workspace
         export CONFIG_YAML_PATH=DeepSeek-V3.yaml
         export FAIL_TAG=FAIL_TAG
-        export RESULT_FILE_PATH=./tests/ret
         ```
 
         On slave host(other nodes, such as xxx.xxx.xxx.212)
@@ -117,7 +116,6 @@ From the workflow perspective, we can see how the final test script is executed,
 
         `LWS_WORKER_INDEX` is the index of this node in the `cluster_hosts` . The node with an index of 0 is the leader.
         Slave node index value range is [1, num_nodes-1].
-        `RESULT_FILE_PATH` is the directory used to store running report.
     - Run vllm serve instances
 
         Copy and Run run.sh on every cluster host, to start vllm, commands as following:
