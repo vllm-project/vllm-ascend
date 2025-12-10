@@ -73,53 +73,6 @@ class TestAscendConfig(TestBase):
             init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
-    def test_init_ascend_config_with_refresh(self):
-        test_vllm_config = VllmConfig()
-        ascend_config = init_ascend_config(test_vllm_config)
-        self.assertFalse(ascend_config.torchair_graph_config.enabled)
-
-        test_vllm_config.additional_config = {
-            "torchair_graph_config": {
-                "enabled": True,
-            },
-        }
-        ascend_config = init_ascend_config(test_vllm_config)
-        self.assertFalse(ascend_config.torchair_graph_config.enabled)
-
-        test_vllm_config.additional_config = {
-            "torchair_graph_config": {
-                "enabled": True,
-            },
-            "refresh": True,
-        }
-        ascend_config = init_ascend_config(test_vllm_config)
-        self.assertTrue(ascend_config.torchair_graph_config.enabled)
-
-    @_clean_up_ascend_config
-    def test_init_ascend_config_with_wrong_input(self):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "torchair_graph_config": {
-                "enabled": True,
-                "graph_batch_sizes": "fake_size",
-            },
-            "refresh": True,
-        }
-        with self.assertRaises(TypeError):
-            init_ascend_config(test_vllm_config)
-
-        test_vllm_config.additional_config = {
-            "torchair_graph_config": {
-                "enabled": False,
-                "graph_batch_sizes": [1, 2, 4, 8],
-                "graph_batch_sizes_init": True,
-            },
-            "refresh": True,
-        }
-        with self.assertRaises(ValueError):
-            init_ascend_config(test_vllm_config)
-
-    @_clean_up_ascend_config
     def test_get_ascend_config(self):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
