@@ -303,8 +303,9 @@ class AscendAttentionMetadataBuilder:
             padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
             seq_lens = torch.cat([
                 seq_lens,
-                torch.tensor([padded_num_tokens
-                              ]).to(seq_lens.device).to(seq_lens.dtype)
+                torch.ones(padded_num_tokens,
+                           dtype=seq_lens.dtype,
+                           device=seq_lens.device)
             ])
             block_table_padding = torch.zeros(
                 (padded_num_tokens, ) + block_table.shape[1:],
@@ -313,8 +314,10 @@ class AscendAttentionMetadataBuilder:
             block_table = torch.cat([block_table, block_table_padding], dim=0)
             query_start_loc_cpu = torch.cat([
                 query_start_loc_cpu,
-                torch.tensor([query_start_loc_cpu[-1] + padded_num_tokens]).to(
-                    query_start_loc_cpu.device).to(query_start_loc_cpu.dtype)
+                torch.arange(query_start_loc_cpu[-1] + 1,
+                             query_start_loc_cpu[-1] + 1 + padded_num_tokens,
+                             dtype=query_start_loc_cpu.dtype,
+                             device=query_start_loc_cpu.device)
             ])
 
         query_start_loc = query_start_loc_cpu.pin_memory().to(
