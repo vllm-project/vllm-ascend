@@ -45,7 +45,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         exit 1
     fi
     # for dispatch_gmm_combine_decode
-    yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/dispatch_gmm_combine_decode/op_kernel"
+    yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
     # for dispatch_ffn_combine
     SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
     TARGET_DIR="$SCRIPT_DIR/dispatch_ffn_combine/op_kernel/utils/"
@@ -58,7 +58,19 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
 
     sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
     sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
-    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer;sparse_flash_attention;dispatch_ffn_combine;dispatch_gmm_combine_decode;"
+
+    CUSTOM_OPS_ARRAY=(
+        "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
+        "lightning_indexer"
+        "sparse_flash_attention"
+        "dispatch_ffn_combine"
+        "dispatch_gmm_combine_decode"
+        "moe_combine_normal"
+        "moe_dispatch_normal"
+        "dispatch_layout"
+        "notify_dispatch"
+    )
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 else
     # others
@@ -71,7 +83,7 @@ fi
 cd csrc
 rm -rf build output
 echo "building custom ops $CUSTOM_OPS for $SOC_VERSION"
-bash build.sh -n $CUSTOM_OPS -c $SOC_ARG
+bash build.sh -n "$CUSTOM_OPS" -c "$SOC_ARG"
 
 # install custom ops to vllm_ascend/_cann_ops_custom
 ./output/CANN-custom_ops*.run --install-path=$ROOT_DIR/vllm_ascend/_cann_ops_custom
