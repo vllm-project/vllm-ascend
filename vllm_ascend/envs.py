@@ -36,12 +36,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE":
     lambda: os.getenv("CMAKE_BUILD_TYPE"),
-    # Whether to compile custom kernels. If not set, the default value is True.
-    # If set to False, the custom kernels will not be compiled. Please note that
-    # the sleep mode feature will be disabled as well if custom kernels are not
-    # compiled.
-    "COMPILE_CUSTOM_KERNELS":
-    lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER":
