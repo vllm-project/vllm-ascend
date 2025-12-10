@@ -28,8 +28,7 @@ import torch
 import torch_npu
 from vllm.model_executor.layers.activation import SiluAndMul
 
-from vllm_ascend.ops.moe.experts_selector import (check_npu_moe_gating_top_k,
-                                                  select_experts)
+from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.moe.token_dispatcher import TokenDispatcherWithAllGather
 
@@ -297,10 +296,7 @@ def test_select_experts(
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        call_moe_gatingtopk = check_npu_moe_gating_top_k(
-            hidden_states, topk, topk_group, num_expert_group, scoring_func,
-            custom_routing_function)
-        if not call_moe_gatingtopk and use_grouped_topk:
+        if use_grouped_topk:
             mock_native_grouped_topk.assert_called_once()
         else:
             mock_native_grouped_topk.assert_not_called()
