@@ -26,10 +26,10 @@ extern "C" {
 extern aclnnStatus aclnnInnerDispatchGmmCombineDecodeGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *expertIds,
-    const aclTensor *gmm1PermutedWeight,
-    const aclTensor *gmm1PermutedWeightScale,
-    const aclTensor *gmm2Weight,
-    const aclTensor *gmm2WeightScale,
+    const aclTensorList *gmm1PermutedWeight,
+    const aclTensorList *gmm1PermutedWeightScale,
+    const aclTensorList *gmm2Weight,
+    const aclTensorList *gmm2WeightScale,
     const aclTensor *expertSmoothScalesOptional,
     const aclTensor *expertScalesOptional,
     char *groupEp,
@@ -41,7 +41,7 @@ extern aclnnStatus aclnnInnerDispatchGmmCombineDecodeGetWorkspaceSize(
     int64_t quantMode,
     int64_t globalBs,
     const aclTensor *output,
-    const aclTensor *epRecvCount,
+    const aclTensor *expertTokenNums,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 extern aclnnStatus aclnnInnerDispatchGmmCombineDecode(
@@ -53,10 +53,10 @@ extern aclnnStatus aclnnInnerDispatchGmmCombineDecode(
 aclnnStatus aclnnDispatchGmmCombineDecodeGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *expertIds,
-    const aclTensor *gmm1PermutedWeight,
-    const aclTensor *gmm1PermutedWeightScale,
-    const aclTensor *gmm2Weight,
-    const aclTensor *gmm2WeightScale,
+    const aclTensorList *gmm1PermutedWeight,
+    const aclTensorList *gmm1PermutedWeightScale,
+    const aclTensorList *gmm2Weight,
+    const aclTensorList *gmm2WeightScale,
     const aclTensor *expertSmoothScalesOptional,
     const aclTensor *expertScalesOptional,
     char *groupEp,
@@ -68,14 +68,14 @@ aclnnStatus aclnnDispatchGmmCombineDecodeGetWorkspaceSize(
     int64_t quantMode,
     int64_t globalBs,
     const aclTensor *output,
-    const aclTensor *epRecvCount,
+    const aclTensor *expertTokenNums,
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
 {
     return aclnnInnerDispatchGmmCombineDecodeGetWorkspaceSize(x, expertIds, gmm1PermutedWeight, gmm1PermutedWeightScale,
         gmm2Weight, gmm2WeightScale, expertSmoothScalesOptional, expertScalesOptional, groupEp, epRankSize,
         epRankId, moeExpertNum, shareExpertNum, shareExpertRankNum, quantMode, globalBs,
-        output, epRecvCount, workspaceSize, executor);
+        output, expertTokenNums, workspaceSize, executor);
 }
 
 aclnnStatus aclnnDispatchGmmCombineDecode(

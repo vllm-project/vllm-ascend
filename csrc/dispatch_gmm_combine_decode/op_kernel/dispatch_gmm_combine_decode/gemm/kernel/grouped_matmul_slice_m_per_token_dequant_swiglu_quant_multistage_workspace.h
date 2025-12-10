@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include "ascendc/basic_api/interface/kernel_operator_list_tensor_intf.h"
 #include "catlass/catlass.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
@@ -415,7 +416,7 @@ public:
         GM_ADDR gmExpandIdx;
         GM_ADDR gmEpSendCount;
         GM_ADDR gmResvered;
-        GM_ADDR gmOutputRecvCount;
+        GM_ADDR gmExpertTokenNums;
 
         uint32_t epRankSize;
         uint32_t epRankId;
@@ -439,7 +440,7 @@ public:
                LayoutPerTokenScale const &layoutPerTokenScale_, GM_ADDR ptrOutput_, LayoutOutput const &layoutOutput_,
                GM_ADDR ptrDequantScale_, LayoutDequantScale const &layoutDequantScale_, GM_ADDR ptrWorkspace_,
                GM_ADDR gmX_, GM_ADDR debugGm_, GM_ADDR gmexpertIds_, GM_ADDR gmExpandIdx_, GM_ADDR gmEpSendCount_,
-               GM_ADDR gmResvered_, GM_ADDR gmOutputRecvCount_, uint32_t epRankSize_, uint32_t epRankId_,
+               GM_ADDR gmResvered_, GM_ADDR gmExpertTokenNums_, uint32_t epRankSize_, uint32_t epRankId_,
                uint32_t moeExpertNum_, uint32_t moeExpertNumPerRank_, uint32_t sharedExpertNum_,
                uint32_t sharedExpertRankNum_, uint32_t quantMode_, uint32_t globalBs_, uint32_t bs_, uint32_t topK_,
                uint32_t h)
@@ -464,7 +465,7 @@ public:
               gmexpertIds(gmexpertIds_),
               gmExpandIdx(gmExpandIdx_),
               gmEpSendCount(gmEpSendCount_),
-              gmOutputRecvCount(gmOutputRecvCount_),
+              gmExpertTokenNums(gmExpertTokenNums_),
               gmResvered(gmResvered_),
               epRankSize(epRankSize_),
               epRankId(epRankId_),
@@ -533,7 +534,7 @@ public:
         AscendC::GlobalTensor<ElementA> gmA;
         gmA.SetGlobalBuffer(params.ptrA);
         AscendC::GlobalTensor<ElementB> gmB;
-        gmB.SetGlobalBuffer(params.ptrB);
+        AscendC::ListTensorDesc gmBlistTensorDesc(reinterpret_cast<__gm__ void *>(params.ptrB));
 
         AscendC::GlobalTensor<ElementGroupList> groupList;
         groupList.SetGlobalBuffer(params.ptrGroupList);
@@ -553,6 +554,7 @@ public:
                        static_cast<uint8_t>(aicNum + AscendC::GetBlockIdx())};  // AIV wait for flags in latter part
         uint32_t target = 1;
         for (uint32_t groupIdx = 0; groupIdx < localExpertNum; ++groupIdx) {
+            gmB.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(gmBlistTensorDesc.GetDataPtr<int32_t>(groupIdx)));
             groupTokenNumStateTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + GROUP_TOKEN_NUM_OFFSET) +
                                                      groupIdx * GROUP_INFO_SIZE);
             // wait AIV recv needed tokens
@@ -617,7 +619,6 @@ public:
             }
 
             gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
-            gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
 
             startCoreIdx = (startCoreIdx + coreLoops) % aicNum;
         }
@@ -1049,7 +1050,7 @@ public:
     }
 
     CATLASS_DEVICE
-    void GetCumSum(int32_t startRankId, int32_t recvExpertNum, int64_t ubOffset, GM_ADDR gmOutputRecvCount)
+    void GetCumSum(int32_t startRankId, int32_t recvExpertNum, int64_t ubOffset)
     {
         // calculate token index in output tensor
         int64_t subUbOffset = ubOffset;
@@ -1075,15 +1076,6 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
         AscendC::GatherMask(gatherMaskOutTensor, statusFp32Tensor_, gatherTmpTensor, true, GATHER_SECOND_NUM,
                             {1, (uint16_t)recStatusNumPerCore, 1, 0}, rsvdCnt);
-        if (isRecvCore && recvCoreIdx == 0) {
-            AscendC::GlobalTensor<int32_t> recvCountTensor;
-            recvCountTensor.SetGlobalBuffer((__gm__ int32_t *)gmOutputRecvCount);
-            AscendC::DataCopyExtParams dataCopyParams = {
-                1U, static_cast<uint32_t>(localExpertNum * epRankSize * sizeof(int32_t)), 0U, 0U, 0U};
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
-            AscendC::DataCopyPad(recvCountTensor, gatherMaskOutTensor.ReinterpretCast<int32_t>(), dataCopyParams);
-        }
         AscendC::LocalTensor<float> workLocalTensor = resource.ubBuf.template GetBufferByByte<float>(subUbOffset);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::ReduceSum<float>(gatherMaskOutTensor, gatherMaskOutTensor, workLocalTensor,
@@ -1184,7 +1176,7 @@ public:
     }
 
     CATLASS_DEVICE
-    void RecvCoreFunc(GM_ADDR gmX1, GM_ADDR gmX1Scale, GM_ADDR gmEpSendCount, GM_ADDR gmOutputRecvCount)
+    void RecvCoreFunc(GM_ADDR gmX1, GM_ADDR gmX1Scale, GM_ADDR gmEpSendCount)
     {
         ubOffset = 0;
         RecvCount(ubOffset);
@@ -1211,7 +1203,7 @@ public:
 
         if (startRankId < recvExpertNum) {
             // RecvCount, GetCumSum, RecvToken must use the same ubOffset to get right info
-            GetCumSum(startRankId, recvExpertNum, ubOffset, gmOutputRecvCount);
+            GetCumSum(startRankId, recvExpertNum, ubOffset);
             RecvToken(gmX1, gmX1Scale, gmEpSendCount, coreTokenCount, startRankId, endRankId, recvRankNumPerCore, ubOffset);
         }
 
@@ -1255,6 +1247,7 @@ public:
             uint32_t startCoreIdx = 0;
 
             AscendC::GlobalTensor<int32_t> groupTokenNumStateTensor;
+            AscendC::ListTensorDesc gmScaleListTensor(reinterpret_cast<__gm__ void *>(gmScale));
             for (uint32_t groupIdx = 0; groupIdx < localExpertNum; ++groupIdx) {
                 // just like AIC
                 groupTokenNumStateTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + GROUP_TOKEN_NUM_OFFSET) +
@@ -1273,12 +1266,13 @@ public:
                 LayoutPerTokenScale layoutPerTokenScale =
                     wholeLayoutPerTokenScale.GetTileLayout(inGroupProblemShape.template GetCoordByAxis<0>());
                 LayoutD layoutD = layout::RowMajor{currentM, n};
-                EpilogueParams epilogueParams{gmScale + gmGroupOffsetScale,
-                                            layoutScale,
-                                            gmTokenScale + gmGroupOffsetPerTokenScale,
-                                            layoutPerTokenScale,
-                                            gmSwigluOutput + gmGroupOffsetD,
-                                            layoutD};
+                auto gmScalePtr = reinterpret_cast<__gm__ ElementScale*>(
+                                        gmScaleListTensor.GetDataPtr<int32_t>(groupIdx));
+                EpilogueParams epilogueParams{
+                    gmScalePtr, layoutScale,
+                    gmTokenScale + gmGroupOffsetPerTokenScale, layoutPerTokenScale,
+                    gmSwigluOutput + gmGroupOffsetD, layoutD
+                };
                 blockScheduler.Update(inGroupProblemShape, L1TileShape::ToCoordMN());
                 blockEpilogue.UpdateParams(epilogueParams);
                 uint32_t coreLoops = blockScheduler.GetCoreLoops();
@@ -1302,7 +1296,6 @@ public:
                     stageId = (stageId + 1 < WORKSPACE_STAGES) ? (stageId + 1) : 0;
                 }
 
-                gmGroupOffsetScale += inGroupProblemShape.n();
                 gmGroupOffsetPerTokenScale += inGroupProblemShape.m();
                 gmGroupOffsetD += currentM * n;
 
@@ -1446,7 +1439,7 @@ public:
     }
 
     CATLASS_DEVICE
-    void UpdateAndCleanInfo(__gm__ ElementGroupList_ *ptrGroupList, GM_ADDR gmEpSendCount)
+    void UpdateAndCleanInfo(__gm__ ElementGroupList_ *ptrGroupList, GM_ADDR gmEpSendCount, GM_ADDR gmExpertTokenNums)
     {
         if (aivIdx == aiCoreGroupNum * subBlockNum - 1) {
             // clean
@@ -1465,18 +1458,32 @@ public:
             expertTokenNumsOutGMTensor_.SetGlobalBuffer((__gm__ int64_t *)(ptrGroupList));
             AscendC::GlobalTensor<int32_t> sendCountsGlobal;
             sendCountsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(gmEpSendCount));
+            AscendC::GlobalTensor<int64_t> nonCumSumExpertTokenNumsTensor;
+            nonCumSumExpertTokenNumsTensor.SetGlobalBuffer((__gm__ int64_t *)gmExpertTokenNums);
+            uint32_t tmpTokenNum = 0;
+            
             for (uint32_t localMoeIndex = 0; localMoeIndex < localExpertNum; ++localMoeIndex) {
                 __asm__ __volatile__("");
                 AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                                                 AscendC::DcciDst::CACHELINE_OUT>(
                     sendCountsGlobal[localMoeIndex * epRankSize + epRankSize - 1]);
                 __asm__ __volatile__("");
+
                 uint32_t tokenNum = sendCountsGlobal.GetValue(localMoeIndex * epRankSize + epRankSize - 1);
                 expertTokenNumsOutGMTensor_.SetValue(localMoeIndex, tokenNum);
+                uint32_t nonCumSumTokenNum = tokenNum - tmpTokenNum;
+                nonCumSumExpertTokenNumsTensor.SetValue(localMoeIndex, nonCumSumTokenNum);
+                tmpTokenNum = tokenNum;
                 __asm__ __volatile__("");
                 AscendC::DataCacheCleanAndInvalid<int64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                                                 AscendC::DcciDst::CACHELINE_OUT>(
                     expertTokenNumsOutGMTensor_[localMoeIndex]);
+                __asm__ __volatile__("");
+                
+                __asm__ __volatile__(""); 
+                AscendC::DataCacheCleanAndInvalid<int64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                                                AscendC::DcciDst::CACHELINE_OUT>(
+                    nonCumSumExpertTokenNumsTensor[localMoeIndex]);
                 __asm__ __volatile__("");
             }
         }
@@ -1492,8 +1499,7 @@ public:
                         (GM_ADDR)params.ptrPerTokenScale, (GM_ADDR)params.gmExpandIdx);
         }
         if (isRecvCore) {
-            RecvCoreFunc((GM_ADDR)params.ptrA, (GM_ADDR)params.ptrPerTokenScale, (GM_ADDR)params.gmEpSendCount,
-                        (GM_ADDR)params.gmOutputRecvCount);
+            RecvCoreFunc((GM_ADDR)params.ptrA, (GM_ADDR)params.ptrPerTokenScale, (GM_ADDR)params.gmEpSendCount);
         }
 
         auto gmSwigluOutput = reinterpret_cast<__gm__ float *>(
@@ -1508,7 +1514,7 @@ public:
         AscendC::SyncAll<false>();
         AscendC::PipeBarrier<PIPE_ALL>();
 
-        UpdateAndCleanInfo(params.ptrGroupList, params.gmEpSendCount);
+        UpdateAndCleanInfo(params.ptrGroupList, params.gmEpSendCount, params.gmExpertTokenNums);
         {
             // dynamic quant
             AscendC::GlobalTensor<int32_t> sendCountsGlobal;
