@@ -345,7 +345,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         assert self.indexer is not None, "Indexer is required for DSA."
@@ -470,7 +469,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.fused_qkv_a_proj is None or not isinstance(
                     quant_method, AscendW8A8LinearMethod):
                 reasons.append(
-                    "Currently mlapo only supports W8A8 quantization in MLA scenario."
+                    "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
                     "thus mlapo is disabled for these layers.")
             if self.enable_sfa_cp:
@@ -485,7 +484,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _v_up_proj(self, x):
         if x.dtype in [torch.float16, torch.bfloat16] \
-                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose"):
+                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
+                and not self.enable_sfa_cp:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
             res = torch.empty((b, self.num_heads, self.v_head_dim),
@@ -533,7 +533,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
 
         if self.enable_sfa_cp:
             assert slots_cp is not None
@@ -596,8 +596,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             ..., self.q_lora_rank:].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[
             ..., :self.q_lora_rank].contiguous()
-
-        self.fused_qkv_a_proj.weight = None
 
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
@@ -673,9 +671,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
-        if self.vllm_config.kv_transfer_config is not None:
+        if self.vllm_config.kv_transfer_config is not None and \
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
+            self.q_proj.weight = None
             self.q_proj.deq_scale = None
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()

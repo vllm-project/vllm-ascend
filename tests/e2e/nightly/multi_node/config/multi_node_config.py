@@ -127,9 +127,6 @@ class MultiNodeConfig:
 
         master_ip = self.master_ip
         if self.disaggregated_prefill:
-            self.envs[
-                "DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = self.disaggregated_prefill.get(
-                    "ranktable_path")
             if self.cur_index < self.decode_start_index:
                 # For prefiller nodes, use the default master ip(index==0) as DP master
                 master_ip = self.master_ip

@@ -21,11 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.factory import \
 
 def register_connector():
     KVConnectorFactory.register_connector(
-        "LLMDataDistCMgrConnector",
-        "vllm_ascend.distributed.llmdatadist_c_mgr_connector",
-        "LLMDataDistCMgrConnector")
-
-    KVConnectorFactory.register_connector(
         "MooncakeConnectorV1", "vllm_ascend.distributed.mooncake_connector",
         "MooncakeConnector")
 
