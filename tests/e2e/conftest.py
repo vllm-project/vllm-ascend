@@ -26,7 +26,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Any, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Optional, Tuple, TypeVar, Union
 
 import httpx
 import numpy as np
@@ -42,7 +42,8 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
-from vllm.config.model import _get_and_verify_dtype
+from vllm.config.model import (ConvertOption, RunnerOption,
+                               _get_and_verify_dtype)
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -67,7 +68,7 @@ from vllm.distributed.parallel_state import (  # noqa E402
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _M = TypeVar("_M")
 
-_PromptMultiModalInput = Union[List[_M], List[List[_M]]]
+_PromptMultiModalInput = Union[list[_M], list[list[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
@@ -224,53 +225,58 @@ class RemoteOpenAIServer:
         # Then wait for all api_server nodes
         self._wait_for_multiple_servers(targets=targets, timeout=timeout)
 
-    def _wait_for_multiple_servers(self, targets, timeout: float):
+    def _wait_for_multiple_servers(self,
+                                   targets,
+                                   timeout: float,
+                                   log_interval: float = 30.0):
         """
         targets: List[(node_ip, url)]
+        log_interval
         """
         start = time.time()
         client = requests
 
-        # track readiness
         ready = {node_ip: False for node_ip, _ in targets}
 
-        # polling loop
+        last_log_time = 0.0
+
         while True:
+            now = time.time()
             all_ready = True
+            should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
                 if ready[node_ip]:
-                    continue  # already ready
+                    continue
 
                 try:
                     resp = client.get(url)
                     if resp.status_code == 200:
                         ready[node_ip] = True
                         logger.info(f"[READY] Node {node_ip} is ready.")
-                    else:
-                        all_ready = False
-                        logger.info(f"[WAIT] {url}: HTTP {resp.status_code}")
                 except RequestException:
                     all_ready = False
-                    logger.info(f"[WAIT] {url}: connection failed")
+                    if should_log:
+                        logger.info(f"[WAIT] {url}: connection failed")
 
-                    # underlying process died?
+                    # check unexpected exit
                     result = self._poll()
                     if result is not None and result != 0:
                         raise RuntimeError(
                             f"Server at {node_ip} exited unexpectedly."
                         ) from None
 
-            # if all nodes ready, exit
+            if should_log:
+                last_log_time = now
+
             if all_ready:
                 break
 
-            # check timeout
-            if time.time() - start > timeout:
+            if now - start > timeout:
                 not_ready_nodes = [n for n, ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
-                    f"Timeout: these nodes did not become ready: {not_ready_nodes}"
+                    f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
                 ) from None
 
             time.sleep(5)
@@ -315,12 +321,11 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
-        runner: str = "auto",
+        runner: RunnerOption = "auto",
+        convert: ConvertOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
-        # Use smaller max model length, otherwise bigger model cannot run due
-        # to kv cache size limit.
-        max_model_len: int = 1024,
+        max_model_len: Optional[int] = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
@@ -334,6 +339,7 @@ class VllmRunner:
         self.model = LLM(
             model=model_name,
             runner=runner,
+            convert=convert,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
@@ -351,73 +357,79 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: List[str],
+        prompts: Union[list[str], list[torch.Tensor], list[int]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> List[TextPrompt]:
-        if images is not None:
-            assert len(prompts) == len(images)
+    ) -> list[TextPrompt]:
 
-        if videos is not None:
-            assert len(prompts) == len(videos)
+        if any(x is not None and len(x) != len(prompts)
+               for x in [images, videos, audios]):
+            raise ValueError(
+                "All non-None multimodal inputs must have the same length as "
+                "prompts")
 
-        if audios is not None:
-            assert len(prompts) == len(audios)
+        inputs = []
+        for i, prompt in enumerate(prompts):
+            multi_modal_data = {}
+            if images is not None and (image := images[i]) is not None:
+                multi_modal_data["image"] = image
+            if videos is not None and (video := videos[i]) is not None:
+                multi_modal_data["video"] = video
+            if audios is not None and (audio := audios[i]) is not None:
+                multi_modal_data["audio"] = audio
 
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-        if images is not None:
-            for i, image in enumerate(images):
-                if image is not None:
-                    inputs[i]["multi_modal_data"] = {"image": image}
+            text_prompt_kwargs: dict[str, Any] = {
+                "multi_modal_data": multi_modal_data or None
+            }
+            if isinstance(prompt, str):
+                text_prompt_kwargs["prompt"] = prompt
+            elif isinstance(prompt, list):
+                text_prompt_kwargs["prompt_token_ids"] = prompt
+            else:
+                text_prompt_kwargs["prompt_embeds"] = prompt
 
-        if videos is not None:
-            for i, video in enumerate(videos):
-                if video is not None:
-                    inputs[i]["multi_modal_data"] = {"video": video}
-
-        if audios is not None:
-            for i, audio in enumerate(audios):
-                if audio is not None:
-                    inputs[i]["multi_modal_data"] = {"audio": audio}
+            inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
 
     def generate(
         self,
-        prompts: List[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+        **kwargs: Any,
+    ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
         req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params)
+                                          sampling_params=sampling_params,
+                                          **kwargs)
 
-        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
-            req_sample_output_ids: List[List[int]] = []
-            req_sample_output_strs: List[str] = []
+            req_sample_output_ids: list[list[int]] = []
+            req_sample_output_strs: list[str] = []
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
     @staticmethod
     def _final_steps_generate_w_logprobs(
-        req_outputs: List[RequestOutput],
-    ) -> List[TokensTextLogprobsPromptLogprobs]:
-        outputs: List[TokensTextLogprobsPromptLogprobs] = []
+        req_outputs: list[RequestOutput],
+    ) -> list[TokensTextLogprobsPromptLogprobs]:
+        outputs: list[TokensTextLogprobsPromptLogprobs] = []
         for req_output in req_outputs:
             assert len(req_output.outputs) > 0
             for sample in req_output.outputs:
@@ -430,20 +442,22 @@ class VllmRunner:
 
     def generate_w_logprobs(
         self,
-        prompts: List[str],
+        prompts: list[str],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
-    ) -> Union[List[TokensTextLogprobs],
-               List[TokensTextLogprobsPromptLogprobs]]:
+        **kwargs: Any,
+    ) -> Union[list[TokensTextLogprobs],
+               list[TokensTextLogprobsPromptLogprobs]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
         req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params)
+                                          sampling_params=sampling_params,
+                                          **kwargs)
 
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
@@ -454,34 +468,37 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: List[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> List[Tuple[List[int], str]]:
+        **kwargs: Any,
+    ) -> list[tuple[list[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts,
                                 greedy_params,
                                 images=images,
                                 videos=videos,
-                                audios=audios)
+                                audios=audios,
+                                **kwargs)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 
     def generate_greedy_logprobs(
         self,
-        prompts: List[str],
+        prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
-        stop_token_ids: Optional[List[int]] = None,
-        stop: Optional[List[str]] = None,
-    ) -> Union[List[TokensTextLogprobs],
-               List[TokensTextLogprobsPromptLogprobs]]:
+        stop_token_ids: Optional[list[int]] = None,
+        stop: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> Union[list[TokensTextLogprobs],
+               list[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
             max_tokens=max_tokens,
@@ -494,22 +511,45 @@ class VllmRunner:
                                         greedy_logprobs_params,
                                         images=images,
                                         audios=audios,
-                                        videos=videos)
+                                        videos=videos,
+                                        **kwargs)
 
-    def encode(
-        self,
-        prompts: List[str],
-        images: Optional[PromptImageInput] = None,
-        videos: Optional[PromptVideoInput] = None,
-        audios: Optional[PromptAudioInput] = None,
-    ) -> List[List[float]]:
+    def classify(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.model.classify(prompts)
+        return [req_output.outputs.probs for req_output in req_outputs]
+
+    def embed(self,
+              prompts: list[str],
+              images: Optional[PromptImageInput] = None,
+              videos: Optional[PromptVideoInput] = None,
+              audios: Optional[PromptAudioInput] = None,
+              *args,
+              **kwargs) -> list[list[float]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.embed(inputs)
+        req_outputs = self.model.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
+
+    def encode(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.model.encode(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def reward(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.model.reward(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def score(
+        self,
+        text_1: Union[str, list[str]],
+        text_2: Union[str, list[str]],
+        *args,
+        **kwargs,
+    ) -> list[float]:
+        req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
+        return [req_output.outputs.score for req_output in req_outputs]
 
     def __enter__(self):
         return self
@@ -630,9 +670,78 @@ class HfRunner:
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
 
+    def get_inputs(
+        self,
+        prompts: list[str],
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> list[Union[BatchFeature, BatchEncoding]]:
+        if images is not None:
+            assert len(prompts) == len(images)
+
+        if videos is not None:
+            assert len(prompts) == len(videos)
+
+        if audios is not None:
+            assert len(prompts) == len(audios)
+
+        all_inputs: list[Union[BatchFeature, BatchEncoding]] = []
+        for i, prompt in enumerate(prompts):
+            processor_kwargs: dict[str, Any] = {
+                "text": prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and (image := images[i]) is not None:
+                processor_kwargs["images"] = image
+            if videos is not None and (video := videos[i]) is not None:
+                processor_kwargs["videos"] = video
+            if audios is not None and (audio_inputs := audios[i]) is not None:
+                # HACK - not all processors take sampling_rate; we should
+                # clean this up in the future.
+                if len(audio_inputs) == 2:
+                    audio, sr = audio_inputs
+                    processor_kwargs["audio"] = audio
+                    processor_kwargs["sampling_rate"] = sr
+                else:
+                    processor_kwargs["audio"] = audio_inputs
+
+            inputs = self.processor(**processor_kwargs)
+            if isinstance(inputs, BatchFeature):
+                inputs = inputs.to(dtype=self.dtype)
+
+            all_inputs.append(inputs)
+
+        return all_inputs
+
+    def classify(self, prompts: list[str]) -> list[str]:
+        # output is final logits
+        all_inputs = self.get_inputs(prompts)
+        outputs = []
+        problem_type = getattr(self.config, "problem_type", "")
+
+        for inputs in all_inputs:
+            output = self.model(**self.wrap_device(inputs))
+            if problem_type == "regression":
+                logits = output.logits[0].tolist()
+            elif problem_type == "multi_label_classification":
+                logits = output.logits.sigmoid()[0].tolist()
+            else:
+                logits = output.logits.softmax(dim=-1)[0].tolist()
+            outputs.append(logits)
+
+        return outputs
+
     def encode(self, prompts: list[str], *args,
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
+
+    def predict(self, prompts: list[list[str]], *args,
+                **kwargs) -> torch.Tensor:
+        return self.model.predict(prompts,
+                                  *args,
+                                  convert_to_tensor=True,
+                                  **kwargs)
 
     def __enter__(self):
         return self
@@ -647,7 +756,7 @@ def ilama_lora_files():
     return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
 
 
-def qwen_prompt(questions: List[str]) -> List[str]:
+def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
              f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
