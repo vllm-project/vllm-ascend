@@ -987,16 +987,16 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = num_input_tokens // self.uniform_decode_query_len
                 pad_size = num_reqs_padded - num_reqs
                 if pad_size > 0:
-                    last_query_loc = self.query_start_loc[num_reqs]
+                    last_query_loc = self.query_start_loc.gpu[num_reqs]
 
                     steps = torch.arange(1,
                                          pad_size + 1,
                                          device=self.device,
-                                         dtype=self.query_start_loc.dtype)
+                                         dtype=self.query_start_loc.gpu.dtype)
                     fill_values = last_query_loc + (
                         steps * self.uniform_decode_query_len)
 
-                    self.query_start_loc[num_reqs + 1:num_reqs_padded +
+                    self.query_start_loc.gpu[num_reqs + 1:num_reqs_padded +
                                          1] = fill_values
                 # So we are trying to simulate the behavior of GPUModelRunner's
                 # prepare_inputs for uniform decode mode by padding query_start_loc
@@ -1004,9 +1004,9 @@ class NPUModelRunner(GPUModelRunner):
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.query_start_loc[:num_reqs + 1],
-                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs + 1],
+                seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
                 seq_lens=self.seq_lens.gpu[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=slot_mapping_size,
@@ -1867,7 +1867,7 @@ class NPUModelRunner(GPUModelRunner):
                 # QUESTION: Why do we separately set query_start_loc for spec in the first place?
                 # While in _prepare_inputs we don't?
                 if self.speculative_config:
-                    self.query_start_loc[:num_reqs + 1] = torch.tensor(
+                    self.query_start_loc.gpu[:num_reqs + 1] = torch.tensor(
                         [0] + self.actual_seq_lengths_q[:num_reqs],
                         device=self.device,
                         dtype=torch.int32)
