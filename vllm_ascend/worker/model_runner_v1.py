@@ -1108,7 +1108,7 @@ class NPUModelRunner(GPUModelRunner):
                     attn_metadata[layer_name] = attn_metadata_i
 
         if lmhead_tp_enable():
-            max_num_reqs_across_dp = maybe_padded_num_tokens if not with_prefill else self.max_num_reqs
+            max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
@@ -2201,7 +2201,7 @@ class NPUModelRunner(GPUModelRunner):
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
-            max_num_reqs_across_dp = num_tokens_padded if not with_prefill else max_num_reqs
+            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
                                         dtype=torch.int32)
 
