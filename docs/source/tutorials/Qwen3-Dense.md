@@ -11,7 +11,7 @@ This document will show the main verification steps of the model, including supp
 The Qwen3 Dense models is first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429)
 
 ## **Node**
-This example requires version **v0.11.0rc2**.Earlier versions may lack certain features.
+This example requires version **v0.11.0rc2**. Earlier versions may lack certain features.
 
 ## Supported Features
 
