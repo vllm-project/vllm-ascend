@@ -526,17 +526,29 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
             self.params_dtype = vllm_config.model_config.dtype
+            # Get dimensions from HuggingFace config
+            hf_config = vllm_config.model_config.hf_config
+            self.num_kv_heads = getattr(hf_config, 'num_key_value_heads', hf_config.num_attention_heads)
+            self.num_heads = hf_config.num_attention_heads
+            self.head_size = hf_config.hidden_size // hf_config.num_attention_heads
+            # Apply TP sharding
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            self.num_kv_heads = self.num_kv_heads // tp_size
+            self.num_heads = self.num_heads // tp_size
         else:
             self.params_dtype = torch.bfloat16
+            self.num_kv_heads = None
+            self.head_size = None
+            self.num_heads = None
 
     def create_weights(self, layer) -> None:
         """Create KV cache quantization parameters for Qwen2/Qwen3 Attention layer."""
         param_dict = {}
         scale_dtype = self.params_dtype
 
-        # Get num_kv_heads and head_size from layer.impl (v1 architecture)
-        num_kv_heads = getattr(layer, 'num_kv_heads', None) or layer.impl.num_kv_heads
-        head_size = getattr(layer, 'head_size', None) or layer.impl.head_size
+        # Use cached values from __init__
+        num_kv_heads = self.num_kv_heads
+        head_size = self.head_size
 
         param_dict["key_antiquant_scale"] = torch.empty(num_kv_heads *
                                                         head_size,
@@ -581,10 +593,10 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
         """Apply C8 KV cache quantization during forward pass."""
         num_tokens = query.shape[0]
 
-        # Get attributes from layer.impl (v1 architecture)
-        num_heads = getattr(layer, 'num_heads', None) or layer.impl.num_heads
-        num_kv_heads = getattr(layer, 'num_kv_heads', None) or layer.impl.num_kv_heads
-        head_size = getattr(layer, 'head_size', None) or layer.impl.head_size
+        # Use cached values from __init__
+        num_heads = self.num_heads
+        num_kv_heads = self.num_kv_heads
+        head_size = self.head_size
 
         if attn_metadata is None:
             return output.view(num_tokens, num_heads * head_size)
