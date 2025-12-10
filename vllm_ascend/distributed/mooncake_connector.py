@@ -498,7 +498,6 @@ class KVCacheRecvingThread(threading.Thread):
                       tp_num_need_pulls: int):
         # Get necessary parameters
         k_cache = list(self.kv_caches.values())[0][0]
-        kv_shape = k_cache.shape
         dtype = k_cache.dtype
         device = k_cache.device
         head_dim = self.model_config.hf_config.head_dim
@@ -539,13 +538,6 @@ class KVCacheRecvingThread(threading.Thread):
 
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
-            if len(
-                    k_cache_layer.shape
-            ) == 3:  # kv shape in torchair model is [num_block, block_size, num_kv_head*head_dim]
-                k_cache_layer = k_cache_layer.view(kv_shape[0], kv_shape[1],
-                                                   num_kv_head, head_dim)
-                v_cache_layer = v_cache_layer.view(kv_shape[0], kv_shape[1],
-                                                   num_kv_head, head_dim)
             # Load cache data into buffers
             torch_npu.atb.npu_paged_cache_load(
                 k_cache_layer,
