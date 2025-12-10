@@ -26,6 +26,13 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
 
+        self.mock_cpugpubuffer = patch(
+            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
+
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
+
     def test_initialization_eagle(self):
         self.vllm_config.speculative_config.method = "eagle"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
@@ -77,9 +84,15 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
 
+        self.mock_cpugpubuffer = patch(
+            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
+
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
 
     @patch(
         "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
@@ -169,10 +182,16 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
 
+        self.mock_cpugpubuffer = patch(
+            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
         self.proposer.model = MagicMock()
+
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
 
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context):
@@ -215,6 +234,9 @@ class TestEagleProposerGenerateTokenIds(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
 
+        self.mock_cpugpubuffer = patch(
+            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
@@ -222,7 +244,12 @@ class TestEagleProposerGenerateTokenIds(TestBase):
         self.proposer._propose = MagicMock(
             return_value=torch.tensor([[1, 2], [3, 4], [5, 6]]))
 
-    def test_generate_token_ids_without_metadata(self):
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
+
+    # TODO: This is equivalent to disable_padded_drafter_batch=True.
+    # We need to add some cases about disable_padded_drafter_batch=False in future.
+    def test_generate_token_ids(self):
         valid_sampled = [[20, 30, 40]]
         scheduler_output = MagicMock()
         scheduler_output.num_scheduled_tokens = [2, 1, 3]
@@ -238,7 +265,7 @@ class TestEagleProposerGenerateTokenIds(TestBase):
             return_value={"layer_0": mock_attn_metadata})
 
         result = self.proposer.generate_token_ids(
-            valid_sampled_token_ids=valid_sampled,
+            sampled_token_ids=valid_sampled,
             scheduler_output=scheduler_output,
             positions=positions,
             num_scheduled_tokens=num_scheduled,
@@ -246,35 +273,12 @@ class TestEagleProposerGenerateTokenIds(TestBase):
         )
 
         self.proposer._propose.assert_called_once()
-        self.assertEqual(result, [[1, 2], [3, 4], [5, 6]])
-
-    def test_generate_token_ids_with_metadata(self):
-        valid_sampled = [[5], [6, 7], [8, 9, 10]]
-        spec_metadata = MagicMock()
-        spec_metadata.num_draft_tokens = [2, 3, 4]
-
-        mock_attn_metadata = MagicMock()
-        mock_attn_metadata.slot_mapping = torch.tensor([0, 1, 2, 3, 4, 5])
-        mock_attn_metadata.query_start_loc = torch.tensor([0, 1, 3, 6])
-        mock_attn_metadata.block_tables = MagicMock()
-        self.proposer._get_eagle_atten_dict = MagicMock(
-            return_value={"layer_0": mock_attn_metadata})
-        self.proposer._prepare_inputs = MagicMock(
-            return_value=(torch.tensor([0, 2, 5]), torch.tensor([1, 3, 5])))
-
-        result = self.proposer.generate_token_ids(
-            valid_sampled_token_ids=valid_sampled,
-            spec_decode_metadata=spec_metadata,
-            positions=torch.randn(6, 1),
-            hidden_states=torch.randn(6, 4096),
-        )
-
-        self.proposer._prepare_inputs.assert_called_once()
-        self.assertEqual(self.proposer._propose.call_count, 1)
-        self.assertEqual(len(result), 3)
+        self.assertEqual(result.numpy().tolist(), [[1, 2], [3, 4], [5, 6]])
 
 
 class TestEagleProposerHelperMethods(TestBase):
+
+    # TODO: Can add some tests about prepare_next_token_ids in future.
 
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
@@ -292,21 +296,29 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
 
+        self.mock_cpugpubuffer = patch(
+            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
 
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
+
+    # TODO: This is equivalent to disable_padded_drafter_batch=True.
+    # We need to add a test_prepare_inputs_padded in future.
     def test_prepare_inputs(self):
         self.proposer.token_arange_np = np.arange(10)
         mock_attn = MagicMock()
         mock_attn.slot_mapping = torch.tensor([0, 1, 2, 3, 4, 5])
         num_rejected = torch.tensor([1, 0, 1], device=self.device)
+        mock_return_attn = MagicMock()
 
         with patch.object(self.proposer,
-                          '_prepare_inputs',
-                          return_value=(torch.tensor([0, 2, 5]),
+                          'prepare_inputs',
+                          return_value=(mock_return_attn,
                                         torch.tensor([1, 2, 4]))):
-            cu_num_tokens, indices = self.proposer._prepare_inputs(
+            return_attn, indices = self.proposer.prepare_inputs(
                 mock_attn, num_rejected)
-            self.assertEqual(cu_num_tokens.tolist(), [0, 2, 5])
             self.assertEqual(indices.tolist(), [1, 2, 4])

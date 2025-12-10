@@ -785,7 +785,8 @@ class NPUModelRunner(GPUModelRunner):
             self.requests[r].num_tokens for r in self.input_batch.req_ids
         ]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
-        num_reqs = self.input_batch.num_reqs
+        base_num_reqs = self.input_batch.num_reqs
+        num_reqs = base_num_reqs
         if self.pcp_size > 1:
             # while pcp > 1, we need the original num_scheduled_tokens before split
             # to calculate discard_requests_mask
@@ -1090,6 +1091,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
                 self.spec_decode_common_attn_metadata = common_attn_metadata
+                if self.speculative_config.method in ("eagle", "eagle3") and \
+                        self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                    self.spec_decode_common_attn_metadata = \
+                        self.spec_decode_common_attn_metadata.unpadded(
+                            total_num_scheduled_tokens, base_num_reqs)
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 common_prefix_len = 0
@@ -1851,7 +1857,7 @@ class NPUModelRunner(GPUModelRunner):
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.method == "mtp" and \
+                    self.speculative_config.method in ("mtp", "eagle", "eagle3") and \
                     not self.speculative_config.disable_padded_drafter_batch
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens

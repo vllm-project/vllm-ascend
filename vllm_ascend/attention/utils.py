@@ -103,6 +103,37 @@ class AscendCommonAttentionMetadata:
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
 
+    # TODO: Remove it when vLLM no longer uses this function.
+    def unpadded(self, num_actual_tokens: int,
+                 num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
+        # This only use to eagle now. It will be use to enforce_eager in future.
+        return AscendCommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
+            num_computed_tokens_cpu=self.
+            num_computed_tokens_cpu[:num_actual_reqs],
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            decode_token_per_req=self.decode_token_per_req,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
+            positions=self.positions[:num_actual_tokens],
+            attn_mask=self.attn_mask,
+            spec_attn_mask=self.spec_attn_mask,
+            attn_state=self.attn_state,
+            is_only_prefill=self.is_only_prefill,
+            graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
+            num_input_tokens=num_actual_tokens,
+            cos=self.cos[:num_actual_tokens] if self.cos else None,
+            sin=self.sin[:num_actual_tokens] if self.sin else None,
+            prefill_context_parallel_metadata=self.
+            prefill_context_parallel_metadata,
+        )
+
 
 def filter_chunked_req_indices(
     seq_len: torch.Tensor,
