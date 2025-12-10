@@ -153,12 +153,7 @@ if __name__ == "__main__":
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
             max_model_len=1024,
-            trust_remote_code=True,
-            additional_config={
-            'torchair_graph_config': {
-            'enabled': True,
-            }
-            })
+            trust_remote_code=True)
 
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:

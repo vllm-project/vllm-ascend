@@ -111,10 +111,9 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not vllm_config.model_config.enforce_eager
-            and not ascend_config.torchair_graph_config.enabled)
+        self.use_aclgraph = (vllm_config.compilation_config.mode
+                             == CompilationMode.VLLM_COMPILE
+                             and not vllm_config.model_config.enforce_eager)
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype

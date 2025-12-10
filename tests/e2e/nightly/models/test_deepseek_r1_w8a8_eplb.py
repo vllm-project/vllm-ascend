@@ -68,9 +68,6 @@ async def test_models(model: str) -> None:
         "cudagraph_mode": "FULL_DECODE_ONLY"
     }
     additional_config: dict[str, Any] = {
-        "torchair_graph_config": {
-            "enabled": True
-        },
         "enable_shared_expert_dp": False,
         "multistream_overlap_shared_expert": False,
         "dynamic_eplb": True,

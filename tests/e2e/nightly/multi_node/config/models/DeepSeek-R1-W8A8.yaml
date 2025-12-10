@@ -57,7 +57,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
 
   -
     server_cmd: >
@@ -95,7 +95,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -134,7 +134,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true}'
+        '{"multistream_overlap_shared_expert":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -172,7 +172,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true}'
+        '{"multistream_overlap_shared_expert":true}'
 benchmarks:
   perf:
     case_type: performance

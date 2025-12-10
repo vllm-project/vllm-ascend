@@ -143,7 +143,6 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
-from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
@@ -638,7 +637,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     TorchairMtpProposer,
                                      SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
@@ -2917,8 +2915,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         return attn_metadata
 
-    def _generate_dummy_run_hidden_states(self, with_prefill,
-                                          is_torchair_compile, input_ids,
+    def _generate_dummy_run_hidden_states(self, with_prefill, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
         hidden_states = self.model(input_ids=input_ids,
@@ -2960,7 +2957,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self,
         num_tokens: int,
         with_prefill: bool = False,
-        is_torchair_compile: bool = False,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
@@ -3136,9 +3132,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     model_instance=self.model,
                     weight_prefetch_method=self.weight_prefetch_method):
                 hidden_states = self._generate_dummy_run_hidden_states(
-                    with_prefill, is_torchair_compile, input_ids, positions,
-                    attn_metadata, num_tokens_padded, intermediate_tensors,
-                    inputs_embeds)
+                    with_prefill, input_ids, positions, attn_metadata,
+                    num_tokens_padded, intermediate_tensors, inputs_embeds)
                 dummy_compute_logits(hidden_states)
 
             if self.drafter:
@@ -4261,9 +4256,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             return []
 
         return list(model.pooler.get_supported_tasks())
-
-    def _build_drafter_prepare_inputs_torchair_param(self):
-        return False
 
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
