@@ -45,8 +45,8 @@ from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_ep_group, get_pcp_group,
-                                             get_pp_group, get_tp_group,
+                                             get_pcp_group, get_pp_group,
+                                             get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -466,7 +466,6 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
-
 
     def _make_attention_mask(self, attn_state) -> torch.Tensor:
         # pcp situation.
