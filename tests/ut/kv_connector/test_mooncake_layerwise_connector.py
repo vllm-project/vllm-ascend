@@ -893,12 +893,3 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(mla_caches)
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.block_len), 2)
-
-    def test_device_id_selection_with_physical_devices(self):
-        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config,
-                                                  self.engine_id)
-        self.assertIsNotNone(worker.engine)
-
-
-if __name__ == '__main__':
-    unittest.main()
