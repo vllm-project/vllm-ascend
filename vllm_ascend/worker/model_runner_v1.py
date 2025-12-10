@@ -2575,6 +2575,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         self.debugger.stop()
                         self.debugger.step()
                     return pool_output
+                # Sometimes, after the model is compiled through the AOT backend,
+                # the model output may become a list containing only one Tensor object.
+                if isinstance(hidden_states, list) and \
+                        len(hidden_states) == 1 and \
+                        isinstance(hidden_states[0], torch.Tensor):
+                    hidden_states = hidden_states[0]
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             if broadcast_pp_output:
@@ -3296,6 +3302,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                                 dtype=np.int32)
                 logit_indices = np.cumsum(num_scheduled_tokens) - 1
                 # TODO: need to rum a dummy sampler for generate task
+                # Sometimes, after the model is compiled through the AOT backend,
+                # the model output may become a list containing only one Tensor object.
+                if isinstance(hidden_states, list) and \
+                        len(hidden_states) == 1 and \
+                        isinstance(hidden_states[0], torch.Tensor):
+                    hidden_states = hidden_states[0]
                 hidden_states = hidden_states[logit_indices]
                 output = self.model.compute_logits(hidden_states)
 
