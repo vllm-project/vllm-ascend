@@ -68,13 +68,13 @@ From the workflow perspective, we can see how the final test script is executed,
   
 3. Running Locally(Option)
 
-    Step 1st. Add cluster_hosts to config yamls
+    Step 1. Add cluster_hosts to config yamls
 
     Modify on every cluster host, commands as following:
     like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml) after the configure item `num_nodes` , for example: 
     `cluster_hosts: ["xxx.xxx.xxx.188", "xxx.xxx.xxx.212"]`
 
-    Step 2nd. Install develop environment
+    Step 2. Install develop environment
     - Install vllm-ascend develop packages on every cluster host
 
         ``` bash
@@ -93,7 +93,7 @@ From the workflow perspective, we can see how the final test script is executed,
         pip install -e . -r requirements/api.txt -r requirements/extra.txt
         ```
 
-    Step 3rd. Running test locally
+    Step 3. Running test locally
     - Export environments
 
         On leader host(the first node xxx.xxx.xxx.188)
@@ -104,7 +104,6 @@ From the workflow perspective, we can see how the final test script is executed,
         export CONFIG_YAML_PATH=DeepSeek-V3.yaml
         export FAIL_TAG=FAIL_TAG
         export RESULT_FILE_PATH=./tests/ret
-        export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:254
         ```
 
         On slave host(other nodes, such as xxx.xxx.xxx.212)
@@ -114,7 +113,6 @@ From the workflow perspective, we can see how the final test script is executed,
         export WORKSPACE=/vllm-workspace
         export CONFIG_YAML_PATH=DeepSeek-V3.yaml
         export FAIL_TAG=FAIL_TAG
-        export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:254
         ```
 
         `LWS_WORKER_INDEX` is the index of this node in the `cluster_hosts` . The node with an index of 0 is the leader.
