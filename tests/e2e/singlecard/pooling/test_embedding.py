@@ -67,14 +67,14 @@ def test_bge_model_correctness():
             runner="pooling",
             enforce_eager=False,
     ) as vllm_aclgraph_runner:
-        vllm_aclgraph_outputs = vllm_aclgraph_runner.encode(queries)
+        vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
     with VllmRunner(
             model_name,
             runner="pooling",
             enforce_eager=True,
     ) as vllm_runner:
-        vllm_eager_outputs = vllm_runner.encode(queries)
+        vllm_eager_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
             model_name,
