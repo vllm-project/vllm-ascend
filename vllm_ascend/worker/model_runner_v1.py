@@ -636,7 +636,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
-        self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
                                      SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
@@ -645,8 +644,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.spec_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-            )
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
@@ -1890,7 +1887,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
-                spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
                 is_only_prefill=bool(np.all(num_valid_tokens != 1)),
                 max_query_len=max_num_scheduled_tokens,
@@ -1903,7 +1899,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
             if self.speculative_config and self.pcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
-                # to avoid irregular spec_attn_mask shape, e.g.,
+                # to maintain regular tensor shape, e.g.,
                 # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
                 # ori block_table: # [d0, d1, p0, p1, p2]
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
@@ -2913,7 +2909,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     positions=self.positions,
                     attn_mask=self.attn_mask,
-                    spec_attn_mask=self.spec_attn_mask,
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
@@ -4423,7 +4418,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 dtype=torch.int32,
             )
             # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular spec_attn_mask shape
+            # to maintain regular tensor shape
             for decode_idx in range(self.decode_threshold):
                 num_computed_tokens_of_pcp_dcp[
                     self.decode_threshold - 1 - decode_idx::self.decode_threshold] = \
@@ -4526,13 +4521,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 tail_attn_nomask_seqlens = torch.tensor(
                     [chunk_seqlens, kv_with_q_tail_nomask_seqlens],
                     dtype=torch.int32)
-                pcp_prefill_mask = self.attn_mask
 
                 self.extra_long_seq_kwargs = {
                     'attn_mask_seqlens': attn_mask_seqlens,
                     'head_attn_nomask_seqlens': head_attn_nomask_seqlens,
                     'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens,
-                    'pcp_prefill_mask': pcp_prefill_mask
                 }
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx[:
                                                                                              num_actual_tokens_pcp_padded]
@@ -4554,8 +4547,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     'head_attn_nomask_seqlens']
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs[
                     'tail_attn_nomask_seqlens']
-                long_seq_metadata.pcp_prefill_mask = self.extra_long_seq_kwargs[
-                    'pcp_prefill_mask']
             self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata
 

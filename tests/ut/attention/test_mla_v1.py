@@ -558,7 +558,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             actual_seq_lengths_q=torch.tensor([0, 1]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((10, 10)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.PrefillNoCache,
             num_computed_tokens_cpu=None,
             seq_lens=None)
@@ -625,7 +624,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
             seq_lens=None)
@@ -681,7 +679,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             decode_token_per_req=torch.tensor([1, 1, 1]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((3, 3)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
             seq_lens=None)
@@ -736,7 +733,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             decode_token_per_req=torch.tensor([1, 1, 1]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((3, 3)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
             seq_lens=None)
@@ -791,7 +787,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             actual_seq_lengths_q=torch.tensor([0, 1]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((10, 10)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.PrefillNoCache,
             num_computed_tokens_cpu=None,
             seq_lens=None)

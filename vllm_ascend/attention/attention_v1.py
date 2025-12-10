@@ -144,7 +144,6 @@ class AscendMetadataForPrefill:
         head_attn_nomask_seqlens: torch.Tensor = None
         tail_attn_nomask_seqlens: torch.Tensor = None
         q_full_idx: torch.Tensor = None
-        pcp_prefill_mask: torch.Tensor = None
 
     @dataclass
     class ChunkedContextMetadata:
