@@ -1055,7 +1055,6 @@ class MockTransferEngine:
 
 class MockEnvsAscend:
     MOONCAKE_CONNECTOR_PROTOCOL = "mock_protocol"
-    PHYSICAL_DEVICES = "10,11"
 
 
 def mock_get_tensor_model_parallel_rank():
