@@ -137,6 +137,7 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.pool.medatata import PoolingStates
 from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -146,7 +147,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable)
+                               is_moe_model, lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -371,13 +372,30 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
                                   "index_topk")
-        self.attn_backend = get_attn_backend(0,
-                                             self.dtype,
-                                             None,
-                                             self.block_size,
-                                             use_mla=self.model_config.use_mla,
-                                             use_sparse=self.use_sparse)
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        if vllm_version_is('0.12.0'):
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse)
+        else:
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None
+                and self.model_config.is_mm_prefix_lm)
+        if self.pcp_size > 1:
+            self.attn_mask_builder = None
+        else:
+            self.attn_mask_builder = AttentionMaskBuilder(
+                self.scheduler_config.max_num_batched_tokens, self.dtype,
+                self.device)
 
         self._set_up_drafter()
 
@@ -2241,33 +2259,37 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
+        assert self.input_batch.num_reqs == len(
+            self.input_batch.pooling_params
+        ), ("Either all or none of the requests in a batch must be pooling request"
+            )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-        pooling_metadata = self.input_batch.pooling_metadata
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
-                                              device=hidden_states.device)
         seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
 
+        pooling_metadata = self.input_batch.get_pooling_metadata()
+        if vllm_version_is("0.12.0"):
+            pooling_metadata.build_pooling_cursor(
+                num_scheduled_tokens_np.tolist(), device=hidden_states.device)
+        else:
+            pooling_metadata.build_pooling_cursor(
+                num_scheduled_tokens_np.tolist(),
+                seq_lens_cpu,
+                device=hidden_states.device)
+
         model = cast(VllmModelForPooling, self.model)
-        raw_pooler_output = model.pooler(
+        raw_pooler_output: PoolerOutput = model.pooler(
             hidden_states=hidden_states,
             pooling_metadata=pooling_metadata,
         )
         raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
+            lambda x: x.to("cpu", non_blocking=True) if x is not None else x,
             raw_pooler_output,
         )
         torch.npu.synchronize()
 
-        pooler_output: list[Optional[torch.Tensor]] = []
+        pooler_output: list[torch.Tensor | None] = []
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
             output = raw_output if seq_len == prompt_len else None
@@ -2280,7 +2302,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            kv_connector_output=kv_connector_output,
         )
 
     def _select_moe_comm_method(self,
@@ -2473,8 +2494,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     pool_output = self._pool(
                         hidden_states,
                         scheduler_output.total_num_scheduled_tokens,
-                        num_scheduled_tokens_np, finished_sending,
-                        finished_recving, kv_connector_output)
+                        num_scheduled_tokens_np)
                     if need_dump:
                         assert self.debugger is not None
                         self.debugger.stop()
@@ -3215,35 +3235,51 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         req_num_tokens = num_tokens // num_reqs
 
+        dummy_prompt_lens = torch.tensor(
+            num_scheduled_tokens_list,
+            device="cpu",
+        )
         dummy_token_ids = torch.zeros((num_reqs, req_num_tokens),
                                       dtype=torch.int32,
                                       device=self.device)
 
         model = cast(VllmModelForPooling, self.get_model())
         dummy_pooling_params = PoolingParams(task=task)
+        dummy_pooling_params.verify(task=task, model_config=self.model_config)
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
 
-        dummy_prompt_lens = torch.tensor(
-            num_scheduled_tokens_list,
-            device="cpu",
-        )
-        dummy_metadata = PoolingMetadata(
-            prompt_lens=dummy_prompt_lens,
-            prompt_token_ids=dummy_token_ids,
-            pooling_params=[dummy_pooling_params] * num_reqs,
-        )
+        if vllm_version_is("0.12.0"):
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=dummy_prompt_lens,
+                prompt_token_ids=dummy_token_ids,
+                pooling_params=[dummy_pooling_params] * num_reqs,
+            )
+            dummy_metadata.build_pooling_cursor(
+                num_scheduled_tokens_list,
+                device=hidden_states.device,
+            )
+        else:
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=dummy_prompt_lens,
+                prompt_token_ids=dummy_token_ids,
+                pooling_params=[dummy_pooling_params] * num_reqs,
+                pooling_states=[PoolingStates() for i in range(num_reqs)],
+            )
 
-        dummy_metadata.build_pooling_cursor(num_scheduled_tokens_list,
-                                            device=hidden_states.device)
+            dummy_metadata.build_pooling_cursor(
+                num_scheduled_tokens_list,
+                seq_lens_cpu=dummy_prompt_lens,
+                device=hidden_states.device,
+            )
 
         try:
             return model.pooler(hidden_states=hidden_states,
                                 pooling_metadata=dummy_metadata)
         except RuntimeError as e:
-            if 'out of memory' in str(e):
+            if "out of memory" in str(e):
                 raise RuntimeError(
-                    "CUDA out of memory occurred when warming up pooler "
+                    "NPU out of memory occurred when warming up pooler "
                     f"({task=}) with {num_reqs} dummy requests. Please try "
                     "lowering `max_num_seqs` or `gpu_memory_utilization` when "
                     "initializing the engine.") from e
@@ -3256,8 +3292,17 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
     ) -> PoolerOutput:
         # Find the task that has the largest output for subsequent steps
+        supported_pooling_tasks = self.get_supported_pooling_tasks()
+
+        if not supported_pooling_tasks:
+            raise RuntimeError(
+                f"Model {self.model_config.model} does not support "
+                "any pooling tasks. See "
+                "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                "to learn more.")
+
         output_size = dict[PoolingTask, float]()
-        for task in self.get_supported_pooling_tasks():
+        for task in supported_pooling_tasks:
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
             output_size[task] = sum(o.nbytes for o in output)
@@ -4250,12 +4295,21 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         return prompt_logprobs_dict
 
-    def get_supported_pooling_tasks(self):
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
         model = self.get_model()
         if not is_pooling_model(model):
             return []
 
-        return list(model.pooler.get_supported_tasks())
+        supported_tasks = list(model.pooler.get_supported_tasks())
+
+        if "score" in supported_tasks:
+            num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
+            if num_labels != 1:
+                supported_tasks.remove("score")
+                logger.debug_once(
+                    "Score API is only enabled for num_labels == 1.")
+
+        return supported_tasks
 
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
