@@ -41,7 +41,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_all_gather
+from vllm.distributed import tensor_model_parallel_all_gather, get_tensor_model_parallel_world_size
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
