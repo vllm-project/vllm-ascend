@@ -71,7 +71,7 @@ From the workflow perspective, we can see how the final test script is executed,
     Step 1. Add cluster_hosts to config yamls
 
     Modify on every cluster host, commands as following:
-    like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml) after the configure item `num_nodes` , for example: 
+    like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml) after the configure item `num_nodes` , for example:
     `cluster_hosts: ["xxx.xxx.xxx.188", "xxx.xxx.xxx.212"]`
 
     Step 2. Install develop environment
