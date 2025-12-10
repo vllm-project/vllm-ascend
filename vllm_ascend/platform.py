@@ -303,7 +303,7 @@ class NPUPlatform(Platform):
             from vllm_ascend.core.recompute_schedule_config import \
                 RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config)
+                vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
