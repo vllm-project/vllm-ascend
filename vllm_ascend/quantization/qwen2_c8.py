@@ -23,10 +23,6 @@ import torch_npu
 from vllm.attention.backends.abstract import AttentionType
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
-                               get_ascend_device_type)
-
 
 def quant_per_tensor(in_tensor: torch.Tensor,
                      input_scale: torch.Tensor,
@@ -108,6 +104,7 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
                 "Encoder self-attention and encoder/decoder cross-attention "
                 "are not implemented for Qwen2C8KVCacheMethod")
 
+        # Quantize current key/value to int8
         quant_key = quant_per_tensor(
             key.view(-1, layer.num_kv_heads * layer.head_size),
             layer.key_antiquant_scale.data.view(-1), None, True)
@@ -115,10 +112,13 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
             value.view(-1, layer.num_kv_heads * layer.head_size),
             layer.value_antiquant_scale.data.view(-1), None, True)
 
+        # Reshape for attention computation
         query = query.view(-1, layer.num_heads, layer.head_size)
         key = key.view(-1, layer.num_kv_heads, layer.head_size)
         value = value.view(-1, layer.num_kv_heads, layer.head_size)
         value = value.contiguous()
+
+        # Write quantized KV to cache
         if kv_cache[0].numel() > 0:
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
@@ -134,94 +134,31 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
 
             self.key_cache = key_cache
             self.value_cache = value_cache
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            assert attn_metadata.attn_mask is not None
-            mask = attn_metadata.attn_mask
-            torch_npu._npu_flash_attention(query=query,
-                                           key=key,
-                                           value=value,
-                                           mask=mask,
-                                           seq_len=attn_metadata.seq_lens,
-                                           scale_value=scale,
-                                           num_heads=layer.num_heads,
-                                           num_kv_heads=layer.num_kv_heads,
-                                           out=output.reshape(query.shape))
 
-        elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
-            assert attn_metadata is not None
-            assert attn_metadata.attn_mask is not None
+        # Determine attention path
+        has_decode = hasattr(attn_metadata,
+                             'num_decodes') and attn_metadata.num_decodes > 0
+        has_prefill = hasattr(
+            attn_metadata,
+            'num_prefills') and attn_metadata.num_prefills > 0
+        num_decode_tokens = attn_metadata.num_decode_tokens if hasattr(
+            attn_metadata, 'num_decode_tokens') else 0
 
-            compress_mask = attn_metadata.attn_mask
-            batch_size = attn_metadata.query_lens.shape[0]
-            block_table = attn_metadata.block_tables[:batch_size, :]
-            num_block, block_size, _ = self.key_cache.shape  # type: ignore
+        # Handle decode path
+        if has_decode:
+            decode_query = query[:num_decode_tokens].view(
+                num_decode_tokens, 1,
+                layer.num_heads * layer.head_size).contiguous()
 
-            key_from_cache = self.key_cache.view(num_block, block_size, -1)
-            value_from_cache = self.value_cache.view(num_block, block_size, -1)
-
-            if key_from_cache.dtype == torch.int8:
-                key_cache_anti_quant, value_cache_anti_quant = self.anti_quant_int8(
-                    key_from_cache, value_from_cache, layer)
-            else:
-                key_cache_anti_quant = key_from_cache
-                value_cache_anti_quant = value_from_cache
-
-            max_seq_len = max(attn_metadata.seq_lens_list) if hasattr(
-                attn_metadata, 'seq_lens_list'
-            ) and attn_metadata.seq_lens_list is not None else 0
-
-            if block_size == 128 and max_seq_len <= 2048:
-                key = key_cache_anti_quant.view(  # type: ignore
-                    num_block, block_size, -1)
-                value = value_cache_anti_quant.view(  # type: ignore
-                    num_block, block_size, -1)
-
-                output, _ = torch_npu.npu_fused_infer_attention_score(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=compress_mask,
-                    block_table=block_table,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=attn_metadata.seq_lens_list,
-                    num_key_value_heads=layer.num_kv_heads,
-                    num_heads=layer.num_heads,
-                    scale=scale,
-                    sparse_mode=3,
-                )
-            else:
-                torch_npu._npu_flash_attention_qlens(
-                    query=query,
-                    key_cache=key_cache_anti_quant,
-                    value_cache=value_cache_anti_quant,
-                    block_table=block_table,
-                    mask=compress_mask,
-                    seq_len=attn_metadata.query_lens,
-                    context_lens=attn_metadata.seq_lens,
-                    num_kv_heads=layer.num_kv_heads,
-                    num_heads=layer.num_heads,
-                    scale_value=scale,
-                    out=output)
-        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            if hasattr(attn_metadata, "decode"):
-                decode_meta = attn_metadata.decode
-                seq_lens = decode_meta.seq_lens_list
+            if hasattr(attn_metadata, "decode_meta"):
+                seq_lens = attn_metadata.decode_meta.seq_lens_list
             else:
                 seq_lens = attn_metadata.seq_lens
 
-            block_size = key_cache.shape[1]
-            query = query.view(num_tokens, 1,
-                               layer.num_heads * layer.head_size).contiguous()
-
-            key = key_cache
-            value = value_cache
-
-            output = torch_npu.npu_incre_flash_attention(
-                query,
-                key,
-                value,
+            output[:num_decode_tokens] = torch_npu.npu_incre_flash_attention(
+                decode_query,
+                key_cache,
+                value_cache,
                 num_key_value_heads=layer.num_kv_heads,
                 num_heads=layer.num_heads,
                 actual_seq_lengths=seq_lens,
@@ -232,49 +169,70 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
                 antiquant_scale=self.antiquant_scale_comb,
             )
 
-        elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
-            if layer.head_size == 192:
-                raise NotImplementedError(
-                    "KV cache int8 quantization is not implemented for head_size == 192"
+        # Handle prefill path
+        if has_prefill:
+            prefill_query = query[num_decode_tokens:]
+            prefill_key = key[num_decode_tokens:]
+            prefill_value = value[num_decode_tokens:]
+
+            # Check if chunked prefill is needed
+            has_chunked_context = (hasattr(attn_metadata, 'prefill')
+                                   and attn_metadata.prefill is not None
+                                   and hasattr(attn_metadata.prefill,
+                                               'chunked_context')
+                                   and attn_metadata.prefill.chunked_context
+                                   is not None)
+
+            if has_chunked_context:
+                # Chunked prefill: load and dequantize KV from cache
+                if layer.head_size == 192:
+                    raise NotImplementedError(
+                        "KV cache int8 quantization is not implemented for head_size == 192"
+                    )
+
+                num_block, block_size, _ = self.key_cache.shape  # type: ignore
+                cached_key = self.key_cache.view(num_block, block_size,
+                                                 -1)  # type: ignore
+                cached_value = self.value_cache.view(
+                    num_block, block_size, -1)  # type: ignore
+
+                if cached_key.dtype == torch.int8:
+                    cached_key, cached_value = self.anti_quant_int8(
+                        cached_key, cached_value, layer)
+
+                prefill_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=prefill_query,
+                    key=cached_key,
+                    value=cached_value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=attn_metadata.block_tables[
+                        attn_metadata.num_decodes:],
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=attn_metadata.prefill.
+                    actual_seq_lengths_q,
+                    actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+                    num_key_value_heads=layer.num_kv_heads,
+                    num_heads=layer.num_heads,
+                    scale=scale,
+                    sparse_mode=3,
                 )
+            else:
+                # Regular prefill: use current KV
+                assert attn_metadata.attn_mask is not None
+                prefill_output = torch.empty_like(prefill_query)
+                torch_npu._npu_flash_attention(
+                    query=prefill_query,
+                    key=prefill_key,
+                    value=prefill_value,
+                    mask=attn_metadata.attn_mask,
+                    seq_len=attn_metadata.seq_lens,
+                    scale_value=scale,
+                    num_heads=layer.num_heads,
+                    num_kv_heads=layer.num_kv_heads,
+                    out=prefill_output)
 
-            assert attn_metadata is not None
-            assert attn_metadata.attn_mask is not None
-
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                attn_metadata.attn_mask = \
-                    torch_npu.npu_format_cast(attn_metadata.attn_mask.contiguous(),
-                                              ACL_FORMAT_FRACTAL_NZ)
-                attn_metadata.seq_lens = \
-                    attn_metadata.seq_lens.to(device=query.device)
-
-            num_block, block_size, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1)
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1)
-
-            if key.dtype == torch.int8:
-                key, value = self.anti_quant_int8(key, value, layer)
-
-            output, _ = torch_npu.npu_fused_infer_attention_score(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=attn_metadata.block_tables,
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                actual_seq_lengths_kv=attn_metadata.seq_lens_list,
-                num_key_value_heads=layer.num_kv_heads,
-                num_heads=layer.num_heads,
-                scale=scale,
-                sparse_mode=3,
-            )
-        else:
-            raise NotImplementedError(
-                f"KV cache int8 quantization is not implemented for other attention states: {attn_metadata.attn_state}"
-            )
+            output[num_decode_tokens:num_decode_tokens +
+                   prefill_output.shape[0]] = prefill_output
 
         return output
