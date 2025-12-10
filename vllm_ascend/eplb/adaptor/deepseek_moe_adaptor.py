@@ -13,3 +13,9 @@ class DeepSeekMoeAdaptor(VllmEplbAdaptor):
         self.num_dense_layers = self.model.config.first_k_dense_replace
         self.global_expert_num = self.model.config.n_routed_experts
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
+
+    def model_register(self, model_config):
+        super().model_register(self)
+        config = model_config.hf_config
+        self.model.num_dense_layers = config.first_k_dense_replace
+        self.model.num_moe_layers = config.num_hidden_layers - self.model.num_dense_layers

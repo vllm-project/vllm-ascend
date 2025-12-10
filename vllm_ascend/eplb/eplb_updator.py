@@ -19,6 +19,8 @@ import numpy
 import torch
 import torch.distributed as dist
 import vllm.envs as envs
+import vllm_ascend.eplb.adaptor.abstract_adaptor
+import vllm_ascend.eplb.adaptor.vllm_adaptor
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
@@ -83,7 +85,7 @@ class EplbUpdator:
                     self.shared_dict["expert_maps"],
                     self.expert_map_record_path)
 
-            self.adaptor.model.clear_all_moe_loads()
+            vllm_ascend.eplb.adaptor.abstract_adaptor.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
 

@@ -25,10 +25,6 @@ class EplbAdaptor():
         pass
 
     @abstractmethod
-    def init_eplb_params(self):
-        raise NotImplementedError
-
-    @abstractmethod
     def get_rank_expert_workload(self):
         raise NotImplementedError
 
@@ -46,3 +42,45 @@ class EplbAdaptor():
                                 local_expert_to_replace: Any,
                                 buffer_tensor_id: Any) -> Any:
         raise NotImplementedError
+
+    @abstractmethod
+    def model_register(self, model_config: Any):
+        raise NotImplementedError
+
+def get_expert_map(self, layer_id):
+    return self.model.layers[layer_id].mlp.experts.get_map()
+
+
+def get_log2phy_map(self, layer_id):
+    return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+
+
+def get_all_expert_map(self, num_moe_layers):
+    all_loads = []
+    num_dense_layers = self.num_dense_layers if hasattr(
+        self, "num_dense_layers") else 0
+    for layer_id in range(num_moe_layers):
+        load_tensor = self.get_expert_map(
+            layer_id + num_dense_layers)  # (num_experts_per_layer,)
+        all_loads.append(load_tensor)
+
+    return torch.stack(all_loads, dim=0)
+
+
+def get_all_moe_loads(self):
+    num_dense_layers = self.num_dense_layers if hasattr(
+        self, "num_dense_layers") else 0
+    all_moe_loads = torch.stack(
+        [self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load \
+            for layer_id in range(self.num_moe_layers)],
+        dim=0
+    )
+    return all_moe_loads
+
+
+def clear_all_moe_loads(self):
+    num_dense_layers = self.num_dense_layers if hasattr(
+        self, "num_dense_layers") else 0
+    for layer_id in range(self.num_moe_layers):
+        self.model.layers[layer_id +
+                          num_dense_layers].mlp.experts.clear_moe_load()

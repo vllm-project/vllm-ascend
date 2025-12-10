@@ -39,6 +39,9 @@ import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
+
+import vllm_ascend.eplb.adaptor.abstract_adaptor
+import vllm_ascend.eplb.adaptor.vllm_adaptor
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention, MLAAttention
@@ -123,13 +126,12 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_params)
 from vllm_ascend.eplb.adaptor.eplb_adaptor_factory import EplbAdaptorFactory
 # yapf: enable
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor, model_register
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
-from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
@@ -3054,7 +3056,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits)
             if self.in_profile_run and self.dynamic_eplb:
-                self.model.clear_all_moe_loads()
+                vllm_ascend.eplb.adaptor.abstract_adaptor.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()

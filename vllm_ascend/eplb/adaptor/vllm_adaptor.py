@@ -16,26 +16,32 @@
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this adaptor.
 import json
+import types
 from typing import Any
 
 import torch
 import torch.distributed as dist
+
+import vllm_ascend.eplb.adaptor.abstract_adaptor
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
+from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor, get_expert_map, get_log2phy_map, get_all_expert_map, \
+    get_all_moe_loads, clear_all_moe_loads
 
 
 class VllmEplbAdaptor(EplbAdaptor):
 
-    def __init__(self, model, **args):
+    def __init__(self, model, model_config, **args):
         super().__init__(**args)
         self.model = model
+        self.model_config = model_config
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
         self.init_redundancy_expert = get_ascend_config(
         ).init_redundancy_expert
+        self.model_register(self.model_config)
         self.init_eplb_params()
         self.init_eplb_param_dict()
         self.init_expert_maps()
@@ -47,7 +53,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         )  # copy of expert map on CPU to avoid device synchronize frequently
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_expert_map(self.num_dense_layers + layer_idx)
+                get_expert_map(self.num_dense_layers + layer_idx)
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(
             self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
@@ -60,7 +66,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
+                get_log2phy_map(self.num_dense_layers + layer_idx)
         self.all_topk_ids = []
 
     def init_eplb_params(self):
@@ -131,11 +137,11 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
-        self.moe_load = self.model.get_all_moe_loads()
+        self.moe_load = get_all_moe_loads()
         return self.moe_load
 
     def get_init_expert_map(self, num_moe_layers):
-        expert_map = self.model.get_all_expert_map(num_moe_layers)
+        expert_map = get_all_expert_map(num_moe_layers)
         if dist.is_initialized():
             world_size = dist.get_world_size()
 
@@ -313,3 +319,11 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.num_moe_layers, -1)
 
         return expert_map_all
+
+
+    def model_register(self, model_config):
+        vllm_ascend.eplb.adaptor.abstract_adaptor.get_expert_map = types.MethodType(get_expert_map, self.model)
+        vllm_ascend.eplb.adaptor.abstract_adaptor.get_log2phy_map = types.MethodType(get_log2phy_map, self.model)
+        vllm_ascend.eplb.adaptor.abstract_adaptor.get_all_expert_map = types.MethodType(get_all_expert_map, self.model)
+        vllm_ascend.eplb.adaptor.abstract_adaptor.get_all_moe_loads = types.MethodType(get_all_moe_loads, self.model)
+        vllm_ascend.eplb.adaptor.abstract_adaptor.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, self.model)
