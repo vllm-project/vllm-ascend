@@ -52,8 +52,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_pcp_group, get_pp_group,
-                                             get_tp_group,
+                                             get_ep_group, get_pcp_group,
+                                             get_pp_group, get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -378,12 +378,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        if self.pcp_size > 1:
-            self.attn_mask_builder = None
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
 
@@ -651,10 +646,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.spec_attn_mask = torch.triu(torch.ones(2048,
-                                                        2048,
-                                                        dtype=torch.bool),
-                                             diagonal=1).to(self.device)
+            self.spec_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
+            )
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
@@ -1033,21 +1026,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         return tuple(tasks)
 
-    def _make_attention_mask(self, seq_lens, position,
-                             attn_state) -> torch.Tensor:
+    def _make_attention_mask(self, attn_state) -> torch.Tensor:
         # pcp situation.
-        if self.pcp_size > 1:
-            return None
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
-        # dcp situation.
-        if self.dcp_size > 1:
-            return self.attn_mask_builder.get_splitfuse_attn_mask()
-        if self.vllm_config.model_config.use_mla:
-            return None
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
-            return self.attn_mask_builder.get_pooling_mask(self.device)
+            return self.attn_mask_builder.get_pooling_mask()
+
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size > 1:
+                return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
+            # mla prefill
+            if attn_state != AscendAttentionState.DecodeOnly:
+                return self.attn_mask_builder.get_mla_mask(self.dtype)
         return self.attn_mask_builder.get_splitfuse_attn_mask()
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
@@ -1668,16 +1660,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.positions[:num_input_tokens].copy_(
             self.positions_cpu[:num_input_tokens], non_blocking=True)
 
-        # Make Attention metadata
-        positions_cpu = self.positions_cpu[:num_input_tokens]
-        positions = self.positions[:num_input_tokens]
-        seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
-
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
                                             num_valid_tokens)
-        self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
-                                                   position=positions_cpu,
-                                                   attn_state=attn_state)
+        self.attn_mask = self._make_attention_mask(attn_state)
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -2347,10 +2332,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     moe_comm_type = MoECommType.ALLGATHER
 
         elif soc_version in {AscendDeviceType._910_93}:
-            moe_comm_type = (MoECommType.MC2
-                             if num_tokens <= self.mc2_tokens_capacity else
-                             MoECommType.FUSED_ALLTOALL if quant_type
-                             == "w8a8_dynamic" else MoECommType.ALLTOALL)
+            # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+            moe_comm_type = (
+                MoECommType.MC2 if num_tokens <= self.mc2_tokens_capacity else
+                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
+                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
@@ -2450,6 +2436,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     attn_metadata, self.with_prefill, maybe_padded_num_tokens,
                     input_ids, positions, intermediate_tensors, inputs_embeds)
 
+            self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
                 scheduler_output)
 
@@ -2711,7 +2698,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
-            self.maybe_wait_for_kv_save()
+
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
@@ -2839,12 +2826,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.query_start_loc_cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
-            assigned_mask_dim = 2048
-            self.attn_mask = torch.triu(torch.ones(assigned_mask_dim,
-                                                   assigned_mask_dim),
-                                        diagonal=1).to(torch.int8).to(
-                                            self.device)
+            self.attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -3416,7 +3398,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, Union[torch.Tensor,
                                               Optional[torch.Tensor]]] = {}
-        # llmdatadist need the addr of cache tensor be aligned with 2M
+        # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
@@ -3444,7 +3426,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
                 ):
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
-                    # v cache tensor (rope cache tensor in mla) separately to support llmdatadist,
+                    # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
                     # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
                     # and rope head dim.
@@ -4498,18 +4480,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 tail_attn_nomask_seqlens = torch.tensor(
                     [chunk_seqlens, kv_with_q_tail_nomask_seqlens],
                     dtype=torch.int32)
-                if self.vllm_config.model_config.use_mla:
-                    pcp_prefill_mask = torch.triu(
-                        torch.ones(512,
-                                   512,
-                                   device=self.device,
-                                   dtype=self.dtype), 1)
-                else:
-                    pcp_prefill_mask = torch.triu(
-                        torch.full((2048, 2048),
-                                   True,
-                                   device=self.device,
-                                   dtype=torch.bool), 1)
+                pcp_prefill_mask = self.attn_mask
 
                 self.extra_long_seq_kwargs = {
                     'attn_mask_seqlens': attn_mask_seqlens,
