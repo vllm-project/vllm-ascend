@@ -265,7 +265,7 @@ at::Tensor npu_sparse_flash_attention_meta(
     return output;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_routing_v3_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_custom_meta(
     const at::Tensor &x, const at::Tensor &expert_idx,
     const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
     int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
@@ -379,7 +379,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // MoE dispatch-ffn-combine
-    ops.impl("npu_moe_init_routing_v2", &vllm_ascend::meta::moe_init_routing_v3_meta);
+    // moe_init_routing_custom
+    ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
 }
 }

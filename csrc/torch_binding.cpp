@@ -819,10 +819,9 @@ constexpr int64_t CUMSUM = 0;
 constexpr int64_t COUNT = 1;
 constexpr int64_t KEY_VALUE = 2;
 
-
 using tensor_list = std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>;
 
-tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &expert_idx,
+tensor_list npu_moe_init_routing_custom(const at::Tensor &x, const at::Tensor &expert_idx,
     const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
     int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
     bool expert_tokens_num_flag, int64_t quant_mode, at::IntArrayRef active_expert_range, int64_t row_idx_type)
@@ -890,7 +889,7 @@ tensor_list npu_moe_init_routing_v2(const at::Tensor &x, const at::Tensor &exper
     }
 
     at::Tensor expanded_scale = at::empty({expanded_scale_len}, x.options().dtype(at::kFloat));
-    EXEC_NPU_CMD(aclnnMoeInitRoutingV3,
+    EXEC_NPU_CMD(aclnnMoeInitRoutingCustom,
         x,
         expert_idx,
         scale,
@@ -1026,10 +1025,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
     ops.def(
-        "npu_moe_init_routing_v2(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
+        "npu_moe_init_routing_custom(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
         "                        int expert_capacity=-1, int expert_num=-1, int drop_pad_mode=0, int expert_tokens_num_type=0, "
         "                        bool expert_tokens_num_flag=False, int quant_mode=0, int[2] active_expert_range=[], "
         "                        int row_idx_type=0) -> (Tensor, Tensor, Tensor, Tensor)"
     );
-    ops.impl("npu_moe_init_routing_v2", torch::kPrivateUse1, &vllm_ascend::npu_moe_init_routing_v2);
+    ops.impl("npu_moe_init_routing_custom", torch::kPrivateUse1, &vllm_ascend::npu_moe_init_routing_custom);
 }
