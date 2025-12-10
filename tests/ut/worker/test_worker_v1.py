@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -216,68 +215,13 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_gpu_blocks, 100)
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
-    @patch("vllm_ascend.worker.worker_v1.NPUPlatform")
-    @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
-    @patch("vllm_ascend.worker.worker_v1.logger")
-    def test_sleep_mode_enabled(self, mock_logger, mock_allocator_class,
-                                mock_platform, mock_sleep_mode_enabled):
-        """Test sleep method when sleep mode is enabled"""
-        from vllm_ascend.worker.worker_v1 import NPUWorker
-
-        # Setup mock
-        mock_sleep_mode_enabled.return_value = True
-        mock_platform.mem_get_info.side_effect = [
-            (1000, 2000),
-            (1200, 2000),
-        ]  # before, after
-        mock_allocator = MagicMock()
-        mock_allocator_class.get_instance.return_value = mock_allocator
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-
-            # Test sleep method
-            worker.sleep(level=1)
-
-            # Verify calls
-            mock_sleep_mode_enabled.assert_called_once()
-            mock_allocator.sleep.assert_called_once_with(
-                offload_tags=("weights", ))
-            self.assertEqual(mock_platform.mem_get_info.call_count,
-                             2)  # Called 2 times in sleep method
-            # Verify log output
-            mock_logger.info.assert_called_once()
-
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
-    def test_sleep_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
-        """Test sleep method raises exception when sleep mode is disabled"""
-        from vllm_ascend.worker.worker_v1 import NPUWorker
-
-        # Set sleep mode disabled
-        mock_sleep_mode_enabled.return_value = False
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-
-            # Test sleep method should raise exception
-            with self.assertRaises(ValueError) as cm:
-                worker.sleep()
-
-            self.assertIn("Sleep mode is not enabled", str(cm.exception))
-
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
     @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_wake_up_mode_enabled(self, mock_allocator_class,
-                                  mock_sleep_mode_enabled):
+    def test_wake_up_mode_enabled(self, mock_allocator_class):
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
         # Setup mock
-        mock_sleep_mode_enabled.return_value = True
         mock_allocator = MagicMock()
         mock_allocator_class.get_instance.return_value = mock_allocator
 
@@ -301,28 +245,7 @@ class TestNPUWorker(TestBase):
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
-            # Verify calls
-            mock_sleep_mode_enabled.assert_called_once()
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
-
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_wake_up_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
-        """Test wake_up method raises exception when sleep mode is disabled"""
-        from vllm_ascend.worker.worker_v1 import NPUWorker
-
-        # Set sleep mode disabled
-        mock_sleep_mode_enabled.return_value = False
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-
-            # Test wake_up method should raise exception
-            with self.assertRaises(ValueError) as cm:
-                worker.wake_up()
-
-            self.assertIn("Sleep mode is not enabled", str(cm.exception))
 
     @patch(
         "vllm_ascend.worker.worker_v1.NPUWorker._init_worker_distributed_environment"
