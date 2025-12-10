@@ -65,8 +65,8 @@ def _rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        if self.cos is not None and \
-            self.sin is not None:
+        if hasattr(self, "cos") and hasattr(self, "sin") and \
+            self.cos is not None and self.sin is not None:
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,
