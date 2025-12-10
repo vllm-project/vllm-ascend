@@ -14,4 +14,4 @@ In simple terms, structured decoding gives LLMs a "template" to follow. Users pr
 
 Currently, the usage of structured output feature in vllm-ascend is totally the same as that in vllm.
 
-Find more examples and explanations about these usages in [vLLM official document](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/structured_outputs.py).
+Find more examples and explanations about these usages in [vLLM official document](https://docs.vllm.ai/en/stable/features/structured_outputs/).
