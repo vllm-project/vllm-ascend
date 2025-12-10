@@ -107,7 +107,6 @@ jobs:
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
-          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_torchair_correctness.py
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
   e2e-2-cards:
@@ -170,10 +169,6 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_qwen3_moe_with_torchair
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair_v1scheduler
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_nz
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
@@ -183,7 +178,6 @@ jobs:
         run: |
           pytest -sv tests/e2e/multicard/test_quantization.py
           pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_full_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py

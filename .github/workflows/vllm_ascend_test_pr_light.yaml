@@ -134,8 +134,6 @@ jobs:
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
-            --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
-            --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
             --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
             --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \

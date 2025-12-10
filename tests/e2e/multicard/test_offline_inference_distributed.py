@@ -78,9 +78,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
             additional_config={
-                "torchair_graph_config": {
-                    "enabled": True,
-                },
                 "enable_multistream_moe": True,
                 "refresh": True,
             },
@@ -144,17 +141,12 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
         "Hello, my name is",
     ]
     max_tokens = 5
-    with VllmRunner(
-            snapshot_download(model),
-            dtype="auto",
-            tensor_parallel_size=2,
-            quantization="ascend",
-            enforce_eager=True,
-            enable_expert_parallel=True,
-            additional_config={"torchair_graph_config": {
-                "enabled": False,
-            }},
-    ) as vllm_model:
+    with VllmRunner(snapshot_download(model),
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    quantization="ascend",
+                    enforce_eager=True,
+                    enable_expert_parallel=True) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
 
 

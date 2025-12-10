@@ -82,7 +82,6 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"torchair_graph_config":{"enabled":true}}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnector",
         "kv_role": "kv_consumer",
