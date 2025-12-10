@@ -74,13 +74,6 @@ async def test_models(model: str) -> None:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
     additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-            "enable_multistream_moe": False,
-            "enable_multistream_mla": True,
-            "graph_batch_size": [16],
-            "use_cached_graph": True
-        },
         "chunked_prefill_for_mla": True,
         "enable_weight_nz_layout": True
     }

@@ -6,7 +6,7 @@ MTP boosts inference performance by parallelizing the prediction of multiple tok
 ## How to Use MTP
 To enable MTP for DeepSeek-V3 models, add the following parameter when starting the service:
 
---speculative_config ' {"method": "deepseek_mtp", "num_speculative_tokens": 1, "disable_padded_drafter_batch": False} '
+--speculative_config ' {"method": "mtp", "num_speculative_tokens": 1, "disable_padded_drafter_batch": False} '
 
 - `num_speculative_tokens`: The number of speculative tokens which enable model to predict multiple tokens at once, if provided. It will default to the number in the draft model config if present, otherwise, it is required.
 - `disable_padded_drafter_batch`: Disable input padding for speculative decoding. If set to True, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. This currently only affects the MTP method of speculation, default is False.
@@ -74,21 +74,18 @@ If the bonus token is accepted, the MTP model performs inference for (num_specul
 
 ### Method Validation
 
-- Currently, the spec_decode scenario only supports methods such as ngram, eagle, eagle3, and deepseek_mtp. If an incorrect parameter is passed for the method, the code will raise an error to alert the user that an incorrect method was provided.
+- Currently, the spec_decode scenario only supports methods such as ngram, eagle, eagle3, and mtp. If an incorrect parameter is passed for the method, the code will raise an error to alert the user that an incorrect method was provided.
 
 ```
 def get_spec_decode_method(method,
                            vllm_config,
                            device,
-                           runner,
-                           is_torchair_graph=False):
+                           runner):
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
     elif method in ["eagle", "eagle3"]:
         return EagleProposer(vllm_config, device, runner)
-    elif method == 'deepseek_mtp':
-        if is_torchair_graph:
-            return TorchairMtpProposer(vllm_config, device, runner)
+    elif method == 'mtp':
         return MtpProposer(vllm_config, device, runner)
     else:
         raise ValueError("Unknown speculative decoding method: "
