@@ -514,7 +514,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 shape_order = "TND"
                 scale = self.scale
                 mask = attn_metadata.attn_mask
-                mask = mask.to(torch.uint8)
+                if mask is not None:
+                    mask = mask.to(torch.uint8)
                 attn_output = torch_npu.npu_fusion_attention(
                     query=query,
                     key=key,
