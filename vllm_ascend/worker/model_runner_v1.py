@@ -36,18 +36,18 @@ import torch.nn as nn
 from tqdm import tqdm  # type: ignore
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention, MLAAttention
+from vllm.attention.selector import get_attn_backend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather)
+from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_pcp_group, get_pp_group,
-                                             get_tp_group,
+                                             get_ep_group, get_pcp_group,
+                                             get_pp_group, get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -119,7 +119,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
                                is_moe_model, lmhead_tp_enable)
-from vllm_ascend.worker.npu_input_batch import NpuInputBatch
+from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -248,10 +248,17 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.is_pooling_model = self.model_config.pooler_config is not None
         self.enable_prompt_embeds = self.model_config.enable_prompt_embeds
-
+        self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
                                   "index_topk")
+        self.attn_backend = get_attn_backend(0,
+                                             self.dtype,
+                                             None,
+                                             self.block_size,
+                                             use_mla=self.model_config.use_mla,
+                                             use_sparse=self.use_sparse)
+
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
@@ -349,15 +356,15 @@ class NPUModelRunner(GPUModelRunner):
         # solution, we initialize the input batch here, and re-initialize it
         # in `initialize_kv_cache` if the block_sizes here is different from
         # the block_sizes in the kv cache config.
-        self.input_batch = NpuInputBatch(
+        self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.model_config.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.cache_config.block_size],
-            kernel_block_sizes=[self.cache_config.block_size],
+            block_sizes=[self.block_size],
+            kernel_block_sizes=[[self.cache_config.block_size]],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config, self.device, self.pin_memory,
@@ -855,13 +862,10 @@ class NPUModelRunner(GPUModelRunner):
                 num_input_tokens_with_flashcomm1 = (num_input_tokens +
                                                     tp_size - 1) // tp_size
             for k, v in intermediate_tensors.items():
-                self.intermediate_tensors[
-                    k][:num_input_tokens_with_flashcomm1].copy_(
-                        v[:num_input_tokens_with_flashcomm1],
-                        non_blocking=True)
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
-                k:
-                v[:num_input_tokens_with_flashcomm1]
+                k: v[:num_input_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
@@ -943,7 +947,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
+                blk_table_tensor = blk_table.get_device_tensor()
                 slot_mapping = blk_table.slot_mapping.gpu[:slot_mapping_size]
                 blk_table.slot_mapping.gpu[slot_mapping_size:].fill_(0)
                 if self.pcp_size > 1:
@@ -1159,7 +1163,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.PrefillNoCache
             else:
                 attn_state = AscendAttentionState.PrefillCacheHit
-        elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+        elif np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
@@ -1346,7 +1350,8 @@ class NPUModelRunner(GPUModelRunner):
             moe_comm_type = MoECommType.ALLGATHER
         elif soc_version in {AscendDeviceType._910B}:
             if (num_tokens <= mc2_tokens_capacity
-                    and self.parallel_config.world_size_across_dp >= 16):
+                    and self.parallel_config.world_size_across_dp /
+                    self.parallel_config.pipeline_parallel_size >= 16):
                 moe_comm_type = MoECommType.MC2
             else:
                 # Currently, w4a8_dynamic does not support allgatherep
@@ -1356,10 +1361,10 @@ class NPUModelRunner(GPUModelRunner):
                     moe_comm_type = MoECommType.ALLGATHER
 
         elif soc_version in {AscendDeviceType._910_93}:
-            moe_comm_type = (MoECommType.MC2
-                             if num_tokens <= mc2_tokens_capacity else
-                             MoECommType.FUSED_ALLTOALL if quant_type
-                             == "w8a8_dynamic" else MoECommType.ALLTOALL)
+            moe_comm_type = (
+                MoECommType.MC2 if num_tokens <= mc2_tokens_capacity else
+                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
+                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
@@ -1812,7 +1817,7 @@ class NPUModelRunner(GPUModelRunner):
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
                 block_table_tensor = self.input_batch.block_table[
-                    kv_cache_group_id].get_device_tensor(num_reqs)
+                    kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
                 self.cp_kv_recover_idx = torch.zeros(self.max_num_tokens,
@@ -2493,7 +2498,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     else:
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
@@ -2625,7 +2630,6 @@ class NPUModelRunner(GPUModelRunner):
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
-
         if block_sizes != [
                 self.cache_config.block_size
         ] or kernel_block_sizes != [[self.cache_config.block_size]]:
@@ -2633,7 +2637,7 @@ class NPUModelRunner(GPUModelRunner):
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
-            self.input_batch = NpuInputBatch(
+            self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.model_config.max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
