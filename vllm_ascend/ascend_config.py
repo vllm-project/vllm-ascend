@@ -18,15 +18,6 @@ from uuid import uuid4
 
 from vllm.logger import logger
 
-TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2", "qwen"]
-
-
-def _check_torchair_supported(model_type: str):
-    for supported_model in TORCHAIR_MODEL_LIST:
-        if supported_model in model_type.lower():
-            return True
-    return False
-
 
 def check_kv_extra_config(vllm_config):
 
@@ -66,11 +57,6 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-        torchair_graph_config = additional_config.get("torchair_graph_config",
-                                                      {})
-
-        self.torchair_graph_config = TorchairGraphConfig(
-            torchair_graph_config, vllm_config, additional_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
@@ -107,8 +93,8 @@ class AscendConfig:
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp", False
-        ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+            "enable_shared_expert_dp",
+            False) and vllm_config.parallel_config.enable_expert_parallel
         if self.enable_shared_expert_dp:
             from vllm_ascend.utils import enable_sp
             assert enable_sp(vllm_config=vllm_config,
@@ -215,86 +201,6 @@ class AscendCompilationConfig:
         # Add more compilation related configs here as needed
 
 
-class TorchairGraphConfig:
-    """
-    Configuration Object for torchair_graph_config from additional_config
-    """
-
-    def __init__(self, torchair_graph_config, vllm_config, additional_config):
-        self.enabled = torchair_graph_config.get("enabled", False)
-        self.mode = torchair_graph_config.get("mode", '')
-        self.use_cached_graph = torchair_graph_config.get(
-            "use_cached_graph", False)
-        self.use_cached_kv_cache_bytes = torchair_graph_config.get(
-            "use_cached_kv_cache_bytes", False)
-        self.graph_batch_sizes = torchair_graph_config.get(
-            "graph_batch_sizes", [])
-        self.graph_batch_sizes_init = torchair_graph_config.get(
-            "graph_batch_sizes_init", False)
-        self.enable_multistream_mla = torchair_graph_config.get(
-            "enable_multistream_mla", False)
-        self.enable_view_optimize = torchair_graph_config.get(
-            "enable_view_optimize", True)
-        self.enable_frozen_parameter = torchair_graph_config.get(
-            "enable_frozen_parameter", True)
-        self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
-        self.enable_super_kernel = torchair_graph_config.get(
-            "enable_super_kernel", False)
-
-        if not isinstance(self.graph_batch_sizes, list):
-            raise TypeError("graph_batch_sizes must be list[int]")
-        if self.graph_batch_sizes_init and len(self.graph_batch_sizes) > 0:
-            raise ValueError(
-                "graph_batch_sizes_init is only valid when graph_batch_sizes is empty"
-            )
-        if not self.enabled:
-            if self.mode:
-                raise RuntimeError(
-                    "mode is valid only when Torchair graph mode is enabled")
-            if self.use_cached_graph:
-                raise RuntimeError(
-                    "use_cached_graph is valid only when Torchair graph mode is enabled"
-                )
-            if self.use_cached_kv_cache_bytes:
-                raise RuntimeError(
-                    "use_cached_kv_cache_bytes is valid only when Torchair graph mode is enabled"
-                )
-            if self.graph_batch_sizes:
-                raise RuntimeError(
-                    "graph_batch_sizes is valid only when Torchair graph mode is enabled"
-                )
-            if self.graph_batch_sizes_init:
-                raise RuntimeError(
-                    "graph_batch_sizes_init is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_multistream_mla:
-                raise RuntimeError(
-                    "enable_multistream_mla is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_kv_nz:
-                raise RuntimeError(
-                    "enable_kv_nz is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_super_kernel:
-                raise RuntimeError(
-                    "enable_super_kernel is valid only when Torchair graph mode is enabled"
-                )
-        if self.enable_super_kernel:
-            if vllm_config.parallel_config.tensor_parallel_size != 1:
-                raise RuntimeError(
-                    "enable_super_kernel is valid only when tensor_parallel_size is 1"
-                )
-            if not additional_config.get("multistream_overlap_shared_expert",
-                                         False):
-                raise RuntimeError(
-                    "enable_super_kernel is valid only when multistream_overlap_shared_expert is enabled"
-                )
-        if self.use_cached_kv_cache_bytes and not self.use_cached_graph:
-            raise RuntimeError(
-                "use_cached_kv_cache_bytes is valid only when Torchair graph mode and use_cached_graph are enabled"
-            )
-
-
 class XliteGraphConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
@@ -382,39 +288,7 @@ def get_ascend_config():
 def check_ascend_config(vllm_config, enforce_eager):
     ascend_config = get_ascend_config()
 
-    # for eager mode
-    if enforce_eager:
-        # torchair_graph cannot be enabled with eager mode.
-        if ascend_config.torchair_graph_config.enabled:
-            raise RuntimeError(
-                "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
-            )
-    # for graph mode
-    else:
-        # torchair_graph case
-        if ascend_config.torchair_graph_config.enabled:
-            # torchair_graph is supported for deepseek/pangu/qwen model only.
-            if vllm_config.model_config:
-                model_type = vllm_config.model_config.hf_config.model_type
-                if not _check_torchair_supported(model_type):
-                    raise NotImplementedError(
-                        "Torchair graph mode only works with following model types:"
-                        f"{TORCHAIR_MODEL_LIST}.")
-            if ascend_config.enable_shared_expert_dp:
-                logger.warning(
-                    "enable_shared_expert_dp is not supported for torchair graph mode currently, "
-                    "it has been disabled automatically.")
-        # aclgraph case
-        else:
-            if ascend_config.ascend_compilation_config.enable_quantization_fusion:
-                logger.info(
-                    "Quantization fusion enabled! op fusion on quantization are expected. "
-                )
-
-            if vllm_config.model_config:
-                model_type = vllm_config.model_config.hf_config.model_type
-                if "qwen" not in model_type:
-                    logger.warning(
-                        "ACL Graph is currently experimental. Please "
-                        "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
-                        " if you encourage any Error")
+    if ascend_config.ascend_compilation_config.enable_quantization_fusion:
+        logger.info(
+            "Quantization fusion enabled! op fusion on quantization are expected. "
+        )
