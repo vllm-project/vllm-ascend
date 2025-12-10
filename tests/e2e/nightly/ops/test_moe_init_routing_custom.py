@@ -165,7 +165,7 @@ def moe_init_routing_golden(x, expert_idx, scale, offset, active_num, expert_cap
 
 
 @torch.inference_mode()
-def test_moe_init_routing_v3_kernel():
+def test_moe_init_routing_custom_kernel():
     N = 1024
     H = 4096
     K = 8
@@ -178,15 +178,15 @@ def test_moe_init_routing_v3_kernel():
     expert_tokens_num_flag = True
     quant_mode = -1
     row_idx_type = 0
-    active_num = 0
+    active_num = 8192
     scale = None
     offset = None
     x = torch.randint(-5, 5, (N, H), dtype=torch.int8).npu()
     expert_idx = torch.randint(0, expert_num, (N, K), dtype=torch.int32).npu()
 
     expanded_x_cpu, expanded_row_idx_cpu, expert_tokens_count_cpu, expanded_scale_cpu = moe_init_routing_golden(
-        x.cpu(),
-        expert_idx.cpu(),
+        x.cpu().numpy(),
+        expert_idx.cpu().numpy(),
         scale,
         offset,
         active_num,
@@ -199,26 +199,30 @@ def test_moe_init_routing_v3_kernel():
         quant_mode,
         row_idx_type)
 
-    expanded_x_npu, expanded_row_idx_npu, expert_tokens_count_npu, expanded_scale_npu = torch.ops._C_ascend.npu_moe_init_routing_v2(
+    expanded_x_npu, expanded_row_idx_npu, expert_tokens_count_npu, expanded_scale_npu = torch.ops._C_ascend.npu_moe_init_routing_custom(
         x,
         expert_idx,
-        scale,
-        offset,
-        active_num,
-        expert_capacity,
-        expert_num,
-        drop_pad_mode,
-        expert_tokens_num_type,
-        expert_tokens_num_flag,
-        active_expert_range,
-        quant_mode,
-        row_idx_type)
+        scale=scale,
+        offset=offset,
+        active_num=active_num,
+        expert_capacity=expert_capacity,
+        expert_num=expert_num,
+        drop_pad_mode=drop_pad_mode,
+        expert_tokens_num_type=expert_tokens_num_type,
+        expert_tokens_num_flag=expert_tokens_num_flag,
+        active_expert_range=active_expert_range,
+        quant_mode=quant_mode,
+        row_idx_type=row_idx_type)
 
-    torch.testing.assert_close(expanded_x_cpu, expanded_x_npu.cpu(), atol=1, rtol=0.0001)
-    torch.testing.assert_close(expanded_row_idx_cpu, expanded_row_idx_npu.cpu(), atol=1, rtol=0.0001)
-    torch.testing.assert_close(expert_tokens_count_cpu, expert_tokens_count_npu.cpu(), atol=1, rtol=0.0001)
-    torch.testing.assert_close(expanded_scale_cpu, expanded_scale_npu.cpu(), atol=1, rtol=0.0001 )
+    torch.testing.assert_close(torch.from_numpy(expanded_x_cpu), expanded_x_npu.cpu(), atol=1, rtol=0.0001)
+    torch.testing.assert_close(torch.from_numpy(expanded_row_idx_cpu), expanded_row_idx_npu.cpu(), atol=1, rtol=0.0001)
+    if expert_tokens_num_flag:
+        torch.testing.assert_close(torch.from_numpy(expert_tokens_count_cpu), expert_tokens_count_npu.cpu(), atol=1, rtol=0.0001)
+    if scale and quant_mode != 0:
+        torch.testing.assert_close(torch.from_numpy(expanded_scale_cpu), expanded_scale_npu.cpu(), atol=1, rtol=0.0001 )
 
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+test_moe_init_routing_custom_kernel()
