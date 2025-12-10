@@ -41,7 +41,6 @@ def test_qwen_moe_with_full_decode_only():
     with VllmRunner(model,
                     max_model_len=1024,
                     tensor_parallel_size=2,
-                    cudagraph_capture_sizes=[4],
                     enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -89,7 +88,6 @@ def test_qwen_moe_with_full():
     with VllmRunner(model,
                     max_model_len=1024,
                     tensor_parallel_size=2,
-                    cudagraph_capture_sizes=[4],
                     enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL",

@@ -39,7 +39,6 @@ def test_embed_models_correctness(model: str):
             runner="pooling",
             enforce_eager=False,
             max_model_len=None,
-            cudagraph_capture_sizes=[4],
     ) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
 
