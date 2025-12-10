@@ -173,8 +173,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--gpu-memory-utilization 0.92
 ```
 
 ### Multi-node Deployment
@@ -206,7 +205,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
@@ -225,8 +224,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --max-num-batched-tokens 17450 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.9 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--gpu-memory-utilization 0.9
 ```
 
 **Node 1**
@@ -248,7 +246,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
 
 vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
@@ -269,8 +267,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--gpu-memory-utilization 0.92
 ```
 
 ::::
@@ -295,9 +292,8 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
@@ -317,8 +313,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --trust-remote-code \
 --quantization ascend \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.9 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--gpu-memory-utilization 0.9
 ```
 
 **Node 1**
@@ -340,9 +335,8 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
@@ -364,8 +358,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --trust-remote-code \
 --quantization ascend \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--gpu-memory-utilization 0.92
 ```
 
 ::::
