@@ -170,6 +170,6 @@ class AscendQwen2_5_VLForConditionalGeneration(nn.Module):
 Qwen2VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
 Qwen2_5_VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
 
-# NOTE: These will be removed after https://github.com/vllm-project/vllm/pull/29388 is merged.
+# NOTE: These will be removed after ascend_forward_context is refactored.
 Qwen2_5_VLForConditionalGeneration._process_image_input = AscendQwen2_5_VLForConditionalGeneration._process_image_input
 Qwen2_5_VLForConditionalGeneration._process_video_input = AscendQwen2_5_VLForConditionalGeneration._process_video_input
