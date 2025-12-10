@@ -854,9 +854,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
         self.vllm_config = get_current_vllm_config()
-        self.fc2_enable = flashcomm2_o_shared_enabled()
+        self.fc2_o_shared_enable = flashcomm2_o_shared_enabled()
 
-        if self.fc2_enable and is_hidden_layer(self.vllm_config, self.o_proj):
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
             from vllm_ascend.distributed.parallel_state import \
                 get_shared_weight_group
             register_layer_to_shared_weight_series(
@@ -1011,7 +1012,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
 
-        if self.fc2_enable and is_hidden_layer(self.vllm_config, self.o_proj):
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
             post_process_after_loading_for_shared_weight_series(self.o_proj)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
@@ -1532,7 +1534,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
 
-        if self.fc2_enable and is_hidden_layer(self.vllm_config, self.o_proj):
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
             reach_layer_for_shared_weight_series(self.o_proj)
 
         decode_preprocess_res = None
@@ -1653,8 +1656,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            if self.fc2_enable and is_hidden_layer(self.vllm_config,
-                                                   self.o_proj):
+            if self.fc2_o_shared_enable and is_hidden_layer(
+                    self.vllm_config, self.o_proj):
                 reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         if self.pcp_size > 1:
