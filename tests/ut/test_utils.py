@@ -112,27 +112,6 @@ class TestUtils(TestBase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
-    @mock.patch('importlib.util.find_spec')
-    @mock.patch('importlib.import_module')
-    def test_try_register_lib(self, mock_import_module, mock_find_spec):
-        # import OK
-        mock_find_spec.return_value = mock.MagicMock()
-        mock_import_module.return_value = mock.MagicMock()
-        lib_name = "existing_lib"
-        lib_info = "Library found and imported successfully"
-        utils.try_register_lib(lib_name, lib_info)
-
-        # Can't find lib
-        mock_find_spec.return_value = None
-        lib_name = "non_existing_lib"
-        utils.try_register_lib(lib_name)
-
-        # import error
-        mock_find_spec.return_value = mock.MagicMock()
-        mock_import_module.side_effect = ImportError("import error")
-        lib_name = "error_lib"
-        utils.try_register_lib(lib_name)
-
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
         self.assertTrue(result)
