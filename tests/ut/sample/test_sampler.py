@@ -19,7 +19,8 @@ class TestAscendTopKTopPSampler(TestBase):
 
     @mock.patch("vllm_ascend.sample.sampler.random_sample")
     @mock.patch("torch_npu.npu_top_k_top_p")
-    def test_npu_topk_topp_called_when_optimized(self, mock_npu_op, mock_random_sample):
+    def test_npu_topk_topp_called_when_optimized(self, mock_npu_op,
+                                                 mock_random_sample):
         mock_npu_op.return_value = (torch.randn(1, 3))
         mock_random_sample.return_value = torch.randn(3)
         sampler = AscendTopKTopPSampler()
