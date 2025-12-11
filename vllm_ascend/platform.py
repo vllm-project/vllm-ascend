@@ -26,7 +26,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
@@ -181,7 +181,6 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        check_ascend_config(vllm_config, enforce_eager)
         from vllm.config.compilation import CUDAGraphMode
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
