@@ -954,6 +954,24 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 req_state.mm_features,
             )
 
+    def _skip_all_reduce_acorss_dp_group(self) -> bool:
+        # NOTE: We can skip the all_reduce operation and avoid paading tokens
+        # to max_tokens_acrodd_dp in D nodes. In MoE models, we must ensure that
+        # num_tokens DOES NOT exceed mc2_tokens_capacity which means that moe_comm_method
+        # of each rank is MC2. For dense models, skipping all_reduce is not necessary
+        # since collective-communication is not time-consuming since dp_size in dense
+        # model deployments is always small and can be overlapped by async scheduling.
+        if not is_moe_model(self.vllm_config):
+            return False
+        if self.compilation_config.cudagraph_capture_sizes:
+            potential_max_num_tokens = self.compilation_config.max_cudagraph_capture_size
+        else:
+            potential_max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        # To ensure skipping all_reduce acrosss dp group is valid, we need to ensure that
+        # moe_comm_method of each rank is MC2 and recomputation would never happen in D
+        # nodes. So here we check whether recompute_scheduler_enable is True.
+        return self.is_kv_consumer and not self.in_profile_run and self.ascend_config.recompute_scheduler_enable and self._select_moe_comm_method(potential_max_num_tokens) == MoECommType.MC2
+
     def _sync_metadata_across_dp(
             self, num_tokens: int,
             with_prefill: bool) -> tuple[int, Optional[torch.Tensor], bool]:
@@ -965,11 +983,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # immediately once the other two flags are no longer needed.
         if self.dp_size == 1:
             return num_tokens, None, with_prefill
-        # NOTE: Here we can skip the all_reduce operation and avoid paading tokens
-        # to max_tokens_acrodd_dp in D nodes. In MoE models, we must ensure that
-        # num_tokens DOES NOT exceed mc2_tokens_capacity which means that moe_comm_method
-        # of each rank is MC2. It is recommended to enable recompute scheduler for D Nodes.
-        if self.is_kv_consumer and not self.in_profile_run:
+
+        if self._skip_all_reduce_acorss_dp_group():
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
                                                     device="cpu",
