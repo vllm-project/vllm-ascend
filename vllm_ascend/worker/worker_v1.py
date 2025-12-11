@@ -52,8 +52,8 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
-                               register_ascend_customop, sleep_mode_enabled,
+from vllm_ascend.utils import (check_ascend_device_type, enable_sp,
+                               is_enable_nz, register_ascend_customop,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -129,7 +129,7 @@ class NPUWorker(WorkerBase):
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
-        if sleep_mode_enabled():
+        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -140,10 +140,6 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
     def sleep(self, level: int = 1) -> None:
-        if not sleep_mode_enabled():
-            raise ValueError(
-                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
-            )
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -164,11 +160,6 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        if not sleep_mode_enabled():
-            raise ValueError(
-                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
-            )
-
         if is_enable_nz():
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
@@ -296,9 +287,14 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
+            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
+            if enable_sp():
+                all_gather_group = None
+            else:
+                all_gather_group = get_tp_group()
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                    all_gather_group=all_gather_group))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
@@ -309,9 +305,13 @@ class NPUWorker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != (
             "external_launcher") and not get_pp_group().is_last_rank
-
+        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
+        if enable_sp():
+            all_gather_group = None
+        else:
+            all_gather_group = get_tp_group()
         get_pp_group().send_tensor_dict(output.tensors,
-                                        all_gather_group=get_tp_group())
+                                        all_gather_group=all_gather_group)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
