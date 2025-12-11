@@ -30,5 +30,4 @@ multi_node_qwen3vl
 multi_node_pd_disaggregation_mooncake
 multi_node_ray
 Qwen2.5-Omni.md
-
 :::
