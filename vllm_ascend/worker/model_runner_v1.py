@@ -3401,8 +3401,8 @@ def _torch_cuda_wrapper():
         def __init__(self, *args, **kwargs) -> None:
             self.record = lambda: None
             self.synchronize = lambda: None
-    
     class _StreamPlaceholder:
+
         def __init__(self, *args, **kwargs) -> None:
             pass
 
@@ -3414,7 +3414,7 @@ def _torch_cuda_wrapper():
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.stream = torch.npu.stream
         yield
-    except Exception as e:
+    except Exception:
         torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         torch.cuda.default_stream = _StreamPlaceholder
