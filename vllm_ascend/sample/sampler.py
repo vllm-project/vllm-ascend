@@ -23,11 +23,10 @@ def random_sample(
     # not have its own seed. Then, we overwrite the values for the requests
     # that have their own seeds.
     with npu_stream_switch(global_stream()):
+        q = torch.empty_like(probs)
         if len(generators) != probs.shape[0]:
-            q = torch.empty_like(probs)
             q.exponential_()
         if generators:
-            q = torch.empty_like(probs)
             # TODO(woosuk): This can be slow because we handle each request
             # one by one. Optimize this.
             for i, generator in generators.items():
