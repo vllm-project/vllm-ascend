@@ -192,3 +192,22 @@ def test_output_between_eager_and_full_decode_only(
         name_0="vllm_eager_outputs",
         name_1="vllm_aclgraph_outputs",
     )
+
+
+def test_aclgraph_enable():
+    # Generally, this test is not belong to e2e, but it is a good way to check if
+    # aclgraph is enabled in real environment
+    from vllm.config.compilation import CompilationMode, CUDAGraphMode
+    from vllm.engine.arg_utils import EngineArgs
+
+    from vllm_ascend.platform import NPUPlatform
+
+    # vLLM default mode is piecewise cudagraph
+    config = EngineArgs()
+    VllmConfig = config.create_engine_config()
+    assert VllmConfig.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+    # after check_and_update_config, mode should be VLLM_COMPILE and piecewise cudagraph
+    NPUPlatform.check_and_update_config(VllmConfig)
+    assert VllmConfig.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert VllmConfig.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
