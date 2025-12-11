@@ -20,7 +20,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
