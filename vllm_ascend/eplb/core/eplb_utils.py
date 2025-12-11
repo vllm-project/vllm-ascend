@@ -35,52 +35,26 @@ def generate_experts_map(ep_size, ep_rank, n_expert, n_redundant):
             if len(groups[-j]) == 0:
                 groups[-j] = np.append(groups[-j], j)
             else:
-                groups[-j] = np.append(groups[-j], (groups[-j][-1] + 1) % n_expert)
+                groups[-j] = np.append(groups[-j],
+                                       (groups[-j][-1] + 1) % n_expert)
         return torch.tensor(np.concatenate(groups), device="npu")
 
     random_placement = split_and_insert(n_expert, ep_size, n_redundant)
     global_num_experts = random_placement.shape[0]
     local_num_experts = global_num_experts // ep_size
 
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device="npu")
-    e_ids = random_placement[ep_rank * local_num_experts: (ep_rank + 1) * local_num_experts]
-    expert_map[e_ids] = torch.arange(local_num_experts, dtype=torch.int32)
+    expert_map = torch.full((n_expert,),
+                            -1,
+                            dtype=torch.int32,
+                            device="npu")
+    e_ids = random_placement[ep_rank * local_num_experts: (ep_rank + 1) *
+                             local_num_experts]
+    expert_map[e_ids] = torch.arange(local_num_experts, dtype=torch.int32, device="npu")
 
     return local_num_experts, expert_map
 
 
 def generate_log2phy_map(expert_map):
-    num_local_experts = expert_map.max() + 1
-    log2phy_map = expert_map.clone()
-    num_ranks, num_global_expert = log2phy_map.shape
-    rank_id = torch.distributed.get_rank()
-    row_indices = torch.arange(num_ranks).view(-1, 1).expand(num_ranks, \
-                                                             num_global_expert) * num_local_experts
-    log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
-
-    for idx in range(num_global_expert):
-        positive_rank_idx = torch.where(log2phy_map[:, idx] != -1)[0]
-        negative_rank_idx = torch.where(log2phy_map[:, idx] == -1)[0]
-        num_rank_holding_expert = positive_rank_idx.size(0)
-
-        if num_rank_holding_expert == 0:
-            log2phy_map[:, idx] = torch.full((num_ranks, ),
-                                             0,
-                                             dtype=log2phy_map.dtype)
-
-        if num_rank_holding_expert == 1:
-            log2phy_map[negative_rank_idx, idx] = torch.full(
-                (num_ranks - 1, ),
-                log2phy_map[positive_rank_idx, idx].item(),
-                dtype=log2phy_map.dtype)
-        else:
-            mapping_id = rank_id % num_rank_holding_expert
-            log2phy_map[negative_rank_idx,
-                        idx] = torch.tensor(log2phy_map[positive_rank_idx[mapping_id], idx],
-                                            dtype=log2phy_map.dtype)
-    return log2phy_map
-
-def generate_log2phy_map_all(expert_map):
     num_local_experts = expert_map.max() + 1
     log2phy_map = expert_map.clone()
     num_ranks, num_global_expert = log2phy_map.shape
@@ -123,7 +97,7 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
         expert_map_all = local_ids.unsqueeze(0).expand(world_size, -1)
-        log2phy_map_all = generate_log2phy_map_all(expert_map_all)
+        log2phy_map_all = generate_log2phy_map(expert_map_all)
         return log2phy_map_all[rank_id]
 
     local_num_experts = global_expert_num // world_size
@@ -146,7 +120,7 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
             local_ids = torch.arange(local_count, dtype=torch.int32)
             expert_map_all[r, start:end] = local_ids
 
-    log2phy_map_all = generate_log2phy_map_all(expert_map_all)
+    log2phy_map_all = generate_log2phy_map(expert_map_all)
 
     return log2phy_map_all[rank_id]
 
