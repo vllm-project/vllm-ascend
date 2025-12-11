@@ -43,16 +43,6 @@ class TestUtils(TestBase):
                         0):
             self.assertFalse(utils.is_enable_nz())
 
-    def test_sleep_mode_enabled(self):
-        utils._SLEEP_MODE_ENABLED = None
-        with mock.patch("vllm_ascend._build_info.__sleep_mode_enabled__",
-                        True):
-            self.assertTrue(utils.sleep_mode_enabled())
-        utils._SLEEP_MODE_ENABLED = None
-        with mock.patch("vllm_ascend._build_info.__sleep_mode_enabled__",
-                        False):
-            self.assertFalse(utils.sleep_mode_enabled())
-
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)
