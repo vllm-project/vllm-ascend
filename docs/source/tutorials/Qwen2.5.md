@@ -107,9 +107,6 @@ vllm serve ${MODEL_PATH} \
           --trust-remote-code \
           --max-model-len 32768
 ```
-`--allowed-local-media-path` is optional, only set it if you need infer model with local media file
-
-`--tensor_parallel_size` no need to set for this 7B model, but if you really need tensor parallel, tp size can be one of `1\2\4`
 
 ### Multi-node Deployment
 
