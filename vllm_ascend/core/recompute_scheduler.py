@@ -47,6 +47,7 @@ logger = init_logger(__name__)
 
 
 class RecomputeScheduler(Scheduler):
+    running: list[Request]
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -613,14 +614,15 @@ class RecomputeScheduler(Scheduler):
                 kv_connector_output.invalid_block_ids)
 
         # return recomputed requests as EngineCoreOutput
-        for req_info in scheduler_output.recomputed_reqs:
-            outputs[req_info.client_index].append(
-                EngineCoreOutput(
-                    request_id=req_info.request_id,
-                    finish_reason=FinishReason.STOP,
-                    new_token_ids=[req_info.output_token_ids[-1]],
-                    stop_reason="recomputed",
-                ))
+        if scheduler_output.recomputed_reqs is not None:
+            for req_info in scheduler_output.recomputed_reqs:
+                outputs[req_info.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_info.request_id,
+                        finish_reason=FinishReason.STOP,
+                        new_token_ids=[req_info.output_token_ids[-1]],
+                        stop_reason="recomputed",
+                    ))
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
