@@ -134,6 +134,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                enable_sp, get_ascend_soc_version, is_310p,
                                is_enable_nz, is_moe_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+import os
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -1924,8 +1925,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+        if os.getenv("VLLM_MONITOR", "0")=="1":
+            torch.npu.synchronize()
+            _start_time = time.time()
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
+            if os.getenv("VLLM_MONITOR", "0")=="1":
+                scheduled_new_reqs_id = scheduler_output.scheduled_new_reqs_id
+                scheduled_running_reqs_id = scheduler_output.scheduled_running_reqs_id
+                scheduled_resumed_reqs_id = scheduler_output.scheduled_resumed_reqs_id
+                _P = []
+                _D = []
+                _chunked_P = []
+                _recomputed = []
+                _computed = []
+                for _req_id, _num_tokens in scheduler_output.num_scheduled_tokens.items():
+                    if _req_id in scheduled_new_reqs_id:
+                        _P.append(_num_tokens)
+                    elif _req_id in scheduled_running_reqs_id and _num_tokens == 1:
+                        _D.append(_num_tokens)
+                    elif _req_id in scheduled_running_reqs_id and _num_tokens > 1:
+                        _chunked_P.append(_num_tokens)
+                    elif _req_id in scheduled_resumed_reqs_id:
+                        _recomputed.append(_num_tokens)
+                    _computed.append(self.requests[_req_id].num_computed_tokens)
+
+                logger.info(f"=================rank: {torch.distributed.get_rank()} P: {len(_P)}, D: {len(_D)}, chunked_P: {len(_chunked_P)}, recomputed: {len(_recomputed)}, P_tokens: {sum(_P)}, chunked_P_tokens: {sum(_chunked_P)}, recomputed_tokens: {sum(_recomputed)}, computed: {sum(_computed)/len(_computed) if len(_computed) else 0}, kv_cache_usage: {scheduler_output.kv_cache_usage}")
             if not scheduler_output.total_num_scheduled_tokens:
                 if not has_kv_transfer_group():
                     logger.debug(
@@ -1958,6 +1983,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                            uniform_decode=uniform_decode)
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(batch_descriptor)
+        
+        if os.getenv("VLLM_MONITOR", "0")=="1":
+            torch.npu.synchronize()
+            _end_time = time.time()
+            logger.info(f"=================rank: {torch.distributed.get_rank()} prepare_data: {_end_time - _start_time}")
+            logger.info(f"=================rank: {torch.distributed.get_rank()} aclgraph: {aclgraph_runtime_mode}")
+            # Run forward pass
+            _start_time = time.time()
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -1995,6 +2028,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             finished_recving=finished_recving)
         finished_sending = None
         finished_recving = None
+
+        if os.getenv("VLLM_MONITOR", "0")=="1":
+            torch.npu.synchronize()
+            _end_time = time.time()
+            logger.info(f"=================rank: {torch.distributed.get_rank()} forward: {_end_time - _start_time}")
+            _start_time = time.time()
+        
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
             # to make sure we are synced across pp ranks
@@ -2213,6 +2253,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         " ".join(dr_str))
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
+        
+        if os.getenv("VLLM_MONITOR", "0")=="1":
+            torch.npu.synchronize()
+            _end_time = time.time()
+            logger.info(f"=================rank: {torch.distributed.get_rank()} post_process: {_end_time - _start_time}")
+        
         if not self.use_async_scheduling:
             return model_runner_output
 
@@ -2379,6 +2425,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         force_attention: bool = False,
         uniform_decode: bool = False,
     ) -> torch.Tensor:
+        if os.getenv("VLLM_MONITOR", "0")=="1":
+            logger.info(f"=================rank: {torch.distributed.get_rank()} dummy_run")
         # only support eager mode and piecewise graph now
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
