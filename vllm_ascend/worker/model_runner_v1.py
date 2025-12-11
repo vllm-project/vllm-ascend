@@ -1838,15 +1838,13 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens = max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
-            self.seq_len.copy_to_gpu()
+            self.seq_lens.copy_to_gpu()
 
             cu_num_tokens, arange = self._get_cumsum_and_arange(
                 num_scheduled_tokens)
 
             self.query_start_loc.cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
-            self.query_start_loc = self.query_start_loc.cpu.pin_memory().to(
-                self.device, non_blocking=True)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
             self.attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
