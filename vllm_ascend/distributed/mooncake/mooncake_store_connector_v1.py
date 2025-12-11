@@ -45,7 +45,7 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
             )
 
             assert self.connector_worker is not None
-            if vllm_config.parallel_config.rank == 0:
+            if vllm_config.parallel_config.rank == 0 and self.kv_role == "kv_producer":
                 self.lookup_server = MooncakeLookupServer(
                     self.connector_worker, vllm_config, self.use_layerwise)
 
@@ -160,9 +160,10 @@ def get_zmq_rpc_path_mooncake(
 class MooncakeStoreConnectorV1Scheduler:
 
     def __init__(self, vllm_config: "VllmConfig", use_layerwise):
-        self.client = MooncakeLookupClient(vllm_config)
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.client = MooncakeLookupClient(
+            vllm_config) if self.kv_role == "kv_producer" else None
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
