@@ -88,7 +88,8 @@ class NPUWorker(WorkerBase):
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
-        _register_atb_extensions()
+        if get_ascend_device_type() != AscendDeviceType._910_95:
+            _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
