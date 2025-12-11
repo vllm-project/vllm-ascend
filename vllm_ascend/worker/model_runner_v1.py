@@ -1418,10 +1418,13 @@ class NPUModelRunner(GPUModelRunner):
                     moe_comm_type = MoECommType.ALLGATHER
 
         elif soc_version in {AscendDeviceType._910_93}:
-            moe_comm_type = (
-                MoECommType.MC2 if num_tokens <= mc2_tokens_capacity else
-                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
-                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
+            # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+            fused_all2all_enable = quant_type == "w8a8_dynamic" and get_ep_group(
+            ).world_size <= 16 and (not self.dynamic_eplb)
+            moe_comm_type = (MoECommType.MC2
+                             if num_tokens <= mc2_tokens_capacity else
+                             MoECommType.FUSED_ALLTOALL
+                             if fused_all2all_enable else MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
