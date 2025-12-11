@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-name: 'ascend test / performance'
+name: Performance Test
 # This workflow runs nightly benchmarks for vllm-ascend.
 
 on:
