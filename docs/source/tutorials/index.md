@@ -6,7 +6,8 @@
 single_npu
 Qwen-VL-Dense.md
 single_npu_qwen2_audio
-single_npu_qwen3_embedding
+qwen3_embedding
+qwen3_reranker
 single_npu_qwen3_quantization
 single_npu_qwen3_w4a4
 single_node_pd_disaggregation_mooncake
