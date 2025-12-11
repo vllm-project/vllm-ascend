@@ -165,10 +165,15 @@ class AscendConfig:
                     "Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
-        from vllm_ascend.utils import \
-            get_flashcomm2_oproj_tp_size_and_validate_config
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+        from vllm_ascend.utils import get_flashcomm2_config_and_validate
+        self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
             self, vllm_config)
+        self.enable_npugraph_ex = additional_config.get(
+            "enable_npugraph_ex", False)
+        if self.enable_npugraph_ex:
+            raise NotImplementedError(
+                "This feature is still in the experiment and will be supported soon."
+            )
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
                                               False):
@@ -283,12 +288,3 @@ def get_ascend_config():
             "Ascend config is not initialized. Please call init_ascend_config first."
         )
     return _ASCEND_CONFIG
-
-
-def check_ascend_config(vllm_config, enforce_eager):
-    ascend_config = get_ascend_config()
-
-    if ascend_config.ascend_compilation_config.enable_quantization_fusion:
-        logger.info(
-            "Quantization fusion enabled! op fusion on quantization are expected. "
-        )

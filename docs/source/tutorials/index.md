@@ -4,7 +4,7 @@
 :caption: Deployment
 :maxdepth: 1
 single_npu
-single_npu_qwen2.5_vl
+Qwen-VL-Dense.md
 single_npu_qwen2_audio
 single_npu_qwen3_embedding
 single_npu_qwen3_quantization
@@ -13,11 +13,11 @@ single_node_pd_disaggregation_mooncake
 multi_npu_qwen3_next
 multi_npu
 multi_npu_kimi-k2-thinking
-multi_npu_moge
 Qwen3-Dense
 multi_npu_qwen3_moe
 multi_npu_quantization
 single_node_300i
+DeepSeek-R1.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2-Exp.md
 Qwen3-235B-A22B.md

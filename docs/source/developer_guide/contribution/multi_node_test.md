@@ -66,7 +66,67 @@ From the workflow perspective, we can see how the final test script is executed,
         # fill with accuracy test kwargs
     ```
   
-3. Add the case to nightly workflow
+3. Running Locally(Option)
+
+    Step 1. Add cluster_hosts to config yamls
+
+    Modify on every cluster host, commands as following:
+    like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml) after the configure item `num_nodes` , for example:
+    `cluster_hosts: ["xxx.xxx.xxx.188", "xxx.xxx.xxx.212"]`
+
+    Step 2. Install develop environment
+    - Install vllm-ascend develop packages on every cluster host
+
+        ``` bash
+        cd /vllm-workspace/vllm-ascend
+        python3 -m pip install -r requirements-dev.txt
+        ```
+
+    - Install AISBench on the first host(leader node) in cluster_hosts
+
+        ``` bash
+        export AIS_BENCH_TAG="v3.0-20250930-master"
+        export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+
+        git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} /vllm-workspace/vllm-ascend/benchmark
+        cd /vllm-workspace/vllm-ascend/benchmark
+        pip install -e . -r requirements/api.txt -r requirements/extra.txt
+        ```
+
+    Step 3. Running test locally
+    - Export environments
+
+        On leader host(the first node xxx.xxx.xxx.188)
+
+        ``` bash
+        export LWS_WORKER_INDEX=0
+        export WORKSPACE=/vllm-workspace
+        export CONFIG_YAML_PATH=DeepSeek-V3.yaml
+        export FAIL_TAG=FAIL_TAG
+        ```
+
+        On slave host(other nodes, such as xxx.xxx.xxx.212)
+
+        ``` bash
+        export LWS_WORKER_INDEX=1
+        export WORKSPACE=/vllm-workspace
+        export CONFIG_YAML_PATH=DeepSeek-V3.yaml
+        export FAIL_TAG=FAIL_TAG
+        ```
+
+        `LWS_WORKER_INDEX` is the index of this node in the `cluster_hosts` . The node with an index of 0 is the leader.
+        Slave node index value range is [1, num_nodes-1].
+    - Run vllm serve instances
+
+        Copy and Run run.sh on every cluster host, to start vllm, commands as following:
+
+        ``` bash
+        cp /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh /vllm-workspace/
+        cd /vllm-workspace/
+        bash -x run.sh
+        ```
+
+4. Add the case to nightly workflow
 currently, the multi-node test workflow defined in the [vllm_ascend_test_nightly_a2/a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a3.yaml)
 
    ```yaml
@@ -82,7 +142,7 @@ currently, the multi-node test workflow defined in the [vllm_ascend_test_nightly
                 config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
                 size: 2
             - name: multi-node-qwen3-dp
-                config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+                config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A22B.yaml
                 size: 2
             - name: multi-node-dpsk-4node-pd
                 config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
