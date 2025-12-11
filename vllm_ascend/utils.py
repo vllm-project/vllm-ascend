@@ -49,7 +49,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
@@ -123,14 +122,6 @@ atexit.register(_unregister_print_streams_on_exit)
 
 def is_enable_nz():
     return envs_ascend.VLLM_ASCEND_ENABLE_NZ
-
-
-def sleep_mode_enabled():
-    global _SLEEP_MODE_ENABLED
-    if _SLEEP_MODE_ENABLED is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
-    return _SLEEP_MODE_ENABLED
 
 
 def _round_up(x: int, align: int):

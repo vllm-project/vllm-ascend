@@ -45,7 +45,9 @@ _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "DeepseekV32ForCausalLM":
-    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP")
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "Qwen3NextForCausalLM":
+    ("vllm.model_executor.models.qwen3_next_mtp", "Qwen3NextMTP")
 }
 
 _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
@@ -200,15 +202,16 @@ class MtpProposer(Proposer):
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
 
-        # check if mtp model use main model's embedding and LMhead
-        main_model = model
-        if torch.equal(self.model.model.embed_tokens.weight,
-                       main_model.model.embed_tokens.weight):
-            self.model.model.embed_tokens = main_model.model.embed_tokens
-        for _, layer_module in self.model.model.layers.items():
-            if torch.equal(layer_module.shared_head.head.weight,
-                           main_model.lm_head.weight):
-                layer_module.shared_head.head = main_model.lm_head
+        if self.vllm_config.model_config.is_deepseek_mla:
+            # check if mtp model use main model's embedding and LMhead
+            main_model = model
+            if torch.equal(self.model.model.embed_tokens.weight,
+                           main_model.model.embed_tokens.weight):
+                self.model.model.embed_tokens = main_model.model.embed_tokens
+            for _, layer_module in self.model.model.layers.items():
+                if torch.equal(layer_module.shared_head.head.weight,
+                               main_model.lm_head.weight):
+                    layer_module.shared_head.head = main_model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ):
@@ -233,7 +236,13 @@ class MtpProposer(Proposer):
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
-
+        if self.use_async_scheduling:
+            # there is synchronization between mtp steps when enabling aclgraph,
+            # disable aclgraph when use async scheduling to avoid the
+            # synchronization overhead.
+            # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
+            # and _propose.
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         # TODO: remove this after moe_comm_type selection logic is finalized
         moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
@@ -598,7 +607,6 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
         )
         return spec_common_attn_metadata, token_indices
@@ -742,17 +750,18 @@ class MtpProposer(Proposer):
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
         if self.use_async_scheduling:
-            # there is synchronize between mtp steps when enable aclgraph,
+            # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
-            # synchronize overhead.
+            # synchronization overhead.
+            # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
+            # and _propose.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
             graph_pad_size = num_input_tokens
         else:
-            # Currently, runner.graph_pad_size will always be -1.
-            graph_pad_size = self.runner.graph_pad_size
+            graph_pad_size = -1
 
         # If use fullgraph and disable_padded_drafter_batch=True, We need to
         # update the graph_pad_size in common_attn_metadata, to tell the
@@ -1124,7 +1133,6 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
