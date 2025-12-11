@@ -292,7 +292,7 @@ def get_ascend_config():
 def check_ascend_config(vllm_config, enforce_eager):
     ascend_config = get_ascend_config()
 
-    if ascend_config.ascend_compilation_config.enable_quantization_fusion:
+    if ascend_config.ascend_compilation_config.fuse_norm_quant:
         logger.info(
             "AddRMSNorm and Quant fusion enabled! op fusion on addrmsnorm and quant are expected. "
         )
