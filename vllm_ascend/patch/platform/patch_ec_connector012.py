@@ -1,8 +1,8 @@
-import vllm.distributed.ec_transfer.ec_connector.shared_storage_connector  # noqa
+import vllm.distributed.ec_transfer.ec_connector.shared_storage_connector  # type: ignore[import-not-found]  # noqa
 from safetensors.torch import load_file
 from vllm.distributed.ec_transfer.ec_connector.base import \
-    ECConnectorMetadata  # noqa
-from vllm.distributed.ec_transfer.ec_connector.shared_storage_connector import (  # noqa
+    ECConnectorMetadata  # type: ignore[import-not-found]  # noqa
+from vllm.distributed.ec_transfer.ec_connector.shared_storage_connector import (  # type: ignore[import-not-found]  # noqa
     ECSharedStorageConnector, ECSharedStorageConnectorMetadata)
 from vllm.logger import logger
 
