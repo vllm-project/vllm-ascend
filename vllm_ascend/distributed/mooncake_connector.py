@@ -207,76 +207,88 @@ class KVCacheSendingThread(threading.Thread):
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
+        try:
+            # Listen for new requests for metadata. NOTE(rob): we need each rank
+            # to have a unique port. This hack to keeps us moving. We will
+            # switch when moving to etcd or where we have a single ZMQ socket in
+            # the scheduler.
+            device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
+            handshake_port = self.side_channel_port + device_index
+            path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
+            logger.info("Starting listening on path: %s", path)
+            with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
+                self.ready_event.set()
+                self.run_busy_loop(sock)
+        except Exception as e:
+            logger.error("Mooncake KVCacheSendingThread exception: %s",
+                         e,
+                         exc_info=True)
 
+    def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         size_in_bytes = len(encoded_data)
         logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes",
                      str(size_in_bytes))
 
-        # Listen for new requests for metadata.
-        # NOTE(rob): we need each rank to have a unique port. This hack to keeps
-        # us moving. We will switch when moving to etcd or where we have a
-        # single ZMQ socket in the scheduler.
-        device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
-        handshake_port = self.side_channel_port + device_index
-        path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
-        logger.info("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
-            self.ready_event.set()
-            decoder = msgspec.msgpack.Decoder(type=tuple)
-            while True:
-                try:
-                    frames = sock.recv_multipart()
-                    if len(frames) < 2:
-                        logger.error("Invalid message format: %s", frames)
-                        continue
+        decoder = msgspec.msgpack.Decoder(type=tuple)
+        while True:
+            try:
+                frames = sock.recv_multipart()
+                if len(frames) < 2:
+                    logger.error("Invalid message format: %s", frames)
+                    continue
 
-                    identity = frames[0]
-                    payload = [f for f in frames[1:] if f != b""]
-                    if len(payload) != 1:
-                        logger.error("Invalid message format: %s", frames)
-                        continue
+                identity = frames[0]
+                payload = [f for f in frames[1:] if f != b""]
+                if len(payload) != 1:
+                    logger.error("Invalid message format: %s", frames)
+                    continue
 
-                    msg = decoder.decode(payload[0])
-                    if msg[0] == GET_META_MSG:
-                        sock.send_multipart((identity, b"", encoded_data))
-                    elif msg[0] == DONE_RECVING_MSG:
-                        logger.debug("Got DONE_RECVING_MSG for request %s",
-                                     msg[1])
-                        request_id = msg[1]
-                        self.task_tracker.update_done_task_count(request_id)
-                        # Acknowledge the request completion.
-                        while True:
-                            try:
-                                # Send ACK to the sender.
-                                sock.send_multipart(
-                                    (identity, b"", b"ACK"),
-                                    flags=zmq.NOBLOCK)  # type: ignore
-                                break
-                            except zmq.Again:  # type: ignore
-                                # If the socket is not ready, retry sending.
-                                logger.debug(
-                                    "Socket not ready, retrying to send ACK for "
-                                    "request %s", msg[1])
-                                time.sleep(0.01)
-                    else:
-                        logger.error(
-                            "Connection listener got unexpected message %s",
-                            msg)
-                except Exception as e:
-                    logger.error("Connection listener got exception %s: %s",
-                                 type(e), e)
+                msg = decoder.decode(payload[0])
+                if msg[0] == GET_META_MSG:
+                    sock.send_multipart((identity, b"", encoded_data))
+                elif msg[0] == DONE_RECVING_MSG:
+                    logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
+                    request_id = msg[1]
+                    self.task_tracker.update_done_task_count(request_id)
+                    # Acknowledge the request completion.
+                    while True:
+                        try:
+                            # Send ACK to the sender.
+                            sock.send_multipart(
+                                (identity, b"", b"ACK"),
+                                flags=zmq.NOBLOCK)  # type: ignore
+                            break
+                        except zmq.Again:  # type: ignore
+                            # If the socket is not ready, retry sending.
+                            logger.debug(
+                                "Socket not ready, retrying to send ACK for "
+                                "request %s", msg[1])
+                            time.sleep(0.01)
+                else:
+                    logger.error(
+                        "Connection listener got unexpected message %s", msg)
+            except Exception as e:
+                logger.error("Connection listener got exception %s: %s",
+                             type(e), e)
 
 
 class KVCacheRecvingThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, tp_size: int, _prefill_pp_size: int,
-                 engine: TransferEngine, local_engine_id: str,
+    def __init__(self,
+                 tp_rank: int,
+                 tp_size: int,
+                 _prefill_pp_size: int,
+                 engine: TransferEngine,
+                 local_engine_id: str,
                  local_handshake_port: int,
-                 local_kv_caches_base_addr: list[int], block_len: list[int],
-                 ready_event: threading.Event, vllm_config: VllmConfig,
-                 kv_caches: dict[str, Any]):
+                 local_kv_caches_base_addr: list[int],
+                 block_len: list[int],
+                 ready_event: threading.Event,
+                 vllm_config: VllmConfig,
+                 kv_caches: dict[str, Any],
+                 prefill_pp_layer_partition: Optional[str] = None):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -315,6 +327,14 @@ class KVCacheRecvingThread(threading.Thread):
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
+        self.num_layers = self.model_config.hf_config.num_hidden_layers
+        self.pp_layer_indices = {
+            rank:
+            get_prefill_pp_indices(self.num_layers, rank,
+                                   self._prefill_pp_size,
+                                   prefill_pp_layer_partition)
+            for rank in range(self._prefill_pp_size)
+        }
         if self.use_mla:
             self.k_head_dim = self.model_config.hf_config.kv_lora_rank
             self.v_head_dim = self.model_config.hf_config.qk_rope_head_dim
@@ -435,9 +455,14 @@ class KVCacheRecvingThread(threading.Thread):
 
         remote_kv_caches_base_addrs = \
             self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-        num_layers = self.model_config.hf_config.num_hidden_layers
-        first_layer_index, end_layer_index = get_pp_indices(
-            num_layers, prefill_pp_rank, self._prefill_pp_size)
+        first_layer_index, end_layer_index = self.pp_layer_indices[
+            prefill_pp_rank]
+        # support MTP layer kv transfer
+        if self.vllm_config.speculative_config is not None:
+            num_speculative_tokens = self.vllm_config.speculative_config.num_speculative_tokens
+            num_speculative_tokens = 0 if num_speculative_tokens is None else num_speculative_tokens
+            if prefill_pp_rank == self._prefill_pp_size - 1:
+                end_layer_index = end_layer_index + num_speculative_tokens
         num_cache_per_layer = len(list(
             self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = \
@@ -1020,6 +1045,8 @@ class MooncakeConnectorWorker:
         # get prefill pp size from extra config
         self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
         assert self._decode_pp_size == 1, "decode pp size must be 1"
+        self._prefill_pp_layer_partition = prefill_parallel_config.get(
+            "pp_layer_partition", None)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -1126,9 +1153,21 @@ class MooncakeConnectorWorker:
             self.kv_recv_thread = KVCacheRecvingThread(
                 self.tp_rank, self.tp_size, self._prefill_pp_size, self.engine,
                 self.engine_id, self.handshake_port, kv_caches_base_addr,
-                self.block_len, ready_event, self.vllm_config, self.kv_caches)
+                self.block_len, ready_event, self.vllm_config, self.kv_caches,
+                self._prefill_pp_layer_partition)
             self.kv_recv_thread.start()
-        ready_event.wait()
+
+        start_wait_time = time.time()
+        thread = self.kv_send_thread if self.kv_role == 'kv_producer' else self.kv_recv_thread
+        assert thread is not None
+        while not ready_event.is_set():
+            if not thread.is_alive():
+                raise RuntimeError(
+                    "KV Cache sending/receiving thread failed to start.")
+            if time.time() - start_wait_time > 5 * 60:
+                raise RuntimeError(
+                    "Timeout waiting for KV Cache thread to be ready.")
+            time.sleep(3)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_sending = (
@@ -1455,3 +1494,31 @@ def ensure_zmq_recv(
                 raise RuntimeError(
                     f"Failed to receive data after {max_retries} "
                     f"retries: {e}")
+
+
+# decode node should know pp_partition_layer in prefill node,
+# it is configured in kv_transfer_config by partition_list_str,
+# default using vllm layer split algorithm.
+def get_prefill_pp_indices(
+        num_hidden_layers: int,
+        pp_rank: int,
+        pp_size: int,
+        partition_list_str: Optional[str] = None) -> tuple[int, int]:
+    if partition_list_str is None:
+        return get_pp_indices(num_hidden_layers, pp_rank, pp_size)
+    else:
+        try:
+            partitions = [
+                int(layer) for layer in partition_list_str.split(",")
+            ]
+        except ValueError as err:
+            raise ValueError("Invalid partition string: {}".format(
+                partition_list_str)) from err
+        if len(partitions) != pp_size:
+            raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
+        if sum(partitions) != num_hidden_layers:
+            raise ValueError(
+                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+        start_layer = sum(partitions[:pp_rank])
+        end_layer = start_layer + partitions[pp_rank]
+        return (start_layer, end_layer)
