@@ -144,7 +144,6 @@ class EagleProposer(Proposer):
                            positions: torch.Tensor = None,
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
 
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
