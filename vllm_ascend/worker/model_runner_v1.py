@@ -203,8 +203,6 @@ class NPUModelRunner(GPUModelRunner):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         try:
-            self.dp_size = vllm_config.parallel_config.data_parallel_size
-            self.dp_rank = vllm_config.parallel_config.data_parallel_rank
             self.dcp_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
             self.pcp_size = get_pcp_group().world_size
