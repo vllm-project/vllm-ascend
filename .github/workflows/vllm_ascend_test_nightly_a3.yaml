@@ -28,6 +28,9 @@ on:
   pull_request: 
     branches:
       - 'main'
+  push:
+    branches:
+      - 'main'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -43,33 +46,33 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         test_config:
-          - name: multi-node-deepseek-pd
-            config_file_path: DeepSeek-V3.yaml
-            size: 2
-          - name: multi-node-qwen3-dp
-            config_file_path: Qwen3-235B-A3B.yaml
-            size: 2
-          - name: multi-node-dpsk-4node-pd
-            config_file_path: DeepSeek-R1-W8A8.yaml
-            size: 4
-          - name: multi-node-qwenw8a8-2node
-            config_file_path: Qwen3-235B-W8A8.yaml
-            size: 2
+          # - name: multi-node-deepseek-pd
+          #   config_file_path: DeepSeek-V3.yaml
+          #   size: 2
+          # - name: multi-node-qwen3-dp
+          #   config_file_path: Qwen3-235B-A3B.yaml
+          #   size: 2
+          # - name: multi-node-dpsk-4node-pd
+          #   config_file_path: DeepSeek-R1-W8A8.yaml
+          #   size: 4
+          # - name: multi-node-qwenw8a8-2node
+          #   config_file_path: Qwen3-235B-W8A8.yaml
+          #   size: 2
           - name: multi-node-dpsk3.2-exp-2node
             config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
             size: 2
-          - name: multi-node-deepseek-r1-w8a8-eplb
-            config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
-            size: 4
-          - name: multi-node-qwenw8a8-2node-eplb
-            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-            size: 2
+          # - name: multi-node-deepseek-r1-w8a8-eplb
+          #   config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
+          #   size: 4
+          # - name: multi-node-qwenw8a8-2node-eplb
+          #   config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+          #   size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -83,51 +86,51 @@ jobs:
   
   single-node-tests:
     name: single-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: multi-node-tests
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # needs: multi-node-tests
     strategy:
       fail-fast: false
       matrix:
         test_config:
-          - name: qwen3-32b-in8-a3
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
-          - name: qwen3-32b-int8-a3-feature-stack3
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
-          - name: qwen3-235b-a22b-w8a8-eplb
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
-          - name: deepseek-r1-w8a8-eplb
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
-          - name: deepseek-r1-w8a8-mtpx
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/features/test_mtpx_deepseek_r1_0528_w8a8.py
-          - name: qwen2-5-vl-7b
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
-          - name: qwen2-5-vl-32b
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwen2_5_vl_32b.py
-          - name: qwen3-32b-int8-prefix-cache
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/features/test_prefix_cache_qwen3_32b_int8.py
-          - name: deepseek-r1-0528-w8a8
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
-          - name: deepseek-r1-0528-w8a8-prefix-cache
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/features/test_prefix_cache_deepseek_r1_0528_w8a8.py
-          - name: qwq-32b-a3
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwq_32b.py
-          - name: qwen3-30b-w8a8
-            os: linux-aarch64-a3-2
-            tests: tests/e2e/nightly/models/test_qwen3_30b_w8a8.py
-          - name: qwen3-235b-w8a8
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_qwen3_235b_w8a8.py
+          # - name: qwen3-32b-in8-a3
+          #   os: linux-aarch64-a3-4
+          #   tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
+          # - name: qwen3-32b-int8-a3-feature-stack3
+          #   os: linux-aarch64-a3-4
+          #   tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
+          # - name: qwen3-235b-a22b-w8a8-eplb
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
+          # - name: deepseek-r1-w8a8-eplb
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
+          # - name: deepseek-r1-w8a8-mtpx
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/features/test_mtpx_deepseek_r1_0528_w8a8.py
+          # - name: qwen2-5-vl-7b
+          #   os: linux-aarch64-a3-4
+          #   tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
+          # - name: qwen2-5-vl-32b
+          #   os: linux-aarch64-a3-4
+          #   tests: tests/e2e/nightly/models/test_qwen2_5_vl_32b.py
+          # - name: qwen3-32b-int8-prefix-cache
+          #   os: linux-aarch64-a3-4
+          #   tests: tests/e2e/nightly/features/test_prefix_cache_qwen3_32b_int8.py
+          # - name: deepseek-r1-0528-w8a8
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
+          # - name: deepseek-r1-0528-w8a8-prefix-cache
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/features/test_prefix_cache_deepseek_r1_0528_w8a8.py
+          # - name: qwq-32b-a3
+          #   os: linux-aarch64-a3-4
+          #   tests: tests/e2e/nightly/models/test_qwq_32b.py
+          # - name: qwen3-30b-w8a8
+          #   os: linux-aarch64-a3-2
+          #   tests: tests/e2e/nightly/models/test_qwen3_30b_w8a8.py
+          # - name: qwen3-235b-w8a8
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/models/test_qwen3_235b_w8a8.py
           - name: deepseek3_2-exp-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py

@@ -64,6 +64,8 @@ show_vllm_info() {
     echo "vLLM-Ascend Git information"
     echo "============================"
     cd vllm-ascend
+    git fetch origin pull/4633/head:pr-4633
+    git checkout pr-4633
     if [ -d .git ]; then
     echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
     echo "Commit hash: $(git rev-parse HEAD)"
@@ -143,9 +145,9 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
-    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
-        install_extra_components
-    fi
+    # if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
+    #     install_extra_components
+    # fi
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }

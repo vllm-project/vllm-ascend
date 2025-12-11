@@ -70,7 +70,7 @@ aisbench_cases = [{
 async def test_models(model: str, tp_size: int, dp_size: int,
                       full_graph: bool) -> None:
     port = get_open_port()
-    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "0"}
+    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "1"}
     server_args = [
         "--no-enable-prefix-caching", "--enable-expert-parallel",
         "--tensor-parallel-size",
