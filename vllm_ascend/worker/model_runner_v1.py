@@ -161,11 +161,28 @@ import torch_npu
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
-if get_ascend_device_type() == AscendDeviceType._310P:
+# 修复 310P 内存分配问题：恢复 v0.10.0rc1 的逻辑
+# 310P 只在 torchair_graph_enabled=False 时使用 NZ 格式，否则使用 ND 格式
+# 参考: v0.10.0rc1 中 is_310p() and not self.torchair_graph_enabled 的判断
+from vllm_ascend.utils import is_310p
+
+# 检查是否为 310P 设备
+is_310p_device = get_ascend_device_type() == AscendDeviceType._310P
+
+if is_310p_device:
     torch_npu.npu.set_compile_mode(jit_compile=False)
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
+    # 310P 设备：根据 torchair_graph_enabled 决定格式
+    # eager 模式 (--enforce-eager) 对应 torchair_graph_enabled=False，使用 ND 格式节省内存
+    # graph 模式使用 NZ 格式以获得更好性能
+    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ if not self.torchair_graph_enabled else ACL_FORMAT_FRACTAL_ND
 else:
     ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
+
+# 添加调试信息：310P 设备的格式设置
+if is_310p_device:
+    from vllm.logger import logger
+    logger.info(f"310P device detected: torchair_graph_enabled={self.torchair_graph_enabled}, "
+                f"ACL_FORMAT={'NZ' if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ else 'ND'}")
 
 
 @dataclass
