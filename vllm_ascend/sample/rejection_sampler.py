@@ -20,14 +20,13 @@ GREEDY_TEMPERATURE = -1
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 32
 
-
 vectorcore_num = None
 device_properties = None
 
-
 if HAS_TRITON:
-    from triton.runtime import driver
-    device_properties = driver.active.utils.get_device_properties(torch.npu.current_device())
+    from triton.runtime import driver #type: ignore
+    device_properties = driver.active.utils.get_device_properties(
+        torch.npu.current_device())
     vectorcore_num = device_properties['num_vectorcore']
 #get vector core number in order for later tiling
 
@@ -239,7 +238,7 @@ def rejection_sample(
 
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
-                rejection_greedy_sample_spec_len_1_triton[(grid,)](
+                rejection_greedy_sample_spec_len_1_triton[(grid, )](
                     output_token_ids,
                     draft_token_ids,
                     target_argmax,
@@ -248,7 +247,7 @@ def rejection_sample(
                     BLOCK_SIZE=BLOCK_SIZE,
                 )
             else:
-                rejection_greedy_sample_triton[(grid,)](
+                rejection_greedy_sample_triton[(grid, )](
                     output_token_ids,
                     cu_num_draft_tokens,
                     draft_token_ids,
@@ -377,7 +376,7 @@ def expand_batch_to_tokens(
             grid = vectorcore_num
             BLOCK_SIZE = triton.next_power_of_2(n // grid)
 
-        expand_kernel[(grid,)](
+        expand_kernel[(grid, )](
             expanded_x,
             x,
             cu_num_tokens,
