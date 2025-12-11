@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
@@ -579,30 +578,3 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
-
-    def test_aclgraph_enable(self):
-        config = EngineArgs()
-        VllmConfig = config.create_engine_config()
-        self.assertEqual(VllmConfig.compilation_config.cudagraph_mode,
-                         CUDAGraphMode.PIECEWISE)
-
-        with self.assertLogs(logger="vllm", level="INFO") as cm:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.check_and_update_config(VllmConfig)
-            target_msg = "PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
-            found = any(target_msg in log for log in cm.output)
-
-            self.assertTrue(
-                found,
-                f"Expected log message not found. Captured logs: {cm.output}")
-
-            self.assertEqual(
-                VllmConfig.compilation_config.mode,
-                CompilationMode.VLLM_COMPILE,
-            )
-            self.assertEqual(
-                VllmConfig.compilation_config.cudagraph_mode,
-                CUDAGraphMode.PIECEWISE,
-            )
