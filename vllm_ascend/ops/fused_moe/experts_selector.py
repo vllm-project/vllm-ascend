@@ -98,13 +98,14 @@ def select_experts(hidden_states: torch.Tensor,
             global_num_experts=global_num_experts,
         )
     if mix_placement:
+        shared_expert_routing_fator = 0.4
         pad_shared_expert_ids = torch.full((topk_ids.shape[0], 1),
                                            num_logical_experts,
                                            dtype=topk_ids.dtype,
                                            device=topk_ids.device)
 
         pad_shared_expert_weights = torch.full((topk_weights.shape[0], 1),
-                                               0.4,
+                                               shared_expert_routing_fator,
                                                dtype=topk_weights.dtype,
                                                device=topk_weights.device)
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
@@ -318,3 +319,4 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
