@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
 import numpy as np
 import regex as re
 import torch
-import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
@@ -753,7 +752,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.with_prefill = with_prefill
         self.num_tokens_across_dp = num_tokens_across_dp
-        self._update_graph_pad_size(with_prefill, maybe_padded_num_tokens)
         attn_metadata: dict[str, Any] = {}
 
         # Record the index of requests that should not be sampled,
@@ -1036,7 +1034,6 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state=self.attn_state,
                 is_only_prefill=bool(np.all(num_valid_tokens != 1)),
                 max_query_len=max_num_scheduled_tokens,
-                graph_pad_size=self.graph_pad_size,
                 decode_token_per_req=self.decode_token_per_req,
                 prefill_context_parallel_metadata=long_seq_metadata,
             )
@@ -1149,8 +1146,7 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device)
         return model_kwargs
 
-    def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
-                                             maybe_padded_num_tokens,
+    def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
@@ -1231,16 +1227,6 @@ class NPUModelRunner(GPUModelRunner):
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
         return attn_state
-
-    def _update_graph_pad_size(self, with_prefill, graph_pad_size):
-        self.graph_pad_size = -1
-
-    def _update_input_ids_and_positions(self, input_ids, positions,
-                                        num_input_tokens, with_prefill,
-                                        maybe_padded_num_tokens):
-        if self.uses_mrope:
-            positions = self.mrope_positions.gpu[:, :num_input_tokens]
-        return input_ids, positions
 
     def _calc_spec_decode_metadata(
         self,
@@ -1516,8 +1502,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
-                    attn_metadata, self.with_prefill, maybe_padded_num_tokens,
-                    input_ids, positions, intermediate_tensors, inputs_embeds)
+                    maybe_padded_num_tokens, input_ids, positions,
+                    intermediate_tensors, inputs_embeds)
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1953,9 +1939,9 @@ class NPUModelRunner(GPUModelRunner):
 
         return attn_metadata
 
-    def _generate_dummy_run_hidden_states(self, with_prefill, input_ids,
-                                          positions, attn_metadata, num_tokens,
-                                          intermediate_tensors, inputs_embeds):
+    def _generate_dummy_run_hidden_states(self, input_ids, positions,
+                                          num_tokens, intermediate_tensors,
+                                          inputs_embeds):
         hidden_states = self.model(input_ids=input_ids,
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
@@ -2176,8 +2162,8 @@ class NPUModelRunner(GPUModelRunner):
                     model_instance=self.model,
                     weight_prefetch_method=self.weight_prefetch_method):
                 hidden_states = self._generate_dummy_run_hidden_states(
-                    with_prefill, input_ids, positions, attn_metadata,
-                    num_tokens_padded, intermediate_tensors, inputs_embeds)
+                    input_ids, positions, num_tokens_padded,
+                    intermediate_tensors, inputs_embeds)
                 dummy_compute_logits(hidden_states)
 
             if self.drafter:
