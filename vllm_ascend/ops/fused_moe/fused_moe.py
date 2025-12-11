@@ -94,8 +94,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_force_load_balance: bool = False,
+            activation: str = "silu",
+            enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         **kwargs,
     ) -> torch.Tensor:
