@@ -29,6 +29,69 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
                                get_ascend_device_type)
 
+# Currently, rope ops used on npu requires detached cos && sin as inputs.
+# However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
+# So we have to preprocess cos_sin_cache int cos && sin. In the future,
+# we shall implement a new rope ops which accept cos_sin_cache as inputs.
+_cos_sin_cache: Optional[torch.Tensor] = None
+_cos_cache: Optional[torch.Tensor] = None
+_sin_cache: Optional[torch.Tensor] = None
+_cos: Optional[torch.Tensor] = None
+_sin: Optional[torch.Tensor] = None
+
+
+def _record_cos_sin_cache(cos_sin_cache):
+    global _cos_sin_cache
+    if _cos_sin_cache is not None:
+        return
+    _cos_sin_cache = cos_sin_cache
+
+
+def initialize_cos_sin(vllm_config, dtype, device):
+    global _cos_cache
+    global _sin_cache
+
+    head_dim = vllm_config.model_config.get_head_size()
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    _cos_cache = torch.ones(1,
+                            max_num_batched_tokens,
+                            1,
+                            head_dim,
+                            dtype=dtype,
+                            device=device)
+    _sin_cache = torch.zeros(1,
+                             max_num_batched_tokens,
+                             1,
+                             head_dim,
+                             dtype=dtype,
+                             device=device)
+
+
+def update_cos_sin(positions):
+    global _cos_cache
+    global _sin_cache
+    global _cos
+    global _sin
+
+    if _cos_sin_cache is None or \
+        _cos_cache is None or \
+        _sin_cache is None:
+        return
+
+    num_tokens = positions.size(0)
+    _cos_cache[:, :num_tokens] = _cos_sin_cache.index_select(
+        0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2,
+                                                                    dim=-2)[0]
+    _sin_cache[:, :num_tokens] = _cos_sin_cache.index_select(
+        0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2,
+                                                                    dim=-2)[1]
+    _cos = _cos_cache[:, :num_tokens]
+    _sin = _sin_cache[:, :num_tokens]
+
+
+def get_cos_sin():
+    return _cos, _sin
+
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
     return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
@@ -65,8 +128,9 @@ def _rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        if hasattr(self, "cos") and hasattr(self, "sin") and \
-            self.cos is not None and self.sin is not None:
+        cos, sin = get_cos_sin()
+        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
+                -1] == 128 and cos is not None and sin is not None:
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,
@@ -75,7 +139,7 @@ def _rope_forward_oot(
             # Although this function modifies in-place, please retain the function's return value.
             # Otherwise, the graph fusion operation may fail.
             query, key = torch_npu.npu_apply_rotary_pos_emb(
-                query, key, forward_context.cos, forward_context.sin)
+                query, key, cos, sin)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
@@ -125,10 +189,9 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style: bool,
         dtype: torch.dtype,
     ) -> None:
-        self.cos = None
-        self.sin = None
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
+        _record_cos_sin_cache(self.cos_sin_cache)
 
     def forward_oot(
         self,
@@ -162,8 +225,6 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
     ) -> None:
-        self.cos = None
-        self.sin = None
         extra_kwargs = {
             "extrapolation_factor": extrapolation_factor,
             "attn_factor": attn_factor,
@@ -172,6 +233,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         }
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, scaling_factor, dtype, **extra_kwargs)
+        _record_cos_sin_cache(self.cos_sin_cache)
 
     def forward_oot(
         self,
