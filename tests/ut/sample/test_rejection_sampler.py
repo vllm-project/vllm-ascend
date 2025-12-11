@@ -123,11 +123,32 @@ class TestAscendRejectionSampler(TestBase):
         assert torch.equal(output_ptr, expected)
 
     def test_expand_batch_to_tokens(self):
-        """Test expand_batch_to_tokens wrapper"""
+        """Test expand_batch_to_tokens wrapper with both Triton and PyTorch paths"""
         x = torch.tensor([10, 20, 30])
         cu_num_tokens = torch.tensor([2, 5, 7])
         num_tokens = 7
 
+        # Test PyTorch path
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+            with patch("vllm_ascend.sample.rejection_sampler.expand_pytorch"
+                       ) as mock_pytorch:
+                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+                mock_pytorch.assert_called_once()
+                args = mock_pytorch.call_args[0]
+                assert (args[1] == x).all()
+                assert (args[2] == cu_num_tokens).all()
+
+        # Test Triton kernel path
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True):
+            with patch("vllm_ascend.sample.rejection_sampler.expand_kernel"
+                       ) as mock_triton:
+                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+                mock_triton.__getitem__.assert_called_once_with((3, ))
+                call_args = mock_triton.__getitem__.return_value.call_args[0]
+                assert (call_args[1] == x).all()
+                assert (call_args[2] == cu_num_tokens).all()
+
+        # Run actual function
         with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
             result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
             expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
