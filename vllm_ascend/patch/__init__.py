@@ -129,4 +129,14 @@
 #    Future Plan:
 #       Remove this patch when adapted vllm version contains the above PR.
 #
-from vllm_ascend.patch.worker import patch_deepseekv3
+# ** File: worker/patch_deepseekv3.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#    1. vllm.model_executor.models.deepseek_v2 (DeepseekV2 & DeepseekMoE related logic)
+#    Why:
+#      The mix placement feature requires modifying the loading format of DeepseekV3 shared expert weights and adjusting the inference path of DeepseekMoE.
+#    How：
+#      Patch the weight loading logic of DeepseekV3 to adapt to the mix placement storage format, and modify the forward inference path of DeepseekMoE to support the mix placement feature.
+#    Related PR (if no, explain why):
+#      https://github.com/vllm-project/vllm/pull/4881
+#    Future Plan:
+#      Remove this patch after the mix placement feature is natively implemented in the official vllm codebase.
