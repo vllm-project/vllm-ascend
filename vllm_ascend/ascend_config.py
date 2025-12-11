@@ -190,19 +190,18 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+    def __init__(self, fuse_norm_quant: bool = True, **kwargs):
         """
         Initialize the configuration.
         
         Args:
-            enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
-                When set to True, the system will optimize quantization-related operations,
-                reducing the number of quantization/dequantization nodes.
+            fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
+                When set to True, the system will optimize norm and quant operations.
                 Default: True
                 
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
-        self.enable_quantization_fusion = enable_quantization_fusion
+        self.fuse_norm_quant = fuse_norm_quant
         # Add more compilation related configs here as needed
 
 
