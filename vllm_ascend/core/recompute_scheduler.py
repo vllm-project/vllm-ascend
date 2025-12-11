@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from typing import Type, Union
 
 from vllm._bc_linter import bc_linter_include
+from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
@@ -31,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
     KVConnectorStats
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
@@ -42,13 +45,9 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from dataclasses import dataclass, fields
-from typing import Type, Union
-
-from vllm.config import SchedulerConfig, VllmConfig
 
 logger = init_logger(__name__)
+
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -64,8 +63,7 @@ class RecomputeSchedulerConfig(SchedulerConfig):
         }
         if vllm_scheduler_config.async_scheduling:
             scheduler_config["scheduler_cls"] = (
-                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler"
-            )
+                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler")
         else:
             scheduler_config["scheduler_cls"] = (
                 "vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
