@@ -1,4 +1,4 @@
-# Prefill-Decode Disaggregation Mooncake Verification (Qwen2.5-VL)
+# Prefill-Decode Disaggregation (Qwen2.5-VL)
 
 ## Getting Start
 

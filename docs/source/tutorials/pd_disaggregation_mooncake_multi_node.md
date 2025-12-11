@@ -1,4 +1,4 @@
-# Prefill-Decode Disaggregation Mooncake Verification (Deepseek)
+# Prefill-Decode Disaggregation (Deepseek)
 
 ## Getting Start
 
