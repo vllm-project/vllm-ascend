@@ -52,14 +52,12 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
-    @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
-        mock_try_register_lib,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
@@ -94,12 +92,6 @@ class TestNPUWorker(TestBase):
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
         mock_check_ascend_device_type.assert_called_once()
 
-        # Verify try_register_lib call
-        mock_try_register_lib.assert_called_once_with(
-            "mindie_turbo",
-            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo.",
-        )
-
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
         mock_init_profiler.assert_called_once()
@@ -114,14 +106,12 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
-    @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
-        mock_try_register_lib,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
@@ -159,14 +149,12 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
-    @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
-        mock_try_register_lib,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,

@@ -1,4 +1,4 @@
-# DeepSeek-V3.2-Exp
+# DeepSeek-V3.2
 
 ## Introduction
 

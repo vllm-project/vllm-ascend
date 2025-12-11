@@ -1,4 +1,4 @@
-# DeepSeek-V3.1
+# DeepSeek-V3/3.1
 
 ## Introduction
 
@@ -251,7 +251,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
+We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
  - `DeepSeek-V3.1_w8a8mix_mtp 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
