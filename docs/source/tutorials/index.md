@@ -10,6 +10,7 @@ single_npu_qwen3_embedding
 single_npu_qwen3_quantization
 single_npu_qwen3_w4a4
 single_node_pd_disaggregation_mooncake
+Qwen2.5
 multi_npu_qwen3_next
 multi_npu
 multi_npu_kimi-k2-thinking
