@@ -34,10 +34,15 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
+from vllm_ascend.ops.shared_weight_layer import (
+    is_hidden_layer, post_process_after_loading_for_shared_weight_series,
+    reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, weak_ref_tensors)
+                               flashcomm2_o_shared_enabled, is_enable_nz,
+                               weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -848,6 +853,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             'q_b_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
+        self.vllm_config = get_current_vllm_config()
+        self.fc2_o_shared_enable = flashcomm2_o_shared_enabled()
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            from vllm_ascend.distributed.parallel_state import \
+                get_shared_weight_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_shared_weight_group(),
+                layer=self.o_proj,
+                prefetch_step=1)
+
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
@@ -858,10 +876,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
 
-        vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
 
-        self.speculative_config = vllm_config.speculative_config
+        self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         self.pcp_size = get_pcp_group().world_size
@@ -995,6 +1012,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
 
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            post_process_after_loading_for_shared_weight_series(self.o_proj)
+
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
             ..., self.q_lora_rank:].contiguous()
@@ -1064,7 +1085,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         device = self.q_proj.weight.device
         self.gamma1 = self.q_a_layernorm.weight.data
-        self.beta1 = self.q_a_layernorm.bias.data
+        self.beta1 = torch.zeros_like(self.gamma1) if (
+            _bias := self.q_a_layernorm.bias) is None else _bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
         self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
         self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
@@ -1460,7 +1482,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_out0=decode_k_nope,
             q_out1=decode_q_pe,
             kv_cache_out1=decode_k_pe,
-        )
+            enable_inner_out=False,
+            inner_out=torch.tensor([], device=hidden_states.device))
         decode_q_nope = decode_q_nope.view(bsz, self.num_heads,
                                            self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
@@ -1512,6 +1535,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_c.contiguous(), need_gather_q_kv)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            reach_layer_for_shared_weight_series(self.o_proj)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
@@ -1631,6 +1658,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
+            if self.fc2_o_shared_enable and is_hidden_layer(
+                    self.vllm_config, self.o_proj):
+                reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size

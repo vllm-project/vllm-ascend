@@ -49,7 +49,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
@@ -123,14 +122,6 @@ atexit.register(_unregister_print_streams_on_exit)
 
 def is_enable_nz():
     return envs_ascend.VLLM_ASCEND_ENABLE_NZ
-
-
-def sleep_mode_enabled():
-    global _SLEEP_MODE_ENABLED
-    if _SLEEP_MODE_ENABLED is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
-    return _SLEEP_MODE_ENABLED
 
 
 def _round_up(x: int, align: int):
@@ -962,17 +953,22 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
-                                                     vllm_config):
+def flashcomm2_o_shared_enabled() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
+
+
+def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+    flashcomm2_oproj_shared = flashcomm2_o_shared_enabled()
 
     if not flashcomm2_enable():
-        logger.debug("FLASHCOMM2 not enable.")
-        return flashcomm2_oproj_tp_size
+        flashcomm2_oproj_shared = False
+        logger.info("FLASHCOMM2 not enable.")
+        return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(
-        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size={flashcomm2_oproj_tp_size} and global_tp_size={global_tp_size}"
+        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size} and oproj_shared_enabled = {flashcomm2_oproj_shared}"
     )
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
@@ -999,8 +995,10 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
             "FLASHCOMM2 primarily targets P-scenario deployments, "
             "with additional support for hybrid deployment scenarios. "
             "It is not applicable in D-scenario environments.")
+    if flashcomm2_oproj_shared:
+        logger.info("Enable FLASHCOMM2 with oproj_shared.")
 
-    return flashcomm2_oproj_tp_size
+    return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:

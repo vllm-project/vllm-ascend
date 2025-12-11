@@ -32,7 +32,6 @@ from vllm_ascend.ascend_forward_context import (MoECommType,
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
-                                               set_mtp_graph_params,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
@@ -46,7 +45,9 @@ _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "DeepseekV32ForCausalLM":
-    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP")
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "Qwen3NextForCausalLM":
+    ("vllm.model_executor.models.qwen3_next_mtp", "Qwen3NextMTP")
 }
 
 _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
@@ -201,21 +202,20 @@ class MtpProposer(Proposer):
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
 
-        # check if mtp model use main model's embedding and LMhead
-        main_model = model
-        if torch.equal(self.model.model.embed_tokens.weight,
-                       main_model.model.embed_tokens.weight):
-            self.model.model.embed_tokens = main_model.model.embed_tokens
-        for _, layer_module in self.model.model.layers.items():
-            if torch.equal(layer_module.shared_head.head.weight,
-                           main_model.lm_head.weight):
-                layer_module.shared_head.head = main_model.lm_head
+        if self.vllm_config.model_config.is_deepseek_mla:
+            # check if mtp model use main model's embedding and LMhead
+            main_model = model
+            if torch.equal(self.model.model.embed_tokens.weight,
+                           main_model.model.embed_tokens.weight):
+                self.model.model.embed_tokens = main_model.model.embed_tokens
+            for _, layer_module in self.model.model.layers.items():
+                if torch.equal(layer_module.shared_head.head.weight,
+                               main_model.lm_head.weight):
+                    layer_module.shared_head.head = main_model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ):
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            set_mtp_graph_params(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
@@ -236,7 +236,13 @@ class MtpProposer(Proposer):
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
-
+        if self.use_async_scheduling:
+            # there is synchronization between mtp steps when enabling aclgraph,
+            # disable aclgraph when use async scheduling to avoid the
+            # synchronization overhead.
+            # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
+            # and _propose.
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         # TODO: remove this after moe_comm_type selection logic is finalized
         moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
@@ -254,9 +260,10 @@ class MtpProposer(Proposer):
                     query_start_loc_cpu=self.runner.
                     query_start_loc_cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens_cpu,
-                    seq_lens=self.runner.seq_lens_cpu[:num_reqs],
+                    seq_lens=self.runner.seq_lens[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
+                    num_input_tokens=num_tokens,
                     max_query_len=self.num_speculative_tokens + 1,
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
@@ -289,7 +296,7 @@ class MtpProposer(Proposer):
         positions = self.positions[:num_tokens]
         previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
-            if i > 0:
+            if i > 0 and not skip_attn and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,
@@ -316,7 +323,7 @@ class MtpProposer(Proposer):
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
                     not forward_context.capturing:
-                    if self.vllm_config.model_config.use_mla:
+                    if self.vllm_config.model_config.use_mla and not self.use_sparse:
                         update_mla_attn_params(
                             self.update_stream, forward_context, num_tokens,
                             self.vllm_config.speculative_config)
@@ -514,6 +521,7 @@ class MtpProposer(Proposer):
         #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
+        num_actual_reqs = len(num_draft_tokens)
         num_rejected_tokens = [
             n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
             for i, n in enumerate(num_draft_tokens)
@@ -522,8 +530,11 @@ class MtpProposer(Proposer):
                                            dtype=torch.int32)
 
         device = common_attn_metadata.query_start_loc.device
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
+                                                                       num_actual_reqs
+                                                                       + 1]
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
+        new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[
@@ -587,6 +598,7 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
+            num_input_tokens=common_attn_metadata.num_input_tokens,
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -595,7 +607,6 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
         )
         return spec_common_attn_metadata, token_indices
@@ -704,8 +715,8 @@ class MtpProposer(Proposer):
 
         assert self.runner is not None
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
-        ) and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]:
+        if self.runner.use_aclgraph and num_scheduled_tokens <= self.cudagraph_batch_sizes[
+                -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         elif self.use_aclgraph and num_tokens <= self.cudagraph_batch_sizes[-1]:
@@ -739,17 +750,18 @@ class MtpProposer(Proposer):
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
         if self.use_async_scheduling:
-            # there is synchronize between mtp steps when enable aclgraph,
+            # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
-            # synchronize overhead.
+            # synchronization overhead.
+            # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
+            # and _propose.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
             graph_pad_size = num_input_tokens
         else:
-            # Currently, runner.graph_pad_size will always be -1.
-            graph_pad_size = self.runner.graph_pad_size
+            graph_pad_size = -1
 
         # If use fullgraph and disable_padded_drafter_batch=True, We need to
         # update the graph_pad_size in common_attn_metadata, to tell the
@@ -797,7 +809,7 @@ class MtpProposer(Proposer):
                                                hidden_states=hidden_states)
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                        if self.vllm_config.model_config.use_mla:
+                        if self.vllm_config.model_config.use_mla and not self.use_sparse:
                             update_mla_attn_params(
                                 self.update_stream, forward_context,
                                 num_input_tokens,
@@ -1109,9 +1121,10 @@ class MtpProposer(Proposer):
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens_cpu=common_attn_metadata.seq_lens,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
+            num_input_tokens=common_attn_metadata.num_input_tokens,
             max_query_len=new_query_len_per_req.max().item(),
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=common_attn_metadata.block_table_tensor,
@@ -1120,7 +1133,6 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
