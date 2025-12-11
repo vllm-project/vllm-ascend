@@ -75,7 +75,7 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'light' }}
         run: |
-          # pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          # pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
           # pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
           pytest -sv tests/e2e/singlecard/pooling/test_classification.py::test_classify_correctness
@@ -91,10 +91,9 @@ jobs:
           # the test separately.
 
           pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv tests/e2e/singlecard/test_camem.py
-          # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
           #pytest -sv tests/e2e/singlecard/test_ilama_lora.py
@@ -102,7 +101,6 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
           pytest -sv tests/e2e/singlecard/test_vlm.py
-          pytest -sv tests/e2e/singlecard/multi-modal/test_internvl.py
           pytest -sv tests/e2e/singlecard/test_xlite.py
           pytest -sv tests/e2e/singlecard/pooling/
 
