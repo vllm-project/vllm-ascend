@@ -40,7 +40,7 @@ concurrency:
 
 jobs:
   lint:
-    uses: ./.github/workflows/pre-commit.yml
+    uses: ./.github/workflows/_pre_commit.yml
     with:
       vllm: ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
   changes:
