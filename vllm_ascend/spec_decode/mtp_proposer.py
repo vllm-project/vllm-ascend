@@ -607,7 +607,6 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
         )
         return spec_common_attn_metadata, token_indices
@@ -762,8 +761,7 @@ class MtpProposer(Proposer):
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
             graph_pad_size = num_input_tokens
         else:
-            # Currently, runner.graph_pad_size will always be -1.
-            graph_pad_size = self.runner.graph_pad_size
+            graph_pad_size = -1
 
         # If use fullgraph and disable_padded_drafter_batch=True, We need to
         # update the graph_pad_size in common_attn_metadata, to tell the
@@ -1135,7 +1133,6 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
