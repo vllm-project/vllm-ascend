@@ -16,7 +16,7 @@ def random_sample(
     """Randomly sample from the probabilities.
 
     We use this function instead of torch.multinomial because torch.multinomial
-    causes CPU-GPU synchronization.
+    causes CPU-NPU synchronization.
     """
     # NOTE(woosuk): To batch-process the requests without their own seeds,
     # which is the common case, we first assume that every request does
