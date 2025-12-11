@@ -52,16 +52,14 @@ def test_models_with_aclgraph(
             enforce_eager=False,
             cuda_graph_sizes=[4],
     ) as vllm_model:
-        vllm_aclgraph_outputs = vllm_model.generate_greedy(
-            prompts, max_tokens)
+        vllm_aclgraph_outputs = vllm_model.generate_greedy(prompts, max_tokens)
 
     with VllmRunner(
             model,
             max_model_len=1024,
             enforce_eager=True,
     ) as vllm_model:
-        vllm_eager_outputs = vllm_model.generate_greedy(prompts,
-                                                    max_tokens)
+        vllm_eager_outputs = vllm_model.generate_greedy(prompts, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs,
