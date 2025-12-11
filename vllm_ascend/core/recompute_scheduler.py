@@ -42,8 +42,51 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from dataclasses import dataclass, fields
+from typing import Type, Union
+
+from vllm.config import SchedulerConfig, VllmConfig
 
 logger = init_logger(__name__)
+
+@dataclass
+class RecomputeSchedulerConfig(SchedulerConfig):
+    scheduler_cls: Union[str, Type[object]] = (
+        "vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
+
+    @classmethod
+    def initialize_from_config(cls, vllm_config: VllmConfig):
+        vllm_scheduler_config = vllm_config.scheduler_config
+        scheduler_config = {
+            field.name: getattr(vllm_scheduler_config, field.name)
+            for field in fields(vllm_scheduler_config) if field.init
+        }
+        if vllm_scheduler_config.async_scheduling:
+            scheduler_config["scheduler_cls"] = (
+                "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler"
+            )
+        else:
+            scheduler_config["scheduler_cls"] = (
+                "vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
+        scheduler_config[
+            "max_model_len"] = vllm_config.model_config.max_model_len
+        scheduler_config[
+            "is_encoder_decoder"] = vllm_config.model_config.is_encoder_decoder
+        return cls(**scheduler_config)
+
+
+@dataclass
+class RecomputeReqInfo:
+    request_id: str
+    output_token_ids: ConstantList
+    client_index: int = 0
+
+
+@bc_linter_include
+@dataclass
+class RecomputeSchedulerOutput(SchedulerOutput):
+    recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
 class RecomputeScheduler(Scheduler):
@@ -794,14 +837,7 @@ class RecomputeScheduler(Scheduler):
         return engine_core_outputs
 
 
-@dataclass
-class RecomputeReqInfo:
-    request_id: str
-    output_token_ids: ConstantList
-    client_index: int = 0
+class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
 
-
-@bc_linter_include
-@dataclass
-class RecomputeSchedulerOutput(SchedulerOutput):
-    recomputed_reqs: list[RecomputeReqInfo] | None = None
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
