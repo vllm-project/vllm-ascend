@@ -18,13 +18,9 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen2.5-7B-Instruct`(BF16 version): require 2 910B4 cards(32G × 2). [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
+- `Qwen2.5-7B-Instruct`(BF16 version): require 1 910B4 cards(32G × 1). [Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct)
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment.
-
-### Verify Multi-node Communication(Optional)
-
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
 
 ### Installation
 
@@ -47,7 +43,6 @@ docker run --rm \
     --shm-size=1g \
     --net=host \
     --device /dev/davinci0 \
-    --device /dev/davinci1 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -76,7 +71,6 @@ docker run --rm \
     --shm-size=1g \
     --net=host \
     --device /dev/davinci0 \
-    --device /dev/davinci1 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -104,8 +98,7 @@ Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 pla
 
 ```shell
 #!/bin/sh
-export VLLM_ASCEND_ENABLE_FLASHCOMM=1
-export ASCEBD_RT_VISIBLE_DEVICES=0,1
+export ASCEBD_RT_VISIBLE_DEVICES=0
 
 vllm serve ./Qwen2.5-7B-Instruct/ \
           --host <IP> \
@@ -113,7 +106,7 @@ vllm serve ./Qwen2.5-7B-Instruct/ \
           --served-model-name qwen-2.5-7b-instruct \
           --trust-remote-code \
           --max-model-len 32768 \
-          --tensor-parallel-size 2 \
+          --tensor-parallel-size 1 \
           --enforce-eager
 ```
 
@@ -143,8 +136,6 @@ curl http://<IP>:<Port>/v1/completions \
 A valid response (e.g., `"Beijing is a vibrant and historic capital city"`) indicates successful deployment.
 
 ## Accuracy Evaluation
-
-Two accuracy evaluation methods are provided: AISBench (recommended) and manual testing with standard datasets.
 
 ### Using AISBench
 
