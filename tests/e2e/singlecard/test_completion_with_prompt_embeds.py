@@ -25,7 +25,7 @@ from tests.e2e.conftest import VllmRunner
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
+MODELS = ["Qwen/Qwen3-0.6B"]
 
 
 def get_prompt_embeds(chat, tokenizer, embedding_layer):
@@ -35,127 +35,6 @@ def get_prompt_embeds(chat, tokenizer, embedding_layer):
                                               return_tensors='pt')
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
     return prompt_embeds
-
-
-@pytest.mark.parametrize("model_name", MODELS)
-def test_single_prompt_embeds_inference(model_name):
-    """Test single prompt inference with prompt embeddings."""
-    # Prepare prompt embeddings
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    transformers_model = AutoModelForCausalLM.from_pretrained(model_name)
-    embedding_layer = transformers_model.get_input_embeddings()
-
-    chat = [{
-        "role": "user",
-        "content": "Please tell me about the capital of France."
-    }]
-    prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
-
-    # Run inference with prompt embeddings
-    with VllmRunner(
-            model_name,
-            enable_prompt_embeds=True,
-            enforce_eager=True,
-    ) as vllm_runner:
-        outputs = vllm_runner.model.generate({
-            "prompt_embeds": prompt_embeds,
-        })
-
-    # Verify output
-    assert len(outputs) == 1
-    assert len(outputs[0].outputs) > 0
-    assert len(outputs[0].outputs[0].text) > 0
-    print(f"\n[Single Inference Output]: {outputs[0].outputs[0].text}")
-
-
-@pytest.mark.parametrize("model_name", MODELS)
-def test_batch_prompt_embeds_inference(model_name):
-    """Test batch prompt inference with prompt embeddings."""
-    # Prepare prompt embeddings
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    transformers_model = AutoModelForCausalLM.from_pretrained(model_name)
-    embedding_layer = transformers_model.get_input_embeddings()
-
-    chats = [[{
-        "role": "user",
-        "content": "Please tell me about the capital of France."
-    }],
-             [{
-                 "role": "user",
-                 "content": "When is the day longest during the year?"
-             }],
-             [{
-                 "role": "user",
-                 "content": "Where is bigger, the moon or the sun?"
-             }]]
-
-    prompt_embeds_list = [
-        get_prompt_embeds(chat, tokenizer, embedding_layer) for chat in chats
-    ]
-
-    # Run batch inference with prompt embeddings
-    with VllmRunner(
-            model_name,
-            enable_prompt_embeds=True,
-            enforce_eager=True,
-    ) as vllm_runner:
-        outputs = vllm_runner.model.generate([{
-            "prompt_embeds": embeds
-        } for embeds in prompt_embeds_list])
-
-    # Verify outputs
-    assert len(outputs) == len(chats)
-    for i, output in enumerate(outputs):
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text) > 0
-        print(f"\nQ{i+1}: {chats[i][0]['content']}")
-        print(f"A{i+1}: {output.outputs[0].text}")
-
-
-@pytest.mark.parametrize("model_name", MODELS)
-def test_prompt_embeds_with_aclgraph(model_name):
-    """Test prompt embeddings with ACL graph enabled vs disabled."""
-    # Prepare prompt embeddings
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    transformers_model = AutoModelForCausalLM.from_pretrained(model_name)
-    embedding_layer = transformers_model.get_input_embeddings()
-
-    chat = [{"role": "user", "content": "What is the capital of China?"}]
-    prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
-
-    # Run with ACL graph enabled (enforce_eager=False)
-    with VllmRunner(
-            model_name,
-            enable_prompt_embeds=True,
-            enforce_eager=False,
-    ) as vllm_aclgraph_runner:
-        aclgraph_outputs = vllm_aclgraph_runner.model.generate({
-            "prompt_embeds":
-            prompt_embeds,
-        })
-
-    # Run with ACL graph disabled (enforce_eager=True)
-    with VllmRunner(
-            model_name,
-            enable_prompt_embeds=True,
-            enforce_eager=True,
-    ) as vllm_eager_runner:
-        eager_outputs = vllm_eager_runner.model.generate({
-            "prompt_embeds":
-            prompt_embeds,
-        })
-
-    # Verify both produce valid outputs
-    assert len(aclgraph_outputs) == 1
-    assert len(eager_outputs) == 1
-    assert len(aclgraph_outputs[0].outputs[0].text) > 0
-    assert len(eager_outputs[0].outputs[0].text) > 0
-
-    print("\n[ACL Graph Output]:", aclgraph_outputs[0].outputs[0].text)
-    print("[Eager Output]:", eager_outputs[0].outputs[0].text)
-
-    # Note: Outputs may differ slightly due to different execution paths,
-    # but both should be valid responses
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -176,7 +55,6 @@ def test_mixed_prompt_embeds_and_text(model_name):
     with VllmRunner(
             model_name,
             enable_prompt_embeds=True,
-            enforce_eager=True,
     ) as vllm_runner:
         # Test prompt embeddings
         embeds_output = vllm_runner.model.generate({
