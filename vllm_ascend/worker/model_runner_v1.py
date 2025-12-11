@@ -1543,8 +1543,7 @@ class NPUModelRunner(GPUModelRunner):
                     pool_output = self._pool(
                         hidden_states,
                         scheduler_output.total_num_scheduled_tokens,
-                        num_scheduled_tokens_np, finished_sending,
-                        finished_recving, kv_connector_output)
+                        num_scheduled_tokens_np)
                     if need_dump:
                         assert self.debugger is not None
                         self.debugger.stop()
