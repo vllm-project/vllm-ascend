@@ -60,7 +60,7 @@ class ElasticClient:
                 ip, port_str = source.split(':')
                 port = int(port_str)
             except Exception as e:
-                logger.error(f"IP format error: {source}, detail: {e}")
+                logger.info(f"IP format error: {source}, detail: {e}")
                 continue
 
             self.server_addr = ip

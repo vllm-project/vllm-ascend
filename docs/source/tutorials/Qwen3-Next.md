@@ -1,4 +1,4 @@
-# Multi-NPU (Qwen3-Next)
+# Qwen3-Next
 
 ```{note}
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.

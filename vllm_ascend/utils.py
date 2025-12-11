@@ -220,19 +220,6 @@ def aligned_16(tensor: torch.Tensor):
     return new_tensor
 
 
-def try_register_lib(lib_name: str, lib_info: str = ""):
-    import importlib
-    import importlib.util
-    try:
-        module_spec = importlib.util.find_spec(lib_name)
-        if module_spec is not None:
-            importlib.import_module(lib_name)
-            if lib_info:
-                logger.info(lib_info)
-    except Exception:
-        pass
-
-
 def enable_custom_op():
     """
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
