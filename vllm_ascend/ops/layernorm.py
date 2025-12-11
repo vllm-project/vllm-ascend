@@ -50,6 +50,7 @@ class AscendRMSNorm(RMSNorm):
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)

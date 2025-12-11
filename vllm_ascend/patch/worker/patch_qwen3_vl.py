@@ -18,8 +18,30 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
+from vllm.model_executor.models.qwen3_vl import (
+    Qwen3_VisionTransformer, Qwen3VLForConditionalGeneration)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+from vllm.forward_context import get_forward_context
 
+
+def tensor_parallel_wrap(func):
+
+    def wrap(*args, **kwargs):
+        deepstack_input_embeds = func(*args, **kwargs)
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        if get_forward_context().sp_enabled:
+            deepstack_input_embeds.tensors = {
+                k: v.chunk(tp_size)[tp_rank]
+                for k, v in deepstack_input_embeds.tensors.items()
+            }
+        return deepstack_input_embeds
+
+    return wrap
+
+Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wrap(
+    Qwen3VLForConditionalGeneration._get_deepstack_input_embeds)
 
 class AscendQwen3_VisionTransformer(nn.Module):
 
