@@ -198,7 +198,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         mix_placement = getattr(layer.ascend_config, "mix_placement", False)
         n_shared_experts = 1 if mix_placement else 0
         assert router_logits.shape[
-             1] == global_num_experts - global_redundant_expert_num - n_shared_experts, "Number of global experts mismatch (excluding redundancy)"
+            1] == global_num_experts - global_redundant_expert_num - n_shared_experts, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
