@@ -49,7 +49,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
@@ -123,14 +122,6 @@ atexit.register(_unregister_print_streams_on_exit)
 
 def is_enable_nz():
     return envs_ascend.VLLM_ASCEND_ENABLE_NZ
-
-
-def sleep_mode_enabled():
-    global _SLEEP_MODE_ENABLED
-    if _SLEEP_MODE_ENABLED is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
-    return _SLEEP_MODE_ENABLED
 
 
 def _round_up(x: int, align: int):
@@ -571,26 +562,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
 
-    # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
-    # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
-    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
-    if vllm_config.speculative_config is not None and \
-        vllm_config.speculative_config.num_speculative_tokens > 1:
-        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        original_sizes, compilation_config.cudagraph_capture_sizes = \
-            compilation_config.cudagraph_capture_sizes, None
-        assert len(original_sizes) > 0
-        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
-            enlarged_sizes = [(num_speculative_tokens + 1) * size
-                              for size in original_sizes]
-            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
-            logger.info(
-                "Adjusted ACL graphs: %s → %s for speculative decoding",
-                original_sizes, enlarged_sizes)
-        else:
-            compilation_config.cudagraph_capture_sizes = original_sizes
-
 
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
@@ -830,7 +801,7 @@ def _is_contain_expert(config: Any):
 def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
-    if _IS_VL_MODEL is None and vllm_config.model_config:
+    if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         model_configs = vllm_config.model_config.hf_config.to_dict()
         _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
     return _IS_VL_MODEL
@@ -1067,3 +1038,15 @@ def refresh_block_size(vllm_config):
                 "Block size is set to 128 if prefix cache or chunked prefill is enabled."
             )
             cache_config.block_size = 128
+
+
+def dispose_layer(layer: Any):
+    for attr_name in dir(layer):
+        attr_value = getattr(layer, attr_name)
+        if isinstance(attr_value, torch.Tensor):
+            dispose_tensor(attr_value)
+
+
+def replace_layer(original_layer: Any, new_layer: Any):
+    original_layer.__class__ = new_layer.__class__
+    original_layer.__dict__ = new_layer.__dict__

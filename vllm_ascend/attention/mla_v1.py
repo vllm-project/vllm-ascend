@@ -202,7 +202,6 @@ class AscendMLAMetadataBuilder:
     understand this class
     """
 
-    # _attn_mask_builder = None
     def __init__(self,
                  kv_cache_spec,
                  layer_names,
@@ -556,35 +555,43 @@ class AscendMLAMetadataBuilder:
                         out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
                         dtype=torch.int32,
                     )
-                    chunked_context_metadata = \
-                    AscendMLAPrefillMetadata.ChunkedContextMetadata(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=local_chunk_starts.to(device, non_blocking=True),
-                        seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
+                    chunked_context_metadata = AscendMLAPrefillMetadata.ChunkedContextMetadata(
+                        cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(
+                            device, non_blocking=True),
+                        starts=local_chunk_starts.pin_memory().to(
+                            device, non_blocking=True),
+                        seq_tot=padded_local_chunk_seq_lens.sum(
+                            dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         chunk_seq_lens=chunk_seq_lens,
                         chunk_seq_lens_npu=chunk_seq_lens.npu(),
                         workspace=self.chunked_prefill_workspace,
-                        padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.npu(),
-                        padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
-                        local_context_lens_allranks=local_context_lens_allranks.tolist(),
-                        padded_local_cu_seq_lens=padded_local_cu_chunk_seq_lens_cpu.to(
-                            device, non_blocking=True
-                        ),
+                        padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.
+                        npu(),
+                        padded_local_chunk_seq_lens=padded_local_chunk_seq_lens
+                        .tolist(),
+                        local_context_lens_allranks=local_context_lens_allranks
+                        .tolist(),
+                        padded_local_cu_seq_lens=
+                        padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(
+                            device, non_blocking=True),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                         chunk_size=padded_local_max_context_chunk_across_ranks,
                     )
                 else:
-                    chunked_context_metadata = \
+                    chunked_context_metadata = (
                         AscendMLAPrefillMetadata.ChunkedContextMetadata(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=chunk_starts.to(device, non_blocking=True),
-                        seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-                        max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-                        chunk_seq_lens=chunk_seq_lens,
-                        chunk_seq_lens_npu=chunk_seq_lens.npu(),
-                        workspace=self.chunked_prefill_workspace,
-                    )
+                            cu_seq_lens=cu_seq_lens_cpu.pin_memory().to(
+                                device, non_blocking=True),
+                            starts=chunk_starts.pin_memory().to(
+                                device, non_blocking=True),
+                            seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
+                            max_seq_lens=chunk_seq_lens.max(
+                                dim=1).values.tolist(),
+                            chunk_seq_lens=chunk_seq_lens,
+                            chunk_seq_lens_npu=chunk_seq_lens.npu(),
+                            workspace=self.chunked_prefill_workspace,
+                        ))
             prefill_input_positions = input_positions[tokens_start:]
             cos = self.cos_cache[
                 prefill_input_positions].unsqueeze(  # type: ignore
@@ -616,7 +623,8 @@ class AscendMLAMetadataBuilder:
             cos = common_attn_metadata.cos
             sin = common_attn_metadata.sin
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
-            actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
+            actual_seq_lengths_q = query_start_loc_cpu[1:num_decodes +
+                                                       1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
@@ -849,11 +857,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
 
         vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
-        self.prefill_mask = None
 
         self.speculative_config = vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
@@ -1058,7 +1064,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         device = self.q_proj.weight.device
         self.gamma1 = self.q_a_layernorm.weight.data
-        self.beta1 = self.q_a_layernorm.bias.data
+        self.beta1 = torch.zeros_like(self.gamma1) if (
+            _bias := self.q_a_layernorm.bias) is None else _bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
         self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
         self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
@@ -1158,10 +1165,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            if self.pcp_size > 1:
-                mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
-            else:
-                mask = self.prefill_mask
+            mask = attn_metadata.attn_mask
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
@@ -1205,24 +1209,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                num_tokens,
                                dtype=torch.float32,
                                device=q_nope.device)
-        if self.prefill_mask is None:
-            if q_nope.dtype == torch.float16:
-                mask_value = torch.finfo(torch.float32).min
-            else:
-                mask_value = 1
-            prefill_mask = torch.triu(
-                torch.ones(self.ring_mla_mask_size,
-                           self.ring_mla_mask_size,
-                           device=q_nope.device,
-                           dtype=q_nope.dtype), 1)
-            self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
-                                            0).to(q_nope.dtype)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
                                    k_nope=k_nope,
                                    k_rope=k_pe,
                                    value=value,
-                                   mask=self.prefill_mask,
+                                   mask=attn_metadata.attn_mask,
                                    seqlen=attn_metadata.prefill.query_lens,
                                    head_num=self.num_heads,
                                    kv_head_num=self.num_heads,
@@ -1256,7 +1248,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,
@@ -1284,7 +1276,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,
@@ -1326,18 +1318,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.enable_kv_nz:
-            k_nope = k_nope.view(-1, self.num_kv_heads,
-                                 self.kv_lora_rank // 16, block_size, 16)
-            k_pe = k_pe.view(-1, self.num_kv_heads,
-                             self.qk_rope_head_dim // 16, block_size, 16)
-            input_layout = "BSND"
-        else:
-            k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
-                                 self.kv_lora_rank)
-            k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
-                             self.qk_rope_head_dim)
-            input_layout = "BNSD"
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
+                             self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
+                         self.qk_rope_head_dim)
+        input_layout = "BNSD"
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
@@ -1354,14 +1339,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
-            if self.enable_kv_nz:
-                q_nope = q_nope.view(num_tokens, 1, self.num_heads,
-                                     -1).contiguous()
-                q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
-            else:
-                q_nope = q_nope.view(num_tokens, self.num_heads, 1,
-                                     -1).contiguous()
-                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+            q_nope = q_nope.view(num_tokens, self.num_heads, 1,
+                                 -1).contiguous()
+            q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
 
@@ -1481,10 +1461,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_out0=decode_k_nope,
             q_out1=decode_q_pe,
             kv_cache_out1=decode_k_pe,
-        )
+            enable_inner_out=False,
+            inner_out=torch.tensor([], device=hidden_states.device))
         decode_q_nope = decode_q_nope.view(bsz, self.num_heads,
                                            self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
+
+        if self.dcp_size > 1:
+            decode_q_no_split = torch.cat([decode_q_nope, decode_q_pe], dim=-1)
+            decode_q_no_split = get_dcp_group().all_gather(
+                decode_q_no_split, 1)
+            decode_q_nope, decode_q_pe = decode_q_no_split.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         decode_preprocess_res = DecodeMLAPreprocessResult(
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)

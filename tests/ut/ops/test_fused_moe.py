@@ -25,8 +25,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.fused_moe import (
-    AscendFusedMoE, AscendUnquantizedFusedMoEMethod)
+from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.fused_moe.moe_mlp import (cumsum_group_list,
                                                unified_apply_mlp)
 from vllm_ascend.utils import AscendDeviceType, adapt_patch
@@ -119,7 +118,6 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config',
             return_value=MagicMock(
-                torchair_graph_config=MagicMock(enabled=False),
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
@@ -595,39 +593,3 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(result.shape, hidden_states_shape)
         self.assertEqual(result.dtype, torch.bfloat16)
-
-
-class TestLoadWeight(TestBase):
-
-    def test_load_w13_transpose(self):
-        with patch.object(AscendFusedMoE, "__init__",
-                          lambda self, *args, **kwargs: None):
-            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-
-            expert_data = torch.randn(128, 8)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
-
-            expert_data = torch.randn(8, 128)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
-
-            expert_data = torch.randn(128, 8)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
-
-            expert_data = torch.randn(8, 128)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
-
-    def test_load_w2_transpose(self):
-        with patch.object(AscendFusedMoE, "__init__",
-                          lambda self, *args, **kwargs: None):
-            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-            expert_data = torch.randn(128, 4)
-            loaded_weight = torch.randn(128, 8)
-            moe._load_w2(expert_data, 1, loaded_weight, 0)
-
-            expert_data = torch.randn(4, 128)
-            loaded_weight = torch.randn(128, 8)
-            moe._load_w2(expert_data, 1, loaded_weight, 0)
