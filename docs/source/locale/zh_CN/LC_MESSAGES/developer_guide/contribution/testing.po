@@ -169,11 +169,11 @@ msgstr ""
 #: ../../developer_guide/contribution/testing.md:246
 msgid ""
 "Correctness test example: "
-"[`tests/e2e/singlecard/test_aclgraph.py`](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph.py)"
+"[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
 msgstr ""
-"正确性测试示例：[`tests/e2e/singlecard/test_aclgraph.py`](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph.py)"
+"正确性测试示例：[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
 
 #: ../../developer_guide/contribution/testing.md:247
 msgid ""
