@@ -344,6 +344,7 @@ class AscendFusedMoE(FusedMoE):
             with npu_stream_switch(AscendFusedMoE.gate_stream,
                                    enabled=self.multistream_overlap_gate):
                 # share_expert
+                assert fc3_context.shared_experts is not None
                 shared_out = fc3_context.shared_experts(hidden_states)
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                 moe_comm_type = forward_context.moe_comm_type
