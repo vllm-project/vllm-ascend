@@ -100,15 +100,18 @@ Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 pla
 #!/bin/sh
 export ASCEBD_RT_VISIBLE_DEVICES=0
 
-vllm serve ./Qwen2.5-7B-Instruct/ \
-          --host <IP> \
-          --port <Port> \
+vllm serve ${MODEL_PATH} \
+          --host 0.0.0.0 \
+          --port 8000 \
           --served-model-name qwen-2.5-7b-instruct \
           --trust-remote-code \
-          --max-model-len 32768 \
-          --tensor-parallel-size 1 \
-          --enforce-eager
+          --max-model-len 32768
 ```
+`--allowed-local-media-path` is optional, only set it if you need infer model with local media file
+
+`--gpu-memory-utilization` should not be set manually only if yous know what this parameter aims to.
+
+`--tensor_parallel_size` no need to set for this 7B model, but if you really need tensor parallel, tp size can be one of `1\2\4`
 
 ### Multi-node Deployment
 
