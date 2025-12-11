@@ -1481,7 +1481,7 @@ def ensure_zmq_recv(
 
 
 # decode node should know pp_partition_layer in prefill node,
-# it is configed in kv_transfer_config by partition_list_str,
+# it is configured in kv_transfer_config by partition_list_str,
 # default using vllm layer split algorithm.
 def get_prefill_pp_indices(
         num_hidden_layers: int,
