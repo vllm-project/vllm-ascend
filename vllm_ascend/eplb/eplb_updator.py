@@ -174,20 +174,20 @@ class EplbUpdator:
                 self.device = local_load.device
                 if self._gather_buffer is None:
                     shape = (self.world_size, *local_load.shape)
-                    self._gather_buffer = torch.empty(shape,
+                    self._gather_buffer = torch.zeros(shape,
                                                       dtype=local_load.dtype,
                                                       device=self.device)
 
                 dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-            moe_load = self._gather_buffer.permute(1, 0, 2)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            moe_load_cpu = moe_load.cpu()
-            if dist.get_rank() == 0:
-                numpy.save(f"/xx/moe_load_{self.cur_iterations}.npy", moe_load_cpu.numpy())
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+                moe_load = self._gather_buffer.permute(1, 0, 2)
+                self.shared_dict["moe_load"] = moe_load.cpu()
+                moe_load_cpu = moe_load.cpu()
+                if dist.get_rank() == 0:
+                    numpy.save(f"/xx/moe_load_{self.cur_iterations}.npy", moe_load_cpu.numpy())
+                logger.debug(
+                    f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+                )
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
