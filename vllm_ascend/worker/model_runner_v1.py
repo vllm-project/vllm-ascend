@@ -3401,7 +3401,7 @@ def _torch_cuda_wrapper():
         def __init__(self, *args, **kwargs) -> None:
             self.record = lambda: None
             self.synchronize = lambda: None
-    
+
     class _StreamPlaceholder:
 
         def __init__(self, *args, **kwargs) -> None:
