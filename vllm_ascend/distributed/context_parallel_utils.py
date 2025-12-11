@@ -47,8 +47,8 @@ def all_to_all_4d(input_tensor: torch.tensor,
         else:
             output = input_t
 
-        output = output.transpose(0, 1).contiguous().reshape(
-            hc, shard_seqlen, bs, hs).transpose(0, 2).contiguous()
+        output = output.reshape(hc, shard_seqlen, bs,
+                                hs).transpose(0, 2).contiguous()
         return output.reshape(bs, shard_seqlen, hc, hs)
 
 
@@ -92,8 +92,8 @@ def all_to_all_3d(input_tensor: torch.tensor,
         else:
             output = input_t
 
-        output = output.transpose(0, 1).contiguous().reshape(
-            hc, shard_seqlen, hs).transpose(0, 1).contiguous()
+        output = output.reshape(hc, shard_seqlen,
+                                hs).transpose(0, 1).contiguous()
         return output
 
 

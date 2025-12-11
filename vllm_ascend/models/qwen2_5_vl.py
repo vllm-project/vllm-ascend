@@ -44,7 +44,10 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLDummyInputsBuilder, Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.models.vision import conv3d_to_linear_weight
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.11.0"):
+    from vllm.model_executor.models.vision import conv3d_to_linear_weight
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
@@ -59,9 +62,10 @@ MAX_PAD_SIZE = 128  # max_size to pad weight
 
 
 def get_rank_world():
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    return rank, world_size
+    rank = get_tp_group().rank
+    tp_size = get_tp_group().world_size
+    tp_group = get_tp_group().device_group
+    return rank, tp_size, tp_group
 
 
 class AscendQwen2_5_VisionMLP(Qwen2_5_VisionMLP):
@@ -111,7 +115,7 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             prefix,
         )
         self.embed_dim = embed_dim
-        self.rank, self.world_size = get_rank_world()
+        self.rank, self.world_size, self.group = get_rank_world()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
@@ -158,7 +162,8 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
                       t=3,
                       h=self.num_attention_heads_per_partition *
                       self.world_size)
-        x = all_to_all_4d(x, is_seq_to_head=True)
+        print(f"vit input shape: {x.shape}")
+        x = all_to_all_4d(x, is_seq_to_head=True, group=self.group)
         cur_seq = x.shape[1]
         x = x[:, :true_seq, :, :]
         x = rearrange(
@@ -197,7 +202,7 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             out=context_layer)
         padding = (0, 0, 0, 0, 0, cur_seq - true_seq)
         context_layer = F.pad(context_layer, padding)
-        context_layer = all_to_all_3d(context_layer, is_seq_to_head=False)
+        context_layer = all_to_all_3d(context_layer, is_seq_to_head=False, group=self.group)
 
         context_layer = rearrange(context_layer,
                                   "(b s) h d -> s b (h d)",
@@ -478,8 +483,9 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if name.endswith("patch_embed.proj.weight"):
-                loaded_weight = conv3d_to_linear_weight(loaded_weight)
+            if not vllm_version_is("0.11.0"):
+                if name.endswith("patch_embed.proj.weight"):
+                    loaded_weight = conv3d_to_linear_weight(loaded_weight)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -610,7 +616,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
 
         #pad for sp:
-        rank, world_size = get_rank_world()
+        rank, world_size, tp_group = get_rank_world()
         merge_size = self.spatial_merge_size**2
         padding_size = math.ceil(math.ceil(seq_len / world_size) / merge_size
                                  ) * merge_size * world_size - seq_len
@@ -624,7 +630,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
 
         # transformers
-        x = x.chunk(world_size, dim=0)[rank]
+        x = x.chunk(world_size, dim=0)[rank % world_size]
         x = x.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -639,7 +645,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
 
         # adapter
         x = self.merger(x)
-        x = all_gather_2d(x, world_size=world_size, group=None)
+        x = all_gather_2d(x, world_size=world_size, group=tp_group)
         if padding_size:
             x = x[:-padding_size // merge_size]
         reverse_indices = torch.argsort(window_index)
