@@ -33,7 +33,7 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 QWEN_DENSE_MODELS = [
-    "vllm-ascend/Qwen3-0.6B-Instruct-W8A8",
+    "vllm-ascend/Qwen3-8B-W8A8",
 ]
 
 QWEN_W4A8_MODELS = [
