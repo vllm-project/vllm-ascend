@@ -61,6 +61,7 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _ENABLE_NZ = None
+_IS_EAGLE_MODE = None
 
 
 def is_310p():
@@ -73,14 +74,20 @@ def is_310p():
 
 def is_enable_nz(dtype: Optional[torch.dtype] = torch.int8,
                  vllm_config: Optional[VllmConfig] = None) -> bool:
-    global _ENABLE_NZ
+    global _ENABLE_NZ, _IS_EAGLE_MODE
     if _ENABLE_NZ is None:
         if not vllm_config:
             raise ValueError(
                 "vllm_config must be provided when _ENABLE_NZ is None")
         _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
+
+        _IS_EAGLE_MODE = (
+            vllm_config.speculative_config is not None and 
+            getattr(vllm_config.speculative_config, 'method', None) in ("eagle", "eagle3")
+        )
+
     if dtype in [torch.float16, torch.bfloat16]:
-        return False
+        return _ENABLE_NZ if _IS_EAGLE_MODE else False
     return _ENABLE_NZ
 
 
