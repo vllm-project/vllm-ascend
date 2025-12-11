@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -507,8 +508,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     def setUp(self):
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
-        self.mock_vllm_config.model_config = ModelConfig(max_model_len=2048)
-        self.mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
         mock_scheduler_config = MagicMock(spec=SchedulerConfig)
         mock_scheduler_config.max_num_seqs = 8
@@ -516,7 +515,15 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
-
+        fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
+                                        "fake_weight")
+        model_config = ModelConfig(
+            model=fake_weight_path,
+            skip_tokenizer_init=True,
+        )
+        model_config.hf_text_config.head_dim = 128
+        model_config.hf_text_config.qk_rope_head_dim = 32
+        self.mock_vllm_config.model_config = model_config
         self.kv_cache_spec = MagicMock()
         self.kv_cache_spec.num_layers = 32
         self.kv_cache_spec.head_size = 128
