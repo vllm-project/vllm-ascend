@@ -354,14 +354,14 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
 
-                moe_load_stream = moe_load_async_stream()
-                cur_stream = torch.npu.current_stream()
+                #moe_load_stream = moe_load_async_stream()
+                #cur_stream = torch.npu.current_stream()
 
-                moe_load_stream.wait_stream(cur_stream)
-                with npu_stream_switch(moe_load_stream):
-                    self.moe_load += expert_tokens if group_list_type == 1 else \
+                #moe_load_stream.wait_stream(cur_stream)
+                #with npu_stream_switch(moe_load_stream):
+                self.moe_load += expert_tokens if group_list_type == 1 else \
                         torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-                cur_stream.wait_stream(moe_load_stream)
+                #cur_stream.wait_stream(moe_load_stream)
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
