@@ -51,7 +51,7 @@ class TestMtpProposer:
         config.compilation_config.static_forward_context = dict()
 
         config.device_config = MagicMock()
-        config.device_config.device = "cpu"
+        config.device_config.device = torch.device("cpu")
         init_ascend_config(config)
         return config
 
@@ -70,11 +70,11 @@ class TestMtpProposer:
 
     def test_init(self, base_vllm_config, runner):
         # Test basic initialization
-        proposer = MtpProposer(base_vllm_config, "cpu", runner)
+        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
 
         assert proposer.name == SpecDcodeType.MTP
         assert proposer.vllm_config == base_vllm_config
-        assert proposer.device == "cpu"
+        assert proposer.device == torch.device("cpu")
         assert proposer.dtype == torch.float16
         assert proposer.num_speculative_tokens == 2
         assert proposer.hidden_size == 4096
@@ -87,7 +87,7 @@ class TestMtpProposer:
 
     def test_init_with_aclgraph(self, base_vllm_config, runner):
         runner._use_aclgraph.return_value = True
-        proposer = MtpProposer(base_vllm_config, "cpu", runner)
+        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
 
         assert proposer.use_aclgraph is True
         assert proposer.cudagraph_batch_sizes == [1, 2, 4, 8]
@@ -121,7 +121,7 @@ class TestMtpProposer:
                 return {}
 
         # Setup
-        proposer = MtpProposer(base_vllm_config, "cpu", runner)
+        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
         proposer._init_mtp_model = MagicMock()
         mock_model = MagicMock()
         proposer.model = mock_model
@@ -141,7 +141,7 @@ class TestMtpProposer:
     def test_dummy_run(self, mock_set_context, mock_get_forward_context,
                        base_vllm_config, runner):
         # Setup
-        proposer = MtpProposer(base_vllm_config, "cpu", runner)
+        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
         proposer.model = MagicMock()
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
         runner._select_moe_comm_method.return_value = "alltoall"
@@ -166,7 +166,7 @@ class TestMtpProposer:
                                   mock_get_forward_context, base_vllm_config,
                                   runner):
         # Setup
-        proposer = MtpProposer(base_vllm_config, "cpu", runner)
+        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
         proposer.model = MagicMock()
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
         runner._select_moe_comm_method.return_value = "alltoall"
@@ -273,7 +273,7 @@ class TestMtpProposer:
             [301, 10000, 303],
         ],
                                               dtype=torch.int32,
-                                              device="cpu")
+                                              device=torch.device("cpu"))
 
         mock_requests = {}  # dict[str, CachedRequestState]
         req0 = MagicMock(spec=CachedRequestState)
@@ -339,7 +339,7 @@ class TestMtpProposer:
 
         expected_next_tokens = torch.tensor([103, 2, 3, 4],
                                             dtype=torch.int32,
-                                            device="cpu")
+                                            device=torch.device("cpu"))
         assert torch.equal(next_token_ids, expected_next_tokens)
 
     def test_prepare_inputs_padded(self):
