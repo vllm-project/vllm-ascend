@@ -378,6 +378,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         device="npu")
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -632,13 +633,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if len(kv_cache) > 1:
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-            slots = attn_metadata.slot_mapping
-            torch_npu._npu_reshape_and_cache(
-                key=key[:attn_metadata.num_actual_tokens],
-                value=value[:attn_metadata.num_actual_tokens],
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_indices=slots)
+            if self.kv_sharing_target_layer_name is None:
+                # NOTE: In Cross Layer Attention models, the target sharing layers
+                # don't have their own kvcache. Thus only cache key and value when
+                # it is the source layer.
+                slots = attn_metadata.slot_mapping
+                torch_npu._npu_reshape_and_cache(
+                    key=key[:attn_metadata.num_actual_tokens],
+                    value=value[:attn_metadata.num_actual_tokens],
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_indices=slots)
         return key, value
 
     def forward_impl(
