@@ -648,7 +648,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         is NOT support!. Invalid input will be set to default 0!"
             )
             self.enable_async_exp = 0
-        if self.enable_async_exp != 0 and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+        if self.enable_async_exp != 0:
             logger.info("Enable async exponential while model executing.")
             self._async_exponential_stream = torch.npu.Stream()
             self._async_exponential_event = torch.npu.Event()
@@ -2431,7 +2431,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if self.enable_async_exp and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+        if self.enable_async_exp:
             default_stream = torch.npu.current_stream()
             self._do_async_exponential(default_stream=default_stream,
                                        logits_indices=logits_indices)
