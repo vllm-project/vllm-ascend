@@ -88,7 +88,7 @@ class EplbUpdator:
                     self.shared_dict["expert_maps"],
                     self.expert_map_record_path)
 
-            self.adaptor.clear_all_moe_loads()
+            self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
 

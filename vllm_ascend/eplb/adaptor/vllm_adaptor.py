@@ -77,7 +77,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         )  # copy of expert map on CPU to avoid device synchronize frequently
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.get_expert_map(self.num_dense_layers + layer_idx)
+                self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(
@@ -93,7 +93,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.get_log2phy_map(self.num_dense_layers + layer_idx)
+                self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
 
         self.all_topk_ids = []
 
@@ -139,11 +139,11 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
-        self.moe_load = self.get_all_moe_loads()
+        self.moe_load = self.model.get_all_moe_loads()
         return self.moe_load
 
     def get_init_expert_map(self, num_moe_layers):
-        expert_map = self.get_all_expert_map(num_moe_layers)
+        expert_map = self.model.get_all_expert_map(num_moe_layers)
         if dist.is_initialized():
             world_size = dist.get_world_size()
 
@@ -316,37 +316,3 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.num_moe_layers, -1)
 
         return expert_map_all
-
-    def get_expert_map(self, layer_id):
-        return self.model.layers[layer_id].mlp.experts.get_map()
-
-    def get_log2phy_map(self, layer_id):
-        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
-
-    def get_all_expert_map(self, num_moe_layers):
-        all_loads = []
-        num_dense_layers = self.num_dense_layers if hasattr(
-            self, "num_dense_layers") else 0
-        for layer_id in range(num_moe_layers):
-            load_tensor = self.get_expert_map(
-                layer_id + num_dense_layers)  # (num_experts_per_layer,)
-            all_loads.append(load_tensor)
-
-        return torch.stack(all_loads, dim=0)
-
-    def get_all_moe_loads(self):
-        num_dense_layers = self.num_dense_layers if hasattr(
-            self, "num_dense_layers") else 0
-        all_moe_loads = torch.stack(
-            [self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load \
-                for layer_id in range(self.num_moe_layers)],
-            dim=0
-        )
-        return all_moe_loads
-
-    def clear_all_moe_loads(self):
-        num_dense_layers = self.num_dense_layers if hasattr(
-            self, "num_dense_layers") else 0
-        for layer_id in range(self.num_moe_layers):
-            self.model.layers[layer_id +
-                            num_dense_layers].mlp.experts.clear_moe_load()
