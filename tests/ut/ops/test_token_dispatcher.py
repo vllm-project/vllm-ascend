@@ -148,7 +148,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.enable_dispatch_v2 = True
         self.dispatcher.swiglu_out_scale = torch.randint(0, 8, (10, 1))
         self.dispatcher.output = torch.randint(0, 8, (10, 1))
-        self.dispatcher.moe_expert_num = len(expert_map)
+        self.dispatcher.moe_expert_num = len(self.dispatcher.expert_map)
         self.hidden_states = torch.randn(10, 128)
 
         with patch("torch_npu.npu_moe_distribute_combine_v2",
