@@ -17,6 +17,7 @@ multi_npu_kimi-k2-thinking
 Qwen3-Dense
 multi_npu_qwen3_moe
 multi_npu_quantization
+Qwen2.5-VL
 single_node_300i
 DeepSeek-R1.md
 DeepSeek-V3.1.md
