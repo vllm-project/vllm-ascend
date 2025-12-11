@@ -3,7 +3,8 @@ import torch_npu
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, npu_stream_switch, global_stream
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               global_stream, npu_stream_switch)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -33,7 +34,6 @@ def random_sample(
                 q[i].exponential_(generator=generator)
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
-
 
 
 class AscendSampler(Sampler):
