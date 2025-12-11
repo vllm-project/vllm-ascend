@@ -25,7 +25,7 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/DeepSeek-R1-W8A8",
+    "vllm-ascend/DeepSeek-R1-0528-W8A8",
 ]
 
 prompts = [
