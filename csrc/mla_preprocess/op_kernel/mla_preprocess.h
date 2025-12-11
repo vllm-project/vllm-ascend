@@ -49,7 +49,6 @@ constexpr uint8_t CACHE_MODE_INT8_NZCACHE = 2;  // high performance KV NZ format
 constexpr uint8_t CACHE_MODE_NZCACHE = 3;
 
 // pp matmul
-constexpr uint32_t HIDDTEN_STATE = 7168;
 constexpr uint32_t FLOAT_BLOCK_SIZE = 64;
 constexpr uint32_t HALF_BLOCK_SIZE = 64;
 constexpr uint32_t HALF_VECTOR_SIZE = 64;
@@ -103,6 +102,7 @@ constexpr uint32_t KEY_FP16_CACHEMODE_1_QUANTMODE_0 = 1;
 constexpr uint32_t KEY_BF16_CACHEMODE_0_QUANTMODE_0 = 256;
 constexpr uint32_t KEY_BF16_CACHEMODE_1_QUANTMODE_0 = 257;
 constexpr uint32_t KEY_BF16_CACHEMODE_3_QUANTMODE_0 = 259;
+constexpr uint32_t KEY_BF16_CACHEMODE_1_QUANTMODE_3 = 281;
 constexpr uint32_t KEY_BF16_CACHEMODE_0_QUANTMODE_0_INNER = 256 + 512;
 constexpr uint32_t KEY_BF16_CACHEMODE_1_QUANTMODE_0_INNER = 257 + 512;
 constexpr uint32_t KEY_BF16_CACHEMODE_3_QUANTMODE_0_INNER = 259 + 512;
