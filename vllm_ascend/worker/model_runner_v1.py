@@ -2960,7 +2960,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.parallel_config.tensor_parallel_size)
             capture_sizes = self.compilation_config.cudagraph_capture_sizes
             self.cudagraph_batch_sizes = (capture_sizes
-                                         if capture_sizes is not None else [])
+                                          if capture_sizes is not None else [])
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
