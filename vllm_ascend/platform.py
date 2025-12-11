@@ -366,6 +366,10 @@ class NPUPlatform(Platform):
         use_mla,
         has_sink=False,
         use_sparse=False,
+        # NOTE: Please pay special attention to the order of these parameters.
+        # Although we are only using some of them so far
+        # vllm passes them in sequence when using this interface.
+        use_mm_prefix: bool = False,
         attn_type: str | None = None,
     ):
         # choose attention backend based on use_mla

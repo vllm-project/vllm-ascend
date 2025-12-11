@@ -7,7 +7,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
-    "vllm-ascend/DeepSeek-V2-Lite",
+    "deepseek-ai/DeepSeek-V2-Lite",
 ]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -52,6 +52,7 @@ def test_models_with_enable_shared_expert_dp(model: str) -> None:
             max_model_len=1024,
             tensor_parallel_size=2,
             enforce_eager=False,
+            enable_expert_parallel=True,
             compilation_config={
                 "cudagraph_capture_sizes": [1, 4, 8, 16],
                 "cudagraph_mode": "FULL_DECODE_ONLY",
