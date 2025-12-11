@@ -164,9 +164,10 @@ torch.npu.config.allow_internal_format = True
 # 修复 310P 内存分配问题：恢复 v0.10.0rc1 的逻辑
 # 310P 只在 torchair_graph_enabled=False 时使用 NZ 格式，否则使用 ND 格式
 # 参考: v0.10.0rc1 中 is_310p() and not self.torchair_graph_enabled 的判断
-from vllm_ascend.utils import is_310p
+# 注意: 新版本移除了 is_310p() 函数，改用 get_ascend_device_type() 检测设备类型
 
 # 检查是否为 310P 设备
+from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
 is_310p_device = get_ascend_device_type() == AscendDeviceType._310P
 
 if is_310p_device:
