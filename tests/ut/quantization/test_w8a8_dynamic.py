@@ -33,7 +33,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             mock_get_ep_group.return_value = mock_ep_group
             mock_ascend_config = Mock()
 
-            mock_ascend_config.torchair_graph_config = Mock(enabled=False)
             mock_ascend_config.enable_chunked_prefill = False
             mock_get_ascend_config.return_value = mock_ascend_config
             mock_mc2_group = Mock(device_group=0)

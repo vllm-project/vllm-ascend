@@ -66,8 +66,6 @@ class SfaCpContext:
     local_start: int
     local_end: int
     local_end_with_pad: int
-    pad_size: int
-    local_pad_size: int
     slot_mapping_cp: torch.Tensor
     actual_seq_lengths_query: torch.Tensor
     actual_seq_lengths_key: torch.Tensor
@@ -163,20 +161,16 @@ class AscendSFAMetadataBuilder:
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        device = self.device
+        num_input_tokens = common_attn_metadata.num_input_tokens
 
-        block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        slot_mapping = common_attn_metadata.slot_mapping[:
-                                                         num_actual_tokens].to(
-                                                             device,
-                                                             non_blocking=True)
+        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:
-                                                         num_actual_tokens].long(
+                                                         num_input_tokens].long(
                                                          )
-        query_start_loc = common_attn_metadata.query_start_loc
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
-        has_prefill = any(query_lens > self.decode_threshold)
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        has_prefill = any(query_lens_cpu > self.decode_threshold)
 
         if self.cos_cache is None:
             self.cos_cache = model.model.layers[
@@ -189,36 +183,62 @@ class AscendSFAMetadataBuilder:
             self.sin_cache = self.sin_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
 
-        cum_query_lens = query_start_loc_cpu[1:num_reqs + 1].to(
-            torch.int32).to(device, non_blocking=True)
-        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].to(
-            torch.int32).to(device, non_blocking=True)
+        cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
-            1).unsqueeze(2)
-        sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
-            1).unsqueeze(2)
+        cos = common_attn_metadata.cos
+        sin = common_attn_metadata.sin
+
+        assert self.cos_cache is not None and self.sin_cache is not None
+        new_cos = self.cos_cache[input_positions][:, None, None]
+        new_sin = self.sin_cache[input_positions][:, None, None]
+
+        if (cos is not None and sin is not None
+                and num_input_tokens <= cos.shape[0]
+                and num_input_tokens <= sin.shape[0]):
+            cos[:num_input_tokens] = new_cos
+            sin[:num_input_tokens] = new_sin
+        else:
+            cos, sin = new_cos, new_sin
 
         sfa_cp_context = None
         if self.enable_sfa_cp:
             global_tp_size = get_tp_group().world_size
-            num_tokens = num_actual_tokens
-            num_tokens_pad = _round_up(num_actual_tokens, global_tp_size)
+            num_tokens = num_input_tokens
+            num_tokens_pad = _round_up(num_tokens, global_tp_size)
             num_tokens_per_device = num_tokens_pad // global_tp_size
-            pad_size = num_tokens_pad - num_tokens
             local_start = get_tp_group().rank_in_group * num_tokens_per_device
             local_end_with_pad = local_start + num_tokens_per_device
             local_end = min(local_end_with_pad, num_actual_tokens)
-            local_pad_size = local_end_with_pad - local_end
+
+            pad_size = num_tokens_pad - cos.shape[0]
+            assert cos.shape == sin.shape, \
+                f"cos.shape must be equal to sin.shape, got {cos.shape} and {sin.shape}"
 
             if pad_size > 0:
                 cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
                 sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
-                slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size),
+
+            pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
+            if pad_size_slot > 0:
+                slot_mapping = nn.functional.pad(slot_mapping,
+                                                 (0, pad_size_slot),
                                                  value=-1)
+            else:
+                slot_mapping = slot_mapping[:num_tokens_pad]
+
             cos = cos[local_start:local_end_with_pad]
             sin = sin[local_start:local_end_with_pad]
             slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
+            assert cos.shape[0] == num_tokens_per_device, \
+                f"cos.shape[0] must be equal to num_tokens_per_device, \
+                    got {cos.shape[0]} and {num_tokens_per_device}"
+            assert slot_mapping_cp.shape[0] == num_tokens_per_device, \
+                f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
+                    got {slot_mapping_cp.shape[0]} and {num_tokens_per_device}"
+            assert slot_mapping.shape[0] == num_tokens_pad, \
+                f"slot_mapping.shape[0] must be equal to num_tokens_pad, \
+                    got {slot_mapping.shape[0]} and {num_tokens_pad}"
 
             actual_seq_lengths_query = torch.empty_like(cum_query_lens)
             actual_seq_lengths_key = torch.empty_like(seq_lens)
@@ -250,8 +270,6 @@ class AscendSFAMetadataBuilder:
                 local_start=local_start,
                 local_end=local_end,
                 local_end_with_pad=local_end_with_pad,
-                pad_size=pad_size,
-                local_pad_size=local_pad_size,
                 slot_mapping_cp=slot_mapping_cp,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
@@ -268,8 +286,8 @@ class AscendSFAMetadataBuilder:
             attn_mask=common_attn_metadata.attn_mask,
             attn_state=common_attn_metadata.attn_state,
             block_tables=block_table,
-            sin=sin,
-            cos=cos,
+            sin=sin[:num_input_tokens],
+            cos=cos[:num_input_tokens],
             sfa_cp_context=sfa_cp_context)
 
     def build_for_graph_capture(
@@ -278,7 +296,10 @@ class AscendSFAMetadataBuilder:
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
         model: Optional[nn.Module] = None,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+        if attn_state in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        }:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -345,7 +366,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         assert self.indexer is not None, "Indexer is required for DSA."
@@ -470,7 +490,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.fused_qkv_a_proj is None or not isinstance(
                     quant_method, AscendW8A8LinearMethod):
                 reasons.append(
-                    "Currently mlapo only supports W8A8 quantization in MLA scenario."
+                    "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
                     "thus mlapo is disabled for these layers.")
             if self.enable_sfa_cp:
@@ -484,14 +504,18 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._process_weights_for_fused_mlapo(act_dtype)
 
     def _v_up_proj(self, x):
-        if self.W_UV.shape[0] * self.W_UV.shape[1] < 65536:
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            x = torch_npu.npu_transpose_batchmatmul(x,
-                                                    self.W_UV,
-                                                    perm_x1=[1, 0, 2],
-                                                    perm_x2=[0, 1, 2],
-                                                    perm_y=[1, 0, 2])
-            x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
+        forward_context = get_forward_context()
+        if x.dtype in [torch.float16, torch.bfloat16] \
+                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
+                and not self.enable_sfa_cp \
+                and not forward_context.with_prefill:
+            x = x.view(-1, self.num_heads, self.kv_lora_rank)
+            b, _, _ = x.shape
+            res = torch.empty((b, self.num_heads, self.v_head_dim),
+                              dtype=x.dtype,
+                              device=x.device)
+            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
+            x = res.reshape(-1, self.num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
             x = x.view(-1, self.local_num_heads,
@@ -532,7 +556,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
 
         if self.enable_sfa_cp:
             assert slots_cp is not None
@@ -595,8 +619,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             ..., self.q_lora_rank:].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[
             ..., :self.q_lora_rank].contiguous()
-
-        self.fused_qkv_a_proj.weight = None
 
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
@@ -672,36 +694,39 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
-        if self.vllm_config.kv_transfer_config is not None:
+        if self.vllm_config.kv_transfer_config is not None and \
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
+            self.q_proj.weight = None
             self.q_proj.deq_scale = None
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
-    def _sfa_preprocessc_decode(
+    def _sfa_preprocess_decode(
         self,
         hidden_states: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
         need_gather_q_kv: bool,
-        num_actual_tokens: int,
+        num_input_tokens: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states.contiguous(), need_gather_q_kv)
         k_nope, k_pe = kv_cache[0], kv_cache[1]
         ql_nope = torch.empty(
-            (num_actual_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
+            (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
         q_pe = torch.empty(
-            (num_actual_tokens, self.W_UK_T.shape[0], k_pe.shape[-1]),
+            (num_input_tokens, self.W_UK_T.shape[0], k_pe.shape[-1]),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
         q_c = torch.empty(
-            (num_actual_tokens, self.q_lora_rank),
+            (num_input_tokens, self.q_lora_rank),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -719,7 +744,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UK_T,
             k_nope,
             k_pe,
-            attn_metadata.slot_mapping[:num_actual_tokens].flatten(),
+            attn_metadata.slot_mapping,
             quant_scale0=self.quant_scale0,
             quant_offset0=self.quant_offset0,
             bias0=self.quant_bias_qkv,
@@ -759,25 +784,22 @@ class AscendSFAImpl(MLAAttentionImpl):
                     reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         has_prefill = attn_metadata.has_prefill
-        num_actual_tokens = attn_metadata.num_actual_tokens
         cos = attn_metadata.cos
         sin = attn_metadata.sin
         actual_seq_lengths_query = attn_metadata.cum_query_lens
         actual_seq_lengths_key = attn_metadata.seq_lens
-        hidden_states = hidden_states[:num_actual_tokens]
         if self.enable_sfa_cp:
             need_gather_q_kv = False
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        output = output[:num_actual_tokens]
 
         if self.enable_mlapo and not forward_context.with_prefill:
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocessc_decode(
+            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 need_gather_q_kv=need_gather_q_kv,
-                num_actual_tokens=num_actual_tokens,
+                num_input_tokens=attn_metadata.num_input_tokens,
             )
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
@@ -800,7 +822,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if has_prefill:
                 wait_for_kv_layer_from_connector(layer_name)
 
-            slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+            slot_mapping = attn_metadata.slot_mapping
             slot_mapping_cp = None
             if self.enable_sfa_cp:
                 assert attn_metadata.sfa_cp_context is not None

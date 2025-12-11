@@ -23,6 +23,8 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.utils import moe_load_async_stream
+from vllm_ascend.utils import npu_stream_switch
 
 
 class EplbUpdator:
@@ -34,6 +36,7 @@ class EplbUpdator:
         self.eplb_loader = loader
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
+        self.moe_imbalance_dict: dict[int, float] = {}
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
@@ -152,28 +155,69 @@ class EplbUpdator:
 
         self._gather_buffer = None
         if dist.is_initialized():
-            self.world_size = dist.get_world_size()
-            self.device = local_load.device
-            if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(shape,
-                                                  dtype=local_load.dtype,
-                                                  device=self.device)
+            with npu_stream_switch(moe_load_async_stream()):
+                self.world_size = dist.get_world_size()
+                self.device = local_load.device
+                if self._gather_buffer is None:
+                    shape = (self.world_size, *local_load.shape)
+                    self._gather_buffer = torch.empty(shape,
+                                                      dtype=local_load.dtype,
+                                                      device=self.device)
 
-            dist.all_gather_into_tensor(self._gather_buffer, local_load)
+                dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-            moe_load = self._gather_buffer.permute(1, 0, 2)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+                moe_load = self._gather_buffer.permute(1, 0, 2)
+                self.shared_dict["moe_load"] = moe_load.cpu()
+                logger.debug(
+                    f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+                )
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(
                 f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
             )
+
+        if dist.is_initialized() and dist.get_rank() == 0:
+            self.compute_moe_imbalance(moe_load)
+            self.summarize_moe_imbalance()
+
         return moe_load
+
+    def compute_moe_imbalance(self, moe_load: torch.Tensor):
+
+        self.moe_imbalance_dict.clear()
+
+        layer_card_load = moe_load.sum(dim=-1).cpu().float()
+
+        for layer_idx in range(layer_card_load.size(0)):
+            layer_load = layer_card_load[layer_idx]
+
+            mean_load = layer_load.mean().item()
+            max_load = layer_load.max().item()
+
+            moe_load_imbalance = max_load / (mean_load + 1e-6)
+
+            logger.debug(f"[ModelRunner][MOE_load_stats][Layer {layer_idx}] "
+                         f"PAR={moe_load_imbalance:.4f}")
+
+            self.moe_imbalance_dict[layer_idx] = moe_load_imbalance
+
+    def summarize_moe_imbalance(self):
+
+        values = list(self.moe_imbalance_dict.values())
+        if not values:
+            logger.info("[MOE_load_stats] No data available.")
+            return
+
+        avg_imbalance = sum(values) / len(values)
+        max_imbalance = max(values)
+        min_imbalance = min(values)
+
+        logger.info(
+            f"[ModelRunner][MOE_load_stats] Peak-to-Average-Ratio: "
+            f"Mean={avg_imbalance:.4f}, Max={max_imbalance:.4f}, Min={min_imbalance:.4f}"
+        )
 
     def warm_up_eplb(self):
 
