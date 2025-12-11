@@ -17,9 +17,8 @@
 from typing import Optional
 
 import torch
-import triton
+import triton  # type: ignore
 import triton.language as tl  # type: ignore
-import triton.runtime.driver as driver
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
