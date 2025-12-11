@@ -24,7 +24,7 @@ vectorcore_num = None
 device_properties = None
 
 if HAS_TRITON:
-    from triton.runtime import driver # type: ignore
+    from triton.runtime import driver  # type: ignore
     device_properties = driver.active.utils.get_device_properties(
         torch.npu.current_device())
     vectorcore_num = device_properties['num_vectorcore']
