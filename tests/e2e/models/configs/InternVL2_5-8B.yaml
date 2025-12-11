@@ -1,0 +1,11 @@
+model_name: "OpenGVLab/InternVL2_5-8B"
+runner: "linux-aarch64-a2-1"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+  - name: "mmmu_val"
+    metrics:
+    - name: "acc,none"
+      value: 0.58
+max_model_len: 32768
+trust_remote_code: True
