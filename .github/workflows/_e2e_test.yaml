@@ -68,6 +68,12 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -164,6 +170,12 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -258,6 +270,12 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
         env:
@@ -268,12 +286,6 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
           pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
-
-      - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
-        shell: bash -l {0}
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
 
       - name: Run vllm-project/vllm-ascend Qwen3 Next test
         working-directory: ./vllm-ascend
