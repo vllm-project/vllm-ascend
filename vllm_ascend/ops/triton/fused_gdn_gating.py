@@ -76,15 +76,15 @@ def fused_gdn_gating(
         ROW_ITER = 1
     else:
         progs = num_cores
-        FACTOR = 64
+        FACTOR = 32
         row_per_core = triton.cdiv(batch, num_cores)
         BLK_BATCHES = triton.next_power_of_2(
             triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()
         ) // 2
         ROW_ITER = triton.cdiv(row_per_core, BLK_BATCHES)
 
-    g = torch.empty_like(a, dtype=torch.float32)
-    beta_output = torch.empty_like(b, dtype=torch.float32)
+    g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
 
     grid = (progs, seq_len)
     fused_gdn_gating_kernel[grid](
