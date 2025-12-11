@@ -4870,7 +4870,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         logger.info("Allocating a cross layer KV cache of shape %s",
                     new_kv_cache_shape)
 
-        # allocate one contiguous buffer for all layers
+        # allocate two contiguous buffer for all layers
         cross_layers_k_cache = (torch.zeros(
             total_size // 2, dtype=torch.int8,
             device=device).view(kv_cache_spec.dtype).view(new_kv_cache_shape))
