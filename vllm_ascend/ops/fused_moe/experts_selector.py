@@ -113,7 +113,6 @@ def select_experts(hidden_states: torch.Tensor,
                                  dim=1)
     return topk_weights, topk_ids
 
-
 def check_npu_moe_gating_top_k(
         hidden_states: torch.Tensor,
         top_k: int,
@@ -319,4 +318,5 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
 
