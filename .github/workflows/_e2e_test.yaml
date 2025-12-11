@@ -101,6 +101,7 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
           pytest -sv tests/e2e/singlecard/test_vlm.py
+          pytest -sv tests/e2e/singlecard/multi-modal/test_deepseek_ocr.py
           pytest -sv tests/e2e/singlecard/test_xlite.py
           pytest -sv tests/e2e/singlecard/pooling/
 

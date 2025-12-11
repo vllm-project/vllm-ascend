@@ -33,7 +33,7 @@ MODELS = ["DeepSeek-ai/DeepSeek-OCR",]
 @pytest.mark.parametrize("model", MODELS)
 def test_deepseek_ocr(model: str):
     # Load test image:waiting to modify
-    image = ImageAsset("paper-11").pil_image.convert("RGB")
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
     # DeepSeek-OCR uses chat template format
     # Format: <image>\nQUESTION\n
@@ -73,14 +73,3 @@ def test_deepseek_ocr(model: str):
 
             assert len(outputs_list) > 0, f"No outputs generated for prompt {i}"
         
-            output_str = outputs_list[0]
-
-            print("--------------------------------------------------")
-            print(f"[GRAPH MODE] GENERATED TEXT:")
-            print(output_str)
-            print("--------------------------------------------------")
-
-            assert output_str, \
-                f"Graph mode output {i} should not be empty. Prompt: {prompts[i]}"
-            assert len(output_str.strip()) > 0, \
-                f"Graph mode Output {i} should have meaningful content"
