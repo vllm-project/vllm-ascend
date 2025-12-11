@@ -841,6 +841,8 @@ class NPUModelRunner(GPUModelRunner):
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
         positions = self.positions.gpu[:num_input_tokens]
+        if self.uses_mrope:
+            positions = self.mrope_positions.gpu[:, :num_input_tokens]
 
         # type: ignore
         if get_pp_group().is_first_rank:
@@ -1834,8 +1836,8 @@ class NPUModelRunner(GPUModelRunner):
             attn_metadata = {}
 
             seq_lens = max_query_len
-            self.seq_lens_np[:num_reqs] = seq_lens
-            self.seq_lens_np[num_reqs:] = 0
+            self.seq_lens.np[:num_reqs] = seq_lens
+            self.seq_lens.np[num_reqs:] = 0
             self.seq_len.copy_to_gpu()
 
             cu_num_tokens, arange = self._get_cumsum_and_arange(
