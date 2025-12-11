@@ -967,10 +967,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             potential_max_num_tokens = self.compilation_config.max_cudagraph_capture_size
         else:
             potential_max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        # To ensure skipping all_reduce acrosss dp group is valid, we need to ensure that
+        # To ensure skipping all_reduce across dp group is valid, we need to ensure that
         # moe_comm_method of each rank is MC2 and recomputation would never happen in D
         # nodes. So here we check whether recompute_scheduler_enable is True.
-        return self.is_kv_consumer and not self.in_profile_run and self.ascend_config.recompute_scheduler_enable and self._select_moe_comm_method(potential_max_num_tokens) == MoECommType.MC2
+        return self.is_kv_consumer and not self.in_profile_run and self.ascend_config.recompute_scheduler_enable and self._select_moe_comm_method(
+            potential_max_num_tokens) == MoECommType.MC2
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
