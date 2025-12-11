@@ -212,7 +212,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
+We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
 
 This solution has been tested and demonstrates excellent performance.
 

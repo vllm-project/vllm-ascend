@@ -1,4 +1,4 @@
-# Single-NPU (Qwen3 32B W4A4)
+# Qwen3-32B-W4A4
 
 ## Introduction
 
