@@ -841,9 +841,6 @@ class NPUModelRunner(GPUModelRunner):
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
         positions = self.positions.gpu[:num_input_tokens]
-        input_ids, positions = self._update_input_ids_and_positions(
-            input_ids, positions, num_input_tokens, with_prefill,
-            maybe_padded_num_tokens)
 
         # type: ignore
         if get_pp_group().is_first_rank:
