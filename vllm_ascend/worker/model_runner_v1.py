@@ -172,18 +172,11 @@ is_310p_device = get_ascend_device_type() == AscendDeviceType._310P
 
 if is_310p_device:
     torch_npu.npu.set_compile_mode(jit_compile=False)
-    # 310P 设备：根据 torchair_graph_enabled 决定格式
-    # eager 模式 (--enforce-eager) 对应 torchair_graph_enabled=False，使用 ND 格式节省内存
-    # graph 模式使用 NZ 格式以获得更好性能
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ if not self.torchair_graph_enabled else ACL_FORMAT_FRACTAL_ND
+    # 310P 设备默认使用 ND 格式以节省内存，避免内存分配失败
+    # 具体格式将在类初始化时根据 torchair_graph_enabled 动态决定
+    ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
 else:
     ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
-
-# 添加调试信息：310P 设备的格式设置
-if is_310p_device:
-    from vllm.logger import logger
-    logger.info(f"310P device detected: torchair_graph_enabled={self.torchair_graph_enabled}, "
-                f"ACL_FORMAT={'NZ' if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ else 'ND'}")
 
 
 @dataclass
@@ -306,6 +299,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.pin_memory = is_pin_memory_available()
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
+
+        # 310P 动态格式设置：根据 torchair_graph_enabled 决定 ACL_FORMAT
+        # eager 模式 (--enforce-eager) 使用 ND 格式节省内存
+        # graph 模式使用 NZ 格式获得更好性能
+        if is_310p_device:
+            global ACL_FORMAT
+            ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ if not self.torchair_graph_enabled else ACL_FORMAT_FRACTAL_ND
+            from vllm.logger import logger
+            logger.info(f"310P device detected: torchair_graph_enabled={self.torchair_graph_enabled}, "
+                        f"ACL_FORMAT={'NZ' if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ else 'ND'}")
         self.block_size = vllm_config.cache_config.block_size
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
