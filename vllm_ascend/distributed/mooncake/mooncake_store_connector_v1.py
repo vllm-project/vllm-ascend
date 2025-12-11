@@ -208,7 +208,8 @@ class MooncakeStoreConnectorV1Scheduler:
         else:
             token_ids = torch.tensor(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(token_ids)  # type: ignore[union-attr]
+        num_external_hit_tokens = self.client.lookup(  # type: ignore[union-attr]
+            token_ids)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
