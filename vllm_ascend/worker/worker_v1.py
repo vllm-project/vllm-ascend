@@ -54,7 +54,7 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, enable_sp,
                                is_enable_nz, register_ascend_customop,
-                               sleep_mode_enabled, try_register_lib)
+                               try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -129,7 +129,7 @@ class NPUWorker(WorkerBase):
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
-        if sleep_mode_enabled():
+        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -140,10 +140,6 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
     def sleep(self, level: int = 1) -> None:
-        if not sleep_mode_enabled():
-            raise ValueError(
-                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
-            )
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -164,11 +160,6 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        if not sleep_mode_enabled():
-            raise ValueError(
-                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
-            )
-
         if is_enable_nz():
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "

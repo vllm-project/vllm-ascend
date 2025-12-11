@@ -24,7 +24,6 @@ from tests.e2e.utils import check_embeddings_close
 
 MODELS = [
     "Qwen/Qwen3-Embedding-0.6B",  # lasttoken
-    "BAAI/bge-small-en-v1.5",  # cls_token
     "intfloat/multilingual-e5-small"  # mean_tokens
 ]
 
@@ -55,5 +54,47 @@ def test_embed_models_correctness(model: str):
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+        tol=1e-2,
+    )
+
+
+def test_bge_model_correctness():
+    queries = ['What is the capital of China?', 'Explain gravity']
+
+    model_name = snapshot_download("BAAI/bge-m3")
+    with VllmRunner(
+            model_name,
+            runner="pooling",
+            enforce_eager=False,
+    ) as vllm_aclgraph_runner:
+        vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
+
+    with VllmRunner(
+            model_name,
+            runner="pooling",
+            enforce_eager=True,
+    ) as vllm_runner:
+        vllm_eager_outputs = vllm_runner.embed(queries)
+
+    with HfRunner(
+            model_name,
+            dtype="float32",
+            is_sentence_transformer=True,
+    ) as hf_runner:
+        hf_outputs = hf_runner.encode(queries)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_eager_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
+
+    check_embeddings_close(
+        embeddings_0_lst=vllm_eager_outputs,
+        embeddings_1_lst=vllm_aclgraph_outputs,
+        name_0="eager",
+        name_1="aclgraph",
         tol=1e-2,
     )
