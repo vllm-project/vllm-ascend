@@ -284,7 +284,8 @@ def unquant_apply_mlp(
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
-        bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
+        bias=[w1_bias.to(
+            dtype=torch.float32)] if w1_bias is not None else None,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
@@ -303,7 +304,8 @@ def unquant_apply_mlp(
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
         weight=[w2],
-        bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
+        bias=[w2_bias.to(
+            dtype=torch.float32)] if w2_bias is not None else None,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
