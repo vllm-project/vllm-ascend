@@ -256,9 +256,10 @@ class MtpProposer(Proposer):
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.runner.query_start_loc.gpu[:num_reqs + 1],
-                    query_start_loc_cpu=self.runner.
-                    query_start_loc.cpu[:num_reqs + 1],
+                    query_start_loc=self.runner.query_start_loc.gpu[:num_reqs +
+                                                                    1],
+                    query_start_loc_cpu=self.runner.query_start_loc.
+                    cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens.cpu,
                     seq_lens=self.runner.seq_lens.gpu[:num_reqs],
                     num_reqs=num_reqs,

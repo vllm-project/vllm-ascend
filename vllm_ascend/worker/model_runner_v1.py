@@ -41,7 +41,8 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.distributed import tensor_model_parallel_all_gather, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -78,9 +79,7 @@ from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
                                              GPUModelRunner)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
-from vllm.v1.worker.utils import (AttentionGroup, gather_mm_placeholders,
-                                  sanity_check_mm_encoder_outputs,
-                                  scatter_mm_placeholders)
+from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -201,7 +200,6 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -390,9 +388,12 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         # None in the first PP rank. The rest are set after load_model.
+        # the attr below is in gpu_modelrunner, but occurs lint so add them here
         self.intermediate_tensors: IntermediateTensors | None = None
         self.execute_model_state: ExecuteModelState | None = None
         self.reorder_batch_threshold: int | None = None
+        self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
+                                                 dtype=torch.int32)
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -861,10 +862,13 @@ class NPUModelRunner(GPUModelRunner):
                 num_input_tokens_with_flashcomm1 = (num_input_tokens +
                                                     tp_size - 1) // tp_size
             for k, v in intermediate_tensors.items():
-                self.intermediate_tensors[k][:num_input_tokens_with_flashcomm1].copy_(
-                    v[:num_input_tokens_with_flashcomm1], non_blocking=True)
+                self.intermediate_tensors[
+                    k][:num_input_tokens_with_flashcomm1].copy_(
+                        v[:num_input_tokens_with_flashcomm1],
+                        non_blocking=True)
             intermediate_tensors = IntermediateTensors({
-                k: v[:num_input_tokens_with_flashcomm1]
+                k:
+                v[:num_input_tokens_with_flashcomm1]
                 for k, v in self.intermediate_tensors.items()
             })
 
@@ -1007,7 +1011,7 @@ class NPUModelRunner(GPUModelRunner):
                         steps * self.uniform_decode_query_len)
 
                     self.query_start_loc.gpu[num_reqs + 1:num_reqs_padded +
-                                         1] = fill_values
+                                             1] = fill_values
                 # So we are trying to simulate the behavior of GPUModelRunner's
                 # prepare_inputs for uniform decode mode by padding query_start_loc
                 num_reqs = num_reqs_padded
