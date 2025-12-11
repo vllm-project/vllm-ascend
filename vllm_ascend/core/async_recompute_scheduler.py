@@ -22,10 +22,10 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
 
-
 logger = init_logger(__name__)
 
 
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

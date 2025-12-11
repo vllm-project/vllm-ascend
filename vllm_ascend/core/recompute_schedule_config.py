@@ -20,10 +20,12 @@ from typing import Type, Union
 
 from vllm.config import SchedulerConfig, VllmConfig
 
+
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
+
     @classmethod
     def initialize_from_config(cls, vllm_config: VllmConfig):
         vllm_scheduler_config = vllm_config.scheduler_config
@@ -33,10 +35,13 @@ class RecomputeSchedulerConfig(SchedulerConfig):
         }
         if vllm_scheduler_config.async_scheduling:
             scheduler_config["scheduler_cls"] = (
-                "vllm_ascend.core.async_recompute_scheduler.AsyncRecomputeScheduler")
+                "vllm_ascend.core.async_recompute_scheduler.AsyncRecomputeScheduler"
+            )
         else:
             scheduler_config["scheduler_cls"] = (
                 "vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
-        scheduler_config["max_model_len"] = vllm_config.model_config.max_model_len
-        scheduler_config["is_encoder_decoder"] = vllm_config.model_config.is_encoder_decoder
+        scheduler_config[
+            "max_model_len"] = vllm_config.model_config.max_model_len
+        scheduler_config[
+            "is_encoder_decoder"] = vllm_config.model_config.is_encoder_decoder
         return cls(**scheduler_config)
