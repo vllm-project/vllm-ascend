@@ -500,10 +500,11 @@ class KVCacheRecvingThread(threading.Thread):
         if need_nz_cache or need_cat_cache:
             self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls,
                                    need_cat_cache, need_nz_cache)
-        
-    def reformat_kv_cache(self, block_ids: list[list[int]],
-                      tp_num_need_pulls: int,
-                      need_cat_cache: bool = False,
+
+    def reformat_kv_cache(self,
+                          block_ids: list[list[int]],
+                          tp_num_need_pulls: int,
+                          need_cat_cache: bool = False,
                           need_nz_cache: bool = False):
         # Get necessary parameters
         k_cache = list(self.kv_caches.values())[0][0]
@@ -525,12 +526,14 @@ class KVCacheRecvingThread(threading.Thread):
         seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
         # Initialize buffers
-        k_buffer = torch.empty((num_tokens, self.num_kv_heads, self.k_head_dim),
-                               dtype=dtype,
-                               device=device)
-        v_buffer = torch.empty((num_tokens, self.num_kv_heads, self.v_head_dim),
-                               dtype=dtype,
-                               device=device)
+        k_buffer = torch.empty(
+            (num_tokens, self.num_kv_heads, self.k_head_dim),
+            dtype=dtype,
+            device=device)
+        v_buffer = torch.empty(
+            (num_tokens, self.num_kv_heads, self.v_head_dim),
+            dtype=dtype,
+            device=device)
 
         # Create slot mapping for reshape operations
         block_offsets = torch.arange(0,
@@ -564,8 +567,10 @@ class KVCacheRecvingThread(threading.Thread):
     def _cat_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
                       tp_num_need_pulls, num_blocks, num_tokens, slot_mapping):
 
-        def _transpose_kv_cache_between_head(buffer: torch.Tensor) -> torch.Tensor:
-            buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size, -1)
+        def _transpose_kv_cache_between_head(
+                buffer: torch.Tensor) -> torch.Tensor:
+            buffer = buffer.view(num_blocks, tp_num_need_pulls,
+                                 self.block_size, -1)
             buffer.transpose_(1, 2)
             return buffer.contiguous().view(num_tokens, self.num_kv_heads, -1)
 
@@ -574,12 +579,11 @@ class KVCacheRecvingThread(threading.Thread):
         v_buffer = _transpose_kv_cache_between_head(v_buffer)
 
         # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(
-            key=k_buffer,
-            value=v_buffer,
-            key_cache=k_cache_layer,
-            value_cache=v_cache_layer,
-            slot_indices=slot_mapping)
+        torch_npu._npu_reshape_and_cache(key=k_buffer,
+                                         value=v_buffer,
+                                         key_cache=k_cache_layer,
+                                         value_cache=v_cache_layer,
+                                         slot_indices=slot_mapping)
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
                      slot_mapping):
