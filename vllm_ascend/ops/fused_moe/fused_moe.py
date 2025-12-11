@@ -177,7 +177,8 @@ class AscendFusedMoE(FusedMoE):
         # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
         # workaround to bypass a quantization check that fails with float weights.
         init_eplb_enable = False
-        num_experts+=1 if getattr(self.ascend_config, "mix_placement",False) else 0
+        num_experts += 1 if getattr(self.ascend_config, "mix_placement",
+                                    False) else 0
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
