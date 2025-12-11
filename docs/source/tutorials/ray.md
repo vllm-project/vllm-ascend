@@ -1,4 +1,4 @@
-# Multi-Node-Ray (Qwen/Qwen3-235B-A22B)
+# Ray Distributed (Qwen3-235B-A22B)
 
 Multi-node inference is suitable for scenarios where the model cannot be deployed on a single machine. In such cases, the model can be distributed using tensor parallelism or pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
 
