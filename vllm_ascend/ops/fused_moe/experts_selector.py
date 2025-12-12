@@ -109,9 +109,10 @@ def select_experts(hidden_states: torch.Tensor,
                                                dtype=topk_weights.dtype,
                                                device=topk_weights.device)
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
-        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], 
+        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights],
                                  dim=1)
     return topk_weights, topk_ids
+
 
 def check_npu_moe_gating_top_k(
         hidden_states: torch.Tensor,
@@ -318,5 +319,4 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
-
 
