@@ -144,7 +144,7 @@ The deployment view looks like:
 Once your server is started, you can query the model with input prompts:
 
 ```shell
-curl http://{ localhost:8004 }/v1/completions \
+curl http://{ node0 ip:8004 }/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi",
