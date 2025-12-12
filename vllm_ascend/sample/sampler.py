@@ -52,7 +52,7 @@ class AscendSampler(Sampler):
         with torch.npu.stream(global_stream()):
             global_stream().wait_stream(torch.npu.current_stream())
             q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
-            if self.enable_async_exp == 2:
+            if async_option == 2:
                 # Set self.enable_async_exp to 2 will enable async exponential with AI-core exponential.
                 if len(generators) != q.shape[0]:
                     torch_npu.npu_sim_exponential_(q)
