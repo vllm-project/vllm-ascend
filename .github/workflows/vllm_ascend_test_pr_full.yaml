@@ -38,19 +38,24 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2-0
     if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Setup git proxy
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
+              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
               - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
@@ -69,7 +74,7 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [v0.11.2]
+        vllm_version: [ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9, v0.12.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml

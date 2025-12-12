@@ -5,7 +5,7 @@ export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 
 export VLLM_USE_MODELSCOPE=true
 
@@ -27,5 +27,4 @@ vllm serve Qwen/Qwen1.5-MoE-A2.7B  \
   --max-num-batched-tokens 4096 \
   --gpu-memory-utilization 0.9 \
   --trust-remote-code \
-  --enforce-eager \
-  --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":false, "use_cached_graph":false}}'
+  --enforce-eager

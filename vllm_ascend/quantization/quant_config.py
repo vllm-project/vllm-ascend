@@ -65,6 +65,9 @@ class AscendQuantConfig(QuantizationConfig):
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
                 extra_quant_dict[new_k] = self.quant_description[k]
+            if "weight_packed" in k:
+                new_k = k.replace("weight_packed", "weight")
+                extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:
@@ -96,7 +99,7 @@ class AscendQuantConfig(QuantizationConfig):
                                      user_quant) -> Optional[str]:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
-            if quant_method is None and torch.npu.is_available():
+            if not quant_method and torch.npu.is_available():
                 return ASCEND_QUANTIZATION_METHOD
         return None
 
@@ -200,7 +203,8 @@ packed_modules_model_mapping = {
     "kimi_k2": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -408,11 +412,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self,
-                 quant_config: AscendQuantConfig,
-                 prefix: str,
-                 packed_modules_mapping: Dict[str, Any],
-                 layer: torch.nn.Module = None):
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str,
+                                              Any], layer: torch.nn.Module):
+        super().__init__(layer.moe_config)
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,
                                              "moe",
@@ -440,7 +443,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
         per_group_param = [
             "weight_scale_second", "weight_offset_second", "scale_bias"
-        ]
+        ] + ["weight_scale", "weight_offset"] if hasattr(
+            self.quant_method,
+            "group_size") and self.quant_method.group_size > 0 else []
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)

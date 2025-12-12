@@ -22,9 +22,9 @@ find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
   "import torch; print(torch.__version__)" "Failed to locate torch path")
-# check torch version is 2.7.1
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.7.1")
-  message(FATAL_ERROR "Expected PyTorch version 2.7.1, but found ${TORCH_VERSION}")
+# check torch version is 2.8.0
+if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.8.0")
+  message(FATAL_ERROR "Expected PyTorch version 2.8.0, but found ${TORCH_VERSION}")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
@@ -131,6 +131,6 @@ target_link_libraries(
   opapi
 )
 
-target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib")
+target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib")
 
 install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

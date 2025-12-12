@@ -7,7 +7,7 @@ from typing import Union
 
 # Third Party
 from vllm.config import ParallelConfig
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
@@ -83,7 +83,6 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
-    use_ascend_direct: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -95,12 +94,11 @@ class MooncakeStoreConfig:
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size",
                            DEFAULT_GLOBAL_SEGMENT_SIZE)),
-            local_buffer_size=(config.get("local_buffer_size",
-                                          DEFAULT_LOCAL_BUFFER_SIZE)),
+            local_buffer_size=_parse_global_segment_size(
+                config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
-            use_ascend_direct=config.get("use_ascend_direct", False))
+            master_server_address=config.get("master_server_address"))
 
     @staticmethod
     def load_from_env() -> "MooncakeStoreConfig":

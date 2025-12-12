@@ -6,9 +6,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
+                              get_pcp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kvpool.backend.backend import Backend
@@ -22,14 +22,6 @@ from vllm_ascend.distributed.kvpool.config_data import (
 from vllm_ascend.distributed.kvpool.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
-from vllm_ascend.utils import prefill_context_parallel_enable
-
-if prefill_context_parallel_enable():
-    # isort: off
-    from vllm.distributed import (get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-    # isort: on
 
 backend_map: Dict[str, Type[Backend]] = {
     "mooncake": MooncakeBackend,
@@ -56,11 +48,12 @@ class KVPoolWorker:
         self.use_layerwise = use_layerwize
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.pp_size = parallel_config.pipeline_parallel_size
+        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
 
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
@@ -96,6 +89,7 @@ class KVPoolWorker:
             self.head_or_tp_rank,
             self.pcp_rank,
             self.dcp_rank,
+            self.pp_rank,
         )
 
         self.token_database = ChunkedTokenDatabase(self.metadata,
@@ -562,6 +556,12 @@ class KVPoolWorker:
                 for item in keys:
                     new_str = item.replace(  # type: ignore[attr-defined]
                         "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1)
+                    multi_tp_keys.append(new_str)
+
+            for i in range(1, self.pp_size):
+                for item in keys:
+                    new_str = item.replace(  # type: ignore[attr-defined]
+                        "@pp_rank:0", f"@pp_rank:{i}", 1)
                     multi_tp_keys.append(new_str)
 
             res = self.m_store.exists(

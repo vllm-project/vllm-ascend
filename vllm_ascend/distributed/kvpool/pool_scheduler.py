@@ -5,7 +5,7 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -20,17 +20,20 @@ from vllm_ascend.distributed.kvpool.config_data import (
 class KVPoolScheduler:
 
     def __init__(self, vllm_config: "VllmConfig", use_layerwise):
-        self.client = LookupKeyClient(vllm_config)
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
+        self.client = LookupKeyClient(
+            vllm_config) if self.kv_role != "kv_consumer" else None
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.pcp_size = getattr(vllm_config.parallel_config,
+                                "prefill_context_parallel_size", 1)
+        self.dcp_size = getattr(vllm_config.parallel_config,
+                                "decode_context_parallel_size", 1)
 
         self._block_size = vllm_config.cache_config.block_size
         if self.pcp_size > 1:
@@ -72,8 +75,8 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(token_len,
-                                                     request.block_hashes)
+        num_external_hit_tokens = self.client.lookup(  # type: ignore[union-attr]
+            token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
 import random
 from typing import Any
 
@@ -8,6 +9,8 @@ import pytest
 from vllm import LLM, SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
@@ -61,7 +64,6 @@ def eagle3_model_name():
     return "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
-@pytest.mark.skip("TODO: Revert me after ngram oom issue on ci is fixed")
 def test_ngram_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -71,9 +73,11 @@ def test_ngram_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
-    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=False)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
+
+    with VllmRunner(model_name, max_model_len=1024,
+                    enforce_eager=False) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
     with VllmRunner(model_name,
                     speculative_config={
                         "method": "ngram",
@@ -110,7 +114,7 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    pytest.skip("exist OOM error")
+    pytest.skip("To be aligned with GPU")
     ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=False)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
@@ -118,7 +122,6 @@ def test_eagle_correctness(
     spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
     with VllmRunner(
             model_name,
-            enable_chunked_prefill=True,
             max_num_seqs=1,
             max_num_batched_tokens=2048,
             gpu_memory_utilization=0.6,
@@ -146,3 +149,93 @@ def test_eagle_correctness(
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
+
+
+@pytest.mark.skip(
+    "Fix me, suffix decoding now exists some known accuracy issue, skip it")
+def test_suffix_correctness(
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using ngram speculative decoding.
+    '''
+    with VllmRunner(model_name, max_model_len=1024,
+                    enforce_eager=False) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
+    with VllmRunner(model_name,
+                    speculative_config={
+                        "method": "suffix",
+                        "num_speculative_tokens": 8,
+                    },
+                    max_model_len=1024,
+                    enforce_eager=False) as runner:
+        spec_outputs = runner.model.chat(test_prompts, sampling_config)
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
+
+    # Heuristic: expect at least 70% of the prompts to match exactly
+    # Upon failure, inspect the outputs to check for inaccuracy.
+    assert matches > int(0.66 * len(ref_outputs))
+
+
+@pytest.mark.skip(
+    "Fix me, suffix decoding now exists some functional issue, skip it")
+def test_suffix_acceptance(
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Check that suffix decoding caching takes effect and improves acceptance
+    lengths and acceptance rates over multiple runs of the same prompts.
+    '''
+    num_draft = []
+    num_accept = []
+    with VllmRunner(model_name,
+                    speculative_config={
+                        "method": "suffix",
+                        "suffix_decoding_max_spec_factor": 2.0,
+                        "suffix_decoding_max_cached_requests": 1000,
+                        "num_speculative_tokens": 10,
+                    },
+                    max_model_len=1024,
+                    disable_log_stats=False,
+                    enforce_eager=False) as runner:
+        for i in range(10):
+            runner.model.chat(test_prompts[i], sampling_config)
+            metrics = runner.model.get_metrics()
+            for metric in metrics:
+                print(metric)
+                if metric.name == "vllm:spec_decode_num_draft_tokens":
+                    num_draft.append(metric.value)
+                if metric.name == "vllm:spec_decode_num_accepted_tokens":
+                    num_accept.append(metric.value)
+    # Calculate the acceptance rates for the first and last runs.
+    first_accept_tokens = num_accept[0]
+    first_draft_tokens = num_draft[0]
+    first_accept_rate = first_accept_tokens / first_draft_tokens
+
+    # Take the diff since the stats are cumulative.
+    last_accept_tokens = num_accept[-1] - num_accept[-2]
+    last_draft_tokens = num_draft[-1] - num_draft[-2]
+    last_accept_rate = last_accept_tokens / last_draft_tokens
+
+    # Expect the acceptance length to improve.
+    assert first_accept_tokens < last_accept_tokens
+
+    # Expect the acceptance rate to improve.
+    assert first_accept_rate < last_accept_rate
+
+    # Heuristic: expect at least 80% acceptance rate at the end.
+    assert last_accept_rate > 0.60

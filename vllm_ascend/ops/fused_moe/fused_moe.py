@@ -36,6 +36,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
+from vllm_ascend.eplb.utils import moe_load_async_stream
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
@@ -56,29 +57,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().dynamic_eplb
-        self.transpose = True
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
               self).process_weights_after_loading(layer)
-        if self.transpose:
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
-                1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data,
-                                                  requires_grad=False)
 
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
-                1, 2).contiguous()
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
+            1, 2).contiguous()
+        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
-            self.transpose = False
-        else:
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data)
-            layer.w13_weight = torch.nn.Parameter(w13_data,
-                                                  requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
+            1, 2).contiguous()
+        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
         if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
         ):
@@ -184,6 +174,9 @@ class AscendFusedMoE(FusedMoE):
         # init moe.
         self.local_num_experts, self.expert_map, _ = determine_expert_map(
             self.ep_size, self.ep_rank, self.global_num_experts)
+        # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
+        # workaround to bypass a quantization check that fails with float weights.
+        init_eplb_enable = False
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -200,6 +193,7 @@ class AscendFusedMoE(FusedMoE):
                         self.moe_instance_id, self.ep_rank))
                 self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
+                init_eplb_enable = True
             except Exception as e:
                 logger.warning(
                     f"Init expert map of mtp/eagle when using sample.{e}")
@@ -225,10 +219,10 @@ class AscendFusedMoE(FusedMoE):
             self.moe_load = torch.zeros(local_num_experts,
                                         dtype=torch.int64).npu()
 
-        eplb_enable = self.dynamic_eplb or (self.expert_map_path is not None)
-        if eplb_enable and (not hasattr(self.quant_method, "quant_method") or
-                            not isinstance(self.quant_method.quant_method,
-                                           AscendW8A8DynamicFusedMoEMethod)):
+        if init_eplb_enable and (
+                not hasattr(self.quant_method, "quant_method")
+                or not isinstance(self.quant_method.quant_method,
+                                  AscendW8A8DynamicFusedMoEMethod)):
             raise ValueError("Eplb supports only w8a8_dynamic quantization.")
 
         self.moe_config.num_experts = self.global_num_experts
@@ -375,8 +369,15 @@ class AscendFusedMoE(FusedMoE):
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
-                self.moe_load += expert_tokens if group_list_type == 1 else \
-                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+                moe_load_stream = moe_load_async_stream()
+                cur_stream = torch.npu.current_stream()
+
+                moe_load_stream.wait_stream(cur_stream)
+                with npu_stream_switch(moe_load_stream):
+                    self.moe_load += expert_tokens if group_list_type == 1 else \
+                        torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                cur_stream.wait_stream(moe_load_stream)
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
@@ -384,61 +385,6 @@ class AscendFusedMoE(FusedMoE):
             context_metadata=context_metadata)
 
         return final_hidden_states
-
-    def transpose_weight(self, loaded_weight, expert_data, shard_dim):
-        # Ensure training and inference weight shapes match during RL weight updates
-        if (len(loaded_weight.shape) >= 2 and len(expert_data.shape) >= 2 and \
-            loaded_weight.shape[1] != expert_data.shape[1] and \
-            loaded_weight.shape[0] != expert_data.shape[0]
-        ):
-            shard_dim = int(not shard_dim)
-            loaded_weight = loaded_weight.transpose(0, 1).contiguous()
-        return loaded_weight, shard_dim
-
-    def _load_w13(self,
-                  expert_data: torch.Tensor,
-                  shard_dim: int,
-                  shard_id: str,
-                  loaded_weight: torch.Tensor,
-                  tp_rank: int,
-                  load_full: bool = False):
-        # Index the loaded weight for tp sharding.
-        # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        loaded_weight, shard_dim = self.transpose_weight(
-            loaded_weight, expert_data, shard_dim)
-        shard_size = expert_data.shape[shard_dim] // 2
-        if not load_full:
-            loaded_weight = loaded_weight.narrow(shard_dim,
-                                                 shard_size * tp_rank,
-                                                 shard_size)
-        # Narrow parameter and load.
-        # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
-        # w3, up_proj: Load into second logical weight of w13.
-        else:
-            assert shard_id == "w3"
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-        expert_data.copy_(loaded_weight)
-
-    def _load_w2(self,
-                 expert_data: torch.Tensor,
-                 shard_dim: int,
-                 loaded_weight: torch.Tensor,
-                 tp_rank: int,
-                 load_full: bool = False):
-        # Index the loaded weight for tp sharding.
-        # down_proj: "RowParallel" so tp sharding on input_dim
-        # Narrow parameter and load.
-        loaded_weight, shard_dim = self.transpose_weight(
-            loaded_weight, expert_data, shard_dim)
-        shard_size = expert_data.shape[shard_dim]
-        if not load_full:
-            loaded_weight = loaded_weight.narrow(shard_dim,
-                                                 shard_size * tp_rank,
-                                                 shard_size)
-        # w2, down_proj: Load into only logical weight of w2.
-        expert_data.copy_(loaded_weight)
 
 
 class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
@@ -516,7 +462,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
         forward_context = get_forward_context()
         moe_comm_type = forward_context.moe_comm_type
-        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL} \
                 and not shared_expert_dp_enabled():
             shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out, fused_output

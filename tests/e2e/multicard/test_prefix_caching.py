@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare the with and without prefix caching on V1 scheduler or AscendScheduler."""
+"""Compare the with and without prefix caching."""
 
 import pytest
 
@@ -9,7 +9,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     # for MHA
-    "Qwen/Qwen3-8B-Base",
+    "Qwen/Qwen3-8B",
     # for MLA
     "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]
@@ -58,12 +58,10 @@ INPUT_PROMPTS = [
 ]
 
 
-@pytest.mark.skip(reason="Fix me, the accuracy is not correct")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
-def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
+def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -72,7 +70,6 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
 
     with VllmRunner(model,
                     enable_prefix_caching=False,
-                    enforce_eager=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -84,67 +81,3 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
         name_0="vllm_output",
         name_1="prefix_cache_output",
     )
-
-
-@pytest.mark.skip(reason="Fix me, the accuracy is not correct")
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [50])
-def test_prefix_cache_with_ascend_scheduler(model: str,
-                                            max_tokens: int) -> None:
-
-    with VllmRunner(model,
-                    additional_config={
-                        'ascend_scheduler_config': {
-                            'enabled': True,
-                        },
-                    },
-                    enforce_eager=False,
-                    max_model_len=2048,
-                    tensor_parallel_size=2,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        vllm_output = vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
-
-    with VllmRunner(model,
-                    additional_config={
-                        'ascend_scheduler_config': {
-                            'enabled': True,
-                            'enable_prefix_caching': True,
-                        },
-                    },
-                    enforce_eager=False,
-                    max_model_len=2048,
-                    tensor_parallel_size=2,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        prefix_cache_output = vllm_model.generate_greedy(
-            INPUT_PROMPTS, max_tokens)
-
-    # TODO: enable apc and chunked prefill with ascend scheduler will lead accuracy problem.
-    # Disable it now. Fix it or drop the ascend scheduler in the future.
-    # with VllmRunner(model,
-    #                 additional_config={
-    #                     'ascend_scheduler_config': {
-    #                         'enabled': True,
-    #                         'enable_prefix_caching': True,
-    #                         "enable_chunked_prefill": True,
-    #                     },
-    #                 },
-    #                 enforce_eager=True,
-    #                 max_model_len=2048,
-    #                 tensor_parallel_size=2,
-    #                 gpu_memory_utilization=0.7) as vllm_model:
-    #     chunk_prefill_prefix_cache_output = vllm_model.generate_greedy(
-    #         INPUT_PROMPTS, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_output,
-        outputs_1_lst=prefix_cache_output,
-        name_0="vllm_output",
-        name_1="prefix_cache_output",
-    )
-
-    # check_outputs_equal(
-    #     outputs_0_lst=chunk_prefill_prefix_cache_output,
-    #     outputs_1_lst=prefix_cache_output,
-    #     name_0="chunk_prefill_prefix_cache_output",
-    #     name_1="prefix_cache_output",
-    # )

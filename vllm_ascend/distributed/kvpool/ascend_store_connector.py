@@ -8,7 +8,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import ForwardContext
-from vllm.utils import logger
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -55,7 +55,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
             )
 
             assert self.connector_worker is not None
-            if vllm_config.parallel_config.rank == 0:
+            if vllm_config.parallel_config.rank == 0 and self.kv_role != "kv_consumer":
                 self.lookup_server = LookupKeyServer(self.connector_worker,
                                                      vllm_config,
                                                      self.use_layerwise)

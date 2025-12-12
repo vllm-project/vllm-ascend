@@ -24,7 +24,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
-from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
@@ -66,14 +65,17 @@ def _rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        if self.cos is not None and \
-            self.sin is not None:
+        if hasattr(self, "cos") and hasattr(self, "sin") and \
+            self.cos is not None and self.sin is not None:
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,
                                             self.head_size)
             key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-            torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
+            # Although this function modifies in-place, please retain the function's return value.
+            # Otherwise, the graph fusion operation may fail.
+            query, key = torch_npu.npu_apply_rotary_pos_emb(
+                query, key, self.cos, self.sin)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
@@ -408,10 +410,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        # TODO: This judgment will be removed once the mrope precision issue is fixed
-        if self.mrope_section != [
-                16, 24, 24
-        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86:
+        if self.mrope_section != [16, 24, 24] or \
+            get_ascend_device_type() == AscendDeviceType._910_95:
             return super().forward_oot(positions, query, key)
 
         import torch_npu
@@ -426,7 +426,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
                 query.dtype)  # type: ignore
 
-        query, key = torch_npu.npu_mrope(positions,
+        query, key = torch_npu.npu_mrope(positions.contiguous(),
                                          query.contiguous(),
                                          key.contiguous(),
                                          self.cos_sin_cache.contiguous(),

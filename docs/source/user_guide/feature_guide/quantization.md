@@ -104,22 +104,3 @@ First, make sure you specify `ascend` as the quantization method. Second, check 
 ### 2. How to solve the error "Could not locate the configuration_deepseek.py"?
 
 Please convert DeepSeek series models using `br_release_MindStudio_8.1.RC2_TR5_20260624` ModelSlim, where the missing configuration_deepseek.py error has been fixed.
-
-### 3. What should be considered when converting DeepSeek series models with ModelSlim?
-
-When the MLA portion of the weights used the `W8A8_DYNAMIC` quantization with the torchair graph mode enabled, modify the configuration file in the CANN package to prevent incorrect inference results.
-
-The operation steps are as follows:
-
-1. Search in the CANN package directory, for example:
-find /usr/local/Ascend/ -name fusion_config.json
-
-2. Add `"AddRmsNormDynamicQuantFusionPass":"off",` and `"MultiAddRmsNormDynamicQuantFusionPass":"off",` to the fusion_config.json you find, the location is as follows:
-
-```bash
-{
-    "Switch":{
-        "GraphFusion":{
-            "AddRmsNormDynamicQuantFusionPass":"off",
-            "MultiAddRmsNormDynamicQuantFusionPass":"off",
-```

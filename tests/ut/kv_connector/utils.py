@@ -6,7 +6,6 @@
 import os
 from typing import Any, Optional
 
-import numpy as np
 import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
@@ -79,10 +78,9 @@ def create_vllm_config(
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
-        kv_connector="LLMDataDistCMgrConnector",
+        kv_connector="MooncakeConnector",
         kv_role="kv_both",
-        kv_connector_module_path=
-        "vllm_ascend.distributed.llmdatadist_c_mgr_connector")
+        kv_connector_module_path="vllm_ascend.distributed.mooncake_connector")
     return VllmConfig(scheduler_config=scheduler_config,
                       model_config=model_config,
                       cache_config=cache_config,
@@ -189,7 +187,7 @@ def create_model_runner_output(
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else 0
-    sampled_token_ids = [np.array([sampled_token]) for _ in req_ids]
+    sampled_token_ids = [[sampled_token] for _ in req_ids]
 
     # Make output data structure.
     extra_args = {}

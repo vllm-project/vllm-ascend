@@ -12,7 +12,7 @@ From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by defa
 
 There are two kinds for graph mode supported by vLLM Ascend:
 - **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.1rc1, Qwen and Deepseek series models are well tested.
-- **TorchAirGraph**: This is the GE graph mode. In v0.9.1rc1, only DeepSeek series models are supported.
+- **XliteGraph**: This is the euler xlite graph mode. In v0.11.0, only Llama and Qwen dense serise models are supported.
 
 ## Using ACLGraph
 ACLGraph is enabled by default. Take Qwen series models as an example, just set to use V1 Engine is enough.
@@ -34,9 +34,13 @@ Online example:
 vllm serve Qwen/Qwen2-7B-Instruct
 ```
 
-## Using TorchAirGraph
+## Using XliteGraph
 
-If you want to run DeepSeek series models with the graph mode, you should use [TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html). In this case, additional configuration is required.
+If you want to run Llama or Qwen dense series models with xlite graph mode, please install xlite, and set xlite_graph_config.
+
+```bash
+pip install xlite
+```
 
 Offline example:
 
@@ -44,22 +48,22 @@ Offline example:
 import os
 from vllm import LLM
 
-# TorchAirGraph only works without chunked-prefill now
-model = LLM(model="path/to/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True}})
+# xlite supports the decode-only mode by default, and the full mode can be enabled by setting: "full_mode": True
+model = LLM(model="path/to/Qwen3-32B", tensor_parallel_size=8, additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}})
 outputs = model.generate("Hello, how are you?")
 ```
 
 Online example:
 
 ```shell
-vllm serve path/to/DeepSeek-R1-0528 --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true}}'
+vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
 ```
 
-You can find more details about additional configuration [here](../configuration/additional_config.md).
+You can find more details abort xlite [here](https://gitee.com/openeuler/GVirt/blob/master/xlite/README.md)
 
 ## Fallback to the Eager Mode
 
-If both `ACLGraph` and `TorchAirGraph` fail to run, you should fallback to the eager mode.
+If `ACLGraph` and `XliteGraph` all fail to run, you should fallback to the eager mode.
 
 Offline example:
 
