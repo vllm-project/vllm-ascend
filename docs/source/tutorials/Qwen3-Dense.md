@@ -1,4 +1,4 @@
-# Qwen3-Dense
+# Qwen3-Dense(Qwen3-0.6B/8B/32B)
 
 ## Introduction
 
