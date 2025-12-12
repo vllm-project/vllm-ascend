@@ -1310,7 +1310,7 @@ class NPUModelRunner(GPUModelRunner):
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
         if self.pcp_size > 1:
             logits_indices = logits_indices_pcp
-        metadata = SpecDecodeMetadata(
+        return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
             cu_num_draft_tokens=cu_num_draft_tokens,
@@ -1319,7 +1319,6 @@ class NPUModelRunner(GPUModelRunner):
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
         )
-        return metadata
 
     def propose_draft_token_ids(
         self,
@@ -1672,46 +1671,8 @@ class NPUModelRunner(GPUModelRunner):
                                                 grammar_output, logits)
 
         with ProfileExecuteDuration().capture_async("Sample"):
-            # Sample the next token and get logprobs if needed.
-            sampling_metadata = self.input_batch.sampling_metadata
-            if spec_decode_metadata is None:
-                if lmhead_tp_enable() and logits is not None:
-                    logits = logits[:self.input_batch.num_reqs]
-                sampler_output = self.sampler(
-                    logits=logits,
-                    sampling_metadata=sampling_metadata,
-                )
-            else:
-                if lmhead_tp_enable() and logits is not None:
-                    logits = logits[:len(spec_decode_metadata.logits_indices)]
-                # When indexing with a tensor (bonus_logits_indices), PyTorch
-                # creates a new tensor with separate storage from the original
-                # logits tensor. This means any in-place operations on bonus_logits
-                # won't affect the original logits tensor.
-                assert logits is not None
-                bonus_logits = logits[
-                    spec_decode_metadata.bonus_logits_indices]
-                sampler_output = self.sampler(
-                    logits=bonus_logits,
-                    sampling_metadata=sampling_metadata,
-                )
-                bonus_token_ids = sampler_output.sampled_token_ids
+            sampler_output = self._sample(logits, spec_decode_metadata)
 
-                # Just like `bonus_logits`, `target_logits` is a new tensor with
-                # separate storage from the original `logits` tensor. Therefore,
-                # it is safe to update `target_logits` in place.
-                target_logits = logits[
-                    spec_decode_metadata.target_logits_indices]
-                output_token_ids = self.rejection_sampler(
-                    spec_decode_metadata,
-                    None,  # draft_probs
-                    target_logits,
-                    bonus_token_ids,
-                    sampling_metadata,
-                )
-                sampler_output.sampled_token_ids = output_token_ids
-                if self.need_accepted_tokens:
-                    self._update_states_after_model_execute(output_token_ids)
             discard_sampled_tokens_req_indices = \
                 self.discard_request_indices.np[:self.num_discarded_requests]
             for i in discard_sampled_tokens_req_indices:
@@ -1810,7 +1771,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
-                sampling_metadata,
+                self.input_batch.sampling_metadata,
                 scheduler_output,
                 spec_decode_metadata,
                 positions,
@@ -1877,6 +1838,48 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
         )
+
+    def _sample(self, logits, spec_decode_metadata):
+        # Sample the next token and get logprobs if needed.
+        sampling_metadata = self.input_batch.sampling_metadata
+        if spec_decode_metadata is None:
+            if lmhead_tp_enable() and logits is not None:
+                logits = logits[:self.input_batch.num_reqs]
+            return self.sampler(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            if lmhead_tp_enable() and logits is not None:
+                logits = logits[:len(spec_decode_metadata.logits_indices)]
+            # When indexing with a tensor (bonus_logits_indices), PyTorch
+            # creates a new tensor with separate storage from the original
+            # logits tensor. This means any in-place operations on bonus_logits
+            # won't affect the original logits tensor.
+            assert logits is not None
+            bonus_logits = logits[
+                spec_decode_metadata.bonus_logits_indices]
+            sampler_output = self.sampler(
+                logits=bonus_logits,
+                sampling_metadata=sampling_metadata,
+            )
+            bonus_token_ids = sampler_output.sampled_token_ids
+
+            # Just like `bonus_logits`, `target_logits` is a new tensor with
+            # separate storage from the original `logits` tensor. Therefore,
+            # it is safe to update `target_logits` in place.
+            target_logits = logits[
+                spec_decode_metadata.target_logits_indices]
+            output_token_ids = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
+            sampler_output.sampled_token_ids = output_token_ids
+            if self.need_accepted_tokens:
+                self._update_states_after_model_execute(output_token_ids)
 
     def _build_dummy_attn_metadata(
         self,
