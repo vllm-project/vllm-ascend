@@ -31,6 +31,8 @@ from multiprocessing import Manager
 from typing import (TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional,
                     Union, cast)
 
+import numba
+import numba.types as types
 import numpy as np
 import numpy.typing as npt
 import regex as re
@@ -625,6 +627,32 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.execute_model_state: ExecuteModelState | None = None
 
         self.transfer_event = torch.npu.Event()
+
+        # Use pre-compilation to reduce Numba first token latency
+        self.numba_compiled = False
+        self.precompile_numba_functions()
+
+    def precompile_numba_functions(self):
+        if self.numba_compiled:
+            return
+
+        # Create dummy arguments with correct shapes and data types for pre-compilation
+        dummy_args = (
+            np.zeros(5, dtype=np.int32),  # idx_mapping
+            np.zeros((8, 15), dtype=np.int32),  # token_ids
+            np.zeros(8, dtype=np.int32),  # num_computed_tokens
+            np.zeros(5, dtype=np.int32),  # num_scheduled_tokens
+            np.zeros(10, dtype=np.int32),  # input_ids
+            np.zeros(10, dtype=np.int64),  # positions
+            np.zeros(6, dtype=np.int32),  # query_start_loc
+            np.zeros(5, dtype=np.int32),  # seq_lens
+            np.zeros((8, 15), dtype=bool),  # is_token_ids_in
+            np.zeros(8, dtype=bool),  # is_token_ids_out
+        )
+        self._prepare_inputs_use_numba(*dummy_args)
+        self._prepare_inputs_use_numba_pcp(*dummy_args, np.zeros(10, dtype=np.int32)) # Add position_pcp
+
+        self.numba_compiled = True
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -1434,6 +1462,112 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
             torch.float32).argsort().to(torch.int32)
 
+    @staticmethod
+    @numba.jit(
+        [
+            types.none(
+                types.int32[:],  # idx_mapping
+                types.int32[:, :],  # token_ids
+                types.int32[:],  # num_computed_tokens
+                types.int32[:],  # num_scheduled_tokens
+                types.int32[:],  # input_ids
+                types.int64[:],  # positions
+                types.int32[:],  # query_start_loc
+                types.int32[:],  # seq_lens
+                types.boolean[:, :],  # is_token_ids_in
+                types.boolean[:],  # is_token_ids_out
+                types.int32[:],  #  position_pcp
+            )
+        ],
+        nopython=True,
+        cache=True,
+    )
+    def _prepare_inputs_use_numba_pcp(
+        idx_mapping: np.ndarray,  # batch_idx -> req_idx
+        token_ids: np.ndarray,  # [N, max_model_len]
+        num_computed_tokens: np.ndarray,  # [N]
+        num_scheduled_tokens: np.ndarray,  # [B]
+        input_ids: np.ndarray,  # [num_input_tokens]
+        positions: np.ndarray,  # [num_input_tokens]
+        query_start_loc: np.ndarray,  # [B + 1]
+        seq_lens: np.ndarray,  # [B]
+        is_token_ids_in: np.ndarray, # [N, max_model_len]
+        is_token_ids_out: np.ndarray,  # [num_input_tokens]
+        position_pcp: np.ndarray,  # [num_input_tokens]
+    ) -> None:
+        num_reqs = num_scheduled_tokens.shape[0]
+        query_start_loc[0] = 0
+
+        cu_num_tokens = 0
+        for i in range(num_reqs):
+            req_idx = idx_mapping[i]
+            query_len = num_scheduled_tokens[i]
+            start = num_computed_tokens[req_idx]
+            seq_lens[i] = start + query_len
+            start_idx = cu_num_tokens
+
+            for j in range(query_len):
+                current_idx = start_idx + j
+                actual_pos = start + position_pcp[current_idx]
+
+                input_ids[current_idx] = token_ids[req_idx, actual_pos]
+                is_token_ids_out[current_idx] = is_token_ids_in[req_idx, actual_pos]
+                positions[current_idx] = actual_pos
+
+            cu_num_tokens = start_idx + query_len
+            query_start_loc[i + 1] = cu_num_tokens
+
+    @staticmethod
+    @numba.jit(
+        [
+            types.none(
+                types.int32[:],  # idx_mapping
+                types.int32[:, :],  # token_ids
+                types.int32[:],  # num_computed_tokens
+                types.int32[:],  # num_scheduled_tokens
+                types.int32[:],  # input_ids
+                types.int64[:],  # positions
+                types.int32[:],  # query_start_loc
+                types.int32[:],  # seq_lens
+                types.boolean[:, :],  # is_token_ids_in
+                types.boolean[:],  # is_token_ids_out
+            )
+        ],
+        nopython=True,
+        cache=True,
+    )
+    def _prepare_inputs_use_numba(
+        idx_mapping: np.ndarray,  # batch_idx -> req_idx
+        token_ids: np.ndarray,  # [N, max_model_len]
+        num_computed_tokens: np.ndarray,  # [N]
+        num_scheduled_tokens: np.ndarray,  # [B]
+        input_ids: np.ndarray,  # [num_input_tokens]
+        positions: np.ndarray,  # [num_input_tokens]
+        query_start_loc: np.ndarray,  # [B + 1]
+        seq_lens: np.ndarray,  # [B]
+        is_token_ids_in: np.ndarray, # [N, max_model_len]
+        is_token_ids_out: np.ndarray,  # [num_input_tokens]
+    ) -> None:
+        num_reqs = num_scheduled_tokens.shape[0]
+        query_start_loc[0] = 0
+
+        cu_num_tokens = 0
+        for i in range(num_reqs):
+            req_idx = idx_mapping[i]
+            query_len = num_scheduled_tokens[i]
+            start = num_computed_tokens[req_idx]
+            end = start + query_len
+            seq_lens[i] = end
+
+            start_idx = cu_num_tokens
+            end_idx = start_idx + query_len
+            input_ids[start_idx:end_idx] = token_ids[req_idx, start:end]
+            is_token_ids_out[start_idx:end_idx] = is_token_ids_in[req_idx, start:end]
+            positions[start_idx:end_idx] = np.arange(start, end, dtype=np.int64)
+
+            cu_num_tokens = end_idx
+            query_start_loc[i + 1] = cu_num_tokens
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1457,19 +1591,22 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
-        _, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        positions_np = np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
-            arange,
-        )
 
-        self.input_batch.block_table.compute_slot_mapping(
-            req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(
-            total_num_scheduled_tokens)
         if self.pcp_size > 1:
             if not self.vllm_config.model_config.use_mla:
                 self.generate_kv_idx(scheduler_output)
+
+            # Pre-process slot_mapping part before PCP optimization
+            _, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+            positions_np = np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                arange,
+            )
+
+            self.input_batch.block_table.compute_slot_mapping(
+                req_indices, positions_np)
+            self.input_batch.block_table.commit_slot_mapping(
+                total_num_scheduled_tokens)
             tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(
                 tokens)
             num_scheduled_tokens = np.array(tokens, dtype=np.int32)
@@ -1531,23 +1668,52 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        # Get request indices.
-        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        req_indices = np.repeat(self.arange_np[:num_reqs],
-                                num_scheduled_tokens)
-
-        # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
-        # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        cu_num_tokens, arange = self._get_cumsum_and_arange(
-            num_scheduled_tokens)
+        idx_mapping = [
+            self.input_batch.req_id_to_index[req_id] for req_id in req_ids
+        ]
+        idx_mapping = np.array(idx_mapping, dtype=np.int32)
+        input_ids = self.input_ids_cpu.numpy()
+        is_token_ids_in = self.input_batch.is_token_ids.numpy()
+        is_token_ids_out = self.is_token_ids.np
 
         if self.pcp_size > 1:
-            positions_np = self.positions_np[:total_num_scheduled_tokens]
-            np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-                   position_pcp[:total_num_scheduled_tokens],
-                   out=positions_np)
+            self._prepare_inputs_use_numba_pcp(
+                idx_mapping,  # batch_idx -> req_idx
+                self.input_batch.token_ids_cpu,  # [N, max_model_len]
+                self.input_batch.num_computed_tokens_cpu,  # [N]
+                num_scheduled_tokens,  # [B]
+                input_ids,  # [num_input_tokens]
+                self.positions_np,  # [num_input_tokens]
+                self.query_start_loc_np,  # [B + 1]
+                self.seq_lens_np, # [B]
+                is_token_ids_in,  # [N, max_model_len]
+                is_token_ids_out,  # [num_input_tokens]
+                position_pcp  # [num_input_tokens]
+            )
         else:
-            self.positions_np[:total_num_scheduled_tokens] = positions_np
+            self._prepare_inputs_use_numba(
+                idx_mapping,  # batch_idx -> req_idx
+                self.input_batch.token_ids_cpu,  # [N, max_model_len]
+                self.input_batch.num_computed_tokens_cpu,  # [N]
+                num_scheduled_tokens,  # [B]
+                input_ids,  # [num_input_tokens]
+                self.positions_np,  # [num_input_tokens]
+                self.query_start_loc_np,  # [B + 1]
+                self.seq_lens_np, # [B]
+                is_token_ids_in,  # [N, max_model_len]
+                is_token_ids_out,  # [num_input_tokens]
+            )
+            positions_np = self.positions_np[:total_num_scheduled_tokens].copy()
+
+            # Prepare some information for building Attention-Metadata
+            # Compute and commit slot mapping
+            self.input_batch.block_table.compute_slot_mapping(
+            req_indices, positions_np)
+            self.input_batch.block_table.commit_slot_mapping(
+                total_num_scheduled_tokens)
+
+        self.input_ids_cpu = torch.from_numpy(input_ids)
+        self.is_token_ids.cpu = torch.from_numpy(is_token_ids_out)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1558,28 +1724,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True)
-
-        # Get token indices.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # where M is the max_model_len.
-        token_indices = (positions_np +
-                         req_indices * self.input_batch.token_ids_cpu.shape[1])
-        token_indices_tensor = torch.from_numpy(token_indices)
-        # Prepare input_ids.
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
-                           0,
-                           token_indices_tensor,
-                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        is_token_ids = self.input_batch.is_token_ids.flatten()
-        torch.index_select(
-            is_token_ids,
-            0,
-            token_indices_tensor,
-            out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
@@ -1621,14 +1765,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                 output_idx += num_sched
 
-        self.query_start_loc_np[0] = 0
-        self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
+        cu_num_tokens = self.query_start_loc_np[1:num_reqs + 1].copy()
         self.query_start_loc[:num_reqs + 1].copy_(
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
-
-        self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
         self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                        non_blocking=True)
 
