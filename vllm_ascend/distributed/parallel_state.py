@@ -306,6 +306,11 @@ def get_p_tp_group() -> GroupCoordinator:
     return _P_TP
 
 
+def get_fc3_quant_x_group() -> GroupCoordinator:
+    assert _FC3_QUANT_X is not None, ("fc3 quant x group is not initialized")
+    return _FC3_QUANT_X
+
+
 def destroy_ascend_model_parallel():
     global _MC2
     if _MC2:
