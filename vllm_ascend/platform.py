@@ -26,10 +26,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
-                                       init_ascend_config)
-from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
-                                        delete_torchair_cache_file)
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
@@ -91,8 +88,7 @@ class NPUPlatform(Platform):
         Get the custom compile backend. Previously, we used EagerAdaptor by default. 
         To use graph fusion operations, we defined our own backend compiler.
         """
-        from vllm_ascend.compilation.compiler_interface import AscendCompiler
-        return AscendCompiler.__module__ + "." + AscendCompiler.__name__
+        return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
     def pre_register_and_update(cls,
@@ -184,7 +180,6 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        check_ascend_config(vllm_config, enforce_eager)
         from vllm.config.compilation import CUDAGraphMode
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
@@ -203,25 +198,6 @@ class NPUPlatform(Platform):
                 "NPU does not support %s compilation mode. Setting CUDAGraphMode to NONE",
                 compilation_config.mode)
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-        # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
-        if ascend_config.torchair_graph_config.enabled:
-            logger.info(
-                "Torchair compilation enabled on NPU. Setting CUDAGraphMode to NONE"
-            )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
-            # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
-            # this will increase graph compilation duration, it significantly enhances robustness and decreases
-            # graph launching time during inference.
-            if check_torchair_cache_exist(
-            ) and not ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
-                logger.warning(
-                    "Torchair cache folder is deleted here to prevent runtime issues caused by dimension "
-                    "mismatches or configuration inconsistencies when users reuse cached computation graphs. "
-                    "In order to decrease torchair graph compilation time, users can enable both use_cached_graph "
-                    "and use_cached_kv_cache_bytes in torchair_graph_config.")
-                delete_torchair_cache_file()
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
@@ -248,11 +224,12 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        from vllm_ascend.compilation.compiler_interface import AscendCompiler
-        compilation_config.oot_compiler = AscendCompiler.__module__ + "." + AscendCompiler.__name__
+        # get custom compile backend for graph fusion
+        compilation_config.oot_compiler = cls.get_compile_backend()
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
+            ascend_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
@@ -263,12 +240,14 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
+            ascend_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             logger.info(
                 "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
+            compilation_config.splitting_ops = []
             warning_message = """\033[91m
             **********************************************************************************
             * WARNING: You have enabled the *full graph* feature.
@@ -288,6 +267,7 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_mode)
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
+            ascend_config.enable_npugraph_ex = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -303,9 +283,7 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             parallel_config.all2all_backend = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled:
-                parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
-            elif ascend_config.xlite_graph_config.enabled:
+            if ascend_config.xlite_graph_config.enabled:
                 logger.info(
                     "Euler Xlite enabled. See: https://gitee.com/openeuler/GVirt/tree/master/xlite"
                 )
@@ -320,10 +298,9 @@ class NPUPlatform(Platform):
             compilation_config.custom_ops = ["all"]
 
         if ascend_config.recompute_scheduler_enable:
-            from vllm_ascend.core.recompute_schedule_config import \
-                RecomputeSchedulerConfig
+            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config)
+                vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
@@ -390,29 +367,14 @@ class NPUPlatform(Platform):
         use_sparse=False,
         attn_type: str | None = None,
     ):
-        ascend_config = get_ascend_config()
-
-        if use_mla and ascend_config.enable_shared_expert_dp:
-            if use_mla and use_sparse:
-                return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
-
-        use_torchair = ascend_config.torchair_graph_config.enabled
-        # choose attention backend based on use_mla and use_torchair
+        # choose attention backend based on use_mla
         backend_map = {
-            (True, False, True):
-            "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend",
-            (True, False, False):
-            "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False, True):
-            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend",
-            (False, False, False):
+            (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, False):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-            (True, True, False):
-            "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-            (True, True, True):
-            "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
+            (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(use_mla, use_sparse, use_torchair)]
+        return backend_map[(use_mla, use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

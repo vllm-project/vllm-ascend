@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-name: 'ascend test / performance'
+name: Performance Test
 # This workflow runs nightly benchmarks for vllm-ascend.
 
 on:
@@ -95,12 +95,12 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty

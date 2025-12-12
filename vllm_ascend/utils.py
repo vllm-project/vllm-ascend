@@ -49,9 +49,9 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
@@ -123,14 +123,6 @@ atexit.register(_unregister_print_streams_on_exit)
 
 def is_enable_nz():
     return envs_ascend.VLLM_ASCEND_ENABLE_NZ
-
-
-def sleep_mode_enabled():
-    global _SLEEP_MODE_ENABLED
-    if _SLEEP_MODE_ENABLED is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
-    return _SLEEP_MODE_ENABLED
 
 
 def _round_up(x: int, align: int):
@@ -228,19 +220,6 @@ def aligned_16(tensor: torch.Tensor):
     return new_tensor
 
 
-def try_register_lib(lib_name: str, lib_info: str = ""):
-    import importlib
-    import importlib.util
-    try:
-        module_spec = importlib.util.find_spec(lib_name)
-        if module_spec is not None:
-            importlib.import_module(lib_name)
-            if lib_info:
-                logger.info(lib_info)
-    except Exception:
-        pass
-
-
 def enable_custom_op():
     """
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
@@ -312,6 +291,15 @@ def prefetch_stream() -> torch.npu.Stream:
         # we return the default stream.
         _PREFETCH_STREAM = torch_npu.npu.Stream()
     return _PREFETCH_STREAM
+
+
+def global_stream() -> torch.npu.Stream:
+    global _GLOBAL_STREAM
+    if _GLOBAL_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _GLOBAL_STREAM = torch_npu.npu.Stream()
+    return _GLOBAL_STREAM
 
 
 def shared_experts_calculation_stream() -> torch.npu.Stream:
@@ -727,15 +715,23 @@ def get_ascend_device_type():
 
 
 def lmhead_tp_enable() -> bool:
-    return get_ascend_config().lmhead_tensor_parallel_size is not None
+    return get_ascend_config(
+    ).finegrained_tp_config.lmhead_tensor_parallel_size > 0
+
+
+def embedding_tp_enable() -> bool:
+    return get_ascend_config(
+    ).finegrained_tp_config.embedding_tensor_parallel_size > 0
 
 
 def oproj_tp_enable() -> bool:
-    return get_ascend_config().oproj_tensor_parallel_size is not None
+    return get_ascend_config(
+    ).finegrained_tp_config.oproj_tensor_parallel_size > 0
 
 
 def mlp_tp_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+    return get_ascend_config(
+    ).finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
 def matmul_allreduce_enable() -> bool:
@@ -810,7 +806,7 @@ def _is_contain_expert(config: Any):
 def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
-    if _IS_VL_MODEL is None and vllm_config.model_config:
+    if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         model_configs = vllm_config.model_config.hf_config.to_dict()
         _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
     return _IS_VL_MODEL
@@ -962,23 +958,28 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
-                                                     vllm_config):
+def flashcomm2_o_shared_enabled() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
+
+
+def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+    flashcomm2_oproj_shared = flashcomm2_o_shared_enabled()
 
     if not flashcomm2_enable():
-        logger.debug("FLASHCOMM2 not enable.")
-        return flashcomm2_oproj_tp_size
+        flashcomm2_oproj_shared = False
+        logger.info("FLASHCOMM2 not enable.")
+        return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(
-        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size={flashcomm2_oproj_tp_size} and global_tp_size={global_tp_size}"
+        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size} and oproj_shared_enabled = {flashcomm2_oproj_shared}"
     )
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
-    if ascend_config.oproj_tensor_parallel_size is not None:
+    if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
         raise AssertionError(
             "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
         )
@@ -999,8 +1000,10 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
             "FLASHCOMM2 primarily targets P-scenario deployments, "
             "with additional support for hybrid deployment scenarios. "
             "It is not applicable in D-scenario environments.")
+    if flashcomm2_oproj_shared:
+        logger.info("Enable FLASHCOMM2 with oproj_shared.")
 
-    return flashcomm2_oproj_tp_size
+    return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
