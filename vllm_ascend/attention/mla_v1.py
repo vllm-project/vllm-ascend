@@ -653,7 +653,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # Function `get_and_maybe_dequant_weights` will cast the weights to
         # FRACTAL_AND. So we need to cast to FRACTAL_NZ again.
-        if is_enable_nz(self.kv_b_proj.weight.data.dtype):
+        if is_enable_nz():
             self.kv_b_proj.weight.data = torch_npu.npu_format_cast(
                 self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_NZ)
 

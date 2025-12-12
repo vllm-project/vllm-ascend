@@ -2717,7 +2717,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _convert_torch_format(self, tensor):
         if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
-                and not is_enable_nz(tensor.dtype):
+                and not is_enable_nz():
             return tensor
         tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
         return tensor
