@@ -27,6 +27,7 @@ The following table lists additional configuration options available in vLLM Asc
 | Name                                | Type | Default | Description                                                                                                                                   |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for xlite graph mode                                                                                                    |
+| `finegrained_tp_config`                  | dict | `{}`    | Configuration options for module tensor parallelism                                                                                             |
 | `weight_prefetch_config`            | dict | `{}`    | Configuration options for weight prefetch                                                                                                        |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case.                                      |
 | `expert_map_path`                   | str  | `None`  | When using expert load balancing for an MoE model, an expert map path needs to be passed in.                                                 |
@@ -58,6 +59,15 @@ The details of each configuration option are as follows:
 | `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
 | `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weight.    |
 
+**finegrained_tp_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `lmhead_tensor_parallel_size`       | int  | `0`  | The custom tensor parallel size of lmhead.                                                                                                    |
+| `oproj_tensor_parallel_size`        | int  | `0`  | The custom tensor parallel size of oproj.                                                                                                     |
+| `embedding_tensor_parallel_size`    | int  | `0`  | The custom tensor parallel size of embedding.                                                                                                  |
+| `mlp_tensor_parallel_size`         | int  | `0`  | The custom tensor parallel size of mlp.                                                                                                      |
+
 ### Example
 
 An example of additional configuration is as follows:
@@ -75,6 +85,12 @@ An example of additional configuration is as follows:
                 "gate_up": 0.8
             }
         },
+    },
+    "finegrained_tp_config": {
+        "lmhead_tensor_parallel_size": 8,
+        "oproj_tensor_parallel_size": 8,
+        "embedding_tensor_parallel_size": 8,
+        "mlp_tensor_parallel_size": 8,
     },
     "multistream_overlap_shared_expert": True,
     "refresh": False,

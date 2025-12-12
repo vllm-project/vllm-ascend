@@ -88,8 +88,7 @@ class NPUPlatform(Platform):
         Get the custom compile backend. Previously, we used EagerAdaptor by default. 
         To use graph fusion operations, we defined our own backend compiler.
         """
-        from vllm_ascend.compilation.compiler_interface import AscendCompiler
-        return AscendCompiler.__module__ + "." + AscendCompiler.__name__
+        return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
     def pre_register_and_update(cls,
@@ -225,8 +224,8 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        from vllm_ascend.compilation.compiler_interface import AscendCompiler
-        compilation_config.oot_compiler = AscendCompiler.__module__ + "." + AscendCompiler.__name__
+        # get custom compile backend for graph fusion
+        compilation_config.oot_compiler = cls.get_compile_backend()
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
@@ -299,10 +298,9 @@ class NPUPlatform(Platform):
             compilation_config.custom_ops = ["all"]
 
         if ascend_config.recompute_scheduler_enable:
-            from vllm_ascend.core.recompute_schedule_config import \
-                RecomputeSchedulerConfig
+            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config)
+                vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
