@@ -19,15 +19,6 @@ else:
     WeightPrefetchMethod = None
 
 
-class FusedMoEState(Enum):
-    AllGather = 0
-    All2All = 1
-    MC2 = 2
-    AllGatherEP = 3
-    NaiveMulticast = 4
-    All2AllSeq = 5
-
-
 class MoECommType(Enum):
     ALLGATHER = 0
     MC2 = 1
