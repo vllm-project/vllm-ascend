@@ -41,7 +41,7 @@ The following is a simple example of how to use sleep mode.
 
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    os.environ[VLLM_ASCEND_ENABLE_NZ] = "0"
+    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
     if __name__ == "__main__":
         prompt = "How are you?"
