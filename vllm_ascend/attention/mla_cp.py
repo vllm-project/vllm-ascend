@@ -241,6 +241,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 )
 
             prefill_input_positions = input_positions[tokens_start:]
+            assert self.cos_cache is not None
+            assert self.sin_cache is not None
             cos = self.cos_cache[prefill_input_positions].unsqueeze(1).unsqueeze(2)
             sin = self.sin_cache[prefill_input_positions].unsqueeze(1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
