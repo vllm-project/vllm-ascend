@@ -89,8 +89,6 @@ jobs:
           - os: linux-aarch64-a2-1
             model_list:
               - ERNIE-4.5-21B-A3B-PT
-              # TO DO: There are issues with the accuracy of this model
-              # - gemma-3-4b-it
               - InternVL3_5-8B-hf
               - Molmo-7B-D-0924
               - Llama-3.2-3B-Instruct
