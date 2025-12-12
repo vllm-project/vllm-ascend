@@ -25,6 +25,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
@@ -625,8 +626,7 @@ class AscendMLAMetadataBuilder:
 
         decode_metadata = None
         if num_decodes > 0:
-            cos = common_attn_metadata.cos
-            sin = common_attn_metadata.sin
+            cos, sin = get_cos_and_sin()
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc_cpu[1:num_decodes +
                                                        1].tolist()
