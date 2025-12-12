@@ -173,10 +173,10 @@ class AscendRMSNorm(RMSNorm):
                 x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                               self.variance_epsilon)
             else:
-                x, residual = rms_norm_fwd_kernel(x,self.weight,self.variance_epsilon,residual,self.bias)
+                x, residual = _rms_norm_fwd_triton(x,self.weight,self.variance_epsilon,residual,self.bias)
             return x, residual
 
-        x, _ = rms_norm_fwd_kernel(x, self.weight, self.variance_epsilon, residual, self.bias)
+        x, _ = _rms_norm_fwd_triton(x, self.weight, self.variance_epsilon, residual, self.bias)
         return x
 
 
