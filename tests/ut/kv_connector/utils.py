@@ -62,6 +62,7 @@ def create_vllm_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
+        is_encoder_decoder=False,
     )
     fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
                                     "fake_weight")
