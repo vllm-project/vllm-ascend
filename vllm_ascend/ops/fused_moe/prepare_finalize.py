@@ -22,14 +22,17 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
 from vllm.distributed.parallel_state import (
-    get_dp_group, get_pcp_group, get_tensor_model_parallel_rank,
+    get_dp_group, get_ep_group, get_pcp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
+from vllm_ascend.utils import enable_sp, npu_stream_switch, prefill_context_parallel_enable
+from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
+                                          dbo_wait_current_stream_and_yield,
+                                          UBatchEventKey)
 
 
 class QuantType(Enum):
@@ -335,12 +338,29 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
                 hidden_states)
-            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                pertoken_scale, True, True)
+
+        if get_forward_context().dp_metadata is None:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            router_logits = tensor_model_parallel_all_gather(router_logits, 0)
+            if pertoken_scale is not None:
+                pertoken_scale = tensor_model_parallel_all_gather(
+                    pertoken_scale, 0)
+        else:
+            hidden_states = get_ep_group().all_gather(hidden_states, 0)
+            router_logits = get_ep_group().all_gather(router_logits, 0)
+            if pertoken_scale is not None:
+                pertoken_scale = get_ep_group().all_gather(pertoken_scale, 0)
+        # A2 DBO for FC1/FC2, overlap the comm of o_proj + moe prepare
+        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST)
+
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            hidden_states, True, True)
+            hidden_states, True, True, False)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            router_logits, True, True)
+            router_logits, True, True, False)
+
+        if pertoken_scale is not None:
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                pertoken_scale, True, True, False)
 
         if pertoken_scale is not None:
             return (hidden_states, pertoken_scale), router_logits, None, None
@@ -423,9 +443,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         2 Reduce_results is True usually happens when model has no shared experts. We still do reduce scatter
         here, then skip allreudce in FusedMoe.
         """
-        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
-            hidden_states, True)
 
+        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states,
+                                                            True,
+                                                            do_comm=False)
+        # A2 DBO for FC1/FC2, overlap the moe finalize + mla allgather
+        dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
+        if get_forward_context().dp_metadata is None:
+            hidden_states = tensor_model_parallel_reduce_scatter(
+                hidden_states, 0)
+        else:
+            hidden_states = get_ep_group().reduce_scatter(hidden_states, 0)
+        # TODO: choosing different overlap policy for different models
         return hidden_states
 
     def _finalize_with_dp_group(self, hidden_states: torch.Tensor,

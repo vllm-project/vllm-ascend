@@ -47,11 +47,13 @@ from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import (split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_reduce_scatter)
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_tp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
@@ -61,6 +63,10 @@ from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
+
+from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
+                                          dbo_wait_current_stream_and_yield,
+                                          UBatchEventKey)
 
 
 class CustomLinearOp:
@@ -348,6 +354,10 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
                                    device=x.device)
 
             # Perform all-to-all communication
+
+            # for dbo + fc2 , we combine the alltoall with the next
+            # reduce scatter to achieve better overlap performance
+            dbo_record_current_stream(event=UBatchEventKey.ATTN_POST)
             dist.all_to_all_single(recv_buf,
                                    send_buf,
                                    group=self.odp_group.device_group)
@@ -381,6 +391,11 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             output = self.comm_group.reduce_scatter(output_parallel, dim=0)
         else:
             output = output_parallel
+
+        # A3 DBO for FC2, only yield to other batch but donot wait event here
+        #if get_forward_context().moe_comm_type == MoECommType.ALLTOALL:
+        #    dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST,
+        #                                      wait=False)
 
         if not forward_context.sp_enabled:
             # flashcomm1 not enabled
@@ -468,7 +483,14 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        #TODO: overlap mlp layers for ds
+        # is_ep_comm is False
+        input_ = tensor_model_parallel_all_gather(input_, 0)
+
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_,
+                                                                 True,
+                                                                 do_comm=False)
+
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
@@ -592,8 +614,13 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             output_parallel = self.layer.quant_method.apply(self.layer,
                                                             x,
                                                             bias=bias_)
+            # A2 DBO for FC1, overlap the o_proj + moe prepare
+            dbo_record_current_stream(event=UBatchEventKey.ATTN_POST)
             output = tensor_model_parallel_reduce_scatter(output_parallel, 0)
-
+            # TODO: A3 DBO for FC1, only yield here
+            if get_forward_context().moe_comm_type == MoECommType.ALLTOALL:
+                dbo_wait_current_stream_and_yield(
+                    event=UBatchEventKey.ATTN_POST, wait=False)
         return output
 
     def update_attrs(self):

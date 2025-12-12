@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import torch
 from vllm.config import get_current_vllm_config
@@ -32,20 +32,34 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2, TokenDispatcherWithMoge)
 
-_MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
+_MoECommMethods: Dict[Optional[MoECommType], List[MoECommMethod]] = {}
 
 
-def get_moe_comm_method(
-        moe_comm_type: Optional[MoECommType]) -> Optional[MoECommMethod]:
-    return _MoECommMethods.get(moe_comm_type, None)
+def get_moe_comm_method(moe_comm_type: Optional[MoECommType],
+                        ubatch_num=0) -> Optional[MoECommMethod]:
+    moe_comm_method = _MoECommMethods.get(moe_comm_type, None)
+    if moe_comm_method is not None:
+        return moe_comm_method[ubatch_num]
+    return moe_comm_method
 
 
 def setup_moe_comm_method(moe_config):
-    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-    _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.FUSED_ALLTOALL] = FusedAlltoAllCommImpl(
-        moe_config)
+    _MoECommMethods[MoECommType.ALLTOALL] = [
+        AlltoAllCommImpl(moe_config),
+        AlltoAllCommImpl(moe_config)
+    ]
+    _MoECommMethods[MoECommType.ALLGATHER] = [
+        AllGatherCommImpl(moe_config),
+        AllGatherCommImpl(moe_config)
+    ]
+    _MoECommMethods[MoECommType.MC2] = [
+        MC2CommImpl(moe_config),
+        MC2CommImpl(moe_config)
+    ]
+    _MoECommMethods[MoECommType.FUSED_ALLTOALL] = [
+        FusedAlltoAllCommImpl(moe_config),
+        FusedAlltoAllCommImpl(moe_config)
+    ]
 
 
 class MoECommMethod(ABC):

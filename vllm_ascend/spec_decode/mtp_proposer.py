@@ -231,11 +231,9 @@ class MtpProposer(Proposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None) -> None:
 
-        (
-            num_tokens,
-            num_tokens_across_dp,
-            with_prefill,
-        ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
+        (num_tokens, num_tokens_across_dp, with_prefill,
+         _) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill,
+                                                   False)
         if self.use_async_scheduling:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -730,9 +728,10 @@ class MtpProposer(Proposer):
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
         # eager/acl piecewise mode need to update num_tokens_across_dp
-        (num_input_tokens, num_tokens_across_dp,
-         with_prefill) = self.runner._sync_metadata_across_dp(
-             num_input_tokens, self.runner.with_prefill)
+        (num_input_tokens, num_tokens_across_dp, with_prefill,
+         _) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                   self.runner.with_prefill,
+                                                   False)
 
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 

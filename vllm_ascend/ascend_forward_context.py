@@ -4,10 +4,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from dataclasses import replace
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import (BatchDescriptor, get_forward_context,
-                                  set_forward_context)
+                                  set_forward_context, DPMetadata,
+                                  ForwardContext)
+
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import (enable_sp, flashcomm2_enable, has_layer_idx,
@@ -43,7 +47,8 @@ def set_ascend_forward_context(
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
         weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
-        is_mtp_model=False):
+        is_mtp_model=False,
+        ubatch_slices: Optional[UBatchSlices] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -56,6 +61,7 @@ def set_ascend_forward_context(
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=aclgraph_runtime_mode,
             batch_descriptor=batch_descriptor,
+            ubatch_slices=ubatch_slices,
     ):
         forward_context = get_forward_context()
 
@@ -99,6 +105,9 @@ def set_ascend_forward_context(
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
+        forward_context.cos = None
+        forward_context.sin = None
+        forward_context.dbo_enabled = False
 
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.
@@ -159,3 +168,83 @@ def set_ascend_forward_context(
             yield
         finally:
             pass
+
+
+def create_ascend_forward_context(
+        cur_forward_context: Any,
+        attn_metadata: Any,
+        vllm_config: VllmConfig,
+        virtual_engine: int = 0,
+        dp_metadata: Optional[DPMetadata] = None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        ubatch_slices: Optional[UBatchSlices] = None,
+        reserved_mc2_mask: Optional[torch.Tensor] = None,
+        ubatch_num: int = 0):
+    new_forward_context = ForwardContext(
+        no_compile_layers=vllm_config.compilation_config.
+        static_forward_context,
+        virtual_engine=virtual_engine,
+        attn_metadata=attn_metadata,
+        dp_metadata=dp_metadata,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+        batch_descriptor=batch_descriptor,
+        ubatch_slices=ubatch_slices)
+
+    attn_metadata_i = next(iter(attn_metadata.values()))
+    new_forward_context.sp_enabled = cur_forward_context.sp_enabled
+    new_forward_context.num_tokens = attn_metadata_i.num_actual_tokens
+    tp_world_size = get_tensor_model_parallel_world_size()
+    if get_dp_group(
+    ).world_size > 1 and new_forward_context.dp_metadata is not None:
+        new_forward_context.max_tokens_across_dp = new_forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
+        )
+        if new_forward_context.sp_enabled:
+            new_forward_context.padded_length = (
+                new_forward_context.max_tokens_across_dp + tp_world_size -
+                1) // tp_world_size * tp_world_size
+            new_forward_context.pad_size = new_forward_context.padded_length - new_forward_context.num_tokens
+    else:
+        new_forward_context.max_tokens_across_dp = attn_metadata_i.num_actual_tokens
+        if new_forward_context.sp_enabled:
+            pad_size = (tp_world_size - (new_forward_context.num_tokens %
+                                         tp_world_size)) % tp_world_size
+            new_forward_context.pad_size = pad_size
+
+    new_forward_context.moe_comm_type = cur_forward_context.moe_comm_type
+    from vllm_ascend.ops.fused_moe.moe_comm_method import \
+        get_moe_comm_method
+    new_forward_context.moe_comm_method = get_moe_comm_method(
+        new_forward_context.moe_comm_type, ubatch_num)
+    new_forward_context.with_prefill = cur_forward_context.with_prefill
+    new_forward_context.fused_moe_state = cur_forward_context.fused_moe_state
+    new_forward_context.in_profile_run = cur_forward_context.in_profile_run
+    new_forward_context.capturing = cur_forward_context.capturing
+    new_forward_context.mmrs_fusion = cur_forward_context.mmrs_fusion
+    # TODO: Check it
+    new_forward_context.is_first_layer = cur_forward_context.is_first_layer
+    new_forward_context.layer_idx = cur_forward_context.layer_idx
+    new_forward_context.model_instance = cur_forward_context.model_instance
+    new_forward_context.prefetch_mlp_enabled = cur_forward_context.prefetch_mlp_enabled
+    new_forward_context.weight_prefetch_method = cur_forward_context.weight_prefetch_method
+
+    if new_forward_context.num_tokens:
+        new_forward_context.padded_num_tokens = math.ceil(
+            new_forward_context.max_tokens_across_dp /
+            tp_world_size) * tp_world_size
+        if cur_forward_context.mc2_mask is not None:
+            reserved_mc2_mask = torch.zeros(
+                cur_forward_context.mc2_mask.shape,
+                dtype=cur_forward_context.mc2_mask.dtype,
+                device=cur_forward_context.mc2_mask.device,
+            )
+            mc2_mask = reserved_mc2_mask[:cur_forward_context.
+                                         padded_num_tokens]
+            mc2_mask[:new_forward_context.num_tokens] = True
+            mc2_mask[new_forward_context.num_tokens:] = False
+            new_forward_context.mc2_mask = mc2_mask
+
+    new_forward_context.dbo_enabled = True
+    new_forward_context.cos = None
+    new_forward_context.sin = None
+    return new_forward_context

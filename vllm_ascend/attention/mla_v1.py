@@ -15,7 +15,7 @@ from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_world_size,
                               get_pcp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              get_tp_group)
+                              get_tp_group, tensor_model_parallel_all_gather)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -44,6 +44,10 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                flashcomm2_o_shared_enabled, is_enable_nz,
                                weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
+
+from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
+                                          dbo_wait_current_stream_and_yield)
+from vllm_ascend.worker.ubatching import UBatchEventKey
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1531,10 +1535,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
 
         # Process for Flash Comm V1
-        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            q_c.contiguous(), need_gather_q_kv)
+        if get_forward_context().is_first_layer:
+            dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
+            get_forward_context().is_first_layer = False
+
+        q_c = tensor_model_parallel_all_gather(q_c, 0)
+
+        kv_no_split = tensor_model_parallel_all_gather(kv_no_split, 0)
+
+        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_PRE)
+        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c,
+                                                              need_gather_q_kv,
+                                                              do_comm=False)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            kv_no_split.contiguous(), need_gather_q_kv)
+            kv_no_split, need_gather_q_kv, do_comm=False)
 
         if self.fc2_o_shared_enable and is_hidden_layer(
                 self.vllm_config, self.o_proj):
