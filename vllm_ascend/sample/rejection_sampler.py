@@ -10,7 +10,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.rejection_sampler import (RejectionSampler,
                                               generate_uniform_probs)
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -23,7 +22,6 @@ MAX_SPEC_LEN = 32
 
 class AscendRejectionSampler(RejectionSampler, nn.Module):
     pass
-
 
 
 def apply_sampling_constraints(

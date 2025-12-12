@@ -69,7 +69,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         MambaSpec, MLAAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             LogprobsLists, LogprobsTensors, ModelRunnerOutput,SamplerOutput,
+                             ModelRunnerOutput, SamplerOutput,
                              make_empty_encoder_model_runner_output)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -1680,14 +1680,14 @@ class NPUModelRunner(GPUModelRunner):
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
-            ) = self._bookkeeping_sync(scheduler_output,
+            ) = self._bookkeeping_sync(
+                scheduler_output,
                 sampler_output,
                 logits,
                 hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
             )
-
 
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
@@ -1781,8 +1781,9 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
-        if self.need_accepted_tokens: # TODO remove this if
-            self._update_states_after_model_execute(sampler_output.sampled_token_ids)
+        if self.need_accepted_tokens:  # TODO remove this if
+            self._update_states_after_model_execute(
+                sampler_output.sampled_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -1828,8 +1829,7 @@ class NPUModelRunner(GPUModelRunner):
                 valid_sampled_token_ids[int(i)].clear()
         else:
             valid_sampled_token_ids = []
-            invalid_req_indices = discard_sampled_tokens_req_indices.tolist(
-            )
+            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
             if self.num_spec_tokens <= 0:
                 assert sampled_token_ids.shape[-1] == 1
@@ -1851,9 +1851,8 @@ class NPUModelRunner(GPUModelRunner):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         logprobs_tensors = sampler_output.logprobs_tensors
-        cu_num_accepted_tokens = (
-            [0] if spec_decode_metadata and logprobs_tensors else None
-        )
+        cu_num_accepted_tokens = ([0] if spec_decode_metadata
+                                  and logprobs_tensors else None)
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
                 sampled_ids = [-1] * 1 if \
@@ -1871,9 +1870,8 @@ class NPUModelRunner(GPUModelRunner):
                 f"{self.model_config.max_model_len}")
 
             self.input_batch.token_ids_cpu[req_idx,
-            start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx,
-            start_idx:end_idx] = True
+                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = self.input_batch.req_ids[req_idx]
@@ -1881,10 +1879,8 @@ class NPUModelRunner(GPUModelRunner):
             req_state.output_token_ids.extend(sampled_ids)
 
             if cu_num_accepted_tokens is not None:
-                cu_num_accepted_tokens.append(
-                    cu_num_accepted_tokens[-1] + len(sampled_ids)
-                )
-
+                cu_num_accepted_tokens.append(cu_num_accepted_tokens[-1] +
+                                              len(sampled_ids))
 
         # NOTE: NPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1906,7 +1902,6 @@ class NPUModelRunner(GPUModelRunner):
             req_id_to_index_output_copy,
             invalid_req_indices,
         )
-
 
     def _build_dummy_attn_metadata(
         self,
