@@ -76,7 +76,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
 
 3. Model Compatibility:
-   - Only MoE models with explicit expert parallelism support (e.g., Qwen3-235B-A22) are compatible.
+   - Only MoE models with explicit expert parallelism support (e.g., Qwen3 MoE models) are compatible.
    - Verify model architecture supports dynamic expert routing through --enable-expert-parallel.
 
 4. Gating Configuration:
