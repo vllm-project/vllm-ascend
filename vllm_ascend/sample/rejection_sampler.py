@@ -2,14 +2,11 @@
 from typing import Optional
 
 import torch
-import torch.nn as nn
 import torch_npu
-import vllm.v1.sample.rejection_sampler as rs
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.sample.rejection_sampler import (RejectionSampler,
-                                              generate_uniform_probs)
+from vllm.v1.sample.rejection_sampler import generate_uniform_probs
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -18,10 +15,6 @@ GREEDY_TEMPERATURE = -1
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 32
-
-
-class AscendRejectionSampler(RejectionSampler, nn.Module):
-    pass
 
 
 def apply_sampling_constraints(
@@ -761,8 +754,3 @@ def sample_recovered_tokens_kernel(
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
             orig_prob)
-
-
-rs.apply_sampling_constraints = apply_sampling_constraints
-rs.rejection_sample = rejection_sample
-rs.expand_batch_to_tokens = expand_batch_to_tokens
