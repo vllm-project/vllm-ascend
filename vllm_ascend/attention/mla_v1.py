@@ -73,7 +73,7 @@ class AscendMLABackend(AttentionBackend):
             return AscendMlaCPImpl
         return AscendMLAImpl
 
-@dataClass
+@dataclass
 class AscendMLAPrefillMetadata:
     """ Prefill Specific Metadata for Ascend"""
     @dataclass
@@ -123,7 +123,7 @@ class AscendMLAPrefillMetadata:
     cos: torch.Tensor = None
     pcp_metadata: Optional[AscendPCPMetadata] = None
 
-@dataClass
+@dataclass
 class AscendMLADecodeMetadata:
     # Input positions for rotrary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
@@ -139,7 +139,7 @@ class AscendMLADecodeMetadata:
     cp_seq_len: torch.Tensor = None
     batch_seq_mask: torch.Tensor = None
 
-@dataClass
+@dataclass
 class AscendMLAMetadata:
     """Metadata for MLACommon.
     NOTE: Please read the comment at the top of the file before trying to

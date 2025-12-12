@@ -67,11 +67,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         scheduler_config = vllm_config.scheduler_config
-        decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
-                                      0)
+        decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs', 0)
         max_num_seqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        self.batch_seq_mask_buf = torch.empty(max_num_seqs *
-                                              self.decode_threshold,
+        self.batch_seq_mask_buf = torch.empty(max_num_seqs * self.decode_threshold,
                                               dtype=torch.uint8,
                                               device=device)
 
