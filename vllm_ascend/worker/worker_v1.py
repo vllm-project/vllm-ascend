@@ -476,3 +476,6 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
+
+    def reload_weights(self) -> None:
+        self.model_runner.reload_weights()
