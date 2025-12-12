@@ -3,7 +3,7 @@
 from .policy_abstract import DynamicConfig, EplbPolicy
 from .policy_dynamic_ep import DynamicEplb
 from .policy_dynamic_ep_v2 import DynamicEplbV2
-from .policy_flashlb import FlashLB
+from .policy_flashlb import FlashLB, warm_up
 from .policy_random import RandomLoadBalance
 
 
@@ -29,5 +29,5 @@ class PolicyFactory:
         policy_class = policy.get(policy_type, RandomLoadBalance)
         policy_instance = policy_class(config)
         if policy_type == 3:
-            policy_instance.warm_up()
+            warm_up()
         return policy_instance
