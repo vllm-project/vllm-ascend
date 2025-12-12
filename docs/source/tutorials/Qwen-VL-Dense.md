@@ -1,4 +1,4 @@
-# Qwen-VL-Dense
+# Qwen-VL-Dense(Qwen2.5VL-3B/7B, Qwen3-VL-2B/4B/8B/32B)
 
 ## Introduction
 

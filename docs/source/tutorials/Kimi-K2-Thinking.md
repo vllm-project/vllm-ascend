@@ -1,4 +1,4 @@
-# Multi-NPU (Kimi-K2-Thinking)
+# Kimi-K2-Thinking
 
 ## Run with Docker
 

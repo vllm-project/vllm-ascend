@@ -1,6 +1,6 @@
-# Multi-NPU (QwQ-32B)
+# Qwen3-30B-A3B
 
-## Run vllm-ascend on Multi-NPU
+## Run vllm-ascend on Multi-NPU with Qwen3 MoE
 
 Run docker container:
 
@@ -40,25 +40,27 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ### Online Inference on Multi-NPU
 
-Run the following script to start the vLLM server on multi-NPU:
+Run the following script to start the vLLM server on Multi-NPU:
+
+For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 2, and for 32 GB of memory, tensor-parallel-size should be at least 4.
 
 ```bash
-vllm serve Qwen/QwQ-32B --max-model-len 4096 --port 8000 -tp 4
+vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable_expert_parallel
 ```
 
 Once your server is started, you can query the model with input prompts.
 
 ```bash
-curl http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "Qwen/QwQ-32B",
-        "prompt": "QwQ-32B是什么？",
-        "max_tokens": "128",
-        "top_p": "0.95",
-        "top_k": "40",
-        "temperature": "0.6"
-    }'
+curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-30B-A3B",
+  "messages": [
+    {"role": "user", "content": "Give me a short introduction to large language models."}
+  ],
+  "temperature": 0.6,
+  "top_p": 0.95,
+  "top_k": 20,
+  "max_tokens": 4096
+}'
 ```
 
 ### Offline Inference on Multi-NPU
@@ -67,7 +69,6 @@ Run the following script to execute offline inference on multi-NPU:
 
 ```python
 import gc
-
 import torch
 
 from vllm import LLM, SamplingParams
@@ -85,10 +86,11 @@ prompts = [
     "The future of AI is",
 ]
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
-llm = LLM(model="Qwen/QwQ-32B",
+llm = LLM(model="Qwen/Qwen3-30B-A3B",
           tensor_parallel_size=4,
           distributed_executor_backend="mp",
-          max_model_len=4096)
+          max_model_len=4096,
+          enable_expert_parallel=True)
 
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
@@ -103,6 +105,6 @@ clean_up()
 If you run this script successfully, you can see the info shown below:
 
 ```bash
-Prompt: 'Hello, my name is', Generated text: ' Daniel and I am an 8th grade student at York Middle School. I'
-Prompt: 'The future of AI is', Generated text: ' following you. As the technology advances, a new report from the Institute for the'
+Prompt: 'Hello, my name is', Generated text: " Lucy. I'm from the UK and I'm 11 years old."
+Prompt: 'The future of AI is', Generated text: ' a topic that has captured the imagination of scientists, philosophers, and the general public'
 ```

@@ -1,8 +1,8 @@
-# Multi-NPU (QwQ-32B-W8A8)
+# Qwen3-8B-W4A8
 
 ## Run Docker Container
 :::{note}
-w8a8 quantization feature is supported by v0.8.4rc2 and later.
+w4a8 quantization feature is supported by v0.9.1rc2 and later.
 :::
 
 ```{code-block} bash
@@ -13,9 +13,6 @@ docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
 --device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
@@ -32,26 +29,41 @@ docker run --rm \
 ## Install modelslim and Convert Model
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
-see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
+see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
 :::
 
 ```bash
-# (Optional)This tag is recommended and has been verified
-git clone https://gitcode.com/Ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
+# The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit
 
 cd msit/msmodelslim
+
 # Install by run this script
 bash install.sh
 pip install accelerate
 
 cd example/Qwen
 # Original weight path, Replace with your local model path
-MODEL_PATH=/home/models/QwQ-32B
+MODEL_PATH=/home/models/Qwen3-8B
 # Path to save converted weight, Replace with your local path
-SAVE_PATH=/home/models/QwQ-32B-w8a8
+SAVE_PATH=/home/models/Qwen3-8B-w4a8
 
-# In this conversion process, the npu device is not must, you can also set --device_type cpu to have a conversion
-python3 quant_qwen.py --model_path $MODEL_PATH --save_directory $SAVE_PATH --calib_file ../common/boolq.jsonl --w_bit 8 --a_bit 8 --device_type npu --anti_method m1 --trust_remote_code True
+python quant_qwen.py \
+          --model_path $MODEL_PATH \
+          --save_directory $SAVE_PATH \
+          --device_type npu \
+          --model_type qwen3 \
+          --calib_file None \
+          --anti_method m6 \
+          --anti_calib_file ./calib_data/mix_dataset.json \
+          --w_bit 4 \
+          --a_bit 8 \
+          --is_lowbit True \
+          --open_outlier False \
+          --group_size 256 \
+          --is_dynamic True \
+          --trust_remote_code True \
+          --w_method HQQ
 ```
 
 ## Verify the Quantized Model
@@ -62,8 +74,12 @@ The converted model files look like:
 |-- config.json
 |-- configuration.json
 |-- generation_config.json
+|-- merges.txt
 |-- quant_model_description.json
-|-- quant_model_weight_w8a8.safetensors
+|-- quant_model_weight_w4a8_dynamic-00001-of-00003.safetensors
+|-- quant_model_weight_w4a8_dynamic-00002-of-00003.safetensors
+|-- quant_model_weight_w4a8_dynamic-00003-of-00003.safetensors
+|-- quant_model_weight_w4a8_dynamic.safetensors.index.json
 |-- README.md
 |-- tokenizer.json
 `-- tokenizer_config.json
@@ -71,21 +87,17 @@ The converted model files look like:
 
 Run the following script to start the vLLM server with the quantized model:
 
-:::{note}
-The value "ascend" for "--quantization" argument will be supported after [a specific PR](https://github.com/vllm-project/vllm-ascend/pull/877) is merged and released. You can cherry-pick this commit for now.
-:::
-
 ```bash
-vllm serve /home/models/QwQ-32B-w8a8  --tensor-parallel-size 4 --served-model-name "qwq-32b-w8a8" --max-model-len 4096 --quantization ascend
+vllm serve /home/models/Qwen3-8B-w4a8 --served-model-name "qwen3-8b-w4a8" --max-model-len 4096 --quantization ascend
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "qwq-32b-w8a8",
+        "model": "qwen3-8b-w4a8",
         "prompt": "what is large language model?",
         "max_tokens": "128",
         "top_p": "0.95",
@@ -94,26 +106,15 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-Run the following script to execute offline inference on multi-NPU with the quantized model:
+Run the following script to execute offline inference on single-NPU with the quantized model:
 
 :::{note}
 To enable quantization for ascend, quantization method must be "ascend".
 :::
 
 ```python
-import gc
-
-import torch
 
 from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                             destroy_model_parallel)
-
-def clean_up():
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    gc.collect()
-    torch.npu.empty_cache()
 
 prompts = [
     "Hello, my name is",
@@ -121,9 +122,7 @@ prompts = [
 ]
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
 
-llm = LLM(model="/home/models/QwQ-32B-w8a8",
-          tensor_parallel_size=4,
-          distributed_executor_backend="mp",
+llm = LLM(model="/home/models/Qwen3-8B-w4a8",
           max_model_len=4096,
           quantization="ascend")
 
@@ -132,7 +131,4 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-del llm
-clean_up()
 ```

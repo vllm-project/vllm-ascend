@@ -1,0 +1,121 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Lint
+
+on:
+  # The PR updated when PR opened and push new commits
+  pull_request_target:
+    types: [opened]
+    branches:
+      - 'main'
+
+permissions:
+  pull-requests: write
+
+jobs:
+  commit-update:
+    name: format PR body
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get vLLM version
+        run: |
+          VLLM_COMMIT=ad32e3e19ccf0526cb6744a5fed09a138a5fb2f9
+          echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> $GITHUB_ENV
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+
+      - name: Get vLLM release version
+        run: |
+          VLLM_VERSION=$(python3 docs/source/conf.py | jq .ci_vllm_version | tr -d '"')
+          echo "VLLM_VERSION=$VLLM_VERSION" >> $GITHUB_ENV
+
+      - name: Update PR description
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ github.event.number }}
+          VLLM_VERSION=${{ env.VLLM_VERSION }}
+          VLLM_COMMIT=${{ env.VLLM_COMMIT }}
+          OLD=/tmp/orig_pr_body.txt
+          NEW=/tmp/new_pr_body.txt
+          FINAL=/tmp/final_pr_body.txt
+
+          gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
+          cp "${OLD}" "${NEW}"
+
+          # Remove notes in pr description and add vLLM version and commit
+          sed -i '/<!--/,/-->/d' "${NEW}"
+          sed -i '/- vLLM .*$/d' "${NEW}"
+          {
+              echo ""
+              echo "- vLLM version: $VLLM_VERSION"
+              echo "- vLLM main: $VLLM_COMMIT"
+          } >> "${NEW}"
+
+          # Remove redundant empty lines
+          uniq "${NEW}" > "${FINAL}"
+
+          # Run this only if ${NEW} is different than ${OLD}
+          if ! cmp -s "${OLD}" "${FINAL}"; then
+              echo
+              echo "Updating PR body:"
+              echo
+              cat "${NEW}"
+              gh pr edit --body-file "${FINAL}" "${PR_NUMBER}"
+          else
+              echo "No changes needed"
+          fi
+
+  pr-label:
+    name: Pull Request Labeler
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Label the PR
+        uses: actions/labeler@v6
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml
+          sync-labels: true
+
+  pr-reminder:
+    name: PR Reminder Comment Bot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remind to run full CI on PR
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '👋 Hi! Thank you for contributing to the vLLM Ascend project. The following points will speed up your PR merge:‌‌\n\n' +
+                '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
+                '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
+                '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
+                'If CI fails, you can run linting and testing checks locally according [Contributing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/testing.html).'
+            })
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
