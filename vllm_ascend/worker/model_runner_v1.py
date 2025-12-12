@@ -304,8 +304,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # eager 模式 (--enforce-eager) 使用 ND 格式节省内存
         # graph 模式使用 NZ 格式获得更好性能
         if is_310p_device:
-            from vllm_ascend.ascend_config import AscendConfig
-            ascend_config = AscendConfig(self.vllm_config)
+            # 确保全局 AscendConfig 已初始化（由平台在 pre_register_and_update 中调用）
+            from vllm_ascend.ascend_config import get_ascend_config
+            ascend_config = get_ascend_config()
             global ACL_FORMAT
             ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ if not ascend_config.torchair_graph_config.enabled else ACL_FORMAT_FRACTAL_ND
             from vllm.logger import logger
