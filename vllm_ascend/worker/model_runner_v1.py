@@ -1672,6 +1672,7 @@ class NPUModelRunner(GPUModelRunner):
 
         with ProfileExecuteDuration().capture_async("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
             (
                 logprobs_lists,
                 valid_sampled_token_ids,
@@ -1760,6 +1761,7 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
         )
 
+    # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -1770,37 +1772,18 @@ class NPUModelRunner(GPUModelRunner):
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
-        else:
-            if lmhead_tp_enable() and logits is not None:
-                logits = logits[:len(spec_decode_metadata.logits_indices)]
-            # When indexing with a tensor (bonus_logits_indices), PyTorch
-            # creates a new tensor with separate storage from the original
-            # logits tensor. This means any in-place operations on bonus_logits
-            # won't affect the original logits tensor.
-            assert logits is not None
-            bonus_logits = logits[
-                spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.sampler(
-                logits=bonus_logits,
-                sampling_metadata=sampling_metadata,
-            )
-            bonus_token_ids = sampler_output.sampled_token_ids
 
-            # Just like `bonus_logits`, `target_logits` is a new tensor with
-            # separate storage from the original `logits` tensor. Therefore,
-            # it is safe to update `target_logits` in place.
-            target_logits = logits[
-                spec_decode_metadata.target_logits_indices]
-            output_token_ids = self.rejection_sampler(
-                spec_decode_metadata,
-                None,  # draft_probs
-                target_logits,
-                bonus_token_ids,
-                sampling_metadata,
-            )
-            sampler_output.sampled_token_ids = output_token_ids
-            if self.need_accepted_tokens:
-                self._update_states_after_model_execute(output_token_ids)
+        if lmhead_tp_enable() and logits is not None:
+            logits = logits[:len(spec_decode_metadata.logits_indices)]
+        sampler_output = self.rejection_sampler(
+            spec_decode_metadata,
+            None,  # draft_probs
+            logits,
+            sampling_metadata,
+        )
+        if self.need_accepted_tokens: # TODO remove this if
+            self._update_states_after_model_execute(sampler_output.sampled_token_ids)
+        return sampler_output
 
     def _bookkeeping_sync(
         self,
@@ -1823,18 +1806,6 @@ class NPUModelRunner(GPUModelRunner):
         req_ids_output_copy = self.input_batch.req_ids.copy()
         req_id_to_index_output_copy = \
             self.input_batch.req_id_to_index.copy()
-
-        # NOTE: NPU -> CPU Sync happens here.
-        # Move as many CPU operations as possible before this sync point.
-        logprobs_tensors = sampler_output.logprobs_tensors
-        logprobs_lists = logprobs_tensors.tolists() \
-            if logprobs_tensors is not None else None
-
-        # Compute prompt logprobs if needed.
-        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states[:scheduler_output.total_num_scheduled_tokens],
-            scheduler_output,
-        )
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
@@ -1879,6 +1850,10 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
+        logprobs_tensors = sampler_output.logprobs_tensors
+        cu_num_accepted_tokens = (
+            [0] if spec_decode_metadata and logprobs_tensors else None
+        )
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
                 sampled_ids = [-1] * 1 if \
@@ -1904,6 +1879,24 @@ class NPUModelRunner(GPUModelRunner):
             req_id = self.input_batch.req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
+
+            if cu_num_accepted_tokens is not None:
+                cu_num_accepted_tokens.append(
+                    cu_num_accepted_tokens[-1] + len(sampled_ids)
+                )
+
+
+        # NOTE: NPU -> CPU Sync happens here.
+        # Move as many CPU operations as possible before this sync point.
+        logprobs_tensors = sampler_output.logprobs_tensors
+        logprobs_lists = logprobs_tensors.tolists() \
+            if logprobs_tensors is not None else None
+
+        # Compute prompt logprobs if needed.
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states[:scheduler_output.total_num_scheduled_tokens],
+            scheduler_output,
+        )
 
         return (
             logprobs_lists,
