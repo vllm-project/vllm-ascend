@@ -75,6 +75,8 @@ class AscendConfig:
             "recompute_scheduler_enable", False)
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
+        self.fault_tolerance_level = additional_config.get(
+            "fault_tolerance_lecel",0)
         if self.lmhead_tensor_parallel_size is not None:
             logger.info(
                 f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario"
