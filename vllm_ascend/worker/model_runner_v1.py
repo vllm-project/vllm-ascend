@@ -4881,15 +4881,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         if not self.model_config.is_deepseek_mla:
             # Maintain original KV shape view.
             inv_order = [
-                kv_cache_stride_order.index(i) 
-                for i in range(len(kv_cache_stride_order)) 
+                kv_cache_stride_order.index(i)
+                for i in range(len(kv_cache_stride_order))
                 if kv_cache_shape[i] != 2
             ]
             if len(new_kv_cache_shape) != len(kv_cache_shape):
                 inv_order = [i - 1 if i > 1 else i for i in inv_order]
         else:
             inv_order = [
-                kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+                kv_cache_stride_order.index(i)
+                for i in range(len(kv_cache_stride_order))
             ]
 
         permuted_k_cache = cross_layers_k_cache.permute(*inv_order)
