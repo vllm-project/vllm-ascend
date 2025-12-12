@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, TypeVar
+from typing import ClassVar, List, Optional, Tuple, TypeVar
 
 import numpy as np
 import torch
@@ -30,9 +30,9 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import weak_ref_tensors
-
-if TYPE_CHECKING:
-    pass
+from vllm_ascend.ascend_forward_context import get_cos_and_sin
+from vllm_ascend.ops.shared_weight_layer import (is_hidden_layer,
+                                                 reach_layer_for_shared_weight_series)
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -286,8 +286,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
-            cos = common_attn_metadata.cos
-            sin = common_attn_metadata.sin
+            cos, sin = get_cos_and_sin()
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc_cpu[1:num_decodes +
                                                        1].tolist()
@@ -596,6 +595,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
+            if self.fc2_o_shared_enable and is_hidden_layer(
+                    self.vllm_config, self.o_proj):
+                reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
@@ -715,6 +717,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_c.contiguous(), need_gather_q_kv)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            reach_layer_for_shared_weight_series(self.o_proj)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None

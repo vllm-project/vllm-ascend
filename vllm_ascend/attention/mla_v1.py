@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
@@ -525,8 +526,7 @@ class AscendMLAMetadataBuilder:
 
         decode_metadata = None
         if num_decodes > 0:
-            cos = common_attn_metadata.cos
-            sin = common_attn_metadata.sin
+            cos, sin = get_cos_and_sin()
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc_cpu[1:num_decodes +
                                                        1].tolist()
@@ -731,6 +731,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             'q_b_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            from vllm_ascend.distributed.parallel_state import \
+                get_shared_weight_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_shared_weight_group(),
+                layer=self.o_proj,
+                prefetch_step=1)
+
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
@@ -740,10 +751,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
 
-        vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
 
-        self.speculative_config = vllm_config.speculative_config
+        self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
     def _v_up_proj(self, x):
@@ -848,6 +858,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "thus mlapo is disabled for these layers.")
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            post_process_after_loading_for_shared_weight_series(self.o_proj)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
@@ -1331,6 +1345,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
 
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            reach_layer_for_shared_weight_series(self.o_proj)
+
         decode_preprocess_res = None
         prefill_preprocess_res = None
         if has_prefill:
@@ -1391,6 +1409,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
+            if self.fc2_o_shared_enable and is_hidden_layer(
+                    self.vllm_config, self.o_proj):
+                reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         num_actual_tokens = attn_metadata.num_actual_tokens
         assert attn_metadata.num_decodes is not None and \
