@@ -38,6 +38,7 @@ class KVTransferThread(threading.Thread):
         req_id: str,
         token_len: int,
         block_ids: list[int],
+        currnet_event: None,
         block_hashes: list[BlockHash],
         mask_num: int = 0,
         is_last_chunk: Optional[bool] = None,
@@ -46,6 +47,7 @@ class KVTransferThread(threading.Thread):
             "req_id": req_id,
             "token_len": token_len,
             "block_ids": block_ids,
+            "current_event": currnet_event,
             "block_hashes": block_hashes,
             "mask_num": mask_num,
             "is_last_chunk": is_last_chunk,
@@ -106,6 +108,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_hashes = req_meta["block_hashes"]
         req_id = req_meta["req_id"]
         is_last_chunk = req_meta["is_last_chunk"]
+        current_event = req_meta["current_event"]
         addr_list = []
         size_list = []
         key_list = []
@@ -116,6 +119,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
+        if current_event is not None:
+            current_event.synchronize()
         if self.dcp_size > 1:
             self.m_store.put(key_list, addr_list, size_list)
         else:
@@ -195,6 +200,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
+        current_event = req_meta["current_event"]
         for index, key in enumerate(req_meta.keys):
             addr, size = self.token_database.prepare_value_layer(
                 req_meta.starts[index], req_meta.ends[index],
@@ -202,6 +208,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
+        if current_event is not None:
+            current_event.synchronize()
         if self.dcp_size > 1:
             self.m_store.put(key_list, addr_list, size_list)
         else:
