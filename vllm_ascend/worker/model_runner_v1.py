@@ -52,8 +52,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_ep_group, get_pcp_group,
-                                             get_pp_group, get_tp_group,
+                                             get_pcp_group, get_pp_group,
+                                             get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -2407,10 +2407,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         elif soc_version in {AscendDeviceType._910_93}:
             # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-            moe_comm_type = (
-                MoECommType.MC2 if num_tokens <= self.mc2_tokens_capacity else
-                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
-                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
+            moe_comm_type = (MoECommType.MC2
+                             if num_tokens <= self.mc2_tokens_capacity else
+                             MoECommType.FUSED_ALLTOALL if quant_type
+                             == "w8a8_dynamic" else MoECommType.ALLTOALL)
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
