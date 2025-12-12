@@ -290,6 +290,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.block_size = vllm_config.cache_config.block_size
+        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
+                                           self.block_size)
+        self.max_model_len = self.model_config.max_model_len
+        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dcp_size = get_dcp_group().world_size
@@ -525,6 +529,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
+        self.transfer_event = torch_npu.npu.Event()
+        self.sampled_token_ids_pinned_cpu = torch.empty(
+            (self.max_model_len, 1),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True)
 
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
@@ -2689,8 +2699,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 # Get the valid generated tokens.
                 max_gen_len = sampled_token_ids.shape[-1]
                 if max_gen_len == 1:
-                    # No spec decode tokens. It's a tensor.
-                    valid_sampled_token_ids = sampled_token_ids.tolist()
+                    # No spec decode tokens.
+                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
                 else:
                     # Includes spec decode tokens. It's a numpy array
                     valid_sampled_token_ids, _ = self.rejection_sampler.parse_output(
@@ -4668,3 +4678,18 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
+
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        # This is a short term mitigation for issue mentioned in
+        # https://github.com/vllm-project/vllm/issues/22754.
+        # `tolist` would trigger a npu wise stream sync, which
+        # would block other copy ops from other npu streams.
+        # A npu event sync would avoid such a situation. Since
+        # this is in the critical path of every single model
+        # forward loop, this has caused perf issue for a disagg
+        # setup.
+        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
+        pinned.copy_(sampled_token_ids, non_blocking=True)
+        self.transfer_event.record()
+        self.transfer_event.synchronize()
+        return pinned.tolist()
