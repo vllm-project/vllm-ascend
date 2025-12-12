@@ -643,8 +643,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.enable_async_exp = 0
         if self.enable_async_exp != 0:
             logger.info("Enable async exponential while model executing.")
-            self._async_exponential_stream = torch.npu.Stream()
-            self._async_exponential_event = torch.npu.Event()
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -2507,10 +2505,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if self.enable_async_exp:
-            default_stream = torch.npu.current_stream()
-            self._do_async_exponential(default_stream=default_stream,
-                                       logits_indices=logits_indices)
+        if self.enable_async_exp != 0:
+            head_dim = self.model_config.get_vocab_size()
+            generators = self.input_batch.sampling_metadata.generators
+            b_s = logits_indices.shape[0]
+            self.sampler.do_async_exponential(
+                b_s=b_s,
+                head_dim=head_dim,
+                generators=generators,
+                async_option=self.enable_async_exp
+            )
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -4693,32 +4697,3 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
-
-    def _do_async_exponential(self, default_stream, logits_indices):
-        # Calculating exponential randoms in a different stream
-        # and overlapping with model executing.
-        with torch.npu.stream(self._async_exponential_stream):
-            self._async_exponential_stream.wait_stream(default_stream)
-            b_s = logits_indices.shape[0]
-            head_dim = self.model_config.get_vocab_size()
-            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
-            generators = self.input_batch.sampling_metadata.generators
-            if self.enable_async_exp == 2:
-                # Set self.enable_async_exp to 2 will enable async exponential with AI-core exponential.
-                # If AI-core exponential is not supported, use the default expontial.
-                if len(generators) != q.shape[0]:
-                    torch_npu.npu_sim_exponential_(q)
-                if generators:
-                    for i, generator in generators.items():
-                        torch_npu.npu_sim_exponential_(q[i],
-                                                       generator=generator)
-            else:
-                # If self.enable_async_exp not equals 2
-                # Goes to async exponential with AI-CPU exponential or default exponential.
-                if len(generators) != q.shape[0]:
-                    q.exponential_()
-                if generators:
-                    for i, generator in generators.items():
-                        q[i].exponential_(generator=generator)
-            self._async_exponential_event.record()
-        self.sampler.set_q_event(q, self._async_exponential_event)
