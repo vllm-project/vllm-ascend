@@ -178,7 +178,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     weight=w1,
                     weight_scale=w1_scale,
                     x_scale=pertoken_scale,
-                    group_list=group_list,
+                    group_list=cumsum_group_list(group_list, group_list_type,
+                                                 0),
                     bias=bias1,
                 ))
         elif fusion and not dynamic_eplb:
@@ -187,7 +188,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 x=hidden_states,
                 weight=w1[0],
                 bias=bias1,
-                group_list=group_list,
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=w1_scale[0],
                 x_scale=pertoken_scale)
             if quantized_hidden_states is not None:
