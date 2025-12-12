@@ -3320,6 +3320,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
                     RowParallelLinear)
+                # Fixed: Get ascend_config for torchair_graph_config check
+                ascend_config = get_ascend_config()
                 for module in self.model.modules():
                     if isinstance(module,
                                   (MergedColumnParallelLinear,
@@ -3560,6 +3562,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        # Fixed: Get ascend_config for torchair_graph_config check in format conversion
+        ascend_config = get_ascend_config()
         kv_caches: Dict[str, torch.Tensor] = {}
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec

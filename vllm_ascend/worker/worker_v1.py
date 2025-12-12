@@ -349,10 +349,24 @@ class NPUWorker(WorkerBase):
         NPUPlatform.seed_everything(self.model_config.seed)
 
     def _warm_up_atb(self):
-        x = torch.rand((2, 4), dtype=torch.float16).npu()
-        weight = torch.rand((2, 4), dtype=torch.float16).npu()
-        c = torch.rand((4, 4), dtype=torch.float32).npu()
-        torch_npu._npu_matmul_add_fp32(x, weight, c)
+        # Fixed: Skip _npu_matmul_add_fp32 warm-up for 310P to avoid CreateOperation failure
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+
+        if get_ascend_device_type() == AscendDeviceType._310P:
+            # For 310P devices, use a simpler warm-up that doesn't involve _npu_matmul_add_fp32
+            logger.info("Using simplified warm-up for 310P device")
+            x = torch.rand((2, 4), dtype=torch.float16).npu()
+            weight = torch.rand((2, 4), dtype=torch.float16).npu()
+            # Use standard matmul instead of _npu_matmul_add_fp32 for 310P compatibility
+            result = torch.matmul(x, weight.T)
+            # Simple operation to warm up the device
+            torch_npu.synchronize()
+        else:
+            # Original warm-up for other devices
+            x = torch.rand((2, 4), dtype=torch.float16).npu()
+            weight = torch.rand((2, 4), dtype=torch.float16).npu()
+            c = torch.rand((4, 4), dtype=torch.float32).npu()
+            torch_npu._npu_matmul_add_fp32(x, weight, c)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
