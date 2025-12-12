@@ -304,10 +304,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # eager 模式 (--enforce-eager) 使用 ND 格式节省内存
         # graph 模式使用 NZ 格式获得更好性能
         if is_310p_device:
+            from vllm_ascend.ascend_config import get_ascend_config
+            ascend_config = get_ascend_config(self.vllm_config)
             global ACL_FORMAT
-            ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ if not self.torchair_graph_enabled else ACL_FORMAT_FRACTAL_ND
+            ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ if not ascend_config.torchair_graph_config.enabled else ACL_FORMAT_FRACTAL_ND
             from vllm.logger import logger
-            logger.info(f"310P device detected: torchair_graph_enabled={self.torchair_graph_enabled}, "
+            logger.info(f"310P device detected: torchair_graph_enabled={ascend_config.torchair_graph_config.enabled}, "
                         f"ACL_FORMAT={'NZ' if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ else 'ND'}")
         self.block_size = vllm_config.cache_config.block_size
         self.dp_size = vllm_config.parallel_config.data_parallel_size
