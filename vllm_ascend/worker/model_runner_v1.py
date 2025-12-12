@@ -1196,14 +1196,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
-        if self.model_config.runner_type == "pooling":
-            if isinstance(
-                    self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-                    EncoderOnlyAttentionSpec):
-                attn_state = AscendAttentionState.PrefillNoCache
-            else:
-                attn_state = AscendAttentionState.PrefillCacheHit
-        elif np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
+        if np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
