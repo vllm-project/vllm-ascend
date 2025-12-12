@@ -38,6 +38,7 @@ MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
 M = TypeVar("M", bound=AscendMLAMetadata)
 
+
 class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
@@ -477,111 +478,111 @@ class AscendMlaCPImpl(AscendMLAImpl):
         return x
 
     def _compute_prefill_context(
-            self,
-            q_nope: torch.Tensor,
-            q_pe: torch.Tensor,
-            kv_c_and_k_pe_cache: Tuple[torch.Tensor],
-            rope_dim: int,
-            attn_metadata: AscendMLAMetadata,
-            prefix_output: torch.Tensor,
-            prefix_lse: torch.Tensor,
-        ):
-            assert len(kv_c_and_k_pe_cache) > 1
-            prefill_metadata = attn_metadata.prefill
-            if prefill_metadata is None or prefill_metadata.chunked_context is None:
-                return prefix_output, prefix_lse
-
-            iters = len(prefill_metadata.chunked_context.seq_tot)
-
-            current_seq_len = torch.tensor(prefill_metadata.query_lens,
-                                           dtype=torch.int32)
-            cache_kv_c = kv_c_and_k_pe_cache[0]
-            cache_k_pe = kv_c_and_k_pe_cache[1]
-            num_heads = cache_k_pe.size(2)
-            latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
-            for i in range(iters):
-                toks = prefill_metadata.chunked_context.seq_tot[i]
-                # chunk_seq_lens will be padded when pcp&dcp
-                context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
-                    i]
-                context_seq_len_npu = prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[
-                    i]
-                seq_len = torch.stack([current_seq_len, context_seq_len])
-                kv_c_normed = torch.empty(toks,
-                                          num_heads,
-                                          latent_kv_dim,
-                                          dtype=q_nope.dtype,
-                                          device=q_nope.device)
-                k_pe = torch.empty(toks,
-                                   num_heads,
-                                   rope_dim,
-                                   dtype=q_nope.dtype,
-                                   device=q_nope.device)
-
-                torch_npu.atb.npu_paged_cache_load(
-                    cache_kv_c,
-                    cache_k_pe,
-                    prefill_metadata.block_table,
-                    context_seq_len_npu,
-                    seq_starts=prefill_metadata.chunked_context.starts[i],
-                    key=kv_c_normed,
-                    value=k_pe,
-                )
-
-                cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
-                if self.dcp_size > 1:
-                    cache_kv_c_k_pe = get_dcp_group().all_gather(
-                        cache_kv_c_k_pe, 0)
-
-                if self.pcp_size > 1:
-                    cache_kv_c_k_pe = get_pcp_group().all_gather(
-                        cache_kv_c_k_pe, 0)
-
-                allgatered_kv_c_normed, allgatered_k_pe = cache_kv_c_k_pe.split(
-                    [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-                kv_c_normed, k_pe = self._reorg_kvcache(
-                    allgatered_kv_c_normed,
-                    allgatered_k_pe,
-                    padded_local_chunk_seq_lens_lst=prefill_metadata.
-                    chunked_context.padded_local_chunk_seq_lens[i],
-                    local_context_lens_allranks=prefill_metadata.chunked_context.
-                    local_context_lens_allranks,
-                    sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i]
-                    [-1],
-                    max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
-                    chunk_size=prefill_metadata.chunked_context.chunk_size,
-                    chunk_idx=i,
-                    toks=toks,
-                )
-
-                kv_c_normed = kv_c_normed.squeeze()
-                kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-                k_nope, v = kv_nope \
-                    .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-                k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-
-                mask = attn_metadata.attn_mask
-                torch_npu.atb.npu_ring_mla(
-                    q_nope=q_nope,
-                    q_rope=q_pe,
-                    k_nope=k_nope,
-                    k_rope=k_pe,
-                    value=v,
-                    mask=mask,
-                    seqlen=seq_len,
-                    head_num=self.num_heads,
-                    kv_head_num=self.num_heads,
-                    pre_out=prefix_output,
-                    prev_lse=prefix_lse,
-                    qk_scale=self.scale,
-                    kernel_type="kernel_type_high_precision",
-                    mask_type="no_mask",
-                    input_layout="type_bsnd",
-                    calc_type="calc_type_default",
-                    output=prefix_output,
-                    softmax_lse=prefix_lse)
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
+        rope_dim: int,
+        attn_metadata: AscendMLAMetadata,
+        prefix_output: torch.Tensor,
+        prefix_lse: torch.Tensor,
+    ):
+        assert len(kv_c_and_k_pe_cache) > 1
+        prefill_metadata = attn_metadata.prefill
+        if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
+
+        iters = len(prefill_metadata.chunked_context.seq_tot)
+
+        current_seq_len = torch.tensor(prefill_metadata.query_lens,
+                                       dtype=torch.int32)
+        cache_kv_c = kv_c_and_k_pe_cache[0]
+        cache_k_pe = kv_c_and_k_pe_cache[1]
+        num_heads = cache_k_pe.size(2)
+        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        for i in range(iters):
+            toks = prefill_metadata.chunked_context.seq_tot[i]
+            # chunk_seq_lens will be padded when pcp&dcp
+            context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
+                i]
+            context_seq_len_npu = prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[
+                i]
+            seq_len = torch.stack([current_seq_len, context_seq_len])
+            kv_c_normed = torch.empty(toks,
+                                      num_heads,
+                                      latent_kv_dim,
+                                      dtype=q_nope.dtype,
+                                      device=q_nope.device)
+            k_pe = torch.empty(toks,
+                               num_heads,
+                               rope_dim,
+                               dtype=q_nope.dtype,
+                               device=q_nope.device)
+
+            torch_npu.atb.npu_paged_cache_load(
+                cache_kv_c,
+                cache_k_pe,
+                prefill_metadata.block_table,
+                context_seq_len_npu,
+                seq_starts=prefill_metadata.chunked_context.starts[i],
+                key=kv_c_normed,
+                value=k_pe,
+            )
+
+            cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
+            if self.dcp_size > 1:
+                cache_kv_c_k_pe = get_dcp_group().all_gather(
+                    cache_kv_c_k_pe, 0)
+
+            if self.pcp_size > 1:
+                cache_kv_c_k_pe = get_pcp_group().all_gather(
+                    cache_kv_c_k_pe, 0)
+
+            allgatered_kv_c_normed, allgatered_k_pe = cache_kv_c_k_pe.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            kv_c_normed, k_pe = self._reorg_kvcache(
+                allgatered_kv_c_normed,
+                allgatered_k_pe,
+                padded_local_chunk_seq_lens_lst=prefill_metadata.
+                chunked_context.padded_local_chunk_seq_lens[i],
+                local_context_lens_allranks=prefill_metadata.chunked_context.
+                local_context_lens_allranks,
+                sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i]
+                [-1],
+                max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
+                chunk_size=prefill_metadata.chunked_context.chunk_size,
+                chunk_idx=i,
+                toks=toks,
+            )
+
+            kv_c_normed = kv_c_normed.squeeze()
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = kv_nope \
+                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
+
+            mask = attn_metadata.attn_mask
+            torch_npu.atb.npu_ring_mla(
+                q_nope=q_nope,
+                q_rope=q_pe,
+                k_nope=k_nope,
+                k_rope=k_pe,
+                value=v,
+                mask=mask,
+                seqlen=seq_len,
+                head_num=self.num_heads,
+                kv_head_num=self.num_heads,
+                pre_out=prefix_output,
+                prev_lse=prefix_lse,
+                qk_scale=self.scale,
+                kernel_type="kernel_type_high_precision",
+                mask_type="no_mask",
+                input_layout="type_bsnd",
+                calc_type="calc_type_default",
+                output=prefix_output,
+                softmax_lse=prefix_lse)
+        return prefix_output, prefix_lse
 
     def forward(
         self,
