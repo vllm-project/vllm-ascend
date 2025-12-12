@@ -25,6 +25,6 @@ if os.getenv("DYNAMIC_EPLB", "false") == "true" or os.getenv(
         "EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
-if os.getenv("SHM_BARRIER", "false") == "true":
+if os.getenv("SHM_BARRIER", "true") == "true":
     import vllm_ascend.patch.platform.patch_core  # noqa
     import vllm_ascend.patch.platform.patch_message_queue  # noqa

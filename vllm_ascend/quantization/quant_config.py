@@ -157,6 +157,15 @@ class AscendQuantConfig(QuantizationConfig):
                         f"Detected some but not all shards of {prefix} "
                         "are quantized. All shards of fused layers "
                         "to have the same precision.")
+        elif "experts" in prefix:
+            # For the experts' prefix (e.g., "model.layers.3.mlp.experts")
+            # Assume all experts within the same MLP use the same quantization method
+            experts_quant_description = [
+                self.quant_description[layer]
+                for layer in self.quant_description if prefix in layer
+            ]
+            is_skipped = any(quantization == "FLOAT"
+                             for quantization in experts_quant_description)
         else:
             is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
 

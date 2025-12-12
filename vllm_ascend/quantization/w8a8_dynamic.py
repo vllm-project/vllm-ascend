@@ -197,7 +197,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
-        enable_force_load_balance: bool = True,
+        enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
         shared_experts: Optional[Any] = None,
@@ -225,7 +225,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+            topk_ids = torch.randint_like(
+                topk_ids, 0, global_num_experts - global_redundant_expert_num)
 
         if self.use_aclgraph:
             moe_comm_method = get_forward_context().moe_comm_method
@@ -249,7 +250,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
+            w1_scale=layer.w13_weight_scale.to(torch.float32),
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,

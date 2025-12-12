@@ -8,12 +8,14 @@ import torch.distributed as dist
 
 class ExpertLoadBalancer(object):
 
-    def __init__(self, expert_map_path, global_expert_num):
+    def __init__(self, expert_map_path, num_experts):
         self.expert_map_path = expert_map_path
-        self.global_expert_num = global_expert_num
+        self.num_experts = num_experts
         self.tensor_data = []
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
             self._expert_file_to_tensor())
+        self.global_expert_num = num_experts + self.get_global_redundant_expert_num(
+        )
         self.expert_placement_map = self.generate_expert_placement_map()
 
     def _expert_file_to_tensor(self):
@@ -46,7 +48,7 @@ class ExpertLoadBalancer(object):
 
     def generate_expert_placement_map(self):
         expert_placement_map = torch.full(
-            (self.layers_num, self.ranks_num, self.global_expert_num),
+            (self.layers_num, self.ranks_num, self.num_experts),
             -1,
             dtype=torch.int32,
         )
@@ -69,7 +71,7 @@ class ExpertLoadBalancer(object):
                 result_dict[key] = []
             result_dict[key].append(idx)
 
-        log2phy_map = torch.full((self.ranks_num, self.global_expert_num),
+        log2phy_map = torch.full((self.ranks_num, self.num_experts),
                                  -1,
                                  dtype=torch.int32)
         for rank in range(self.ranks_num):
@@ -96,7 +98,7 @@ class ExpertLoadBalancer(object):
     def get_global_redundant_expert_num(self):
         global_redundant_expert_num = (
             len(self.expert_map_tensor[0][0]) * self.ranks_num -
-            self.global_expert_num)
+            self.num_experts)
         return global_redundant_expert_num
 
     def check_expert_map_tensor(self):

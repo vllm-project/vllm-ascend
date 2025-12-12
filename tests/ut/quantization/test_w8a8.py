@@ -326,7 +326,6 @@ class TestAscendC8KVCacheMethod(TestBase):
         self.attention_type.ENCODER = "encoder"
 
     def test_create_weights(self):
-        """测试 create_weights 是否正确注册参数"""
         AscendC8KVCacheMethod.create_weights(self.layer)
 
         self.layer.register_parameter.assert_any_call("key_antiquant_scale",
