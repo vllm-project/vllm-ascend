@@ -161,7 +161,6 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                                                          dim=0)
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
-                self.split_hidden_states = split_hidden_states  # Save for finalize
 
         return hidden_states, router_logits, mc2_mask
 
@@ -178,14 +177,12 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         if not (self.enable_shared_expert_dp or self.replace_allreduce):
             if self.tp_size > 1:
                 # All-gather across TP group
-                dist.all_gather(list(self.split_hidden_states), hidden_states,
-                                self.moe_config.tp_group.device_group)
-                hidden_states = torch.cat(self.split_hidden_states, dim=0)
-
-                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
-                # If the cache is not cleared after `self.split_hidden_states` is created,
-                # it can lead to the memory explosion in eager mode.
-                del self.split_hidden_states
+                gathered_hidden_states = torch.empty([hidden_states.shape[0] * self.tp_size, hidden_states.shape[1]], 
+                                                     device=hidden_states.device, 
+                                                     dtype=hidden_states.dtype)
+                dist.all_gather_into_tensor(gathered_hidden_states, hidden_states,
+                                            self.moe_config.tp_group.device_group)
+                hidden_states = gathered_hidden_states
 
             # Unpad if necessary
             if self.num_tokens < hidden_states.shape[0]:
@@ -518,3 +515,4 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
+
