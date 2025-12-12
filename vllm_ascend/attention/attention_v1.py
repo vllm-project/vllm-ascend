@@ -33,8 +33,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.utils import (PAGED_ATTENTION_LIST,
-                                         AscendCommonAttentionMetadata,
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
@@ -764,7 +763,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, output)
         else:
             num_tokens = query.shape[0]
-            if num_tokens in PAGED_ATTENTION_LIST:
+            if get_current_vllm_config(
+            ).speculative_config is None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly and num_tokens in get_ascend_config(
+            ).pa_shape_list:
                 output = self.full_graph_attention_with_pa(
                     query, attn_metadata, output)
             else:
