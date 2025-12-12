@@ -79,8 +79,8 @@ def is_enable_nz(dtype: Optional[torch.dtype] = torch.int8,
             raise ValueError(
                 "vllm_config must be provided when _ENABLE_NZ is None")
         _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
-    if dtype in [torch.float16, torch.bfloat16]:
-        return False
+        if dtype in [torch.float16, torch.bfloat16]:
+            _ENABLE_NZ = False
     return _ENABLE_NZ
 
 
