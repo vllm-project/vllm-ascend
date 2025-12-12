@@ -735,6 +735,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             'q_b_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
+        self.vllm_config = get_current_vllm_config()
+        self.fc2_o_shared_enable = flashcomm2_o_shared_enabled()
 
         if self.fc2_o_shared_enable and is_hidden_layer(
                 self.vllm_config, self.o_proj):
