@@ -38,6 +38,7 @@ class EagleProposer(Proposer):
         self.vllm_config = vllm_config
         self.device = device
         self.runner = runner
+        self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
 
         self.block_size = vllm_config.cache_config.block_size
         # We need to get the hidden size from the draft model config because
@@ -59,17 +60,38 @@ class EagleProposer(Proposer):
             self.vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int32,
             device=device)
-        self.positions = torch.zeros(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            dtype=torch.int64,
-            device=device)
+        self.uses_mrope = self.vllm_config.model_config.uses_mrope
+        self.max_num_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        if self.uses_mrope:
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
+            self.mrope_positions = torch.zeros(
+                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+            )
+        else:
+            # RoPE need (max_num_tokens,)
+            self.positions = torch.zeros(
+                self.max_num_tokens, dtype=torch.int64, device=device
+            )
         self.hidden_states = torch.zeros(
             (self.vllm_config.scheduler_config.max_num_batched_tokens,
              self.hidden_size),
             dtype=self.vllm_config.model_config.dtype,
             device=device)
-        self.max_num_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens)
+        self.inputs_embeds = torch.zeros(
+            (self.vllm_config.scheduler_config.max_num_batched_tokens,self.hidden_size),
+            dtype=self.vllm_config.model_config.dtype,
+            device=device
+        )
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
@@ -79,6 +101,11 @@ class EagleProposer(Proposer):
                                    dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
+    def get_model_name(self, model: nn.Module) -> str:
+        if hasattr(model, "module"):  # multi-GPU
+            model = model.module
+        return model.__class__.__name__
+    
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
@@ -96,12 +123,34 @@ class EagleProposer(Proposer):
                 "The EAGLE head shares the same vocab embedding" \
                 " with the target model."
             )
-            self.model.model.embed_tokens = model.model.embed_tokens
+            if hasattr(self.model.model,"embed_tokens"):
+                self.model.model.embed_tokens = self.model.model.embed_tokens
+            elif hasattr(self.model,"embedding"):
+                self.model.model.embed_tokens = self.model.embedding
+            else:
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' attribute"
+                )
         else:
             logger.info(
                 "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
                 " weights instead of sharing them with the target model."
             )
+        if supports_multimodal(model):
+            # handle multimodality
+            if self.get_model_name(model) in [
+                "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3VLForConditionalGeneration",
+            ]:
+                self.model.config.image_token_index = model.config.image_token_id
+            elif self.get_model_name(model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    model.config.vision_config.image_token_id
+                )
+            else:
+                self.model.config.image_token_index = (
+                    model.config.image_token_index
+                )
 
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
@@ -130,7 +179,7 @@ class EagleProposer(Proposer):
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
+                positions=self._get_positions(num_tokens),
                 hidden_states=self.hidden_states[:num_tokens],
             )
             dummy_compute_logits(self.hidden_states)
@@ -145,7 +194,8 @@ class EagleProposer(Proposer):
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
                            attn_metadata=None,
-                           aux_hidden_states: torch.Tensor = None):
+                           aux_hidden_states: torch.Tensor = None,
+                           mm_embeds: list[torch.Tensor] | None = None):
 
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
@@ -170,7 +220,7 @@ class EagleProposer(Proposer):
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.runner.input_ids[:num_scheduled_tokens]
-            target_positions = positions[:num_scheduled_tokens]
+            target_positions = self._get_positions(num_scheduled_tokens)
             if self.name == SpecDcodeType.EAGLE3:
                 target_hidden_states = torch.cat(
                     [h[:num_scheduled_tokens] for h in aux_hidden_states],
@@ -193,7 +243,7 @@ class EagleProposer(Proposer):
             cu_num_tokens, token_indices =\
                     self._prepare_inputs(eagle_attn_metadata, num_rejected_tokens)
             target_token_ids = self.runner.input_ids[token_indices]
-            target_positions = positions[token_indices]
+            target_positions = self._get_positions(token_indices)
             if self.name == SpecDcodeType.EAGLE3:
                 target_hidden_states = torch.cat(
                     [h[token_indices] for h in aux_hidden_states], dim=-1)
@@ -211,6 +261,7 @@ class EagleProposer(Proposer):
             cu_num_tokens=cu_num_tokens,
             block_table=eagle_attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
+            mm_embeds=mm_embeds,
         )
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
@@ -387,6 +438,23 @@ class EagleProposer(Proposer):
 
         return cu_num_tokens, arange
 
+    def _get_positions(self, num_tokens: int | torch.Tensor):
+        if isinstance(num_tokens, int):
+            if self.uses_mrope:
+                return self.mrope_positions[:, :num_tokens]
+            else:
+                return self.positions[:num_tokens]
+        else:
+            if self.uses_mrope:
+                return self.mrope_positions[:, num_tokens]
+            else:
+                return self.positions[num_tokens]
+    def _set_positions(self, num_tokens:int, positions: torch.Tensor):
+        if self.uses_mrope:
+            self.mrope_positions[:, :num_tokens] = positions
+        else:
+            self.positions[:num_tokens] = positions
+
     def _propose(
         self,
         # [num_tokens]
@@ -404,6 +472,7 @@ class EagleProposer(Proposer):
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        mm_embeds: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         device = cu_num_tokens.device
         cu_num_tokens = cu_num_tokens.cpu()
@@ -412,6 +481,8 @@ class EagleProposer(Proposer):
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
         target_positions = target_positions.cpu()
+        if target_positions.dim() > 1:
+            target_positions = target_positions[0]
         if self.name == SpecDcodeType.EAGLE3:
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
@@ -461,17 +532,30 @@ class EagleProposer(Proposer):
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         # copy inputs to buffer for cudagraph
-        self.positions[:num_tokens] = target_positions.to(device)
+        self._set_positions(num_tokens, target_positions.to(device))
         self.hidden_states[:num_tokens] = target_hidden_states
+
+        if self.is_multimodal_model:
+            inputs_embeds = self.model.embed_input_ids(
+                self.input_ids[:num_tokens],
+                multimodal_embeddings=mm_embeds or None,
+            )
+            self.inputs_embeds[:num_tokens] = inputs_embeds
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
+        else:
+            inputs_embeds = None
+            input_ids = self.input_ids[:num_input_tokens]
         attn_metadata.block_tables = block_table.to(device)
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         moe_comm_type=moe_comm_type,
                                         num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
+                input_ids=input_ids,
+                positions=self._get_positions(num_input_tokens),
                 hidden_states=self.hidden_states[:num_input_tokens],
+                inputs_embeds=inputs_embeds
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -566,7 +650,7 @@ class EagleProposer(Proposer):
                 torch.int32).to(device)
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
-            self.positions[:batch_size] = clamped_positions
+            self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
@@ -580,7 +664,7 @@ class EagleProposer(Proposer):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
-                    positions=self.positions[:input_batch_size],
+                    positions=self._get_positions(input_batch_size),
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
