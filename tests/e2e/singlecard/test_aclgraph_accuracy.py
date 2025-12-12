@@ -80,7 +80,7 @@ def test_output_with_aclgraph(
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
         vllm_aclgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            ([output.outputs[0].index], output.outputs[0].text))
 
     vllm_eager_outputs_list = ([
         ([0], answer) for answer in vllm_aclgraph_ds_answers
