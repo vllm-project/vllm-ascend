@@ -22,7 +22,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 class TestMtpProposer:
 
     @pytest.fixture
-    def base_vllm_config(self):
+    def vllm_config(self):
         config = MagicMock(spec=VllmConfig)
         config.additional_config = None
         config.speculative_config = MagicMock(spec=SpeculativeConfig)
@@ -68,12 +68,16 @@ class TestMtpProposer:
         runner.in_profile_run = False
         return runner
 
-    def test_init(self, base_vllm_config, runner):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_init(self, mock_cpu_gpu_buffer, vllm_config, runner):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
+
         # Test basic initialization
-        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
         assert proposer.name == SpecDcodeType.MTP
-        assert proposer.vllm_config == base_vllm_config
+        assert proposer.vllm_config == vllm_config
         assert proposer.device == torch.device("cpu")
         assert proposer.dtype == torch.float16
         assert proposer.num_speculative_tokens == 2
@@ -85,9 +89,13 @@ class TestMtpProposer:
         assert not hasattr(proposer, "mrope_positions")
         assert proposer.use_sparse is False
 
-    def test_init_with_aclgraph(self, base_vllm_config, runner):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_init_with_aclgraph(self, mock_cpu_gpu_buffer, vllm_config,
+                                runner):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
         runner._use_aclgraph.return_value = True
-        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
         assert proposer.use_aclgraph is True
         assert proposer.cudagraph_batch_sizes == [1, 2, 4, 8]
@@ -98,9 +106,12 @@ class TestMtpProposer:
         "vllm_ascend.spec_decode.mtp_proposer.process_weights_after_loading")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_default_torch_dtype")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_current_vllm_config")
-    def test_load_model(self, mock_set_config, mock_set_dtype,
-                        mock_process_weights, mock_get_loader, mock_get_layers,
-                        base_vllm_config, runner):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_load_model(self, mock_cpu_gpu_buffer, mock_set_config,
+                        mock_set_dtype, mock_process_weights, mock_get_loader,
+                        mock_get_layers, vllm_config, runner):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
         attn_layers_all = {
             "target_attn_layer": "val0",
             "draft_attn_layer": "val1",
@@ -112,7 +123,7 @@ class TestMtpProposer:
             "draft_attn_exclude_by_indexer": "val4"
         }
 
-        def get_layers_side_effect(base_vllm_config, cache_cls):
+        def get_layers_side_effect(vllm_config, cache_cls):
             if cache_cls == AttentionLayerBase:
                 return attn_layers_all
             elif cache_cls == DeepseekV32IndexerCache:
@@ -121,7 +132,7 @@ class TestMtpProposer:
                 return {}
 
         # Setup
-        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
         proposer._init_mtp_model = MagicMock()
         mock_model = MagicMock()
         proposer.model = mock_model
@@ -138,11 +149,14 @@ class TestMtpProposer:
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
-    def test_dummy_run(self, mock_set_context, mock_get_forward_context,
-                       base_vllm_config, runner):
-        # Setup
-        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_dummy_run(self, mock_cpu_gpu_buffer, mock_set_context,
+                       mock_get_forward_context, vllm_config, runner):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
         proposer.model = MagicMock()
+        proposer.enable_shared_expert_dp = False
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
         runner._select_moe_comm_method.return_value = "alltoall"
 
@@ -158,15 +172,19 @@ class TestMtpProposer:
         mock_set_context.assert_called()
 
         # Check that model was called correct number of times
-        assert proposer.model.call_count == base_vllm_config.speculative_config.num_speculative_tokens
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.mtp_proposer.set_ascend_forward_context")
-    def test_dummy_run_full_graph(self, mock_set_context,
-                                  mock_get_forward_context, base_vllm_config,
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_dummy_run_full_graph(self, mock_cpu_gpu_buffer, mock_set_context,
+                                  mock_get_forward_context, vllm_config,
                                   runner):
         # Setup
-        proposer = MtpProposer(base_vllm_config, torch.device("cpu"), runner)
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
+        proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
+        proposer.enable_shared_expert_dp = False
         proposer.model = MagicMock()
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
         runner._select_moe_comm_method.return_value = "alltoall"
@@ -186,9 +204,13 @@ class TestMtpProposer:
         mock_set_context.assert_called()
 
         # Check that model was called correct number of times
-        assert proposer.model.call_count == base_vllm_config.speculative_config.num_speculative_tokens
+        assert proposer.model.call_count == vllm_config.speculative_config.num_speculative_tokens
 
-    def test_generate_token_ids(self):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_generate_token_ids(self, mock_cpu_gpu_buffer):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
+
         mock_deps = MagicMock()
         mock_deps.scheduler_output = MagicMock(spec=SchedulerOutput)
         mock_deps.scheduler_output.num_scheduled_tokens = 16
@@ -210,6 +232,7 @@ class TestMtpProposer:
                                                     [300, 301, 302]])
 
         proposer = MagicMock(spec=MtpProposer)
+        proposer.enable_shared_expert_dp = False
         proposer.runner = mock_deps.runner
         proposer.decode_threshold = 1
         proposer.speculative_config = MagicMock(
@@ -242,7 +265,10 @@ class TestMtpProposer:
         proposer._propose.assert_called_once()
         assert torch.equal(draft_token_ids, proposer._propose.return_value)
 
-    def test_prepare_next_token_ids_cpu(self):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_prepare_next_token_ids_cpu(self, mock_cpu_gpu_buffer):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
         sampled_token_ids = [[10, 20, 30], [40, 50], [60]]
 
         mock_gpu_batch = MagicMock()
@@ -262,7 +288,8 @@ class TestMtpProposer:
         assert torch.all(
             result == torch.tensor([30, 50, 60], dtype=torch.int32))
 
-    def test_prepare_next_token_ids_padded(self):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_prepare_next_token_ids_padded(self, mock_cpu_gpu_buffer):
         mock_common_attn_metadata = MagicMock(spec=CommonAttentionMetadata)
         mock_common_attn_metadata.seq_lens_cpu = torch.tensor(
             [10, 8, 5, 12], dtype=torch.int32)
@@ -302,6 +329,7 @@ class TestMtpProposer:
         mock_backup.gpu = torch.tensor([1, 2, 3, 4, 5, 6, 7],
                                        dtype=torch.int32)
         mock_backup.copy_to_gpu = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_backup
 
         proposer = MagicMock(spec=MtpProposer)
         proposer.backup_next_token_ids = mock_backup
@@ -342,10 +370,17 @@ class TestMtpProposer:
                                             device=torch.device("cpu"))
         assert torch.equal(next_token_ids, expected_next_tokens)
 
-    def test_prepare_inputs_padded(self):
+    @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
+    def test_prepare_inputs_padded(self, mock_cpu_gpu_buffer):
+        mock_buffer_instance = MagicMock()
+        mock_cpu_gpu_buffer.return_value = mock_buffer_instance
+
         mock_common_attn_metadata = MagicMock(spec=CommonAttentionMetadata)
         mock_common_attn_metadata.query_start_loc_cpu = torch.tensor(
             [0, 8, 16, 24], dtype=torch.int32)
+        mock_common_attn_metadata.seq_lens_cpu = torch.tensor(
+            [8, 8, 8], dtype=torch.int32)
+        mock_common_attn_metadata.num_input_tokens = 3
         mock_common_attn_metadata.query_start_loc = torch.tensor(
             [0, 8, 16, 24], dtype=torch.int32)
         mock_common_attn_metadata.seq_lens = torch.tensor([8, 8, 8],
