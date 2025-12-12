@@ -41,9 +41,32 @@ class AscendSampler(Sampler):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler()
+        self.async_exponential_event = torch.npu.Event()
+
+    def set_q_event(self, q, event):
+        self.topk_topp_sampler.set_q_event(q, event)
+
+    def do_async_exponential(self, b_s, head_dim, generators):
+        # Calculating exponential randoms in a different stream
+        # and overlapping with model executing.
+        with torch.npu.stream(global_stream()):
+            global_stream().wait_stream(torch.npu.current_stream())
+            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
+            # Goes to async exponential with AI-CPU exponential or default exponential.
+            if len(generators) != q.shape[0]:
+                q.exponential_()
+            if generators:
+                for i, generator in generators.items():
+                    q[i].exponential_(generator=generator)
+            self.async_exponential_event.record()
+        self.set_q_event(q, self.async_exponential_event)
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):
+
+    def set_q_event(self, q, event):
+        self.q = q
+        self.async_event = event
 
     def _apply_top_k_top_p(
         self,
@@ -99,4 +122,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
+        if getattr(self, "q", None) is not None:
+            self.async_event.synchronize()
+            return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
         return random_sample(probs, generators), logits_to_return
