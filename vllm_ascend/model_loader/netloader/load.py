@@ -80,5 +80,5 @@ def elastic_load(
                 time.perf_counter() - t0))
             return model_loaded
     except Exception as e:
-        logger.error(f"elastic_load error: {e}")
+        logger.info(f"elastic_load error: {e}")
         return None

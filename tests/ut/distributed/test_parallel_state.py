@@ -12,15 +12,17 @@ from vllm_ascend.distributed.parallel_state import (
 
 @pytest.fixture
 def parallel_config():
-    return ParallelConfig(data_parallel_size=2,
-                          tensor_parallel_size=2,
-                          pipeline_parallel_size=2)
+    return ParallelConfig(
+        data_parallel_size=2,
+        tensor_parallel_size=4,
+        pipeline_parallel_size=2,
+    )
 
 
 @pytest.fixture
 def mock_distributed():
     with patch('torch.distributed.is_initialized', return_value=True), \
-         patch('torch.distributed.get_world_size', return_value=8), \
+         patch('torch.distributed.get_world_size', return_value=16), \
          patch('torch.distributed.get_backend', return_value='nccl'), \
          patch('vllm_ascend.distributed.parallel_state.get_world_group') as mock_group, \
          patch('vllm_ascend.distributed.parallel_state.get_tp_group') as mock_tp_group, \
@@ -36,8 +38,9 @@ def mock_distributed():
 
 def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config = MagicMock()
-    mock_ascend_config.lmhead_tensor_parallel_size = 2
-    mock_ascend_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.flashcomm2_oproj_tensor_parallel_size = 2
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0
@@ -46,6 +49,7 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
     mock_envs_ascend = MagicMock()
     mock_envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE = 2
+    mock_envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED = 0
     mock_envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL = 0
     with patch('vllm_ascend.distributed.parallel_state.model_parallel_initialized', return_value=False), \
          patch('vllm_ascend.distributed.parallel_state.init_model_parallel_group'), \

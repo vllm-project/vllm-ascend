@@ -8,7 +8,7 @@ import queue
 import struct
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -32,8 +32,8 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import (align_memory,
                                            get_transfer_timeout_value,
                                            kv_alltoall_and_rearrange)
@@ -67,6 +67,27 @@ class ReqMeta:
     metaserver: Optional[str]
 
 
+@dataclass
+class SizedDict(OrderedDict):
+
+    def __init__(self, max_size=16000, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            value: dict[int, list[int]] = {}
+            self[key] = value
+            return value
+
+
 class KVCacheSendingLayerThread(threading.Thread):
 
     def __init__(self,
@@ -79,6 +100,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                  kv_cache_base_addr: list[int],
                  use_mla: bool,
                  block_len: list[int],
+                 decode_tp_size: int,
                  first_kv_cache: torch.Tensor,
                  callback_func: Callable[..., None] = lambda x: None):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
@@ -90,6 +112,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.total_layers = total_layers
         self.use_mla = use_mla
         self.block_len = block_len
+        self._decode_tp_size = decode_tp_size
         self.model_stream = torch_npu.npu.current_stream()
         self.current_layer = -1
 
@@ -151,9 +174,20 @@ class KVCacheSendingLayerThread(threading.Thread):
     def _transfer_kv_cache(self, req_id, req_meta, layer_index, key, value):
         # send kv layer to remote
         if len(req_meta.local_block_ids) == 0:
+            logger.debug(
+                f"Cancelling KV cache transfer for request {req_id}. Reason: No local blocks to transfer."
+            )
             return
         # not need to send kv cache
         if self.tp_rank % self.num_head_replica != 0:
+            logger.debug(
+                f"Cancelling KV cache transfer for request {req_id}. Reason: TP rank excluded from head replication (TP Rank: {self.tp_rank}, Replicas: {self.num_head_replica})."
+            )
+            return
+        if self.use_mla and self.tp_rank >= self._decode_tp_size:
+            logger.debug(
+                f"Cancelling KV cache transfer for request {req_id}. Reason: MLA mode active and TP rank outside decoding group (TP Rank: {self.tp_rank}, Decode TP Size: {self._decode_tp_size})."
+            )
             return
 
         remote_host = req_meta.remote_host
@@ -463,8 +497,6 @@ class MooncakeLayerwiseConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
-        self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
-                             vllm_config.parallel_config.data_parallel_size
 
         # Handshake base port
         self.side_channel_port = (
@@ -529,6 +561,9 @@ class MooncakeLayerwiseConnectorScheduler:
             local_block_ids = (blocks.get_unhashed_block_ids()
                                if num_external_tokens > 0 else [])
             # Get unhashed blocks to pull from remote.
+            logger.debug(
+                f"MooncakeLayerwiseConnector update_state_after_alloc: add {request.request_id} to need recv queue"
+            )
             self._reqs_need_recv[request.request_id] = (
                 request,
                 [],  #request._all_token_ids,
@@ -539,6 +574,9 @@ class MooncakeLayerwiseConnectorScheduler:
         # Layerwise prefiller add request need send
         if params is not None and params.get("do_remote_decode"):
             local_block_ids = (blocks.get_block_ids()[0])
+            logger.debug(
+                f"MooncakeLayerwiseConnector update_state_after_alloc: add {request.request_id} to need send queue"
+            )
             self._reqs_need_send_layerwise[request.request_id] = (len(
                 request.all_token_ids), local_block_ids, request)
 
@@ -582,12 +620,19 @@ class MooncakeLayerwiseConnectorScheduler:
                     req_id]
                 current_tokens = computed_tokens.get(req_id,
                                                      0) + scheduled_tokens
-                if current_tokens == total_tokens:
+                if current_tokens >= total_tokens:
+                    logger.debug(
+                        f"MooncakeLayerwiseConnector build_connector_meta: add {req_id}, current tokens({current_tokens}={computed_tokens.get(req_id,0)}+{scheduled_tokens}), total tokens({total_tokens})"
+                    )
                     meta.add_new_req(request_id=req_id,
                                      local_block_ids=block_ids,
                                      kv_transfer_params=req.kv_transfer_params,
                                      token_ids=[])
                     self._reqs_need_send_layerwise.pop(req_id)
+                else:
+                    logger.debug(
+                        f"MooncakeLayerwiseConnector build_connector_meta: skip {req_id}, current tokens({current_tokens}={computed_tokens.get(req_id,0)}+{scheduled_tokens}), total tokens({total_tokens})"
+                    )
         return meta
 
     def request_finished(
@@ -618,7 +663,6 @@ class MooncakeLayerwiseConnectorWorker:
         if TransferEngine is None:
             raise RuntimeError("mooncake is not available")
         logger.info("Initializing Mooncake work %s", engine_id)
-        self.engine = TransferEngine()
 
         # Metadata.
         self.vllm_config = vllm_config
@@ -627,11 +671,8 @@ class MooncakeLayerwiseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.max_device_id = self.tp_size * self.dp_size
         self.total_layers = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
@@ -647,34 +688,9 @@ class MooncakeLayerwiseConnectorWorker:
             vllm_config.parallel_config.tensor_parallel_size)
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
-
-        # get tp device id
-        # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
-        # introducing some changes
-        device_ids_str = envs_ascend.PHYSICAL_DEVICES
-        if device_ids_str is None:
-            device_ids = list(
-                range(self.dp_rank * self.tp_size,
-                      (self.dp_rank + 1) * self.tp_size))
-        else:
-            device_ids = list(map(int, device_ids_str.split(',')))
-            start_index = self.dp_rank * self.tp_size
-            end_index = start_index + self.tp_size
-            if len(device_ids) < end_index:
-                raise ValueError(
-                    f"Not enough physical devices available for DP rank {self.dp_rank}. "
-                    f"Expected at least {end_index} devices, but found {len(device_ids)} "
-                    "in PHYSICAL_DEVICES.")
-            device_ids = device_ids[start_index:end_index]
-        assert len(device_ids) > self.tp_rank  # type: ignore
-        self.device_id = device_ids[self.tp_rank]  # type: ignore
-
-        if vllm_config.kv_transfer_config.get_from_extra_config(
-                'use_ascend_direct', True):
-            hostname = self.side_channel_host
-        else:
-            hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
-        self._initialize(hostname=hostname, device_name=None)
+        logger.info("Initializing Mooncake work %s", engine_id)
+        self.engine = global_te.get_transfer_engine(self.side_channel_host,
+                                                    device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -695,9 +711,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.encoder = msgspec.msgpack.Encoder()
 
         self.remote_kv_caches_base_addr: dict[str, dict[int, list[int]]] = \
-            defaultdict(dict)
+            SizedDict()
         self.remote_te_port: dict[str, dict[int, int]] = \
-            defaultdict(dict)
+            SizedDict()
         self.remote_sockets_lock = threading.Lock()
         self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]] = defaultdict(  # type: ignore
@@ -725,19 +741,6 @@ class MooncakeLayerwiseConnectorWorker:
         self._decode_tp_size = decode_parallel_config["tp_size"]
         assert "dp_size" in decode_parallel_config.keys()
         self._decode_dp_size = decode_parallel_config["dp_size"]
-
-    def _initialize(
-        self,
-        hostname: str,
-        device_name: Optional[str],
-    ) -> None:
-        """Initialize the mooncake instance."""
-        device_name = device_name if device_name is not None else ""
-        ret_value = self.engine.initialize(hostname, "P2PHANDSHAKE", "ascend",
-                                           device_name)
-        if ret_value != 0:
-            raise RuntimeError(
-                f"Mooncake initialization failed with ret_value: {ret_value}")
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -777,6 +780,8 @@ class MooncakeLayerwiseConnectorWorker:
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
+        ptrs = []
+        lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
             if self.use_mla:
@@ -784,7 +789,8 @@ class MooncakeLayerwiseConnectorWorker:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[i % 2]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             else:
                 cache_list = [cache_or_caches
                               ] if self.use_mla else cache_or_caches
@@ -792,7 +798,9 @@ class MooncakeLayerwiseConnectorWorker:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
                     kv_caches_base_addr.append(base_addr)
-                    self._register(base_addr, region_len)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+        global_te.register_buffer(ptrs, lengths)
         self.kv_caches_base_addr = kv_caches_base_addr
 
         # After KV Caches registered, start the sending or receiving thread.
@@ -812,6 +820,7 @@ class MooncakeLayerwiseConnectorWorker:
                 kv_cache_base_addr=self.kv_caches_base_addr,
                 use_mla=self.use_mla,
                 block_len=self.block_len,
+                decode_tp_size=self._decode_tp_size,
                 first_kv_cache=first_kv_cache,
                 callback_func=self.send_done_send_signal)
             self.kv_send_layer_thread.start()
@@ -824,14 +833,6 @@ class MooncakeLayerwiseConnectorWorker:
                 self.pd_head_ratio, self.engine_id, metadata, ready_event)
             self.kv_recv_layer_thread.start()
             ready_event.wait()
-
-    def _register(self, ptr, length):
-        logger.info(
-            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
-            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
-        ret_value = self.engine.register_memory(ptr, length)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake memory registration failed.")
 
     def _access_metaserver(self, url, message):
         success = False
@@ -948,9 +949,6 @@ class MooncakeLayerwiseConnectorWorker:
                 key = None
                 value = None
             for req_id, req_meta in connector_metadata.requests.items():
-                logger.debug(
-                    f"Add request {req_id} to kv send layer thread. {req_meta=}"
-                )
                 if self.pd_head_ratio != 1:
                     key_block_num = len(
                         req_meta.local_block_ids) * key_block_size
@@ -962,6 +960,9 @@ class MooncakeLayerwiseConnectorWorker:
                     key_start_id += key_block_num
                     value_start_id += value_block_num
                 req_meta_update = self.update_decoder_info(req_id, req_meta)
+                logger.debug(
+                    f"Add request {req_id} to kv send layer thread. {req_meta_update=}"
+                )
                 assert self.kv_send_layer_thread is not None
                 self.kv_send_layer_thread.send_queue.put(
                     (req_id, req_meta_update, self.current_layer, key, value))
@@ -990,10 +991,8 @@ class MooncakeLayerwiseConnectorWorker:
 
     def update_decoder_info(self, req_id, req_meta):
         req_meta_update = copy.deepcopy(req_meta)
-        if self.pd_tp_ratio > 1:
-            req_meta_update.remote_port = req_meta_update.remote_port + self.tp_rank // self.pd_tp_ratio
-        else:
-            req_meta_update.remote_port = req_meta_update.remote_port + self.tp_rank
+        req_meta_update.remote_port = req_meta_update.remote_port + (
+            self.tp_rank // self.pd_tp_ratio) % self._decode_tp_size
         if req_meta_update.remote_engine_id not in self.remote_kv_caches_base_addr or \
             req_meta_update.remote_port not in self.remote_kv_caches_base_addr[req_meta_update.remote_engine_id]:
             try:

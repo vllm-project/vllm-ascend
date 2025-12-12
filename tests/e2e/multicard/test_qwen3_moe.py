@@ -29,21 +29,8 @@ from modelscope import snapshot_download  # type: ignore
 from tests.e2e.conftest import VllmRunner
 
 
-def test_models_distributed_Qwen3_MOE_TP2():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-            "Qwen/Qwen3-30B-A3B",
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_models_distributed_Qwen3_MOE_TP2_WITH_EP():
+def test_qwen3_moe_distributed_mp_tp2_ep():
     example_prompts = [
         "Hello, my name is",
     ]
@@ -53,12 +40,11 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_EP():
             tensor_parallel_size=2,
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_models_distributed_Qwen3_MOE_W8A8():
+def test_qwen3_moe_w8a8_distributed_tp2():
     example_prompts = [
         "Hello, my name is",
     ]
@@ -73,7 +59,7 @@ def test_models_distributed_Qwen3_MOE_W8A8():
 
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_models_distributed_Qwen3_MOE_W8A8_WITH_EP():
+def test_qwen3_moe_w8a8_distributed_tp2_ep():
     example_prompts = [
         "Hello, my name is",
     ]
@@ -88,7 +74,7 @@ def test_models_distributed_Qwen3_MOE_W8A8_WITH_EP():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH_AIV():
+def test_qwen3_moe_distributed_aiv_tp2():
     os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
     example_prompts = [
         "Hello, my name is",
@@ -99,23 +85,5 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH_AIV():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
-            enforce_eager=False,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH():
-    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
-        del os.environ['HCCL_OP_EXPANSION_MODE']
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "auto"
-    max_tokens = 5
-    with VllmRunner(
-            "Qwen/Qwen3-30B-A3B",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

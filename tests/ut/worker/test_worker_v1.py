@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -53,14 +52,12 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
-    @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
-        mock_try_register_lib,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
@@ -95,12 +92,6 @@ class TestNPUWorker(TestBase):
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
         mock_check_ascend_device_type.assert_called_once()
 
-        # Verify try_register_lib call
-        mock_try_register_lib.assert_called_once_with(
-            "mindie_turbo",
-            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo.",
-        )
-
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
         mock_init_profiler.assert_called_once()
@@ -115,14 +106,12 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
-    @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
-        mock_try_register_lib,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
@@ -160,14 +149,12 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.check_ascend_device_type")
-    @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
         mock_init_profiler,
         mock_init_cached_hf_modules,
-        mock_try_register_lib,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
@@ -216,100 +203,37 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_gpu_blocks, 100)
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
-    @patch("vllm_ascend.worker.worker_v1.NPUPlatform")
-    @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
-    @patch("vllm_ascend.worker.worker_v1.logger")
-    def test_sleep_mode_enabled(self, mock_logger, mock_allocator_class,
-                                mock_platform, mock_sleep_mode_enabled):
-        """Test sleep method when sleep mode is enabled"""
-        from vllm_ascend.worker.worker_v1 import NPUWorker
-
-        # Setup mock
-        mock_sleep_mode_enabled.return_value = True
-        mock_platform.mem_get_info.side_effect = [
-            (1000, 2000),
-            (1200, 2000),
-        ]  # before, after
-        mock_allocator = MagicMock()
-        mock_allocator_class.get_instance.return_value = mock_allocator
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-
-            # Test sleep method
-            worker.sleep(level=1)
-
-            # Verify calls
-            mock_sleep_mode_enabled.assert_called_once()
-            mock_allocator.sleep.assert_called_once_with(
-                offload_tags=("weights", ))
-            self.assertEqual(mock_platform.mem_get_info.call_count,
-                             2)  # Called 2 times in sleep method
-            # Verify log output
-            mock_logger.info.assert_called_once()
-
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
-    def test_sleep_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
-        """Test sleep method raises exception when sleep mode is disabled"""
-        from vllm_ascend.worker.worker_v1 import NPUWorker
-
-        # Set sleep mode disabled
-        mock_sleep_mode_enabled.return_value = False
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-
-            # Test sleep method should raise exception
-            with self.assertRaises(ValueError) as cm:
-                worker.sleep()
-
-            self.assertIn("Sleep mode is not enabled", str(cm.exception))
-
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
     @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_wake_up_mode_enabled(self, mock_allocator_class,
-                                  mock_sleep_mode_enabled):
+    def test_wake_up_mode_enabled(self, mock_allocator_class):
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
         # Setup mock
-        mock_sleep_mode_enabled.return_value = True
         mock_allocator = MagicMock()
         mock_allocator_class.get_instance.return_value = mock_allocator
+
+        mock_hidden_size = MagicMock()
+        mock_hf_config = MagicMock()
+        mock_hf_config.hidden_size = mock_hidden_size
+        mock_model_config = MagicMock()
+        mock_model_config.hf_config = mock_hf_config
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config = mock_model_config
+
+        mock_model_runner = MagicMock()
+        mock_model_runner.model = MagicMock()
 
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.model_runner = mock_model_runner
+            worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
-            # Verify calls
-            mock_sleep_mode_enabled.assert_called_once()
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
-
-    @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_wake_up_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
-        """Test wake_up method raises exception when sleep mode is disabled"""
-        from vllm_ascend.worker.worker_v1 import NPUWorker
-
-        # Set sleep mode disabled
-        mock_sleep_mode_enabled.return_value = False
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-
-            # Test wake_up method should raise exception
-            with self.assertRaises(ValueError) as cm:
-                worker.wake_up()
-
-            self.assertIn("Sleep mode is not enabled", str(cm.exception))
 
     @patch(
         "vllm_ascend.worker.worker_v1.NPUWorker._init_worker_distributed_environment"

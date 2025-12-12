@@ -1,4 +1,4 @@
-# DeepSeek-V3.1
+# DeepSeek-V3/3.1
 
 ## Introduction
 
@@ -105,7 +105,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
@@ -128,9 +128,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 ### Multi-node Deployment
@@ -164,7 +163,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -190,9 +189,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 **Node 1**
@@ -220,7 +218,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=100
+export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
@@ -247,14 +245,13 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
+We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
  - `DeepSeek-V3.1_w8a8mix_mtp 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
@@ -421,7 +418,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
@@ -430,7 +427,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -510,7 +506,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "1",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -590,7 +585,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "2",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -670,7 +664,6 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   "engine_id": "3",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8

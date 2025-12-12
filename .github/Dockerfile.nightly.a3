@@ -23,7 +23,6 @@ ARG AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
-ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
 
 WORKDIR /workspace
 

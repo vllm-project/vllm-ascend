@@ -5,7 +5,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 
 @pytest.mark.parametrize("model_name", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
-def test_e2e_ep_correctness(model_name):
+def test_deepseek_correctness_ep(model_name):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
