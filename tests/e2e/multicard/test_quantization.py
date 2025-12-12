@@ -25,16 +25,17 @@ from modelscope import snapshot_download  # type: ignore
 from tests.e2e.conftest import VllmRunner
 
 
-def test_models_distributed_quantized_W8A8():
+def test_qwen2_5_w8a8_external_quantized_tp2():
     example_prompts = [
         "The president of the United States is",
     ]
     max_tokens = 5
-    with VllmRunner(snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
-                    tensor_parallel_size=2,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    enforce_eager=False) as vllm_model:
+    with VllmRunner(
+            snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
+            tensor_parallel_size=2,
+            max_model_len=4096,
+            gpu_memory_utilization=0.8,
+    ) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     golden_results = [
