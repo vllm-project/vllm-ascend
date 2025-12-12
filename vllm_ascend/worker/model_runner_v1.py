@@ -3324,8 +3324,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     if isinstance(module,
                                   (MergedColumnParallelLinear,
                                    QKVParallelLinear, RowParallelLinear)):
-                        module.weight.data = self._convert_torch_format(
-                            module.weight.data)
+                        # Fixed: Skip format conversion for 310P in eager mode to avoid NPU timeout
+                        if not (is_310p_device and not ascend_config.torchair_graph_config.enabled):
+                            module.weight.data = self._convert_torch_format(
+                                module.weight.data)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
@@ -3631,9 +3633,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    k_cache = self._convert_torch_format(k_cache)
+                    # Fixed: Skip format conversion for 310P in eager mode to avoid NPU timeout
+                    if not (is_310p_device and not ascend_config.torchair_graph_config.enabled):
+                        k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    v_cache = self._convert_torch_format(v_cache)
+                    # Fixed: Skip format conversion for 310P in eager mode to avoid NPU timeout
+                    if not (is_310p_device and not ascend_config.torchair_graph_config.enabled):
+                        v_cache = self._convert_torch_format(v_cache)
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
                                              kv_cache_spec.block_size, 1, 128)
