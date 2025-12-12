@@ -359,8 +359,7 @@ class NPUWorker(WorkerBase):
             weight = torch.rand((2, 4), dtype=torch.float16).npu()
             # Use standard matmul instead of _npu_matmul_add_fp32 for 310P compatibility
             result = torch.matmul(x, weight.T)
-            # Simple operation to warm up the device
-            torch_npu.synchronize()
+            # No explicit synchronize needed - warm-up doesn't require blocking operation
         else:
             # Original warm-up for other devices
             x = torch.rand((2, 4), dtype=torch.float16).npu()

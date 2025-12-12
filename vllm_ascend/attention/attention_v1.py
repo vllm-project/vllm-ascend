@@ -529,6 +529,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
 
+        # Fixed: Check device compatibility for FusedInferAttentionScore
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType, aligned_16
+
+        if get_ascend_device_type() == AscendDeviceType._310P:
+            # Fallback for 310P: Use flash attention implementation from v0.10.0rc1
+            return self._forward_prefill_310p_fallback(
+                query, key, value, attn_metadata, block_size, num_tokens
+            )
+
         # Get workspace from cache or calculate it if not present.
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
@@ -569,19 +578,36 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 key = self.key_cache.flatten(2, 3).contiguous()
                 value = self.value_cache.flatten(2, 3).contiguous()
 
-            output, _ = torch_npu.npu_fused_infer_attention_score(
-                query,
-                key,
-                value,
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="BSH",
-                block_size=block_size,
-                pre_tokens=self.sliding_window,
-                scale=self.scale,
-                block_table=attn_metadata.block_tables,
-                actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
-                actual_seq_lengths_kv=attn_metadata.seq_lens)
+            # Fixed: Check device compatibility for decode attention
+            from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+
+            if get_ascend_device_type() == AscendDeviceType._310P:
+                # Fallback for 310P: Use paged attention instead of fused attention
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens,
+                    out=output)
+            else:
+                # Original fused attention for other devices
+                output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query,
+                    key,
+                    value,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="BSH",
+                    block_size=block_size,
+                    pre_tokens=self.sliding_window,
+                    scale=self.scale,
+                    block_table=attn_metadata.block_tables,
+                    actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
+                    actual_seq_lengths_kv=attn_metadata.seq_lens)
 
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
@@ -714,3 +740,44 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output = self.forward_impl(query, key, value, kv_cache, attn_metadata,
                                    output)
         return output
+
+    def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, block_size, num_tokens):
+        """
+        310P fallback implementation using flash attention from v0.10.0rc1
+        This restores the working attention logic for 310P devices
+        """
+        from vllm_ascend.utils import aligned_16
+
+        # Create output tensor
+        output = torch.empty(num_tokens, self.num_heads, self.head_size,
+                           dtype=query.dtype, device=query.device)
+
+        # Apply 310P-specific alignments from v0.10.0rc1
+        query = aligned_16(query)
+        key = aligned_16(key)
+        value = aligned_16(value)
+        output = aligned_16(output)
+
+        # Handle attention mask - format for 310P compatibility
+        mask = attn_metadata.attn_mask
+        if mask is not None:
+            # Reprocess mask similar to v0.10.0rc1 logic
+            if len(attn_metadata.seq_lens.shape) > 0:
+                mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
+            mask = torch_npu.npu_format_cast(mask.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+
+        # Use flash attention - the working operation for 310P
+        torch_npu._npu_flash_attention(
+            query=query,
+            key=key,
+            value=value,
+            mask=mask,
+            seq_len=attn_metadata.seq_lens,
+            scale_value=self.scale,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            out=output
+        )
+
+        # Return only the actual tokens (truncate padding from aligned_16)
+        return output[:num_tokens].view(num_tokens, self.num_heads * self.head_size)
