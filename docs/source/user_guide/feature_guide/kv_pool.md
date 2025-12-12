@@ -113,6 +113,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                 "kv_role": "kv_producer",
                 "kv_port": "20001",
                 "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
                     "prefill": {
                         "dp_size": 1,
                         "tp_size": 1
