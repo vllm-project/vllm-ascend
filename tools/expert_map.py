@@ -9,7 +9,7 @@ import torch.distributed as dist
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.eplb.core.policy.policy_abstract import DynamicConfig
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
-
+from vllm_ascend.eplb.core.policy.policy_flashlb import FlashLB
 
 def generate_expert_map(
     num_router_expert: int,
@@ -164,6 +164,29 @@ def generate_policy_expert_map(src_expert_map_path,moe_load_path,dst_expert_map_
     expert_map = torch.tensor(policy.rebalance_experts(expert_map,moe_load)[2])
     save_expert_map_to_json(expert_map,dst_expert_map_path)
 
+def generate_multi_stage_expert_map(src_expert_map_path,moe_load_path,dst_expert_map_path,mix_placement):
+    num_experts = 257 if mix_placement else 256
+    exp_lb = ExpertLoadBalancer(src_expert_map_path,num_experts)
+    expert_map = exp_lb.expert_map_tensor
+    ep_size=expert_map.shape[1]
+    dummy_config = DynamicConfig()
+    policy = FlashLB(dummy_config)
+    policy.max_stage_window = 64
+    policy.buffer_expert_layer_num = 59
+    file_dir = Path(moe_load_path)
+    moe_files = sorted(list(file_dir.glob("moe_load_*.npy")))
+    if not moe_files:
+        raise FileNotFoundError(f"No moe_load_*.npy files found in directory {file_dir}")
+    
+    for file_path in moe_files:
+        moe_load = np.load(file_path)
+        moe_load = torch.tensor(moe_load, dtype=torch.int32)
+        total_sum = moe_load.sum(dim=(1, 2))
+        avg_val = total_sum / (ep_size * 8)
+        avg_col = avg_val.unsqueeze(1).unsqueeze(2).expand(-1, ep_size, 1)
+        moe_load = torch.cat([moe_load, avg_col], dim=2)
+        expert_map = torch.tensor(policy.rebalance_experts(expert_map,moe_load)[2])
+    save_expert_map_to_json(expert_map,dst_expert_map_path)
 
 num_router_expert = 256
 num_shared_expert = 1
@@ -187,3 +210,9 @@ generate_policy_expert_map(
     dst_expert_map_path="expert_map_policy.json",
     mix_placement=True,
     policy_type=1)
+generate_multi_stage_expert_map(
+    src_expert_map_path="expert_map.json",
+    moe_load_path="/home/r00934900/moe_load/data",
+    dst_expert_map_path="expert_map_policy.json",
+    mix_placement=True,
+)
