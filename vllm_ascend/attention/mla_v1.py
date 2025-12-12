@@ -39,7 +39,8 @@ from vllm_ascend.ops.shared_weight_layer import (
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, weak_ref_tensors)
+                               flashcomm2_o_shared_enabled, is_enable_nz,
+                               weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
