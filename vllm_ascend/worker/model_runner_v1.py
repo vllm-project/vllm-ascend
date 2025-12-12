@@ -1444,7 +1444,8 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
-                return self.kv_connector_no_forward(scheduler_output)
+                return self.kv_connector_no_forward(scheduler_output,
+                                                    self.vllm_config)
 
             if self.dynamic_eplb:
                 self.eplb_updator.forward_before()
