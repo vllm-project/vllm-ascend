@@ -23,7 +23,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
-MODELS = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 DATA_PARALLELS = [2]
 
@@ -39,7 +39,8 @@ api_keyword_args = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
-async def test_single_request_aclgraph(model: str, dp_size: int) -> None:
+async def test_models_single_request_aclgraph_dp2(model: str,
+                                                  dp_size: int) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
