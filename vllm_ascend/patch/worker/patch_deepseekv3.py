@@ -1,6 +1,5 @@
 import typing
 from collections.abc import Callable, Iterable
-from typing import Iterable
 
 import torch
 import vllm
@@ -22,10 +21,11 @@ from vllm.model_executor.models.deepseek_v2 import (
     get_spec_layer_idx_from_weight_name)
 from vllm.model_executor.models.utils import (is_pp_missing_parameter,
                                               sequence_parallel_chunk)
+
 from vllm_ascend.ascend_config import get_ascend_config
 
 
-class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
+class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
 
     def __init__(
         self,
@@ -132,7 +132,6 @@ class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
         router_logits, _ = self.gate(hidden_states)
         fused_moe_out = self.experts(hidden_states=hidden_states,
                                      router_logits=router_logits)
-        ascend_config = get_ascend_config()
         shared_output, final_hidden_states = fused_moe_out
         if self.shared_experts is None:
             assert shared_output is None
