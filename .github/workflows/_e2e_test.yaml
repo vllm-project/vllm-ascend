@@ -169,7 +169,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+          pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
