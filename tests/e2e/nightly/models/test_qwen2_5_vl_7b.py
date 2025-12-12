@@ -46,6 +46,11 @@ aisbench_cases = [{
     "max_out_len": 2048,
     "batch_size": 128,
     "baseline": 82.05,
+    "temperature": 0,
+    "top_k": -1,
+    "top_p": 1,
+    "seed": "None",
+    "repetition_penalty": 1,
     "threshold": 5
 }, {
     "case_type": "performance",
