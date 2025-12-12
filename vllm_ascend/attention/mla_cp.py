@@ -31,8 +31,8 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.ascend_forward_context import get_cos_and_sin
-from vllm_ascend.ops.shared_weight_layer import (is_hidden_layer,
-                                                 reach_layer_for_shared_weight_series)
+from vllm_ascend.ops.shared_weight_layer import (
+    is_hidden_layer, reach_layer_for_shared_weight_series)
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
