@@ -170,6 +170,7 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
+
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
