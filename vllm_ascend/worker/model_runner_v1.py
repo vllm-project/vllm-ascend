@@ -135,6 +135,7 @@ from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
+from vllm_ascend.ops.rotary_embedding import initialize_cos_sin, update_cos_sin
 from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.platform import NPUPlatform
@@ -148,7 +149,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable)
+                               is_moe_model, is_vl_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -417,6 +418,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         else:
             self.cos = None
             self.sin = None
+            if not is_vl_model(self.vllm_config
+                               ) and not self.vllm_config.model_config.use_mla:
+                initialize_cos_sin(self.vllm_config, self.dtype, self.device)
 
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2000,6 +2004,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
+        # update global cos, sin
+        update_cos_sin(positions)
+
         if lmhead_tp_enable():
             max_num_reqs_across_dp = maybe_padded_num_tokens if not with_prefill else self.max_num_reqs
             logits_indices = nn.functional.pad(
@@ -3167,6 +3174,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 positions = self.mrope_positions[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
+
+            # update global cos, sin
+            update_cos_sin(positions)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
