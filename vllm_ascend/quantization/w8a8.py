@@ -347,7 +347,7 @@ class AscendW8A8FusedMoEMethod:
         # converting ACL_FORMAT_FRACTAL_NZ.
         # npu_quant_grouped_matmul_dequant in eager mode does not accept
         # ACL_FORMAT_FRACTAL_NZ.
-        if not is_310p() and is_enable_nz():
+        if not is_310p():
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
             layer.w2_weight.data = torch_npu.npu_format_cast(

@@ -27,7 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -482,10 +482,9 @@ class AscendW4A8DynamicFusedMoEMethod:
 
         self.update_bias(layer, w13_bias, w2_bias)
 
-        if is_enable_nz():
-            layer.w13_weight.data = torch_npu.npu_format_cast(
-                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(
-                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w13_weight.data = torch_npu.npu_format_cast(
+            layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w2_weight.data = torch_npu.npu_format_cast(
+            layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
