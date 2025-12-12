@@ -128,8 +128,6 @@ class AscendCommonAttentionMetadata:
             is_only_prefill=self.is_only_prefill,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,
-            cos=self.cos[:num_actual_tokens] if self.cos else None,
-            sin=self.sin[:num_actual_tokens] if self.sin else None,
             prefill_context_parallel_metadata=self.
             prefill_context_parallel_metadata,
         )

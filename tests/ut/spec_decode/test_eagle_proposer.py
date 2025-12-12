@@ -51,7 +51,7 @@ class TestEagleProposerInitialization(TestBase):
         self.assertEqual(proposer.input_ids.shape, (1024, ))
         self.assertEqual(proposer.positions.shape, (1024, ))
         self.assertEqual(proposer.hidden_states.shape, (1024, 4096))
-        self.assertEqual(proposer.arange.shape, (33, ))
+        self.assertEqual(proposer.arange.shape, (1024, ))
 
     def test_initialization_eagle3(self):
         self.vllm_config.speculative_config.method = "eagle3"

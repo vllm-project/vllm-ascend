@@ -90,16 +90,13 @@ class EagleProposer(Proposer):
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
         self.token_arange_np = np.arange(self.max_num_tokens)
-        # We need +1 here because the arange is used to set query_start_loc,
-        # which has one more element than batch_size.
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
-                                   1,
+        max_num_slots_for_arange = max(self.max_num_tokens, max_batch_size + 1)
+        self.arange = torch.arange(max_num_slots_for_arange,
                                    device=device,
                                    dtype=torch.int32)
-        self.arange_cpu = torch.arange(
-            vllm_config.scheduler_config.max_num_seqs + 1,
-            device="cpu",
-            dtype=torch.int32)
+        self.arange_cpu = torch.arange(max_num_slots_for_arange,
+                                       device="cpu",
+                                       dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     def load_model(self, model: nn.Module) -> None:
@@ -227,7 +224,8 @@ class EagleProposer(Proposer):
             else:
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
-                target_token_ids = self.runner.input_ids[:num_scheduled_tokens]
+                target_token_ids = self.runner.input_ids.gpu[:
+                                                             num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
                 if self.name == SpecDcodeType.EAGLE3:
                     target_hidden_states = torch.cat(
@@ -261,7 +259,7 @@ class EagleProposer(Proposer):
                 target_positions = positions
                 target_hidden_states = hidden_states
             else:
-                target_token_ids = self.runner.input_ids[token_indices]
+                target_token_ids = self.runner.input_ids.gpu[token_indices]
                 target_positions = positions[token_indices]
                 if self.name == SpecDcodeType.EAGLE3:
                     target_hidden_states = torch.cat(
