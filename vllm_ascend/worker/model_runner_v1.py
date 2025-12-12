@@ -1644,6 +1644,309 @@ class NPUModelRunner(GPUModelRunner):
         )
         return logits.to(self.device).to(logits_dtype)
 
+<<<<<<< HEAD
+=======
+    def propose_draft_token_ids(
+        self,
+        valid_sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata,
+        positions: torch.Tensor,
+        num_scheduled_tokens: int,
+        hidden_states: torch.Tensor,
+        attn_metadata: dict[str, Any],
+        aux_hidden_states: torch.Tensor = None,
+    ) -> Optional[list[list[int]]]:
+        if not self.drafter:
+            # Speculative decoding is not enabled.
+            draft_token_ids = None
+        else:
+            draft_token_ids = self.drafter.generate_token_ids(
+                valid_sampled_token_ids, sampling_metadata, scheduler_output,
+                spec_decode_metadata, positions, num_scheduled_tokens,
+                hidden_states, attn_metadata, aux_hidden_states)
+        return draft_token_ids
+
+    def _pool(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]] = None,
+        finished_recving: Optional[set[str]] = None,
+        kv_connector_output: Optional["KVConnectorOutput"] = None,
+    ) -> ModelRunnerOutput:
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
+
+        hidden_states = hidden_states[:num_scheduled_tokens]
+        pooling_metadata = self.input_batch.get_pooling_metadata()
+        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
+                                              device=hidden_states.device)
+        seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
+
+        model = cast(VllmModelForPooling, self.model)
+        raw_pooler_output = model.pooler(
+            hidden_states=hidden_states,
+            pooling_metadata=pooling_metadata,
+        )
+        raw_pooler_output = json_map_leaves(
+            lambda x: x.to("cpu", non_blocking=True),
+            raw_pooler_output,
+        )
+        torch.npu.synchronize()
+
+        pooler_output: list[Optional[torch.Tensor]] = []
+        for raw_output, seq_len, prompt_len in zip(
+                raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
+            output = raw_output if seq_len == prompt_len else None
+            pooler_output.append(output)
+
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+            kv_connector_output=kv_connector_output,
+        )
+
+    def _select_moe_comm_method(self,
+                                num_tokens: int) -> Optional[MoECommType]:
+        """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
+        are designed for expert parallelism.
+        2. If expert parallel is enabled, we need to consider the soc version and the
+        number of tokens. This is based on the observation that all-gather is more
+        efficient than all-to-all when running on A2.
+
+            a. For A2, we choose from MC2 and all-gather.
+
+            b. For A3, we choose from MC2 and all-to-all.
+
+            In both cases, we use MC2 when the number of tokens is smaller than
+            a its capacity threshold.
+
+        Args:
+            num_tokens (int): The number of tokens in the current batch.
+
+        Raises:
+            ValueError: If the soc version is unsupported.
+
+        Returns:
+            MoECommType: The selected MoE communication method.
+        """
+        if not is_moe_model(self.vllm_config):
+            return None
+
+        soc_version = get_ascend_device_type()
+        quant_type = getattr(
+            self.vllm_config.model_config.hf_config, 'moe_quantize',
+            getattr(self.vllm_config.model_config.hf_config, 'quantize', None))
+        model_type = self.vllm_config.model_config.hf_config.model_type
+
+        if not self.parallel_config.enable_expert_parallel:
+            moe_comm_type = MoECommType.ALLGATHER
+        elif soc_version in {AscendDeviceType._910B}:
+            if (num_tokens <= self.mc2_tokens_capacity
+                    and self.parallel_config.world_size_across_dp /
+                    self.parallel_config.pipeline_parallel_size >= 16):
+                moe_comm_type = MoECommType.MC2
+            else:
+                # Currently, w4a8_dynamic does not support allgatherep
+                if quant_type == "w4a8_dynamic":
+                    moe_comm_type = MoECommType.ALLTOALL
+                else:
+                    moe_comm_type = MoECommType.ALLGATHER
+
+        elif soc_version in {AscendDeviceType._910_93}:
+            # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+            moe_comm_type = (
+                MoECommType.MC2 if num_tokens <= self.mc2_tokens_capacity else
+                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
+                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
+        else:
+            raise ValueError(f"Unsupported soc_version: {soc_version}")
+
+        # PanguProMoE only supports allgather
+        if model_type == "PanguProMoE":
+            moe_comm_type = MoECommType.ALLGATHER
+
+        if is_global_first_rank():
+            logger.debug(f"num_tokens: {num_tokens}, "
+                         f"moe_comm_type: {moe_comm_type}")
+        return moe_comm_type
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Union[ModelRunnerOutput, IntermediateTensors] | None:
+        if self.execute_model_state is not None:
+            raise RuntimeError("State error: sample_tokens() must be called "
+                               "after execute_model() returns None.")
+
+        with ProfileExecuteDuration().capture_async("prepare input"):
+            self._update_states(scheduler_output)
+            if has_ec_transfer() and get_ec_transfer().is_producer:
+                with self.maybe_get_ec_connector_output(
+                        scheduler_output,
+                        encoder_cache=self.encoder_cache,
+                ):
+                    self._execute_mm_encoder(scheduler_output)
+                    return make_empty_encoder_model_runner_output(
+                        scheduler_output)
+
+            if not scheduler_output.total_num_scheduled_tokens:
+                if not has_kv_transfer_group():
+                    logger.debug(
+                        "skip this step for we receive the data from remote disaggregate prefill node"
+                    )
+                    # Return empty ModelRunnerOuptut if there's no work to do.
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                return self.kv_connector_no_forward(scheduler_output)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+
+            (attn_metadata, positions, num_scheduled_tokens_np,
+             num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
+             logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
+             intermediate_tensors,
+             max_query_len) = (self._prepare_inputs(scheduler_output,
+                                                    intermediate_tensors))
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+
+        moe_comm_type = self._select_moe_comm_method(num_input_tokens)
+        # prevent debugger is None
+        need_dump = self.dump_enable and self.debugger is not None
+        if need_dump:
+            assert self.debugger is not None
+            dbg_cfg = getattr(self.debugger, "config", None)
+            dump_level = str(
+                getattr(dbg_cfg, "level",
+                        "L1")).upper() if dbg_cfg is not None else "L1"
+            if dump_level in ("L0", "MIX"):
+                self.debugger.start(model=self.model)
+            else:
+                self.debugger.start()
+
+        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+            scheduler_output.total_num_scheduled_tokens
+            == self.input_batch.num_reqs * max_query_len)
+        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
+        aclgraph_runtime_mode, batch_descriptor = \
+            self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+
+        # Run forward pass
+        with ProfileExecuteDuration().capture_async("forward"):
+            with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    with_prefill=self.with_prefill,
+                    reserved_mc2_mask=self.reserved_mc2_mask,
+                    moe_comm_type=moe_comm_type,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
+                    num_actual_tokens=scheduler_output.
+                    total_num_scheduled_tokens,
+                    prefetch_stream=self.prefetch_stream,
+                    model_instance=self.model,
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    is_multimodal_model=self.is_multimodal_model):
+                self.maybe_setup_kv_connector(scheduler_output)
+
+                hidden_states = self._generate_process_reqs_hidden_states(
+                    maybe_padded_num_tokens, input_ids, positions,
+                    intermediate_tensors, inputs_embeds)
+
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = self.get_finished_kv_transfer(
+                scheduler_output)
+
+            aux_hidden_states = None
+            if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
+                hidden_states, aux_hidden_states = hidden_states
+
+        kv_connector_output = KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
+        finished_sending = None
+        finished_recving = None
+        with ProfileExecuteDuration().capture_async("post process"):
+            # Broadcast PP output for external_launcher (torchrun)
+            # to make sure we are synced across pp ranks
+            # TODO: Support overlapping mirco-batches
+            # https://github.com/vllm-project/vllm/issues/18019
+            broadcast_pp_output = \
+                self.parallel_config.distributed_executor_backend \
+                == "external_launcher" and len(get_pp_group().ranks) > 0
+            if not get_pp_group().is_last_rank:
+                # For mid-pipeline stages, return the hidden states.
+                if not broadcast_pp_output:
+                    hidden_states.kv_connector_output = kv_connector_output
+                    if need_dump:
+                        assert self.debugger is not None
+                        self.debugger.stop()
+                        self.debugger.step()
+                    return hidden_states
+                assert isinstance(hidden_states, IntermediateTensors)
+                get_pp_group().send_tensor_dict(
+                    hidden_states.tensors, all_gather_group=get_tp_group())
+                logits = None
+            else:
+                if self.input_batch.pooling_params:
+                    pool_output = self._pool(
+                        hidden_states,
+                        scheduler_output.total_num_scheduled_tokens,
+                        num_scheduled_tokens_np, finished_sending,
+                        finished_recving, kv_connector_output)
+                    if need_dump:
+                        assert self.debugger is not None
+                        self.debugger.stop()
+                        self.debugger.step()
+                    return pool_output
+                # Sometimes, after the model is compiled through the AOT backend,
+                # the model output may become a list containing only one Tensor object.
+                if isinstance(hidden_states, list) and \
+                        len(hidden_states) == 1 and \
+                        isinstance(hidden_states[0], torch.Tensor):
+                    hidden_states = hidden_states[0]
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states)
+            if broadcast_pp_output:
+                model_output_broadcast_data = {
+                    "logits": logits.contiguous(),
+                } if logits is not None else {}
+                model_output_broadcast_data = get_pp_group(
+                ).broadcast_tensor_dict(model_output_broadcast_data,
+                                        src=len(get_pp_group().ranks) - 1)
+                assert model_output_broadcast_data is not None
+                logits = model_output_broadcast_data["logits"]
+
+            # Apply structured output bitmasks if present
+            self.execute_model_state = ExecuteModelState(
+                scheduler_output,
+                logits,
+                spec_decode_metadata,
+                hidden_states,
+                sample_hidden_states,
+                aux_hidden_states,
+                kv_connector_output,
+                attn_metadata,
+                positions,
+            )
+        return None
+
+>>>>>>> e7a21436 (apply flashcomm1 on multimodal_model)
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -2219,7 +2522,8 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     prefetch_stream=self.prefetch_stream,
                     model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method):
+                    weight_prefetch_method=self.weight_prefetch_method,
+                    is_multimodal_model=self.is_multimodal_model):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)
