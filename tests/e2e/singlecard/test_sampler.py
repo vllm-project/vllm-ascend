@@ -61,5 +61,7 @@ def test_exponential_overlap() -> None:
     with VllmRunner("Qwen/Qwen3-0.6B",
                     max_model_len=8192,
                     gpu_memory_utilization=0.7,
-                    additional_config={"enable_async_exponential" : 1}) as runner:
+                    additional_config={
+                        "enable_async_exponential": 1,
+                    }) as runner:
         runner.generate(example_prompts, sampling_params)
