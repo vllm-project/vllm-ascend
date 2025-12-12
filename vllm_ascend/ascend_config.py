@@ -165,9 +165,8 @@ class AscendConfig:
                     "Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
-        from vllm_ascend.utils import \
-            get_flashcomm2_oproj_tp_size_and_validate_config
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+        from vllm_ascend.utils import get_flashcomm2_config_and_validate
+        self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
@@ -191,19 +190,18 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+    def __init__(self, fuse_norm_quant: bool = True, **kwargs):
         """
         Initialize the configuration.
         
         Args:
-            enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
-                When set to True, the system will optimize quantization-related operations,
-                reducing the number of quantization/dequantization nodes.
+            fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
+                When set to True, the system will optimize norm and quant operations.
                 Default: True
                 
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
-        self.enable_quantization_fusion = enable_quantization_fusion
+        self.fuse_norm_quant = fuse_norm_quant
         # Add more compilation related configs here as needed
 
 
@@ -289,12 +287,3 @@ def get_ascend_config():
             "Ascend config is not initialized. Please call init_ascend_config first."
         )
     return _ASCEND_CONFIG
-
-
-def check_ascend_config(vllm_config, enforce_eager):
-    ascend_config = get_ascend_config()
-
-    if ascend_config.ascend_compilation_config.enable_quantization_fusion:
-        logger.info(
-            "Quantization fusion enabled! op fusion on quantization are expected. "
-        )

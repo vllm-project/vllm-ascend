@@ -9,7 +9,8 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_sp, flashcomm2_enable
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable,
+                               flashcomm2_o_shared_enabled)
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -77,6 +78,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
+    vllm_config = get_current_vllm_config()
 
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
@@ -182,6 +184,29 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           backend,
                                           group_name="lmheadtp")
 
+    def _create_shared_weight_group(group_name: str) -> GroupCoordinator:
+        #This communication domain is used for asynchronous broadcasting, so we will create a new communication group to avoid interference
+        group_ranks = []
+        for pp_idx in range(global_pp_size):
+            group = []
+            for dp_idx in range(global_dp_size):
+                base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
+                for i in range(global_tp_size):
+                    global_rank = base + i
+                    group.append(global_rank)
+            group_ranks.append(group)
+
+        return init_model_parallel_group(group_ranks,
+                                         get_world_group().local_rank,
+                                         backend,
+                                         group_name=group_name)
+
+    global _SHARED_WEIGHT
+    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
+    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
+    if enable_sp() and is_ds_v32:
+        _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
+
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config(
@@ -234,17 +259,10 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 backend,
                 group_name="flashcomm2_odp")
 
-    vllm_config = get_current_vllm_config()
-    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
-    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
-    if enable_sp() and is_ds_v32:
-        global _SHARED_WEIGHT
-        group_ranks = [list(range(torch.distributed.get_world_size()))]
-        _SHARED_WEIGHT = init_model_parallel_group(
-            group_ranks,
-            get_world_group().local_rank,
-            backend,
-            group_name="CP_shared_weight")
+        # Create shared weight group for flashcomm2 oproj
+        if flashcomm2_o_shared_enabled():
+            assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
+            _SHARED_WEIGHT = _create_shared_weight_group("flashcomm2_o_shared")
 
 
 def get_mlp_tensor_model_parallel_world_size():
