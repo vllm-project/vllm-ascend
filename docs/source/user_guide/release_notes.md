@@ -56,7 +56,7 @@ v0.11.0 will be the next official release version of vLLM Ascend. We'll release 
 
 ### Core
 - Performance of Qwen3 and Deepseek V3 series models are improved.
-- Mooncake layerwise connector is supported now [#2602](https://github.com/vllm-project/vllm-ascend/pull/2602). Find tutorial [here](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/multi_node_pd_disaggregation_mooncake.html).
+- Mooncake layerwise connector is supported now [#2602](https://github.com/vllm-project/vllm-ascend/pull/2602). Find tutorial [here](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html).
 - MTP > 1 is supported now. [#2708](https://github.com/vllm-project/vllm-ascend/pull/2708)
 - [Experimental] Graph mode `FULL_DECODE_ONLY` is supported now! And `FULL` will be landing in the next few weeks. [#2128](https://github.com/vllm-project/vllm-ascend/pull/2128)
 - Pooling models, such as bge-m3, are supported now. [#3171](https://github.com/vllm-project/vllm-ascend/pull/3171)

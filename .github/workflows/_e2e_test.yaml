@@ -25,6 +25,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -74,9 +75,10 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'light' }}
         run: |
-          # pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          # pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
           # pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
+          pytest -sv tests/e2e/singlecard/pooling/test_classification.py::test_classify_correctness
 
       - name: Run e2e test
         env:
@@ -89,12 +91,9 @@ jobs:
           # the test separately.
 
           pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv tests/e2e/singlecard/test_bge_model.py
           pytest -sv tests/e2e/singlecard/test_camem.py
-          pytest -sv tests/e2e/singlecard/test_embedding.py
-          # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
           #pytest -sv tests/e2e/singlecard/test_ilama_lora.py
@@ -102,12 +101,12 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
           pytest -sv tests/e2e/singlecard/test_vlm.py
-          pytest -sv tests/e2e/singlecard/multi-modal/test_internvl.py
           pytest -sv tests/e2e/singlecard/test_xlite.py
+          pytest -sv tests/e2e/singlecard/pooling/
+          pytest -sv tests/e2e/singlecard/compile/test_norm_quant_fusion.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
-          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_torchair_correctness.py
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
   e2e-2-cards:
@@ -118,6 +117,8 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -169,10 +170,6 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_qwen3_moe_with_torchair
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair_v1scheduler
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_nz
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
@@ -182,7 +179,6 @@ jobs:
         run: |
           pytest -sv tests/e2e/multicard/test_quantization.py
           pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_full_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
@@ -193,19 +189,16 @@ jobs:
           #pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W8A8
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC_new_version
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC_old_version
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_fc2_for_qwen3_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_flashcomm_v1
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight
 
-          pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
+          pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
           pytest -sv tests/e2e/multicard/test_offline_weight_load.py
 
@@ -219,6 +212,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -271,8 +265,7 @@ jobs:
         run: |
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
-          # pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
-          # pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_W8A8_WITH_EP
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
           pytest -sv tests/e2e/multicard/test_data_parallel_tp2.py
 
       - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)

@@ -34,10 +34,15 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
+from vllm_ascend.ops.shared_weight_layer import (
+    is_hidden_layer, post_process_after_loading_for_shared_weight_series,
+    reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, weak_ref_tensors)
+                               flashcomm2_o_shared_enabled, is_enable_nz,
+                               weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -202,7 +207,6 @@ class AscendMLAMetadataBuilder:
     understand this class
     """
 
-    # _attn_mask_builder = None
     def __init__(self,
                  kv_cache_spec,
                  layer_names,
@@ -849,6 +853,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             'q_b_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
+        self.vllm_config = get_current_vllm_config()
+        self.fc2_o_shared_enable = flashcomm2_o_shared_enabled()
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            from vllm_ascend.distributed.parallel_state import \
+                get_shared_weight_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_shared_weight_group(),
+                layer=self.o_proj,
+                prefetch_step=1)
+
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
@@ -858,13 +875,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
 
-        vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
-        self.prefill_mask = None
 
-        self.speculative_config = vllm_config.speculative_config
+        self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
         self.pcp_size = get_pcp_group().world_size
@@ -998,6 +1012,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
 
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            post_process_after_loading_for_shared_weight_series(self.o_proj)
+
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
             ..., self.q_lora_rank:].contiguous()
@@ -1067,7 +1085,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         device = self.q_proj.weight.device
         self.gamma1 = self.q_a_layernorm.weight.data
-        self.beta1 = self.q_a_layernorm.bias.data
+        self.beta1 = torch.zeros_like(self.gamma1) if (
+            _bias := self.q_a_layernorm.bias) is None else _bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
         self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
         self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
@@ -1167,10 +1186,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            if self.pcp_size > 1:
-                mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
-            else:
-                mask = self.prefill_mask
+            mask = attn_metadata.attn_mask
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
@@ -1214,24 +1230,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                num_tokens,
                                dtype=torch.float32,
                                device=q_nope.device)
-        if self.prefill_mask is None:
-            if q_nope.dtype == torch.float16:
-                mask_value = torch.finfo(torch.float32).min
-            else:
-                mask_value = 1
-            prefill_mask = torch.triu(
-                torch.ones(self.ring_mla_mask_size,
-                           self.ring_mla_mask_size,
-                           device=q_nope.device,
-                           dtype=q_nope.dtype), 1)
-            self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
-                                            0).to(q_nope.dtype)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
                                    k_nope=k_nope,
                                    k_rope=k_pe,
                                    value=value,
-                                   mask=self.prefill_mask,
+                                   mask=attn_metadata.attn_mask,
                                    seqlen=attn_metadata.prefill.query_lens,
                                    head_num=self.num_heads,
                                    kv_head_num=self.num_heads,
@@ -1265,7 +1269,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,
@@ -1293,7 +1297,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
             B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA"
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,
@@ -1335,18 +1339,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.enable_kv_nz:
-            k_nope = k_nope.view(-1, self.num_kv_heads,
-                                 self.kv_lora_rank // 16, block_size, 16)
-            k_pe = k_pe.view(-1, self.num_kv_heads,
-                             self.qk_rope_head_dim // 16, block_size, 16)
-            input_layout = "BSND"
-        else:
-            k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
-                                 self.kv_lora_rank)
-            k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
-                             self.qk_rope_head_dim)
-            input_layout = "BNSD"
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
+                             self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
+                         self.qk_rope_head_dim)
+        input_layout = "BNSD"
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
@@ -1363,14 +1360,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
-            if self.enable_kv_nz:
-                q_nope = q_nope.view(num_tokens, 1, self.num_heads,
-                                     -1).contiguous()
-                q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
-            else:
-                q_nope = q_nope.view(num_tokens, self.num_heads, 1,
-                                     -1).contiguous()
-                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+            q_nope = q_nope.view(num_tokens, self.num_heads, 1,
+                                 -1).contiguous()
+            q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
 
@@ -1490,7 +1482,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_out0=decode_k_nope,
             q_out1=decode_q_pe,
             kv_cache_out1=decode_k_pe,
-        )
+            enable_inner_out=False,
+            inner_out=torch.tensor([], device=hidden_states.device))
         decode_q_nope = decode_q_nope.view(bsz, self.num_heads,
                                            self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
@@ -1542,6 +1535,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_c.contiguous(), need_gather_q_kv)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
+
+        if self.fc2_o_shared_enable and is_hidden_layer(
+                self.vllm_config, self.o_proj):
+            reach_layer_for_shared_weight_series(self.o_proj)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
@@ -1661,6 +1658,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
+            if self.fc2_o_shared_enable and is_hidden_layer(
+                    self.vllm_config, self.o_proj):
+                reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size

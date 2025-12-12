@@ -84,11 +84,11 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
-    const at::Tensor &descale0,
+    const c10::optional<at::Tensor> &descale0,
     const at::Tensor &gamma1,
-    const at::Tensor &beta1,
+    const c10::optional<at::Tensor> &beta1,
     const at::Tensor &wuq,
-    const at::Tensor &descale1,
+    const c10::optional<at::Tensor> &descale1,
     const at::Tensor &gamma2,
     const at::Tensor &cos,
     const at::Tensor &sin,
@@ -96,12 +96,12 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const at::Tensor &kv_cache,
     const at::Tensor &kv_cache_rope,
     const at::Tensor &slotmapping,
-    const at::Tensor &quant_scale0,
-    const at::Tensor &quant_offset0,
-    const at::Tensor &bias0,
-    const at::Tensor &quant_scale1,
-    const at::Tensor &quant_offset1,
-    const at::Tensor &bias1,
+    const c10::optional<at::Tensor> &quant_scale0,
+    const c10::optional<at::Tensor> &quant_offset0,
+    const c10::optional<at::Tensor> &bias0,
+    const c10::optional<at::Tensor> &quant_scale1,
+    const c10::optional<at::Tensor> &quant_offset1,
+    const c10::optional<at::Tensor> &bias1,
     const c10::optional<at::Tensor> &ctkv_scale,
     const c10::optional<at::Tensor> &q_nope_scale,
     c10::optional<c10::string_view> cache_mode,
@@ -264,6 +264,23 @@ at::Tensor npu_sparse_flash_attention_meta(
     at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
     return output;
 }
+std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
+    const at::Tensor &x1,
+    const at::Tensor &x2,
+    const at::Tensor &residual,
+    const at::Tensor &gamma,
+    c10::string_view group_tp,
+    int64_t tp_rank_size,
+    int64_t tp_rank_id,
+    double epsilon,
+    bool is_trans_b,
+    bool is_gather_add_out)
+    {
+        at::Tensor output = at::empty_like(residual);
+        at::Tensor add_out = at::empty_like(residual);
+
+        return {output, add_out};
+    }
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -296,5 +313,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
+    // matmul allreduce add rmsnorm
+    ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
 }
 }

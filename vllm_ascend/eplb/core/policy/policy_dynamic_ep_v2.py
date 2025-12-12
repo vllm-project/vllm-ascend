@@ -4,6 +4,7 @@ from abc import abstractmethod
 from collections import defaultdict
 
 import numpy as np
+from vllm.logger import logger
 
 
 class DynamicConfig:
@@ -69,21 +70,21 @@ class DynamicEplbV2(EplbPolicy):
     @staticmethod
     def safe_divide(a, b):
         if b == 0:
-            print("Division by zero is not allowed")
+            logger.info("Division by zero is not allowed")
             return 0
         return a / b
 
     @staticmethod
     def safe_exact_divide(a, b):
         if b == 0:
-            print("Division by zero is not allowed")
+            logger.info("Division by zero is not allowed")
             return 0
         return a // b
 
     @staticmethod
     def safe_mod(a, b):
         if b == 0:
-            print("Division by zero is not allowed")
+            logger.info("Division by zero is not allowed")
             return 0
         return a % b
 

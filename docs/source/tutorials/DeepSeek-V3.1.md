@@ -1,4 +1,4 @@
-# DeepSeek-V3.1
+# DeepSeek-V3/3.1
 
 ## Introduction
 
@@ -128,9 +128,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 ### Multi-node Deployment
@@ -190,9 +189,8 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 **Node 1**
@@ -247,14 +245,13 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"torchair_graph_config":{"enabled":false}}'
 ```
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
+We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
  - `DeepSeek-V3.1_w8a8mix_mtp 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
@@ -421,7 +418,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
   --no-enable-prefix-caching \
-  --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
