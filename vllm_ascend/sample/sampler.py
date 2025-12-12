@@ -1,12 +1,21 @@
+from dataclasses import dataclass
+
 import torch
 import torch_npu
+from vllm.config.model import LogprobsMode
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
-from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.sampler import _SAMPLING_EPS, Sampler
 
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                global_stream, npu_stream_switch)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
+
+
+@dataclass
+class AscendSamplingMetadata(SamplingMetadata):
+    top_k_cpu: torch.Tensor | None = None
 
 
 def random_sample(
@@ -42,19 +51,75 @@ class AscendSampler(Sampler):
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler()
 
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: AscendSamplingMetadata,
+        logprobs_mode_override: LogprobsMode | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Sample logits based on sampling metadata.
+
+        The various logits processing functions called in this method
+        may update the logits tensor in-place.
+        """
+        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        assert not (sampling_metadata.all_greedy
+                    and sampling_metadata.all_random)
+        if sampling_metadata.all_random:
+            greedy_sampled = None
+        else:
+            greedy_sampled = self.greedy_sample(logits)
+            if sampling_metadata.all_greedy:
+                processed_logprobs = None
+                if sampling_metadata.max_num_logprobs is not None:
+                    if logprobs_mode == "processed_logits":
+                        processed_logprobs = logits
+                    elif logprobs_mode == "processed_logprobs":
+                        processed_logprobs = self.compute_logprobs(logits)
+                return greedy_sampled, processed_logprobs
+
+        assert sampling_metadata.temperature is not None
+
+        # Apply temperature.
+        logits = self.apply_temperature(logits, sampling_metadata.temperature,
+                                        sampling_metadata.all_random)
+
+        # Apply logits processors that only apply to random sampling
+        # (argmax invariant)
+        for processor in sampling_metadata.logitsprocs.argmax_invariant:
+            logits = processor.apply(logits)
+
+        # Apply top_k and/or top_p.
+        random_sampled, processed_logprobs = self.topk_topp_sampler(
+            logits, sampling_metadata)
+
+        if greedy_sampled is None:
+            return random_sampled, processed_logprobs
+
+        sampled = torch.where(
+            sampling_metadata.temperature < _SAMPLING_EPS,
+            greedy_sampled,
+            random_sampled,
+            out=greedy_sampled,  # Reuse tensor
+        )
+        return sampled, processed_logprobs
+
 
 class AscendTopKTopPSampler(TopKTopPSampler):
 
     def _apply_top_k_top_p(
         self,
         logits: torch.Tensor,
-        k: torch.Tensor,
-        p: torch.Tensor,
+        sampling_metadata: AscendSamplingMetadata,
     ) -> torch.Tensor:
+        p = sampling_metadata.top_p
+        k = sampling_metadata.top_k
+        k_cpu = sampling_metadata.top_k_cpu
         # npu_top_k_top_p uses the operator aclnnApplyTopKTopP, but aclnnApplyTopKTopP currently does not support 310P
-        if get_ascend_device_type(
-        ) != AscendDeviceType._310P and p is not None and k is not None and 1 <= int(
-                k.max()) <= 1024:
+        device_type = get_ascend_device_type()
+        if (device_type != AscendDeviceType._310P and p is not None
+                and k is not None and k_cpu is not None
+                and 1 <= k_cpu.max() <= 1024):
             # npu_top_k_top_p's parameter order is (logits, p, k), not (logits, k, p)
             return torch_npu.npu_top_k_top_p(logits, p, k)
 
@@ -89,9 +154,9 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
         return logits
 
-    def forward_native(self, logits, generators, k, p):
+    def forward_native(self, logits, sampling_metadata):
         """Override pytorch native implementation to torch_npu"""
-        logits = self._apply_top_k_top_p(logits, k, p)
+        logits = self._apply_top_k_top_p(logits, sampling_metadata)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -99,4 +164,5 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators), logits_to_return
+        return random_sample(probs,
+                             sampling_metadata.generators), logits_to_return

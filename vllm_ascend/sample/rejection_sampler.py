@@ -8,6 +8,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.rejection_sampler import generate_uniform_probs
 
+from vllm_ascend.sample.sampler import AscendSamplingMetadata
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 PLACEHOLDER_TOKEN_ID = -1
@@ -20,7 +21,7 @@ MAX_SPEC_LEN = 32
 def apply_sampling_constraints(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
-    sampling_metadata: SamplingMetadata,
+    sampling_metadata: AscendSamplingMetadata,
 ) -> torch.Tensor:
     """Process logits based on sampling metadata.
 
@@ -70,9 +71,11 @@ def apply_sampling_constraints(
             num_tokens,
         )
 
-    if get_ascend_device_type(
-    ) != AscendDeviceType._310P and top_p is not None and top_k is not None and 1 <= int(
-            top_k.max()) <= 1024:
+    device_type = get_ascend_device_type()
+    top_k_cpu = sampling_metadata.top_k_cpu
+    if (device_type != AscendDeviceType._310P and top_p is not None
+            and top_k is not None and top_k_cpu is not None
+            and 1 <= top_k_cpu.max() <= 1024):
         return torch_npu.npu_top_k_top_p(logits, top_p.to(torch.bfloat16),
                                          top_k)
     else:

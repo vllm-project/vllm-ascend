@@ -3,7 +3,8 @@ from unittest import mock
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.sample.sampler import AscendSampler, AscendTopKTopPSampler
+from vllm_ascend.sample.sampler import (AscendSampler, AscendSamplingMetadata,
+                                        AscendTopKTopPSampler)
 
 
 class TestAscendSampler(TestBase):
@@ -26,10 +27,14 @@ class TestAscendTopKTopPSampler(TestBase):
         sampler = AscendTopKTopPSampler()
 
         logits = torch.tensor([[1.0, 2.0, 3.0]])
-        k = torch.tensor([2])
-        p = torch.tensor([0.9])
+        sampling_metadata = mock.Mock(spec=AscendSamplingMetadata)
+        sampling_metadata.top_k = torch.tensor([2])
+        sampling_metadata.top_k_cpu = sampling_metadata.top_k
+        sampling_metadata.top_p = torch.tensor([0.9])
         generators = {0: torch.Generator()}
         generators[0].manual_seed(42)
+        sampling_metadata.generators = generators
 
-        sampler.forward_native(logits, generators, k, p)
-        mock_npu_op.assert_called_once_with(logits, p, k)
+        sampler.forward_native(logits, sampling_metadata)
+        mock_npu_op.assert_called_once_with(logits, sampling_metadata.top_p,
+                                            sampling_metadata.top_k)

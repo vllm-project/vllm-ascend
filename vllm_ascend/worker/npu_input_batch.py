@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
+from typing import cast
 
 import numpy as np
 import torch
@@ -24,8 +25,10 @@ from vllm.pooling_params import PoolingParams
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.utils import copy_slice
+from vllm.v1.worker.gpu_input_batch import InputBatch, LogitsProcessors
 
+from vllm_ascend.sample.sampler import AscendSamplingMetadata
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -256,3 +259,78 @@ class NPUInputBatch(InputBatch):
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+    def _make_sampling_metadata(self) -> AscendSamplingMetadata:
+        num_reqs = self.num_reqs
+        if not self.all_greedy:
+            temperature = copy_slice(self.temperature_cpu_tensor,
+                                     self.temperature, num_reqs)
+        else:
+            temperature = None
+        if not self.no_top_p:
+            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+        if not self.no_top_k:
+            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+
+        if not self.no_penalties:
+            # Since syncing these tensors is expensive only copy them
+            # if necessary i.e. if there are requests which require
+            # penalties to be applied during sampling.
+            copy_slice(self.frequency_penalties_cpu_tensor,
+                       self.frequency_penalties, num_reqs)
+            copy_slice(self.presence_penalties_cpu_tensor,
+                       self.presence_penalties, num_reqs)
+            copy_slice(
+                self.repetition_penalties_cpu_tensor,
+                self.repetition_penalties,
+                num_reqs,
+            )
+
+        needs_prompt_token_ids = (
+            not self.no_penalties
+            or self.logits_processing_needs_token_ids[:num_reqs].any())
+        # The prompt tokens are used only for applying penalties or
+        # step pooling during the sampling/pooling process.
+        # Hence copy these tensors only when there are requests which
+        # need penalties/step_pooler to be applied.
+        prompt_token_ids = (self._make_prompt_token_ids_tensor()
+                            if needs_prompt_token_ids else None)
+
+        # Only set output_token_ids if required by the current requests'
+        # sampling parameters.
+        needs_output_token_ids = (not self.no_penalties
+                                  or bool(self.bad_words_token_ids)
+                                  or self.logitsprocs_need_output_token_ids)
+        output_token_ids = (cast(list[list[int]], self.req_output_token_ids)
+                            if needs_output_token_ids else [])
+
+        allowed_token_ids_mask: torch.Tensor | None = None
+        if not self.no_allowed_token_ids:
+            assert self.allowed_token_ids_mask is not None
+            copy_slice(
+                self.allowed_token_ids_mask_cpu_tensor,
+                self.allowed_token_ids_mask,
+                num_reqs,
+            )
+            allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
+
+        return AscendSamplingMetadata(
+            temperature=temperature,
+            all_greedy=self.all_greedy,
+            all_random=self.all_random,
+            top_p=None if self.no_top_p else self.top_p[:num_reqs],
+            top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            top_k_cpu=None if self.no_top_k else self.top_k_cpu[:num_reqs],
+            generators=self.generators,
+            max_num_logprobs=self.max_num_logprobs,
+            prompt_token_ids=prompt_token_ids,
+            frequency_penalties=self.frequency_penalties[:num_reqs],
+            presence_penalties=self.presence_penalties[:num_reqs],
+            repetition_penalties=self.repetition_penalties[:num_reqs],
+            output_token_ids=output_token_ids,
+            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
+            no_penalties=self.no_penalties,
+            allowed_token_ids_mask=allowed_token_ids_mask,
+            bad_words_token_ids=self.bad_words_token_ids,
+            logitsprocs=self.logitsprocs,
+        )
