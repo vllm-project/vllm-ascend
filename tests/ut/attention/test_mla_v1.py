@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -6,6 +7,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
@@ -506,8 +508,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     def setUp(self):
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
-        self.mock_vllm_config.model_config = ModelConfig(max_model_len=2048)
-        self.mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 32
         self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
         mock_scheduler_config = MagicMock(spec=SchedulerConfig)
         mock_scheduler_config.max_num_seqs = 8
@@ -515,7 +515,15 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.scheduler_config = mock_scheduler_config
         self.mock_vllm_config.speculative_config = None
         self.mock_device = torch.device("cpu")
-
+        fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
+                                        "fake_weight")
+        model_config = ModelConfig(
+            model=fake_weight_path,
+            skip_tokenizer_init=True,
+        )
+        model_config.hf_text_config.head_dim = 128
+        model_config.hf_text_config.qk_rope_head_dim = 32
+        self.mock_vllm_config.model_config = model_config
         self.kv_cache_spec = MagicMock()
         self.kv_cache_spec.num_layers = 32
         self.kv_cache_spec.head_size = 128
@@ -845,6 +853,8 @@ class TestAscendMLAImpl(TestBase):
         model_config.dtype = torch.float16
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
+        vllm_config.additional_config = {"refresh": True}
+        init_ascend_config(vllm_config)
 
         num_heads = 256
         head_size = 1024

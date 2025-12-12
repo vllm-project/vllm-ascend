@@ -16,6 +16,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -75,8 +76,6 @@ class SfaCpContext:
     local_start: int
     local_end: int
     local_end_with_pad: int
-    pad_size: int
-    local_pad_size: int
     slot_mapping_cp: torch.Tensor
     actual_seq_lengths_query: torch.Tensor
     actual_seq_lengths_key: torch.Tensor
@@ -197,8 +196,7 @@ class AscendSFAMetadataBuilder:
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        cos = common_attn_metadata.cos
-        sin = common_attn_metadata.sin
+        cos, sin = get_cos_and_sin()
 
         assert self.cos_cache is not None and self.sin_cache is not None
         new_cos = self.cos_cache[input_positions][:, None, None]
@@ -215,23 +213,41 @@ class AscendSFAMetadataBuilder:
         sfa_cp_context = None
         if self.enable_sfa_cp:
             global_tp_size = get_tp_group().world_size
-            num_tokens = num_actual_tokens
-            num_tokens_pad = _round_up(num_actual_tokens, global_tp_size)
+            num_tokens = num_input_tokens
+            num_tokens_pad = _round_up(num_tokens, global_tp_size)
             num_tokens_per_device = num_tokens_pad // global_tp_size
-            pad_size = num_tokens_pad - num_tokens
             local_start = get_tp_group().rank_in_group * num_tokens_per_device
             local_end_with_pad = local_start + num_tokens_per_device
             local_end = min(local_end_with_pad, num_actual_tokens)
-            local_pad_size = local_end_with_pad - local_end
+
+            pad_size = num_tokens_pad - cos.shape[0]
+            assert cos.shape == sin.shape, \
+                f"cos.shape must be equal to sin.shape, got {cos.shape} and {sin.shape}"
 
             if pad_size > 0:
                 cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
                 sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
-                slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size),
+
+            pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
+            if pad_size_slot > 0:
+                slot_mapping = nn.functional.pad(slot_mapping,
+                                                 (0, pad_size_slot),
                                                  value=-1)
+            else:
+                slot_mapping = slot_mapping[:num_tokens_pad]
+
             cos = cos[local_start:local_end_with_pad]
             sin = sin[local_start:local_end_with_pad]
             slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
+            assert cos.shape[0] == num_tokens_per_device, \
+                f"cos.shape[0] must be equal to num_tokens_per_device, \
+                    got {cos.shape[0]} and {num_tokens_per_device}"
+            assert slot_mapping_cp.shape[0] == num_tokens_per_device, \
+                f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
+                    got {slot_mapping_cp.shape[0]} and {num_tokens_per_device}"
+            assert slot_mapping.shape[0] == num_tokens_pad, \
+                f"slot_mapping.shape[0] must be equal to num_tokens_pad, \
+                    got {slot_mapping.shape[0]} and {num_tokens_pad}"
 
             actual_seq_lengths_query = torch.empty_like(cum_query_lens)
             actual_seq_lengths_key = torch.empty_like(seq_lens)
@@ -263,8 +279,6 @@ class AscendSFAMetadataBuilder:
                 local_start=local_start,
                 local_end=local_end,
                 local_end_with_pad=local_end_with_pad,
-                pad_size=pad_size,
-                local_pad_size=local_pad_size,
                 slot_mapping_cp=slot_mapping_cp,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
@@ -499,9 +513,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._process_weights_for_fused_mlapo(act_dtype)
 
     def _v_up_proj(self, x):
+        forward_context = get_forward_context()
         if x.dtype in [torch.float16, torch.bfloat16] \
                 and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
-                and not self.enable_sfa_cp:
+                and not self.enable_sfa_cp \
+                and not forward_context.with_prefill:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
             res = torch.empty((b, self.num_heads, self.v_head_dim),

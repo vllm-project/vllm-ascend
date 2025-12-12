@@ -97,6 +97,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    # This feature is bound to the previous VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE, and it adds the shared weight feature,
+    # which can eliminate redundant storage of weights. More detailed information can be found in PR#4188.
+    # We recommend that you enable it when Flashcomm2 is enabled and the VRAM capacity is limited.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED", "0"))),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
@@ -113,10 +118,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
     "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
-    # Whether to enable mlp optimize when tensor parallel is enabled.
-    # this feature in eager mode will get better performance.
-    "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
