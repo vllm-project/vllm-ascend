@@ -10,7 +10,7 @@ import pytest
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -175,6 +175,8 @@ def test_eagle_correctness(
         },
     )
     llm.generate(prompts, sampling_params)
+    cleanup_dist_env_and_memory()
+    del llm
 
 
 @pytest.mark.skip(
