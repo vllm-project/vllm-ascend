@@ -10,4 +10,5 @@ quantization
 sleep_mode
 structured_output
 lora
+Large_Scale_Expert_Parallelism
 :::
