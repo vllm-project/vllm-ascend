@@ -430,26 +430,34 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])
         return attn_out, attn_lse
 
-    def _npu_attention_update(
-            self, attn_out_lse_list: List[torch.Tensor]) -> torch.Tensor:
+    def _npu_attention_update(self,
+                              attn_out_lse: torch.Tensor) -> torch.Tensor:
+        B_total, H_total, D_plus_1 = attn_out_lse.shape
+        S = B_total // self.pcp_size
+        H = H_total // self.dcp_size
+        D = self.head_size
         update_type = 0
-
-        batch = attn_out_lse_list[0].shape[0]
-        num_heads = attn_out_lse_list[0].shape[1]
-        head_dim = attn_out_lse_list[0].shape[2] - 1
-
-        attn_out_split_cp = []
-        attn_lse_split_cp = []
-
-        for i in attn_out_lse_list:
-            attn_out_allgather, attn_lse_allgather = self._out_lse_reshape(
-                *torch.split(i, [self.head_size, 1], dim=-1))
-            attn_out_split_cp.append(attn_out_allgather)
-            attn_lse_split_cp.append(attn_lse_allgather)
+        assert D_plus_1 == D + 1
+        # [PCP, S, DCP, H, D+1]
+        x = attn_out_lse.view(self.pcp_size, S, self.dcp_size, H, D_plus_1)
+        # [PCP, DCP, S, H, D+1]
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
+        x = x.view(-1, S, H, D_plus_1)
+        # Split out lse
+        out_flat, lse_flat = torch.split(x, [D, 1],
+                                         dim=-1)  # [N, S, H, D], [N, S, H, 1]
+        #    out: [N, S, H, D] -> [N, S*H, D]
+        #    lse: [N, S, H, 1] -> [N, S*H]
+        out_flat = out_flat.flatten(1, 2)  # [N, S*H, D]
+        lse_flat = lse_flat.squeeze(-1).flatten(1)  # [N, S*H]
+        #  unbind to list
+        out_list = out_flat.unbind(0)  # [S*H, D]
+        lse_list = lse_flat.unbind(0)  # [S*H]
 
         attn_out, attn_lse = torch_npu.npu_attention_update(
-            attn_lse_split_cp, attn_out_split_cp, update_type)
-        attn_out = attn_out.view(batch, num_heads, head_dim)
+            lse_list, out_list, update_type)
+        attn_out = attn_out.view(S, H, D)
 
         return attn_out
 
@@ -541,17 +549,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(
                 query, k_nope, value, **common_kwargs)
 
-        out_mask = attn_metadata.decode_meta.batch_seq_mask[:, None,
-                                                            None].expand_as(
-                                                                attn_out)
-        attn_out = torch.where(out_mask, 0, attn_out)
-
         lse_mask = attn_metadata.decode_meta.batch_seq_mask[:, None,
                                                             None].expand_as(
                                                                 attn_lse)
         attn_lse = torch.where(lse_mask, -torch.inf, attn_lse)
-
-        attn_out_lse_list = []
         # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
         attn_out_lse = torch.cat([attn_out, attn_lse], dim=-1)
         if self.dcp_size > 1:
@@ -561,30 +562,15 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             dist.all_to_all_single(attn_out_lse_all2all,
                                    attn_out_lse,
                                    group=self.dcp_group)
-            # permute: [num_heads, v_head_dim+1, bs] -> [bs, num_heads, v_head_dim+1]
             attn_out_lse_all2all = attn_out_lse_all2all.permute([2, 0, 1])
             if self.pcp_size > 1:
                 attn_out_lse = attn_out_lse_all2all.contiguous()
-            attn_out_lse_list = list(
-                torch.chunk(attn_out_lse_all2all, self.dcp_size, dim=1))
 
         if self.pcp_size > 1:
             # AllGather out&lse within CP group
-            attn_out_lse_list = [
-                torch.empty_like(attn_out_lse) for _ in range(self.pcp_size)
-            ]
-            dist.all_gather(attn_out_lse_list,
-                            attn_out_lse,
-                            group=self.pcp_group)
-        if self.dcp_size > 1 and self.pcp_size > 1:
-            attn_out_lse_list_pcp_dcp = []
-            for s in attn_out_lse_list:
-                attn_out_lse_list_split = list(
-                    torch.chunk(s, self.dcp_size, dim=1))
-                attn_out_lse_list_pcp_dcp += attn_out_lse_list_split
-            attn_out_lse_list = attn_out_lse_list_pcp_dcp
-        # Update out&lse
-        attn_out = self._npu_attention_update(attn_out_lse_list)
+            attn_out_lse = get_pcp_group().all_gather(attn_out_lse, dim=0)
+
+        attn_out = self._npu_attention_update(attn_out_lse)
         return attn_out
 
     def _update_out_and_lse(self, out_list: torch.Tensor,
@@ -745,31 +731,26 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             if self.pcp_size > 1:
                 chunk_attn_out_lse = attn_out_lse_all2all.contiguous()
 
-            attn_out_lse_list = list(
-                torch.chunk(attn_out_lse_all2all, self.dcp_size, dim=1))
-
         if self.pcp_size > 1:
-            attn_out_lse_list = [
-                torch.empty_like(chunk_attn_out_lse)
-                for _ in range(self.pcp_size)
-            ]
-            dist.all_gather(attn_out_lse_list,
-                            chunk_attn_out_lse,
-                            group=self.pcp_group)
+            # AllGather out&lse within CP group
+            chunk_attn_out_lse = get_pcp_group().all_gather(chunk_attn_out_lse,
+                                                            dim=0)
 
-        if self.dcp_size > 1 and self.pcp_size > 1:
-            attn_out_lse_list_pcp_dcp = []
-            for s in attn_out_lse_list:
-                attn_out_lse_list_split = list(
-                    torch.chunk(s, self.dcp_size, dim=1))
-                attn_out_lse_list_pcp_dcp += attn_out_lse_list_split
-            attn_out_lse_list = attn_out_lse_list_pcp_dcp
-
-        attn_out_lse_allgather = torch.stack(
-            attn_out_lse_list,
-            dim=0)  # [pcp, batch_size, num_heads, head_size+1]
+        B_total, H_total, D_plus_1 = chunk_attn_out_lse.shape
+        S = B_total // self.pcp_size
+        H = H_total // self.dcp_size
+        D = self.head_size
+        assert D_plus_1 == D + 1
+        # [PCP, S, DCP, H, D+1]
+        x = chunk_attn_out_lse.view(self.pcp_size, S, self.dcp_size, H,
+                                    D_plus_1)
+        # [PCP, DCP, S, H, D+1]
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
+        x = x.view(-1, S, H, D_plus_1)
+        # Split out lse
         attn_out_allgather, attn_lse_allgather = torch.split(
-            attn_out_lse_allgather, [self.head_size, 1], dim=-1)
+            x, [D, 1], dim=-1)  # [N, S, H, D], [N, S, H, 1]
 
         prefix_output, prefix_lse = self._update_out_and_lse(
             attn_out_allgather, attn_lse_allgather)
@@ -844,19 +825,21 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                                 pcp_allgather_restore_idx)
                     key, value = all_kv.split([self.head_size, self.head_size],
                                               dim=-1)
+                prefill_key = key[self.pcp_size *
+                                  num_decode_tokens:attn_metadata.
+                                  num_actual_tokens_pcp_padded]
+                prefill_value = value[self.pcp_size *
+                                      num_decode_tokens:attn_metadata.
+                                      num_actual_tokens_pcp_padded]
+                slot_mapping = attn_metadata.slot_mapping[
+                    self.pcp_size * num_decode_tokens:attn_metadata.
+                    num_actual_tokens_pcp_padded]
+                torch_npu._npu_reshape_and_cache(key=prefill_key,
+                                                 value=prefill_value,
+                                                 key_cache=self.key_cache,
+                                                 value_cache=self.value_cache,
+                                                 slot_indices=slot_mapping)
 
-                torch_npu._npu_reshape_and_cache(
-                    key=key[self.pcp_size * num_decode_tokens:attn_metadata.
-                            num_actual_tokens_pcp_padded],
-                    value=value[self.pcp_size *
-                                num_decode_tokens:attn_metadata.
-                                num_actual_tokens_pcp_padded],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=attn_metadata.
-                    slot_mapping[self.pcp_size *
-                                 num_decode_tokens:attn_metadata.
-                                 num_actual_tokens_pcp_padded])
         return key, value
 
     def forward_impl(
@@ -881,9 +864,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             assert attn_metadata.prefill is not None
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
             prefill_query = query[
-                num_decode_tokens:num_actual_tokens_pcp_padded]
-            key = key[self.pcp_size * num_decode_tokens:]
-            value = value[self.pcp_size * num_decode_tokens:]
+                num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
+            key = key[self.pcp_size * num_decode_tokens:].contiguous()
+            value = value[self.pcp_size * num_decode_tokens:].contiguous()
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP
                 attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp(
