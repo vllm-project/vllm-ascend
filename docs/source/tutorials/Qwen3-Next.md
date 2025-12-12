@@ -54,7 +54,7 @@ The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) 
 
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
 
-Install the Ascend BiSheng toolkit:
+Source the Ascend BiSheng toolkit, execute the command:
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
@@ -92,7 +92,7 @@ Run the following script to start the vLLM server on multi-NPU:
 For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 4, and for 32 GB of memory, tensor-parallel-size should be at least 8.
 
 ```bash
-vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 4096 --gpu-memory-utilization 0.7 --enforce-eager
+vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 4096 --gpu-memory-utilization 0.7 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 Once your server is started, you can query the model with input prompts.
@@ -165,7 +165,13 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 
 ### Using AISBench
 
- Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result, here is the result of `Qwen3-Next-80B-A3B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+|----- | ----- | ----- | ----- | -----|
+| gsm8k | - | accuracy | gen | 96.3 |
 
 ## Performance
 
