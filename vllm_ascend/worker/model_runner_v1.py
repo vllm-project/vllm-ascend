@@ -626,23 +626,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         self.transfer_event = torch.npu.Event()
 
-        self.enable_async_exp = envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL
-        if self.enable_async_exp not in (0, 1, 2):
-            # Add invalid input check.
-            logger.info(
-                "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL can ONLY be set to 0, 1, 2. \
-                        Invalid input will be set to default 0!")
-            self.enable_async_exp = 0
-        if self.enable_async_exp == 2 and not hasattr(torch_npu,
-                                                      "npu_sim_exponential_"):
-            # Add AI-core support check.
-            logger.info(
-                "VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL is set to 2 but AI-core exponential \
-                        is NOT support!. Invalid input will be set to default 0!"
-            )
-            self.enable_async_exp = 0
-        if self.enable_async_exp != 0:
-            logger.info("Enable async exponential while model executing.")
+        self.enable_async_exp = self.ascend_config.enable_async_exponential
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -2506,14 +2490,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
         if self.enable_async_exp != 0:
-            head_dim = self.model_config.get_vocab_size()
-            generators = self.input_batch.sampling_metadata.generators
-            b_s = logits_indices.shape[0]
             self.sampler.do_async_exponential(
-                b_s=b_s,
-                head_dim=head_dim,
-                generators=generators,
-                async_option=self.enable_async_exp)
+                b_s=logits_indices.shape[0],
+                head_dim=self.model_config.get_vocab_size(),
+                generators=self.input_batch.sampling_metadata.generators)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):

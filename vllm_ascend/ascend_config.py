@@ -179,6 +179,11 @@ class AscendConfig:
                                               False):
             kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
             kv_cfg._engine_id_patched = True
+        self.enable_async_exponential = additional_config.get(
+            "enable_async_exponential", 0)
+        if self.enable_async_exponential not in (0, 1):
+            raise AssertionError(
+                "Enable async exponential can only be set to 0 or 1.")
 
 
 class AscendCompilationConfig:

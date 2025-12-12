@@ -46,27 +46,18 @@ class AscendSampler(Sampler):
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
 
-    def do_async_exponential(self, b_s, head_dim, generators, async_option):
+    def do_async_exponential(self, b_s, head_dim, generators):
         # Calculating exponential randoms in a different stream
         # and overlapping with model executing.
         with torch.npu.stream(global_stream()):
             global_stream().wait_stream(torch.npu.current_stream())
             q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
-            if async_option == 2:
-                # Set async_option to 2 will enable async exponential with AI-core exponential.
-                if len(generators) != q.shape[0]:
-                    torch_npu.npu_sim_exponential_(q)
-                if generators:
-                    for i, generator in generators.items():
-                        torch_npu.npu_sim_exponential_(q[i],
-                                                       generator=generator)
-            else:
-                # Goes to async exponential with AI-CPU exponential or default exponential.
-                if len(generators) != q.shape[0]:
-                    q.exponential_()
-                if generators:
-                    for i, generator in generators.items():
-                        q[i].exponential_(generator=generator)
+            # Goes to async exponential with AI-CPU exponential or default exponential.
+            if len(generators) != q.shape[0]:
+                q.exponential_()
+            if generators:
+                for i, generator in generators.items():
+                    q[i].exponential_(generator=generator)
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
 
