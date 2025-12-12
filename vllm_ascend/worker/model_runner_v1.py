@@ -2513,8 +2513,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 b_s=b_s,
                 head_dim=head_dim,
                 generators=generators,
-                async_option=self.enable_async_exp
-            )
+                async_option=self.enable_async_exp)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
