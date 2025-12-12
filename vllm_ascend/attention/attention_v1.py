@@ -34,7 +34,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills)
+                                         split_decodes_and_prefills,
+                                         using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
@@ -763,9 +764,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, output)
         else:
             num_tokens = query.shape[0]
-            if get_current_vllm_config(
-            ).speculative_config is None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly and num_tokens in get_ascend_config(
-            ).pa_shape_list:
+            if using_paged_attention(num_tokens):
                 output = self.full_graph_attention_with_pa(
                     query, attn_metadata, output)
             else:

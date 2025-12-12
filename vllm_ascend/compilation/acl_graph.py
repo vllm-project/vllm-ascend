@@ -19,7 +19,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
-from ..attention.utils import PAGED_ATTENTION_LIST
+from vllm_ascend.attention.utils import using_paged_attention
+
 from ..utils import weak_ref_tensors
 
 
@@ -296,7 +297,7 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
 
 
 def update_attn_params(update_stream, forward_context, runtime_shape):
-    if runtime_shape in PAGED_ATTENTION_LIST:
+    if using_paged_attention(runtime_shape):
         _update_attn_pa_params(update_stream, forward_context, runtime_shape)
     else:
         _update_attn_fia_params(update_stream, forward_context, runtime_shape)
