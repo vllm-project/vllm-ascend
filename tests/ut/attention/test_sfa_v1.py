@@ -124,6 +124,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.block_table_tensor = torch.randn(100, 4)
+        common_attn_metadata.cos = None
+        common_attn_metadata.sin = None
+        common_attn_metadata.num_input_tokens = 100
 
         model = MagicMock()
         model.model.layers = [MagicMock() for _ in range(10)]
@@ -166,6 +169,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.block_table_tensor = torch.randn(100, 4)
+        common_attn_metadata.cos = None
+        common_attn_metadata.sin = None
+        common_attn_metadata.num_input_tokens = 100
 
         model = MagicMock()
         model.model.layers = [MagicMock() for _ in range(10)]
