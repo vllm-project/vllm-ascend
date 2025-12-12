@@ -33,12 +33,14 @@ The following table lists additional configuration options available in vLLM Asc
 | `expert_map_path`                   | str  | `None`  | When using expert load balancing for an MoE model, an expert map path needs to be passed in.                                                 |
 | `kv_cache_dtype`                    | str  | `None`  | When using the KV cache quantization method, KV cache dtype needs to be set, currently only int8 is supported.                                |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
-| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effects on MoE models with shared experts.                                |
+| `lmhead_tensor_parallel_size`       | int  | `None`  | The custom tensor parallel size of lmhead. Restriction: Can only be used when tensor_parallel=1                                                                                                   |
+| `oproj_tensor_parallel_size`        | int  | `None`  | The custom tensor parallel size of oproj.                                                                                                     |
+| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effect on MoE models with shared experts.                                |
 | `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic EPLB.                                                                                                                |
 | `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when EPLB begins.                                                                                                      |
 | `gate_eplb`                         | bool | `False` | Whether to enable EPLB only once.                                                                                                              |
 | `num_wait_worker_iterations`        | int  | `30`    | The  forward iterations when the EPLB worker will finish CPU tasks. In our test default value 30 can cover most cases.                           |
-| `expert_map_record_path`            | str  | `None`  | When dynamic EPLB is completed, save the current expert load heatmap to the specified path.                                                   |
+| `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                                                  |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
 | `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
 

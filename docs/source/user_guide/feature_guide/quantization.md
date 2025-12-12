@@ -6,13 +6,13 @@ Since version 0.9.0rc2, the quantization feature is experimentally supported by 
 
 ## Install ModelSlim
 
-To quantize a model, you should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
+To quantize a model, you should install [ModelSlim](https://gitcode.com/Ascend/msit/tree/master) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
 
 Install ModelSlim:
 
 ```bash
 # The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
-git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit/tree/master
 
 cd msit/msmodelslim
 
