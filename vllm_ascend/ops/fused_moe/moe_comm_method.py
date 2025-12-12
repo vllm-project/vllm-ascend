@@ -255,19 +255,15 @@ class FusedAlltoAllCommImpl(MoECommMethod):
     1. `enable_expert_parallel=True`.
     2. `npu_grouped_matmul` is available.
 
-    This implementation uses all-to-all communication to exchange tokens
-    between data parallel ranks before and after the MLP computation. It should
-    have better performance than AllGatherCommImpl when DP size > 1.
+    This implementation uses the MC2 communication method, which is optimized for
+    Communication and Computation parallelism on Ascend devices.
     """
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithAll2AllV(
-            top_k=self.moe_config.experts_per_token,
-            num_experts=self.moe_config.num_experts,
-            num_local_experts=self.moe_config.num_local_experts)
+        return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAll2All(self.moe_config)
+        return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def fused_experts(
             self,
