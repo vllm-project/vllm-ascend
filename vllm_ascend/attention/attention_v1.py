@@ -660,12 +660,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
-            torch_npu._npu_reshape_and_cache(
-                key=key[:attn_metadata.num_actual_tokens],
-                value=value[:attn_metadata.num_actual_tokens],
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_indices=slots)
+
+            # Fixed: Add 310P compatibility for num_actual_tokens like v0.10.0rc1
+            from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+
+            if get_ascend_device_type() == AscendDeviceType._310P:
+                # Extract num_actual_tokens like old version for 310P compatibility
+                num_actual_tokens = attn_metadata.num_actual_tokens
+                torch_npu._npu_reshape_and_cache(
+                    key=key[:num_actual_tokens],
+                    value=value[:num_actual_tokens],
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_indices=slots)
+            else:
+                # Original logic for other devices
+                torch_npu._npu_reshape_and_cache(
+                    key=key[:attn_metadata.num_actual_tokens],
+                    value=value[:attn_metadata.num_actual_tokens],
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_indices=slots)
         return key, value
 
     def forward_impl(
@@ -746,7 +761,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         310P fallback implementation using flash attention from v0.10.0rc1
         This restores the working attention logic for 310P devices
         """
-        from vllm_ascend.utils import aligned_16
+        from vllm_ascend.utils import aligned_16, ACL_FORMAT_FRACTAL_NZ
 
         # Create output tensor
         output = torch.empty(num_tokens, self.num_heads, self.head_size,
