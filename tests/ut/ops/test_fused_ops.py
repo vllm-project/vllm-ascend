@@ -293,13 +293,13 @@ class TestCumsumGroupList(TestBase):
     def test_cumsum_group_list_with_type_0(self):
         group_list = self.experts.cumsum(dim=0)
         group_list_type = 0
-        result = cumsum_group_list(group_list, group_list_type)
+        result = cumsum_group_list(group_list, group_list_type, 0)
         self.assertTrue(torch.equal(result, self.group_list))
 
     def test_cumsum_group_list_with_type_1(self):
         group_list = self.experts
         group_list_type = 1
-        result = cumsum_group_list(group_list, group_list_type)
+        result = cumsum_group_list(group_list, group_list_type, 0)
         self.assertTrue(torch.equal(result, self.group_list))
 
     def test_cumsum_group_list_with_type_2(self):
@@ -312,6 +312,7 @@ class TestCumsumGroupList(TestBase):
         group_list_type = 2
         result = cumsum_group_list(group_list,
                                    group_list_type,
+                                   0,
                                    active_num=self.active_num,
                                    expert_num=self.expert_num)
         self.assertTrue(torch.equal(result, self.group_list))
