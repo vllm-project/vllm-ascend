@@ -748,6 +748,7 @@ class MtpProposer(Proposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+        original_aclgraph_runtime_mode = aclgraph_runtime_mode
         if self.use_async_scheduling:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -801,6 +802,17 @@ class MtpProposer(Proposer):
                         positions = positions.squeeze(-1)
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
+
+                    if original_aclgraph_runtime_mode == CUDAGraphMode.FULL and \
+                        self.use_async_scheduling and attn_metadata[layer_name].decode is not None:
+                        for layer_name in self.attn_layer_name:
+                            actual_size = len(attn_metadata[layer_name].decode.
+                                              actual_seq_lengths_q)
+
+                            attn_metadata[layer_name].decode.seq_lens_list = \
+                                attn_metadata[layer_name].decode.seq_lens_list[:actual_size]
+                            attn_metadata[layer_name].decode.block_table = \
+                                attn_metadata[layer_name].decode.block_table[:actual_size]
 
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
@@ -1133,8 +1145,9 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens)
 
-        token_indices_to_sample = (common_attn_metadata.query_start_loc[1:] -
-                                   1 - num_rejected_tokens_gpu)
+        query_start_loc = common_attn_metadata.query_start_loc[
+            1:1 + num_rejected_tokens_gpu.shape[0]]
+        token_indices_to_sample = query_start_loc - 1 - num_rejected_tokens_gpu
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample
 
