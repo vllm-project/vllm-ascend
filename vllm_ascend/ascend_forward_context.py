@@ -32,7 +32,7 @@ def set_ascend_forward_context(
         attn_metadata: Any,
         vllm_config: VllmConfig,
         virtual_engine: int = 0,
-        num_tokens: Optional[int] = None,
+        num_tokens: int = 0,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
         with_prefill: bool = True,
         in_profile_run: bool = False,
