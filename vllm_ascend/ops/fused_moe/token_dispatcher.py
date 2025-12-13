@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import torch
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -100,14 +101,30 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.need_extra_args = (
             get_ascend_device_type() == AscendDeviceType._910_93)
 
-        # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-        self.a3_need_extra_args = \
-            get_ascend_device_type() == AscendDeviceType._910_93
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
         self.need_expert_scale = is_hierarchical_communication_enabled()
         self.with_quant = False
+
+        # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
+        # dispatch & combine operators with different input num_tokens per rank.
+        vllm_config = get_current_vllm_config()
+        scheduler_config = vllm_config.scheduler_config
+        compilation_config = vllm_config.compilation_config
+        speculative_config = vllm_config.speculative_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        uniform_decode_query_len = 1 if not speculative_config else \
+            1 + speculative_config.num_speculative_tokens
+        decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
+                                      0)
+        max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+        if compilation_config.cudagraph_capture_sizes:
+            max_num_tokens = compilation_config.max_cudagraph_capture_size
+        else:
+            max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -130,7 +147,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": moe_expert_num,
-            "global_bs": 0,
+            "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
 
@@ -146,10 +163,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                 "group_tp": self.moe_all_to_all_group_name,
                 "tp_world_size": 1,
                 "tp_rank_id": 0,
-            })
-        if self.a3_need_extra_args and self.enable_dispatch_v2:
-            stage1_kwargs.update({
-                "x_active_mask": mc2_mask,
             })
         if self.need_expert_scale:
             stage1_kwargs.update({
@@ -214,7 +227,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         context_metadata = {
             "topk_ids": topk_ids,
             "topk_weights": topk_weights,
-            "mc2_mask": mc2_mask,
             "expert_map": expert_map,
             "ep_recv_counts": ep_recv_counts,
             "tp_recv_counts": tp_recv_counts,
@@ -243,7 +255,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         ep_recv_counts = context_metadata["ep_recv_counts"]
         tp_recv_counts = context_metadata["tp_recv_counts"]
         assist_info_for_combine = context_metadata["assist_info_for_combine"]
-        mc2_mask = context_metadata["mc2_mask"]
         expand_scales = context_metadata["expand_scales"]
 
         assert expert_map is not None
@@ -256,7 +267,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": moe_expert_num,
-            "global_bs": 0,
+            "global_bs": self.global_bs,
         }
 
         if self.with_quant:
@@ -284,9 +295,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                 "tp_world_size": 1,
                 "tp_rank_id": 0,
             })
-
-        if self.a3_need_extra_args and self.enable_dispatch_v2:
-            stage3_kwargs["x_active_mask"] = mc2_mask
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
