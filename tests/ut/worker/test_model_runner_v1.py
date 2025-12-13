@@ -213,7 +213,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), \
         f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
 
-    total_pcp_tokens = np.sum(pcp_tokens_result)
+    total_pcp_tokens: int = np.sum(pcp_tokens_result)
     assert positions_result.shape == (total_pcp_tokens,), \
         f"Positions shape mismatch. Expected length {total_pcp_tokens}, got {positions_result.shape}"
 
@@ -222,7 +222,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
         (2 * pcp_size) if num_computed_tokens[i] == 0 else t * pcp_size
         for i, t in enumerate(tokens)
     ]
-    total_padded_tokens = np.sum(padded_tokens)
+    total_padded_tokens: int = np.sum(padded_tokens)
     assert unpad_mask_result.shape[0] == total_padded_tokens, \
         f"unpad_mask size mismatch: expected {total_padded_tokens}, got {unpad_mask_result.shape[0]}"
 
