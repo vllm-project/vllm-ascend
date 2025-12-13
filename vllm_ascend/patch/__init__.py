@@ -246,10 +246,12 @@
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
 #       'torch.argsort' func of npu does not support bool.
+#       Without `stable=True`, the output will have alot of redundant tokens.
 #    How：
 #       Replace with a new torch.argsort that will cast the input to torch.int32.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/4770
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
