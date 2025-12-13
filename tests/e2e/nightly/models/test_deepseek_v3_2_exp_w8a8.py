@@ -94,6 +94,7 @@ async def test_models(model: str, tp_size: int, dp_size: int,
                             env_dict=env_dict,
                             auto_port=False) as server:
         client = server.get_async_client()
+        a = 1
         batch = await client.completions.create(
             model=model,
             prompt=prompts,
