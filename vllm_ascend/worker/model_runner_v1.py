@@ -1134,40 +1134,6 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids, inputs_embeds, intermediate_tensors,
                 max_num_scheduled_tokens)
 
-    def _init_model_kwargs(self):
-        model_kwargs = dict[str, Any]()
-        num_reqs = self.input_batch.num_reqs
-
-        num_pooling_reqs = len(self.input_batch.pooling_params)
-
-        if num_pooling_reqs == 0:
-            return model_kwargs
-
-        pooling_params = self.input_batch.get_pooling_params()
-
-        assert num_pooling_reqs == num_reqs
-
-        token_type_id_requests = dict[int, Any]()
-        for i, param in enumerate(pooling_params):
-            if param.extra_kwargs is not None and \
-            (token_types := param.extra_kwargs.get(
-                "compressed_token_type_ids")) is not None:
-                token_type_id_requests[i] = token_types
-
-        if len(token_type_id_requests) == 0:
-            return model_kwargs
-
-        seq_lens = self.seq_lens.gpu[:num_reqs]
-        token_type_ids = []
-
-        for i in range(num_reqs):
-            pos = token_type_id_requests.get(i, seq_lens[i])
-            ids = (torch.arange(seq_lens[i]) >= pos).int()
-            token_type_ids.append(ids)
-
-        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
-            device=self.device)
-        return model_kwargs
 
     def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
                                              input_ids, positions,

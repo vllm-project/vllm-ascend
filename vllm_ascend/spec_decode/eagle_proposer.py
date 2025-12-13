@@ -125,6 +125,7 @@ class EagleProposer(Proposer):
                   dummy_compute_logits=lambda hidden_states: None):
         with set_ascend_forward_context(None,
                                         self.vllm_config,
+                                        in_profile_run=True,
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
