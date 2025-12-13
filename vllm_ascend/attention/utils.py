@@ -104,13 +104,13 @@ class AscendCommonAttentionMetadata:
 
     actual_seq_lengths_q: list[int]
 
-    positions: torch.Tensor = None
+    positions: torch.Tensor | None = None
 
-    attn_mask: torch.Tensor = None
+    attn_mask: torch.Tensor | None = None
 
-    spec_attn_mask: torch.Tensor = None
+    spec_attn_mask: torch.Tensor | None = None
 
-    attn_state: Any = None
+    attn_state: Any | None = None
 
     is_only_prefill: bool = False
 
