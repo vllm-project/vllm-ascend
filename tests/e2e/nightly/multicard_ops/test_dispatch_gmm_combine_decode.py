@@ -12,7 +12,9 @@ import torchair
 
 from vllm_ascend.utils import enable_custom_op
 
-torch.manual_seed(42)
+config = torchair.CompilerConfig()
+config.mode = "reduce-overhead"
+npu_backend = torchair.get_npu_backend(compiler_config=config)
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
 LOG_NAME = "dispatch_gmm_combine_decode_test_logs"
@@ -99,21 +101,7 @@ class DecodeMoeOps(torch.nn.Module):
 
     def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale,
                                        gmm2_weight, gmm2_weight_scale):
-        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
-                                                torch_npu.Format.FRACTAL_NZ)
-        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
-                                                torch_npu.Format.FRACTAL_NZ)
-        self.gmm1_weight = torch.nn.Parameter(gmm1_weight, requires_grad=False)
-        self.gmm1_weight_scale = torch.nn.Parameter(gmm1_weight_scale,
-                                                    requires_grad=False)
-        self.gmm2_weight = torch.nn.Parameter(gmm2_weight, requires_grad=False)
-        self.gmm2_weight_scale = torch.nn.Parameter(gmm2_weight_scale,
-                                                    requires_grad=False)
-
-        self.gmm1_weight_scale_fp32 = torch.nn.Parameter(
-            gmm1_weight_scale.float(), requires_grad=False)
-        self.gmm2_weight_scale_fp32 = torch.nn.Parameter(
-            gmm2_weight_scale.float(), requires_grad=False)
+        raise NotImplementedError("To be implemented in subclass")
 
     def _apply_ops(self, x, expert_ids, smooth_scales, expert_scales):
         raise NotImplementedError("To be implemented in subclass")
@@ -143,6 +131,19 @@ class SmallOps(DecodeMoeOps):
                          ep_world_size, moe_expert_num, global_rank_id,
                          shared_expert_rank_num)
         self.tp_hcomm_info = ""
+
+    def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale,
+                                       gmm2_weight, gmm2_weight_scale):
+        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
+                                                torch_npu.Format.FRACTAL_NZ)
+        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
+                                                torch_npu.Format.FRACTAL_NZ)
+        self.gmm1_weight = torch.nn.Parameter(gmm1_weight, requires_grad=False)
+        self.gmm1_weight_scale = torch.nn.Parameter(gmm1_weight_scale,
+                                                    requires_grad=False)
+        self.gmm2_weight = torch.nn.Parameter(gmm2_weight, requires_grad=False)
+        self.gmm2_weight_scale = torch.nn.Parameter(gmm2_weight_scale,
+                                                    requires_grad=False)
 
     def _apply_ops(self, x, expert_ids, smooth_scales, expert_scales):
         outputs = torch_npu.npu_moe_distribute_dispatch_v2(
@@ -213,7 +214,7 @@ class SmallOps(DecodeMoeOps):
             shared_expert_num=1,
             shared_expert_rank_num=self.shared_expert_rank_num,
             global_bs=self.batch_size * self.ep_world_size)
-        return (combine_output, ep_send_counts[:self.ep_recv_count_size])
+        return (combine_output, expert_token_nums)
 
 
 class FusionOp(DecodeMoeOps):
@@ -237,14 +238,37 @@ class FusionOp(DecodeMoeOps):
                          ep_world_size, moe_expert_num, global_rank_id,
                          shared_expert_rank_num)
 
+    def _process_weights_after_loading(self, gmm1_weight, gmm1_weight_scale,
+                                       gmm2_weight, gmm2_weight_scale):
+
+        gmm1_weight = torch_npu.npu_format_cast(gmm1_weight,
+                                                torch_npu.Format.FRACTAL_NZ)
+        gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
+                                                torch_npu.Format.FRACTAL_NZ)
+        gmm1_weight_scale = gmm1_weight_scale.float()
+        gmm2_weight_scale = gmm2_weight_scale.float()
+
+        self.gmm1_weight = [
+            weight.clone() for weight in gmm1_weight.unbind(dim=0)
+        ]
+        self.gmm1_weight_scale = [
+            weight.clone() for weight in gmm1_weight_scale.unbind(dim=0)
+        ]
+        self.gmm2_weight = [
+            weight.clone() for weight in gmm2_weight.unbind(dim=0)
+        ]
+        self.gmm2_weight_scale = [
+            weight.clone() for weight in gmm2_weight_scale.unbind(dim=0)
+        ]
+
     def _apply_ops(self, x, expert_ids, smooth_scales, expert_scales):
         output = torch.ops._C_ascend.dispatch_gmm_combine_decode(
             x=x,
             expert_ids=expert_ids,
             gmm1_permuted_weight=self.gmm1_weight,
-            gmm1_permuted_weight_scale=self.gmm1_weight_scale_fp32,
+            gmm1_permuted_weight_scale=self.gmm1_weight_scale,
             gmm2_weight=self.gmm2_weight,
-            gmm2_weight_scale=self.gmm2_weight_scale_fp32,
+            gmm2_weight_scale=self.gmm2_weight_scale,
             expert_smooth_scales=smooth_scales,
             expert_scales=expert_scales,
             group_ep=self.ep_hcomm_info,
@@ -371,23 +395,20 @@ def run_once(local_rank_id,
     fused_ops = FusionOp(*weight_datas, ep_hcomm_info_fused,
                          *parameter).npu()  # type: ignore
     if test_graph:
-        config = torchair.CompilerConfig()
-        config.mode = "reduce-overhead"
-        npu_backend = torchair.get_npu_backend(compiler_config=config)
         fused_ops = torch.compile(fused_ops, backend=npu_backend)
     small_op_token_output, small_op_count_output = small_ops(*input_datas)
-    fused_op_token_output, fused_op_count_output = fused_ops(*input_datas)
+    fused_op_token_output, fused_op_expert_token_nums = fused_ops(*input_datas)
     torch_npu.npu.synchronize(device_id)
     dist.destroy_process_group()
     if log_file is not None:
         log_file.close()
-    small_op_count_output = from_inclusive_prefix_sum(small_op_count_output)
+    # small_op_count_output = from_inclusive_prefix_sum(small_op_count_output)
     torch.testing.assert_close(small_op_token_output.cpu(),
                                fused_op_token_output.cpu(),
                                atol=2.0,
                                rtol=0.02)
     torch.testing.assert_close(small_op_count_output.cpu(),
-                               fused_op_count_output.cpu())
+                               fused_op_expert_token_nums.cpu())
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
@@ -409,3 +430,4 @@ def test():
             ep_world_size, moe_expert_num, shared_expert_rank_num, top_k,
             test_bfloat16, enable_dynamic_bs, test_graph)
     mp.spawn(run_once, args=args, nprocs=ep_world_size, join=True)
+
