@@ -1757,8 +1757,10 @@ class NPUModelRunner(GPUModelRunner):
         return AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
+            logprobs_tensors=sampler_output.logprobs_tensors,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
+            vocab_size=self.input_batch.vocab_size,
         )
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
