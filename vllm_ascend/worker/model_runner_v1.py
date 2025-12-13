@@ -1384,11 +1384,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.parallel_config.pipeline_parallel_size >= 16):
                 moe_comm_type = MoECommType.MC2
             else:
-                # Currently, w4a8_dynamic does not support allgatherep
-                if quant_type == "w4a8_dynamic":
-                    moe_comm_type = MoECommType.ALLTOALL
-                else:
-                    moe_comm_type = MoECommType.ALLGATHER
+                moe_comm_type = MoECommType.ALLGATHER
 
         elif soc_version in {AscendDeviceType._910_93}:
             moe_comm_type = (
