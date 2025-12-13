@@ -116,7 +116,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+            random_matrix = torch.rand(topk_ids.size(0),
+                                       global_num_experts,
+                                       device=topk_ids.device)
+            topk_ids = torch.argsort(
+                random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(

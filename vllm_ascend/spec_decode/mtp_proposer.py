@@ -811,10 +811,7 @@ class MtpProposer(Proposer):
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
-                if not self.runner.with_prefill:
-                    max_num_reqs_across_dp = num_input_tokens
-                else:
-                    max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
+                max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 last_token_indices = nn.functional.pad(
                     last_token_indices,
                     (0, max_num_reqs_across_dp - num_indices))
