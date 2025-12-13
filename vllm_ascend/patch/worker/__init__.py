@@ -20,6 +20,11 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
 
+from vllm.config import CUDAGraphMode, get_current_vllm_config
+
+is_cuda_graph = get_current_vllm_config(
+).compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
 # isort: off
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
@@ -32,4 +37,5 @@ import vllm_ascend.patch.worker.patch_qwen2_5_vl  # noqa
 import vllm_ascend.patch.worker.patch_qwen2_5_omni  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_vl  # noqa
 import vllm_ascend.patch.worker.patch_rope  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
