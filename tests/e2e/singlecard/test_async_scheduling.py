@@ -30,6 +30,7 @@ default_params = dict(
     min_tokens=18,
 )
 
+
 def test_without_spec_decoding(monkeypatch: pytest.MonkeyPatch, ):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor, prefill chunking."""
