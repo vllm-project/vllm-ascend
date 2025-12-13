@@ -18,11 +18,11 @@ MTP_MODEL = "wemaster/deepseek_mtp_main_random_bf16"
 first_prompt = ("The following numbers of the sequence " +
                 ", ".join(str(i) for i in range(10)) + " are:")
 example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
 
 default_params = dict(
     temperature=0.0,  # greedy
