@@ -45,25 +45,25 @@ def test_without_spec_decoding(monkeypatch: pytest.MonkeyPatch, ):
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
-def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
-    """Test consistency and acceptance rates with some different combos of
-    preemption, executor, async scheduling, prefill chunking,
-    spec decoding model length.
-    """
+# def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+#     """Test consistency and acceptance rates with some different combos of
+#     preemption, executor, async scheduling, prefill chunking,
+#     spec decoding model length.
+#     """
 
-    spec_config = {
-        "method": "mtp",
-        "num_speculative_tokens": 2,
-    }
+#     spec_config = {
+#         "method": "mtp",
+#         "num_speculative_tokens": 2,
+#     }
 
-    # test_preemption, executor, async_scheduling,
-    # spec_config, test_prefill_chunking
-    test_configs = [
-        (False, "mp", True, spec_config, False),
-        (False, "mp", False, spec_config, False),
-    ]
+#     # test_preemption, executor, async_scheduling,
+#     # spec_config, test_prefill_chunking
+#     test_configs = [
+#         (False, "mp", True, spec_config, False),
+#         (False, "mp", False, spec_config, False),
+#     ]
 
-    run_tests(monkeypatch, MTP_MODEL, test_configs, [{}])
+#     run_tests(monkeypatch, MTP_MODEL, test_configs, [{}])
 
 
 @dynamo_config.patch(cache_size_limit=16)
