@@ -99,6 +99,7 @@ async def test_models(model: str, tp_size: int, dp_size: int,
             prompt=prompts,
             **request_keyword_args,
         )
+
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         # aisbench test
