@@ -312,6 +312,7 @@ class LookupKeyClient:
 
 def get_zmq_rpc_path_lookup(
     vllm_config: Optional["VllmConfig"] = None, ) -> str:
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured
     rpc_port = 0
@@ -325,4 +326,4 @@ def get_zmq_rpc_path_lookup(
                 "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
             )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}"
+    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"

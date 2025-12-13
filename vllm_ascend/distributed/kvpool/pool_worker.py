@@ -165,28 +165,27 @@ class KVPoolWorker:
             if self.kv_role in ['kv_producer', 'kv_both']:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
-                    self.m_store, self.token_database, self.tp_rank,
-                    self.dcp_size, self.put_step, ready_event_sending,
-                    self.num_layers)
+                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size,
+                    self.put_step, ready_event_sending, self.num_layers)
                 self.kv_send_thread.start()
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
-                self.m_store, self.token_database, self.tp_rank, self.dcp_size,
-                ready_event, self.get_event)
+                self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size, ready_event,
+                self.get_event)
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
             if self.kv_role in ['kv_producer', 'kv_both']:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreSendingThread(
-                    self.m_store, self.token_database, self.tp_rank,
-                    self.dcp_size, self.put_step, ready_event_sending)
+                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size,
+                    self.put_step, ready_event_sending)
                 self.kv_send_thread.start()
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database, self.tp_rank,
-                    self.dcp_size, ready_event)
+                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size,
+                    ready_event)
                 self.kv_recv_thread.start()
                 ready_event.wait()
 
@@ -317,32 +316,11 @@ class KVPoolWorker:
             token_len = request.token_len_chunk
             req_id = request.req_id
 
-            skip_leading_tokens = self.lookup(token_len, request.block_hashes,
-                                              self.use_layerwise)
-            if skip_leading_tokens == token_len:
-                if request.is_last_chunk:
-                    self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
-                        req_id)
-                continue  # skip this request
-
-            mask_num = (skip_leading_tokens // self.block_size *
-                        self.block_size)
-
-            logger.info(
-                "Storing KV cache for %d out of %d tokens "
-                "(skip_leading_tokens=%d) for request %s",
-                token_len - skip_leading_tokens,
-                token_len,
-                skip_leading_tokens,
-                request.req_id,
-            )
-
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 req_id,
                 token_len,
                 request.block_ids,
                 request.block_hashes,
-                mask_num,
                 request.is_last_chunk,
             )
 
