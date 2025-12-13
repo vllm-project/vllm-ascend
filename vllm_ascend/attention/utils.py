@@ -40,8 +40,6 @@ class AscendPrefillContextParallelMetadata:
 
     q_full_idx: torch.Tensor = None
 
-    pcp_prefill_mask: torch.Tensor = None
-
 
 @dataclass
 class AscendCommonAttentionMetadata:
@@ -87,8 +85,6 @@ class AscendCommonAttentionMetadata:
     positions: torch.Tensor = None
 
     attn_mask: torch.Tensor = None
-
-    spec_attn_mask: torch.Tensor = None
 
     attn_state: Any = None
 

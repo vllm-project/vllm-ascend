@@ -86,7 +86,6 @@ class AscendPCPMetadata:
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
     q_full_idx: torch.Tensor = None
-    pcp_prefill_mask: torch.Tensor = None
     pcp_allgather_restore_idx: Optional[list[int]] = None
 
 
@@ -485,8 +484,6 @@ class AscendMLAMetadataBuilder:
                     tail_attn_nomask_seqlens=common_long_seq_metadata.
                     tail_attn_nomask_seqlens,
                     q_full_idx=common_long_seq_metadata.q_full_idx,
-                    pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask
-                    if long_seq_metadata else None,
                     pcp_allgather_restore_idx=long_seq_metadata.
                     pcp_allgather_restore_idx if long_seq_metadata else None)
 
@@ -635,7 +632,7 @@ class AscendMLAMetadataBuilder:
             input_positions = input_positions[:num_decode_tokens]
             if self.pcp_size > 1:
                 # For pcp + spec decode, we flatten seq_lens and block_table
-                # to avoid irregular spec_attn_mask shape
+                # to maintain regular tensor shape
                 block_table = block_table[:num_decodes_flatten, ...]
             else:
                 block_table = block_table[:num_decodes, ...]
@@ -728,7 +725,7 @@ class AscendMLAMetadataBuilder:
                     seq_lens=seq_lens,
                     seq_lens_list=seq_lens_list,
                     max_seq_lens=max_seq_lens,
-                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    attn_mask=common_attn_metadata.attn_mask,
                     actual_seq_lengths_q=actual_seq_lengths_q,
                     sin=sin,
                     cos=cos,
@@ -748,7 +745,7 @@ class AscendMLAMetadataBuilder:
                     seq_lens=seq_lens,
                     seq_lens_list=seq_lens_list,
                     max_seq_lens=max_seq_lens,
-                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    attn_mask=common_attn_metadata.attn_mask,
                     actual_seq_lengths_q=actual_seq_lengths_q,
                     sin=sin[:num_decode_tokens, ...],
                     cos=cos[:num_decode_tokens, ...],
@@ -1357,14 +1354,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             sparse_mode = 3
-            spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            attn_mask_value = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
             q_nope = q_nope.view(num_tokens, self.num_heads, 1,
                                  -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             sparse_mode = 0
-            spec_attn_mask = None
+            attn_mask_value = None
 
         common_kwargs = {
             'query_rope': q_pe,
@@ -1372,7 +1369,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             'num_heads': self.num_heads,
             'num_key_value_heads': self.num_kv_heads,
             'input_layout': input_layout,
-            'atten_mask': spec_attn_mask,
+            'atten_mask': attn_mask_value,
             'sparse_mode': sparse_mode,
             'scale': self.scale,
             'antiquant_mode': 0,
@@ -1410,7 +1407,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
                  weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
                  self.num_heads, self.num_kv_heads, input_layout,
-                 weak_ref_tensors(spec_attn_mask) if spec_attn_mask is not None
+                 weak_ref_tensors(attn_mask_value) if attn_mask_value is not None
                  else None, sparse_mode, self.scale, decode_meta.block_table,
                  block_size, decode_meta.seq_lens_list, actual_seq_lengths,
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
@@ -1767,7 +1764,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
-        mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
+        mask = attn_metadata.attn_mask
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
