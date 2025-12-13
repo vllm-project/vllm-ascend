@@ -9,3 +9,4 @@ tasks:
 trust_remote_code: True
 gpu_memory_utilization: 0.8
 dtype: "bfloat16"
+enforce_eager: True
