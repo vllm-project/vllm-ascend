@@ -807,7 +807,7 @@ class MtpProposer(Proposer):
                         self.use_async_scheduling and attn_metadata[layer_name].decode is not None:
                         for layer_name in self.attn_layer_name:
                             actual_size = len(attn_metadata[layer_name].decode.
-                                            actual_seq_lengths_q)
+                                              actual_seq_lengths_q)
 
                             attn_metadata[layer_name].decode.seq_lens_list = \
                                 attn_metadata[layer_name].decode.seq_lens_list[:actual_size]
