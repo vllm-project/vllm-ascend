@@ -3474,7 +3474,7 @@ def _torch_cuda_wrapper():
 
     try:
         # replace cuda APIs with xpu APIs, this should work by default
-        torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
