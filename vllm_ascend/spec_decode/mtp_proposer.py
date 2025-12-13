@@ -243,11 +243,6 @@ class MtpProposer(Proposer):
             # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
             # and _propose.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
-        # TODO: remove this after moe_comm_type selection logic is finalized
-        moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
-                         == MoECommType.FUSED_ALLTOALL else moe_comm_type)
-
         if skip_attn:
             attn_metadata = None
         elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -303,7 +298,6 @@ class MtpProposer(Proposer):
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
@@ -733,7 +727,6 @@ class MtpProposer(Proposer):
          with_prefill) = self.runner._sync_metadata_across_dp(
              num_input_tokens, self.runner.with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
@@ -780,7 +773,6 @@ class MtpProposer(Proposer):
                     num_tokens=num_input_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     in_profile_run=self.runner.in_profile_run,

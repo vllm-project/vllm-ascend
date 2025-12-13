@@ -86,7 +86,8 @@ from vllm_ascend.ascend_forward_context import (MoECommType,
                                                 get_mc2_tokens_capacity,
                                                 set_ascend_forward_context,
                                                 set_cos_and_sin, set_mc2_mask,
-                                                set_mc2_tokens_capacity)
+                                                set_mc2_tokens_capacity,
+                                                select_moe_comm_method)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -1343,69 +1344,6 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states, attn_metadata, aux_hidden_states)
         return draft_token_ids
 
-    def _select_moe_comm_method(self,
-                                num_tokens: int) -> Optional[MoECommType]:
-        """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
-        are designed for expert parallelism.
-        2. If expert parallel is enabled, we need to consider the soc version and the
-        number of tokens. This is based on the observation that all-gather is more
-        efficient than all-to-all when running on A2.
-
-            a. For A2, we choose from MC2 and all-gather.
-
-            b. For A3, we choose from MC2 and all-to-all.
-
-            In both cases, we use MC2 when the number of tokens is smaller than
-            a its capacity threshold.
-
-        Args:
-            num_tokens (int): The number of tokens in the current batch.
-
-        Raises:
-            ValueError: If the soc version is unsupported.
-
-        Returns:
-            MoECommType: The selected MoE communication method.
-        """
-        if not is_moe_model(self.vllm_config):
-            return None
-        mc2_tokens_capacity = get_mc2_tokens_capacity()
-        soc_version = get_ascend_device_type()
-        quant_type = getattr(
-            self.vllm_config.model_config.hf_config, 'moe_quantize',
-            getattr(self.vllm_config.model_config.hf_config, 'quantize', None))
-        model_type = self.vllm_config.model_config.hf_config.model_type
-
-        if not self.parallel_config.enable_expert_parallel:
-            moe_comm_type = MoECommType.ALLGATHER
-        elif soc_version in {AscendDeviceType._910B}:
-            if (num_tokens <= mc2_tokens_capacity
-                    and self.parallel_config.world_size_across_dp /
-                    self.parallel_config.pipeline_parallel_size >= 16):
-                moe_comm_type = MoECommType.MC2
-            else:
-                # Currently, w4a8_dynamic does not support allgatherep
-                if quant_type == "w4a8_dynamic":
-                    moe_comm_type = MoECommType.ALLTOALL
-                else:
-                    moe_comm_type = MoECommType.ALLGATHER
-
-        elif soc_version in {AscendDeviceType._910_93}:
-            moe_comm_type = (
-                MoECommType.MC2 if num_tokens <= mc2_tokens_capacity else
-                MoECommType.FUSED_ALLTOALL if quant_type == "w8a8_dynamic"
-                and get_ep_group().world_size <= 16 else MoECommType.ALLTOALL)
-        else:
-            raise ValueError(f"Unsupported soc_version: {soc_version}")
-
-        # PanguProMoE only supports allgather
-        if model_type == "PanguProMoE":
-            moe_comm_type = MoECommType.ALLGATHER
-
-        if is_global_first_rank():
-            logger.debug(f"num_tokens: {num_tokens}, "
-                         f"moe_comm_type: {moe_comm_type}")
-        return moe_comm_type
 
     @staticmethod
     def get_finished_kv_transfer(
@@ -1460,7 +1398,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
 
-        moe_comm_type = self._select_moe_comm_method(num_input_tokens)
         # prevent debugger is None
         need_dump = self.dump_enable and self.debugger is not None
         if need_dump:
@@ -1489,7 +1426,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens=num_input_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=self.with_prefill,
-                    moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
@@ -2045,6 +1981,7 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
+        is_profile: bool = False,
     ) -> torch.Tensor:
         # only support eager mode and piecewise graph now
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
@@ -2121,8 +2058,6 @@ class NPUModelRunner(GPUModelRunner):
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
-
-        moe_comm_type = self._select_moe_comm_method(num_tokens_padded)
 
         # filter out the valid batch descriptor
         if aclgraph_runtime_mode is not None:
@@ -2213,9 +2148,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=with_prefill,
-                    in_profile_run=self.in_profile_run,
-                    # reserved_mc2_mask=self.reserved_mc2_mask,
-                    moe_comm_type=moe_comm_type,
+                    in_profile_run=is_profile,
+
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
@@ -2242,60 +2176,41 @@ class NPUModelRunner(GPUModelRunner):
             if not self.in_profile_run and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
-            return hidden_states
+            return hidden_states, hidden_states
 
-    @contextmanager
-    def set_in_profile_run(self):
-        self.in_profile_run = True
-        try:
-            yield
-        finally:
-            self.in_profile_run = False
-
-    def profile_run(self) -> None:
-        # Trigger compilation for general shape.
-        with self.set_in_profile_run():
-            hidden_states = self._dummy_run(
-                self.max_num_tokens //
-                self.pcp_size if self.pcp_size > 1 else self.max_num_tokens,
-                with_prefill=True)
-            # MC2 will consume additional NPU memory.
-            # Therefore, we need to run the MC2 path once here to complete its initialization,
-            # allowing vLLM to correctly estimate the maximum memory required.
-            mc2_tokens_capacity = get_mc2_tokens_capacity()
-            if self.max_num_tokens > mc2_tokens_capacity and \
-                self._select_moe_comm_method(mc2_tokens_capacity) == MoECommType.MC2:
-                self._dummy_run(mc2_tokens_capacity, with_prefill=True)
-
+    
+    @torch.inference_mode()
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
         output = None
-        if get_pp_group().is_last_rank:
-            if self.is_pooling_model:
-                output = self._dummy_pooler_run(hidden_states)
-            else:
-                # For profile, have maximum num_reqs and that collectively have
-                # maximum num_tokens.
-                min_tokens_per_req = self.max_num_tokens // self.max_num_reqs
-                num_scheduled_tokens_list = [min_tokens_per_req
-                                             ] * self.max_num_reqs
-                num_scheduled_tokens_list[
-                    -1] += self.max_num_tokens % self.max_num_reqs
-                num_scheduled_tokens = np.array(num_scheduled_tokens_list,
-                                                dtype=np.int32)
-                logit_indices = np.cumsum(num_scheduled_tokens) - 1
-                # TODO: need to rum a dummy sampler for generate task
-                # Sometimes, after the model is compiled through the AOT backend,
-                # the model output may become a list containing only one Tensor object.
-                if isinstance(hidden_states, list) and \
-                        len(hidden_states) == 1 and \
-                        isinstance(hidden_states[0], torch.Tensor):
-                    hidden_states = hidden_states[0]
-                hidden_states = hidden_states[logit_indices]
-                output = self.model.compute_logits(hidden_states)
-
-        NPUPlatform.synchronize()
-        del hidden_states, output
-        self.encoder_cache.clear()
-        gc.collect()
+        
+        # For profile, have maximum num_reqs and that collectively have
+        # maximum num_tokens.
+        min_tokens_per_req = self.max_num_tokens // self.max_num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * self.max_num_reqs
+        num_scheduled_tokens_list[-1] += self.max_num_tokens % self.max_num_reqs
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                        dtype=np.int32)
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        # TODO: need to rum a dummy sampler for generate task
+        # Sometimes, after the model is compiled through the AOT backend,
+        # the model output may become a list containing only one Tensor object.
+        if isinstance(hidden_states, list) and \
+            len(hidden_states) == 1 and \
+            isinstance(hidden_states[0], torch.Tensor):
+            hidden_states = hidden_states[0]
+            hidden_states = hidden_states[logit_indices]
+            output = self.model.compute_logits(hidden_states)
+        return output
+    
+    def profile_run(self) -> None:
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if self.max_num_tokens > mc2_tokens_capacity and \
+            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) == MoECommType.MC2:
+            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+        super().profile_run()
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:

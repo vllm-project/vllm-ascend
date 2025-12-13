@@ -11,7 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import (enable_sp, flashcomm2_enable, has_layer_idx,
-                               is_moe_model)
+                               is_moe_model, AscendDeviceType, get_ascend_device_type)
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -35,7 +35,6 @@ def set_ascend_forward_context(
         num_tokens_across_dp: Optional[torch.Tensor] = None,
         with_prefill: bool = True,
         in_profile_run: bool = False,
-        moe_comm_type: Optional[MoECommType] = None,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
@@ -60,6 +59,10 @@ def set_ascend_forward_context(
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import \
             get_moe_comm_method
+        moe_comm_type = select_moe_comm_method(num_tokens, vllm_config)
+        # TODO: remove this after moe_comm_type selection logic is finalized
+        if in_profile_run and is_mtp_model:
+            moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type== MoECommType.FUSED_ALLTOALL else moe_comm_type)
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -231,3 +234,62 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
 
 def get_cos_and_sin():
     return _cos, _sin
+
+def select_moe_comm_method(num_tokens: int, vllm_config:VllmConfig) -> Optional[MoECommType]:
+        """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
+        are designed for expert parallelism.
+        2. If expert parallel is enabled, we need to consider the soc version and the
+        number of tokens. This is based on the observation that all-gather is more
+        efficient than all-to-all when running on A2.
+
+            a. For A2, we choose from MC2 and all-gather.
+
+            b. For A3, we choose from MC2 and all-to-all.
+
+            In both cases, we use MC2 when the number of tokens is smaller than
+            a its capacity threshold.
+
+        Args:
+            num_tokens (int): The number of tokens in the current batch.
+
+        Raises:
+            ValueError: If the soc version is unsupported.
+
+        Returns:
+            MoECommType: The selected MoE communication method.
+        """
+        if not is_moe_model(vllm_config):
+            return None
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        soc_version = get_ascend_device_type()
+        quant_type = getattr(
+            vllm_config.model_config.hf_config, 'moe_quantize',
+            getattr(vllm_config.model_config.hf_config, 'quantize', None))
+        model_type = vllm_config.model_config.hf_config.model_type
+
+        if not vllm_config.parallel_config.enable_expert_parallel:
+            moe_comm_type = MoECommType.ALLGATHER
+        elif soc_version in {AscendDeviceType._910B}:
+            if (num_tokens <= mc2_tokens_capacity
+                    and vllm_config.parallel_config.world_size_across_dp >= 16):
+                moe_comm_type = MoECommType.MC2
+            else:
+                # Currently, w4a8_dynamic does not support allgatherep
+                if quant_type == "w4a8_dynamic":
+                    moe_comm_type = MoECommType.ALLTOALL
+                else:
+                    moe_comm_type = MoECommType.ALLGATHER
+
+        elif soc_version in {AscendDeviceType._910_93}:
+            moe_comm_type = (MoECommType.MC2
+                             if num_tokens <= mc2_tokens_capacity else
+                             MoECommType.FUSED_ALLTOALL if quant_type
+                             == "w8a8_dynamic" else MoECommType.ALLTOALL)
+        else:
+            raise ValueError(f"Unsupported soc_version: {soc_version}")
+
+        # PanguProMoE only supports allgather
+        if model_type == "PanguProMoE":
+            moe_comm_type = MoECommType.ALLGATHER
+        return moe_comm_type
+
