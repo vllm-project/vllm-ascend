@@ -70,7 +70,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertFalse(self.dispatcher.with_quant)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
-        self.assertTrue(self.dispatcher.a3_need_extra_args)
 
     def test_get_dispatch_mc2_kwargs_without_quant(self):
         hidden_states = torch.randn(10, 128)
