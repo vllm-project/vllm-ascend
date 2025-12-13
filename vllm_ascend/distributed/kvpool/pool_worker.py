@@ -309,6 +309,15 @@ class KVPoolWorker:
         self.current_layer = self.current_layer + 1
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
+        current_event = None
+        for request in connector_metadata.requests:
+            can_save = request.can_save
+            if can_save is None or not can_save:
+                continue
+            current_event = torch.npu.Event()
+            current_event.record()
+            break
+
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
@@ -341,6 +350,7 @@ class KVPoolWorker:
                 req_id,
                 token_len,
                 request.block_ids,
+                current_event,
                 request.block_hashes,
                 mask_num,
                 request.is_last_chunk,
