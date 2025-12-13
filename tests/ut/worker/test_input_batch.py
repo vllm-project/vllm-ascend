@@ -24,6 +24,7 @@ from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
@@ -67,6 +68,8 @@ def _compare_objs(obj1,
             is_same = True  # if we make it here must be same
         elif a == b:
             is_same = True
+        elif isinstance(a, CpuGpuBuffer):
+            is_same = np.allclose(a.np, b.np) and torch.allclose(a.gpu, b.gpu)
         assert is_same, f"Attribute {attr_name} is different"\
             f" in {obj1} and {obj2}: {a} != {b}"
 
