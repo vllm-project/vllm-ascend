@@ -37,7 +37,8 @@ class AscendW8A8DynamicLinearMethod:
     """
 
     def __init__(self):
-        pass
+        self.transpose_weight = True
+        self.supports_eplb = True
 
     @staticmethod
     def get_weight(input_size: int, output_size: int,
