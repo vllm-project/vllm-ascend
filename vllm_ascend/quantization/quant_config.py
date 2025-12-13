@@ -104,6 +104,15 @@ class AscendQuantConfig(QuantizationConfig):
                 return ASCEND_QUANTIZATION_METHOD
         return None
 
+    def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
+        # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
+        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
+        if prefix_mapping:
+            hf_to_vllm_mapper = WeightsMapper(
+                orig_to_new_prefix=prefix_mapping)
+            return hf_to_vllm_mapper._map_name(prefix)
+        return prefix
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
@@ -111,14 +120,7 @@ class AscendQuantConfig(QuantizationConfig):
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
-        if model_type == "qwen3_vl_moe":
-            hf_to_vllm_mapper = WeightsMapper(
-                orig_to_new_prefix={
-                    "visual.": "model.visual.",
-                    "language_model.lm_head.": "lm_head.",
-                    "language_model.model.": "model.language_model.",
-                })
-            prefix = hf_to_vllm_mapper._map_name(prefix)
+        prefix = self.quant_prefix_mapper(model_type, prefix)
         from vllm.attention.layer import Attention
         if prefix.startswith("language_model"):
             prefix = prefix.split('.', 1)[-1]
@@ -182,6 +184,16 @@ class AscendQuantConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+
+# key: model_type
+# value: orig_to_new_prefix
+QUANT_MODEL_PREFIX_MAPPINGS = {
+    "qwen3_vl_moe": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
+}
 
 packed_modules_model_mapping = {
     "qwen3_moe": {
