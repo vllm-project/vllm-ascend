@@ -170,10 +170,6 @@ msgid "Qwen2.5-VL"
 msgstr "Qwen2.5-VL"
 
 #: ../../user_guide/support_matrix/supported_models.md
-msgid "[#553](https://github.com/vllm-project/vllm-ascend/issues/553)"
-msgstr "[#553](https://github.com/vllm-project/vllm-ascend/issues/553)"
-
-#: ../../user_guide/support_matrix/supported_models.md
 msgid "LLaVA-Next"
 msgstr "LLaVA-Next"
 
