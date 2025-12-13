@@ -25,9 +25,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
-                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               get_ascend_device_type, is_enable_nz)
+from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+                               get_ascend_device_type, maybe_trans_nz)
 
 
 def quant_per_tensor(in_tensor: torch.Tensor,
@@ -46,9 +45,7 @@ class AscendW8A8LinearMethod:
     """
 
     def __init__(self) -> None:
-        # aclnn quant matmul requires to transpose matrix B, set to true by default.
-        self.transpose_weight = get_ascend_device_type(
-        ) != AscendDeviceType._310P
+        pass
 
     @staticmethod
     def get_weight(
@@ -191,11 +188,9 @@ class AscendW8A8LinearMethod:
         layer.aclnn_input_offset = torch.nn.Parameter(
             layer.input_offset.data.repeat(expanding_factor),
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
-        if self.transpose_weight:
+        if get_ascend_device_type() != AscendDeviceType._310P:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        if is_enable_nz():
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
         ascend_quant_method = getattr(layer, "ascend_quant_method", "")
@@ -210,7 +205,7 @@ class AscendW8A8FusedMoEMethod:
     """
 
     def __init__(self):
-        self.transpose_weight = True
+        pass
 
     @staticmethod
     def get_weight(num_experts: int, intermediate_size_per_partition: int,
@@ -383,12 +378,9 @@ class AscendW8A8FusedMoEMethod:
         # converting ACL_FORMAT_FRACTAL_NZ.
         # npu_quant_grouped_matmul_dequant in eager mode does not accept
         # ACL_FORMAT_FRACTAL_NZ.
-        if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
-        ):
-            layer.w13_weight.data = torch_npu.npu_format_cast(
-                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
-            layer.w2_weight.data = torch_npu.npu_format_cast(
-                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
+        if get_ascend_device_type() != AscendDeviceType._310P:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
 
 class AscendC8KVCacheMethod:
