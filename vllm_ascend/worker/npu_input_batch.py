@@ -36,10 +36,10 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors,
                                              MoveDirectionality)
-from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 
+from vllm_ascend.sample.sampler import AscendSamplingMetadata
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -779,7 +779,7 @@ class InputBatch:
         if batch_update:
             self.sampling_metadata = self._make_sampling_metadata()
 
-    def _make_sampling_metadata(self) -> SamplingMetadata:
+    def _make_sampling_metadata(self) -> AscendSamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(self.temperature_cpu_tensor,
@@ -821,12 +821,13 @@ class InputBatch:
                        self.allowed_token_ids_mask, num_reqs)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
-        return SamplingMetadata(
+        return AscendSamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            top_k_cpu=None if self.no_top_k else self.top_k_cpu[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
