@@ -347,6 +347,18 @@ def with_cancellation(handler_func):
 
     return wrapper
 
+def normalize_delta(delta: dict):
+
+    if not isinstance(delta, dict):
+        return delta
+
+    allowed = {"role", "content"}
+
+    new_delta = {}
+    for k, v in delta.items():
+        if k in allowed and v is not None:
+            new_delta[k] = v
+    return new_delta
 
 app = FastAPI(lifespan=lifespan)
 
@@ -475,9 +487,11 @@ async def _handle_select_instance(api: str, req_data: Any,
         base_delay=global_args.retry_delay)
     proxy_state.release_prefiller(prefiller_idx, prefiller_score)
     response_json = response.json()
+
     kv_transfer_params = response_json.get('kv_transfer_params', {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
+    
     # Select decoder
     decoder_score = proxy_state.calculate_decode_scores(request_length)
     logger.debug("Decoder score: %f", decoder_score)
@@ -489,6 +503,7 @@ async def _handle_select_instance(api: str, req_data: Any,
                         prefiller_idx=prefiller_idx,
                         prefiller_score=prefiller_score,
                         prefiller=prefiller,
+                        response_prefiller=response_json,
                         decoder=decoder,
                         decoder_idx=decoder_idx,
                         decoder_score=decoder_score)
@@ -500,6 +515,7 @@ class InstanceInfo:
     prefiller_idx: int
     prefiller_score: float
     prefiller: ServerState
+    response_prefiller : dict
     decoder_idx: int
     decoder_score: float
     decoder: ServerState
@@ -512,6 +528,7 @@ async def _handle_completions(api: str, request: Request):
         request_length = len(req_body)
         instance_info = await _handle_select_instance(api, req_data,
                                                       request_length)
+        
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -532,6 +549,29 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            idx = 0
+            #only when stream_flag is true got first token from prefill node
+            if stream_flag: 
+                prefill_data = instance_info.response_prefiller
+                prefill_choice = prefill_data["choices"][0]
+                if "message" in prefill_choice:
+                    prefill_content = normalize_delta( prefill_choice["message"])
+                #create chat.completion.chunk
+                first_content_chunk = {
+                    "id": prefill_data["id"],
+                    "object": "chat.completion.chunk",
+                    "created": prefill_data["created"], 
+                    "model": prefill_data["model"],
+                    "choices": [{
+                        "index": 0, 
+                        "delta": prefill_content,
+                        "logprobs": None,
+                        "finish_reason": None
+                    }], 
+                    "prompt_token_ids":None
+                }
+                first_content_str = "data: " + json.dumps(first_content_chunk, ensure_ascii=False) + "\n\n"
+                yield first_content_str.encode("utf-8")
             # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
@@ -548,6 +588,10 @@ async def _handle_completions(api: str, request: Request):
                                 instance_info.prefiller_idx,
                                 instance_info.prefiller_score)
                             released_kv = True
+                        idx += 1
+                        #skip the idx because it has gotted from prefiller
+                        if idx < 3 and stream_flag:
+                            continue
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
@@ -571,7 +615,6 @@ async def _handle_completions(api: str, request: Request):
                         if not choices:
                             yield chunk
                             continue
-
                         choice = choices[0]
                         delta = choice.get("delta") or {}
                         message = choice.get("message") or {}
@@ -582,7 +625,6 @@ async def _handle_completions(api: str, request: Request):
                                 or ""
                                 )
                         generated_token += content
-
                         stop_reason = choice.get(
                             "stop_reason")
                         usage = chunk_json.get("usage", {})
@@ -626,7 +668,7 @@ async def _handle_completions(api: str, request: Request):
                                         instance_info.decoder_score)
 
         return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+                                 media_type="text/event-stream")
     except Exception as e:
         import traceback
         exc_info = sys.exc_info()
