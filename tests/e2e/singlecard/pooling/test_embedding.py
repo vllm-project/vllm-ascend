@@ -35,10 +35,10 @@ def test_embed_models_correctness(model: str):
     model_name = snapshot_download(model)
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             runner="pooling",
             enforce_eager=False,
             max_model_len=None,
-            cudagraph_capture_sizes=[4],
     ) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
 

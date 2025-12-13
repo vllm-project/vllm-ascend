@@ -28,6 +28,7 @@ def test_quant_W8A8():
     with VllmRunner(
             snapshot_download("vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"),
             max_model_len=8192,
+            cudagraph_capture_sizes=[4],
             enforce_eager=False,
             gpu_memory_utilization=0.7,
             quantization="ascend",

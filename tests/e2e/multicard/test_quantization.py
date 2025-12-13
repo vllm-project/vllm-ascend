@@ -34,6 +34,7 @@ def test_qwen2_5_w8a8_external_quantized_tp2():
             snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
             tensor_parallel_size=2,
             max_model_len=4096,
+            cudagraph_capture_sizes=[4],
             gpu_memory_utilization=0.8,
     ) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)

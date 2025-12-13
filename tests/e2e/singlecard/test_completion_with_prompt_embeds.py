@@ -54,6 +54,7 @@ def test_mixed_prompt_embeds_and_text(model_name):
     # Run inference with mixed inputs
     with VllmRunner(
             model_name,
+            cudagraph_capture_sizes=[4],
             enable_prompt_embeds=True,
     ) as vllm_runner:
         # Test prompt embeddings
