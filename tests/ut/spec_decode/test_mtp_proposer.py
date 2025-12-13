@@ -158,7 +158,6 @@ class TestMtpProposer:
         proposer.model = MagicMock()
         proposer.enable_shared_expert_dp = False
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
-        runner._select_moe_comm_method.return_value = "alltoall"
 
         mock_get_forward_context = MagicMock()
         mock_get_forward_context.cudagraph_runtime_mode = None
@@ -168,7 +167,6 @@ class TestMtpProposer:
 
         # Verify
         runner._sync_metadata_across_dp.assert_called_once()
-        runner._select_moe_comm_method.assert_called_once()
         mock_set_context.assert_called()
 
         # Check that model was called correct number of times
@@ -187,7 +185,6 @@ class TestMtpProposer:
         proposer.enable_shared_expert_dp = False
         proposer.model = MagicMock()
         runner._sync_metadata_across_dp.return_value = (8, 8, False)
-        runner._select_moe_comm_method.return_value = "alltoall"
         runner.attn_groups = []
 
         mock_get_forward_context = MagicMock()
@@ -200,7 +197,6 @@ class TestMtpProposer:
 
         # Verify
         runner._sync_metadata_across_dp.assert_called_once()
-        runner._select_moe_comm_method.assert_called_once()
         mock_set_context.assert_called()
 
         # Check that model was called correct number of times

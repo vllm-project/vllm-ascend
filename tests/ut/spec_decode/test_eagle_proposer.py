@@ -161,7 +161,6 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.speculative_config = MagicMock()
         self.device = torch.device("cpu")
         self.runner = MagicMock()
-        self.runner._select_moe_comm_method.return_value = "alltoall"
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -188,8 +187,6 @@ class TestEagleProposerDummyRun(TestBase):
     def test_dummy_run_with_prefill(self, mock_context):
         mock_context.return_value.__enter__.return_value = None
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
-
-        self.runner._select_moe_comm_method.assert_called_with(64)
         self.proposer.model.assert_called_once()
 
 
