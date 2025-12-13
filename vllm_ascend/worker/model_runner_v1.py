@@ -1875,8 +1875,10 @@ class NPUModelRunner(GPUModelRunner):
         return AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampled_token_ids,
+            logprobs_tensors=sampler_output.logprobs_tensors,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
+            vocab_size=self.input_batch.vocab_size,
         )
 
     def _build_dummy_attn_metadata(
@@ -3472,7 +3474,7 @@ def _torch_cuda_wrapper():
 
     try:
         # replace cuda APIs with xpu APIs, this should work by default
-        torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
