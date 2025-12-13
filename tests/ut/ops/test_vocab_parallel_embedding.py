@@ -14,11 +14,12 @@
 # Adapted from vllm/tests/lora/test_layers.py
 
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
 
@@ -32,9 +33,33 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.embedding_dim = 10
         self.org_num_embeddings = 40
         self.padding_size = 8
+
+        self.mock_group = mock.MagicMock()
+        self.mock_group.world_size = 2
+        self.mock_group.rank_in_group = 0
+
+        parallel_state._MLP_TP = self.mock_group
+        parallel_state._OTP = self.mock_group
+
         mock_vllm_config = MagicMock()
         mock_vllm_config.additional_config = {}
-        init_ascend_config(mock_vllm_config)
+        self.mock_ascend_config = MagicMock()
+        self.mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
+        self.mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
+
+        self.patches = [
+            patch("vllm_ascend.utils.get_ascend_config",
+                  return_value=self.mock_ascend_config),
+            patch("vllm_ascend.distributed.parallel_state.get_lmhead_tp_group",
+                  return_value=self.mock_group),
+            patch(
+                "vllm.distributed.parallel_state.get_tp_group",
+                return_value=self.mock_group,
+            ),
+        ]
+
+        for p in self.patches:
+            p.start()
 
     def _create_layer(self):
         # Patch methods and dependencies for VocabParallelEmbedding
