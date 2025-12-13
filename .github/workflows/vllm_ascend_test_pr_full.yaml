@@ -43,6 +43,7 @@ jobs:
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+      accuracy_tracker: ${{ steps.filter.outputs.accuracy_tracker }}
     steps:
       - name: Setup git proxy
         run: |
@@ -69,6 +70,11 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
+            accuracy_tracker:
+              - '.github/workflows/_e2e_accuracy.yaml'
+              - 'csrc/**'
+              - 'vllm_ascend/**'
+              - 'tests/e2e/models/**'
 
   e2e-test:
     name: e2e-full
@@ -83,3 +89,44 @@ jobs:
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       type: full
+
+  e2e-accuracy:
+    needs: [changes]
+    name: e2e-accuracy
+    if: ${{ needs.changes.outputs.accuracy_tracker == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - os: linux-aarch64-a2-1
+            model_list:
+              - Qwen3-8B
+              - Qwen2-Audio-7B-Instruct
+              - Qwen3-8B-W8A8
+              - Qwen3-VL-8B-Instruct
+              - Qwen2.5-Omni-7B
+              - Meta-Llama-3.1-8B-Instruct
+          - os: linux-aarch64-a2-1
+            model_list:
+              - ERNIE-4.5-21B-A3B-PT
+              - gemma-3-4b-it
+              - internlm-7b
+              - InternVL3_5-8B-hf
+              - llava-1.5-7b-hf
+              - Molmo-7B-D-0924
+          - os: linux-aarch64-a3-2
+            model_list:
+              - Qwen3-30B-A3B
+              - Qwen3-VL-30B-A3B-Instruct
+              - Qwen3-30B-A3B-W8A8
+          - os: linux-aarch64-a3-4
+            model_list:
+              - Qwen3-Next-80B-A3B-Instruct
+    uses: ./.github/workflows/_e2e_accuracy.yaml
+    with:
+      vllm: v0.12.0
+      runner: ${{ matrix.test_config.os }}
+      model_list: ${{ toJson(matrix.test_config.model_list) }}
+      image-a2: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      image-a3: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-a3-ubuntu22.04-py3.11
+      upload: false

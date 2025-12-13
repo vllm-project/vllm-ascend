@@ -30,7 +30,10 @@ on:
       runner:
         required: true
         type: string
-      image:
+      image-a2:
+        required: true
+        type: string
+      image-a3:
         required: true
         type: string
       model_list:
@@ -55,11 +58,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e-nightly:
+  e2e-accuracy-test:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
     container:
-      image: "${{ inputs.image }}"
+      image: ${{ contains(inputs.runner, 'a2') && inputs.image-a2 || inputs.image-a3 }}
       env:
         VLLM_USE_MODELSCOPE: True
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
@@ -101,18 +104,19 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           pip install -r requirements-dev.txt
           pip install -v -e .
 
       - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
-        if: ${{ inputs.runner == 'linux-aarch64-a2-4' && contains(inputs.model_list, 'Qwen3-Next-80B-A3B-Instruct') }}
+        if: ${{ contains(inputs.model_list, 'Qwen3-Next-80B-A3B-Instruct') }}
         shell: bash -l {0}
         run: |
           . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
           python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
-        if: ${{ inputs.runner == 'linux-aarch64-a2-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
+        if: ${{ contains(inputs.model_list, 'Molmo-7B-D-0924') }}
         shell: bash -l {0}
         run: |
           pip install tensorflow --no-cache-dir
@@ -180,6 +184,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           HF_DATASETS_OFFLINE: True
           VLLM_USE_MODELSCOPE: True
+          HCCL_BUFFSIZE: 600
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
           VLLM_COMMIT: ${{ env.VLLM_COMMIT }}
