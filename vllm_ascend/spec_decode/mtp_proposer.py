@@ -735,6 +735,9 @@ class MtpProposer(Proposer):
              num_input_tokens, self.runner.with_prefill)
 
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
+        # TODO: remove this after moe_comm_type selection logic is finalized
+        moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
+                         == MoECommType.FUSED_ALLTOALL else moe_comm_type)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
