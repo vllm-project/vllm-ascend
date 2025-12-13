@@ -4,7 +4,6 @@
 :caption: Deployment
 :maxdepth: 1
 Qwen2.5-Omni.md
-Qwen2_audio
 Qwen2.5-7B
 Qwen3-Dense
 Qwen-VL-Dense.md
