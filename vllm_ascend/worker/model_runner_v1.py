@@ -17,7 +17,6 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-import gc
 import math
 import time
 from collections import defaultdict
@@ -46,8 +45,8 @@ from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
-                                             get_ep_group, get_pcp_group,
-                                             get_pp_group, get_tp_group,
+                                             get_pcp_group, get_pp_group,
+                                             get_tp_group,
                                              is_global_first_rank)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -84,10 +83,10 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (MoECommType,
                                                 get_mc2_tokens_capacity,
+                                                select_moe_comm_method,
                                                 set_ascend_forward_context,
                                                 set_cos_and_sin, set_mc2_mask,
-                                                set_mc2_tokens_capacity,
-                                                select_moe_comm_method)
+                                                set_mc2_tokens_capacity)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -111,7 +110,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.sample.sampler import AscendSampler
@@ -122,7 +120,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable)
+                               lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -1344,7 +1342,6 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states, attn_metadata, aux_hidden_states)
         return draft_token_ids
 
-
     @staticmethod
     def get_finished_kv_transfer(
         scheduler_output: "SchedulerOutput",
@@ -2149,7 +2146,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=with_prefill,
                     in_profile_run=is_profile,
-
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
@@ -2178,19 +2174,19 @@ class NPUModelRunner(GPUModelRunner):
                 self.eplb_updator.forward_end()
             return hidden_states, hidden_states
 
-    
     @torch.inference_mode()
     def _dummy_sampler_run(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         output = None
-        
+
         # For profile, have maximum num_reqs and that collectively have
         # maximum num_tokens.
         min_tokens_per_req = self.max_num_tokens // self.max_num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * self.max_num_reqs
-        num_scheduled_tokens_list[-1] += self.max_num_tokens % self.max_num_reqs
+        num_scheduled_tokens_list[
+            -1] += self.max_num_tokens % self.max_num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
@@ -2204,12 +2200,14 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = hidden_states[logit_indices]
             output = self.model.compute_logits(hidden_states)
         return output
-    
+
     def profile_run(self) -> None:
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and \
             select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) == MoECommType.MC2:
-            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            self._dummy_run(mc2_tokens_capacity,
+                            with_prefill=True,
+                            is_profile=True)
         super().profile_run()
 
     def eplb_warmup(self):

@@ -457,7 +457,6 @@ class EagleProposer(Proposer):
         else:
             num_input_tokens = num_tokens
 
-
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -494,7 +493,6 @@ class EagleProposer(Proposer):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
-
 
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
