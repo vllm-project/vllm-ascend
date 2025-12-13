@@ -475,7 +475,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Calculate maximum supported batch sizes considering model architecture
     resources_per_graph = num_hidden_layers + 1
-    if vllm_config.speculative_config is not None:
+    if vllm_config.speculative_config is not None and vllm_config.speculative_config.draft_model_config:
         draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
 
