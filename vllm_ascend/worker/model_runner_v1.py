@@ -69,7 +69,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         MambaSpec, MLAAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             ModelRunnerOutput, SamplerOutput,
+                             ModelRunnerOutput, SamplerOutput,LogprobsLists, LogprobsTensors,
                              make_empty_encoder_model_runner_output)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -1673,23 +1673,6 @@ class NPUModelRunner(GPUModelRunner):
         with ProfileExecuteDuration().capture_async("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-            (
-                num_nans_in_logits,
-                logprobs_lists,
-                valid_sampled_token_ids,
-                prompt_logprobs_dict,
-                req_ids_output_copy,
-                req_id_to_index_output_copy,
-                invalid_req_indices,
-            ) = self._bookkeeping_sync(
-                scheduler_output,
-                sampler_output,
-                logits,
-                hidden_states,
-                scheduler_output.total_num_scheduled_tokens,
-                spec_decode_metadata,
-            )
-
         def propose_draft_token_ids(sampled_token_ids):
             assert self.spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
@@ -1703,6 +1686,22 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata,
                 aux_hidden_states,
             )
+
+        (
+            logprobs_lists,
+            valid_sampled_token_ids,
+            prompt_logprobs_dict,
+            req_ids_output_copy,
+            req_id_to_index_output_copy,
+            invalid_req_indices,
+        ) = self._bookkeeping_sync(
+            scheduler_output,
+            sampler_output,
+            logits,
+            hidden_states,
+            scheduler_output.total_num_scheduled_tokens,
+            spec_decode_metadata,
+        )
 
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
@@ -1787,122 +1786,132 @@ class NPUModelRunner(GPUModelRunner):
                 sampler_output.sampled_token_ids)
         return sampler_output
 
-    # def _bookkeeping_sync(
-    #     self,
-    #     scheduler_output: "SchedulerOutput",
-    #     sampler_output: SamplerOutput,
-    #     logits: torch.Tensor | None,
-    #     hidden_states: torch.Tensor,
-    #     num_scheduled_tokens: int,
-    #     spec_decode_metadata: SpecDecodeMetadata | None,
-    # ):
-    #     discard_sampled_tokens_req_indices = \
-    #         self.discard_request_indices.np[:self.num_discarded_requests]
-    #     for i in discard_sampled_tokens_req_indices:
-    #         generator = self.input_batch.generators.get(int(i))
-    #         if generator is not None:
-    #             generator.set_offset(generator.get_offset() - 4)
-    #
-    #     # Copy some objects so they don't get modified after returning.
-    #     # This is important when using async scheduling.
-    #     req_ids_output_copy = self.input_batch.req_ids.copy()
-    #     req_id_to_index_output_copy = \
-    #         self.input_batch.req_id_to_index.copy()
-    #
-    #     num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
-    #     sampled_token_ids = sampler_output.sampled_token_ids
-    #     invalid_req_indices = []
-    #
-    #     if not self.use_async_scheduling:
-    #         # Get the valid generated tokens.
-    #         max_gen_len = sampled_token_ids.shape[-1]
-    #         if max_gen_len == 1:
-    #             # No spec decode tokens. It's a tensor.
-    #             valid_sampled_token_ids = sampled_token_ids.tolist()
-    #         else:
-    #             # Includes spec decode tokens. It's a numpy array
-    #             valid_sampled_token_ids, _ = self.rejection_sampler.parse_output(
-    #                 sampled_token_ids,
-    #                 self.input_batch.vocab_size,
-    #             )
-    #         # Mask out the sampled tokens that should not be sampled.
-    #         for i in discard_sampled_tokens_req_indices:
-    #             valid_sampled_token_ids[int(i)].clear()
-    #     else:
-    #         valid_sampled_token_ids = []
-    #         invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
-    #         invalid_req_indices_set = set(invalid_req_indices)
-    #         if self.num_spec_tokens <= 0:
-    #             assert sampled_token_ids.shape[-1] == 1
-    #             # Cache the sampled tokens on the NPU and avoid CPU sync.
-    #             # These will be copied into input_ids in the next step
-    #             # when preparing inputs.
-    #             self.input_batch.prev_sampled_token_ids = sampled_token_ids
-    #
-    #         self.input_batch.prev_sampled_token_ids_invalid_indices = \
-    #             invalid_req_indices_set
-    #         self.input_batch.prev_req_id_to_index = {
-    #             req_id: i
-    #             for i, req_id in enumerate(self.input_batch.req_ids)
-    #             if i not in invalid_req_indices_set
-    #         }
-    #     # Cache the sampled tokens in the model runner, so that the scheduler
-    #     # doesn't need to send them back.
-    #     # NOTE(woosuk): As an exception, when using PP, the scheduler sends
-    #     # the sampled tokens back, because there's no direct communication
-    #     # between the first-stage worker and the last-stage worker.
-    #     logprobs_tensors = sampler_output.logprobs_tensors
-    #     cu_num_accepted_tokens = ([0] if spec_decode_metadata
-    #                               and logprobs_tensors else None)
-    #     for req_idx in range(num_sampled_tokens):
-    #         if self.use_async_scheduling:
-    #             sampled_ids = [-1] * 1 if \
-    #                 req_idx not in invalid_req_indices_set else None
-    #         else:
-    #             sampled_ids = valid_sampled_token_ids[req_idx]
-    #         if not sampled_ids:
-    #             continue
-    #
-    #         start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-    #         end_idx = start_idx + len(sampled_ids)
-    #         assert end_idx <= self.model_config.max_model_len, (
-    #             "Sampled token IDs exceed the max model length. "
-    #             f"Total number of tokens: {end_idx} > max_model_len: "
-    #             f"{self.model_config.max_model_len}")
-    #
-    #         self.input_batch.token_ids_cpu[req_idx,
-    #                                        start_idx:end_idx] = sampled_ids
-    #         self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
-    #         self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-    #         self.input_batch.num_tokens[req_idx] = end_idx
-    #         req_id = self.input_batch.req_ids[req_idx]
-    #         req_state = self.requests[req_id]
-    #         req_state.output_token_ids.extend(sampled_ids)
-    #
-    #         if cu_num_accepted_tokens is not None:
-    #             cu_num_accepted_tokens.append(cu_num_accepted_tokens[-1] +
-    #                                           len(sampled_ids))
-    #
-    #     # NOTE: NPU -> CPU Sync happens here.
-    #     # Move as many CPU operations as possible before this sync point.
-    #     logprobs_tensors = sampler_output.logprobs_tensors
-    #     logprobs_lists = logprobs_tensors.tolists() \
-    #         if logprobs_tensors is not None else None
-    #
-    #     # Compute prompt logprobs if needed.
-    #     prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-    #         hidden_states[:scheduler_output.total_num_scheduled_tokens],
-    #         scheduler_output,
-    #     )
-    #
-    #     return (
-    #         logprobs_lists,
-    #         valid_sampled_token_ids,
-    #         prompt_logprobs_dict,
-    #         req_ids_output_copy,
-    #         req_id_to_index_output_copy,
-    #         invalid_req_indices,
-    #     )
+    # TODO: remove this func after eagle_proposer is refactored and
+    #  _bookkeeping_sync is moved after propose_draft_token_ids
+    def _bookkeeping_sync(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampler_output: SamplerOutput,
+        logits: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> tuple[
+        LogprobsLists | None,
+        list[list[int]],
+        dict[str, LogprobsTensors | None],
+        list[str],
+        dict[str, int],
+        list[int],
+    ]:
+        num_reqs = self.input_batch.num_reqs
+        discard_sampled_tokens_req_indices = np.nonzero(
+            self.discard_request_mask.np[:num_reqs]
+        )[0]
+        for i in discard_sampled_tokens_req_indices:
+            gen = self.input_batch.generators.get(int(i))
+            if gen is not None:
+                gen.set_offset(gen.get_offset() - 4)
+
+        # Copy some objects so they don't get modified after returning.
+        # This is important when using async scheduling.
+        req_ids_output_copy = self.input_batch.req_ids.copy()
+        req_id_to_index_output_copy = self.input_batch.req_id_to_index.copy()
+
+        num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
+        sampled_token_ids = sampler_output.sampled_token_ids
+        logprobs_tensors = sampler_output.logprobs_tensors
+        invalid_req_indices = []
+        cu_num_tokens: list[int] | None = None
+        if not self.use_async_scheduling:
+            # Get the valid generated tokens.
+            max_gen_len = sampled_token_ids.shape[-1]
+            if max_gen_len == 1:
+                # No spec decode tokens.
+                valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                # Mask out the sampled tokens that should not be sampled.
+                for i in discard_sampled_tokens_req_indices:
+                    valid_sampled_token_ids[int(i)].clear()
+            else:
+                # Includes spec decode tokens.
+                valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
+                    sampled_token_ids,
+                    self.input_batch.vocab_size,
+                    discard_sampled_tokens_req_indices,
+                    return_cu_num_tokens=logprobs_tensors is not None,
+                )
+        else:
+            valid_sampled_token_ids = []
+            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
+            invalid_req_indices_set = set(invalid_req_indices)
+
+            # Cache the sampled tokens on the GPU and avoid CPU sync.
+            # These will be copied into input_ids in the next step
+            # when preparing inputs.
+            # With spec decoding, this is done in propose_draft_token_ids().
+            if self.num_spec_tokens <= 0:
+                assert sampled_token_ids.shape[-1] == 1
+                self.input_batch.prev_sampled_token_ids = sampled_token_ids
+            self.input_batch.prev_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids)
+                if i not in invalid_req_indices_set
+            }
+
+        # Cache the sampled tokens in the model runner, so that the scheduler
+        # doesn't need to send them back.
+        # NOTE(woosuk): As an exception, when using PP, the scheduler sends
+        # the sampled tokens back, because there's no direct communication
+        # between the first-stage worker and the last-stage worker.
+        req_ids = self.input_batch.req_ids
+        for req_idx in range(num_sampled_tokens):
+            if self.use_async_scheduling:
+                sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
+            else:
+                sampled_ids = valid_sampled_token_ids[req_idx]
+
+            num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
+
+            if not sampled_ids:
+                continue
+
+            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            end_idx = start_idx + num_sampled_ids
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}"
+            )
+
+            self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+
+            req_id = req_ids[req_idx]
+            req_state = self.requests[req_id]
+            req_state.output_token_ids.extend(sampled_ids)
+
+        logprobs_lists = (
+            logprobs_tensors.tolists(cu_num_tokens)
+            if not self.use_async_scheduling and logprobs_tensors is not None
+            else None
+        )
+
+        # Compute prompt logprobs if needed.
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states[:num_scheduled_tokens],
+            scheduler_output.num_scheduled_tokens,
+        )
+
+        return (
+            logprobs_lists,
+            valid_sampled_token_ids,
+            prompt_logprobs_dict,
+            req_ids_output_copy,
+            req_id_to_index_output_copy,
+            invalid_req_indices,
+        )
 
     def _build_dummy_attn_metadata(
         self,
