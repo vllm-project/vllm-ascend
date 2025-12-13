@@ -1144,7 +1144,7 @@ class NPUModelRunner(GPUModelRunner):
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
                                    inputs_embeds=inputs_embeds,
-                                   **self._init_model_kwargs())
+                                   **self._init_model_kwargs(maybe_padded_num_tokens))
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
