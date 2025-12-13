@@ -398,6 +398,11 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.npu.synchronize()
 
+        if envs_ascend.TRAIN_INFER_MATCHING:
+            logger.info(
+                "Train-Inference matching is ENABLED, this might cause performance drop!"
+            )
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -506,6 +511,15 @@ class NPUModelRunner(GPUModelRunner):
         # pcp situation.
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
+        # Only calls in PrefillNoCache situation
+        # and when TI-matching switch is ON.
+        if attn_state == AscendAttentionState.PrefillNoCache and \
+                envs_ascend.TRAIN_INFER_MATCHING:
+            num_reqs = self.input_batch.num_reqs
+            seq_lens = self.seq_lens_cpu[:num_reqs]
+            max_seq_len = max(seq_lens.max().item(), 0)
+            return self.attn_mask_builder.get_attn_mask(
+                max_seq_len=max_seq_len, dtype=self.dtype)
         # Pooling situation.
         if self.model_config.runner_type == "pooling":
             return self.attn_mask_builder.get_attn_mask(2048, torch.bool)
