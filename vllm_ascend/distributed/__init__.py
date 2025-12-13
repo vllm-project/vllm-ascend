@@ -38,3 +38,7 @@ def register_connector():
         "MooncakeLayerwiseConnector",
         "vllm_ascend.distributed.mooncake_layerwise_connector",
         "MooncakeLayerwiseConnector")
+
+    KVConnectorFactory.register_connector(
+        "UCMConnector", "vllm_ascend.distributed.ucm_connector",
+        "UCMConnectorV1")
