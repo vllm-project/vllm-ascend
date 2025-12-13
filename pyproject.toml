@@ -26,7 +26,8 @@ requires = [
     "quart",
     "numba",
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
-    "compressed_tensors>=0.11.0"
+    "compressed_tensors>=0.11.0",
+    "triton-ascend @ https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'"
 ]
 build-backend = "setuptools.build_meta"
 
