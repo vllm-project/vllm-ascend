@@ -121,7 +121,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable)
+                               is_moe_model, lmhead_tp_enable, EmbCpuGpuBuffer)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -391,9 +391,23 @@ class NPUModelRunner(GPUModelRunner):
         self.reorder_batch_threshold: int | None = None
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
+        self.inputs_embeds = self._make_emb_buffer(
+            self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
+        )
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
+
+    def _make_emb_buffer(
+        self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
+    ) -> EmbCpuGpuBuffer:
+        return EmbCpuGpuBuffer(
+            *size,
+            dtype=dtype,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            with_numpy=numpy,
+        )
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
