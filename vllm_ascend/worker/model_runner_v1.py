@@ -1644,8 +1644,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         return logits.to(self.device).to(logits_dtype)
 
-<<<<<<< HEAD
-=======
     def propose_draft_token_ids(
         self,
         valid_sampled_token_ids: torch.Tensor | list[list[int]],
@@ -1946,7 +1944,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         return None
 
->>>>>>> e7a21436 (apply flashcomm1 on multimodal_model)
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
