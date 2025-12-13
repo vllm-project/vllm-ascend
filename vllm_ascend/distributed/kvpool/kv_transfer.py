@@ -200,7 +200,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
-        current_event = req_meta["current_event"]
         for index, key in enumerate(req_meta.keys):
             addr, size = self.token_database.prepare_value_layer(
                 req_meta.starts[index], req_meta.ends[index],
@@ -208,8 +207,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        if current_event is not None:
-            current_event.synchronize()
         if self.dcp_size > 1:
             self.m_store.put(key_list, addr_list, size_list)
         else:
