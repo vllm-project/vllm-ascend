@@ -69,7 +69,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         MambaSpec, MLAAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             ModelRunnerOutput, SamplerOutput,LogprobsLists, LogprobsTensors,
+                             LogprobsLists, LogprobsTensors, ModelRunnerOutput,
+                             SamplerOutput,
                              make_empty_encoder_model_runner_output)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -1799,17 +1800,16 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
-        LogprobsLists | None,
-        list[list[int]],
-        dict[str, LogprobsTensors | None],
-        list[str],
-        dict[str, int],
-        list[int],
+            LogprobsLists | None,
+            list[list[int]],
+            dict[str, LogprobsTensors | None],
+            list[str],
+            dict[str, int],
+            list[int],
     ]:
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
-            self.discard_request_mask.np[:num_reqs]
-        )[0]
+            self.discard_request_mask.np[:num_reqs])[0]
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
@@ -1868,7 +1868,9 @@ class NPUModelRunner(GPUModelRunner):
         req_ids = self.input_batch.req_ids
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
-                sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
+                sampled_ids = [
+                    -1
+                ] if req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
@@ -1882,10 +1884,10 @@ class NPUModelRunner(GPUModelRunner):
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}"
-            )
+                f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
+            self.input_batch.token_ids_cpu[req_idx,
+                                           start_idx:end_idx] = sampled_ids
             self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
@@ -1894,11 +1896,9 @@ class NPUModelRunner(GPUModelRunner):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_tokens)
-            if not self.use_async_scheduling and logprobs_tensors is not None
-            else None
-        )
+        logprobs_lists = (logprobs_tensors.tolists(cu_num_tokens)
+                          if not self.use_async_scheduling
+                          and logprobs_tensors is not None else None)
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
