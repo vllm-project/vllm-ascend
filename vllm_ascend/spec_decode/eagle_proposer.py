@@ -23,6 +23,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 
 PADDING_SLOT_ID = -1
@@ -124,13 +125,16 @@ class EagleProposer(Proposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None):
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
+        positions = self.positions[:num_tokens]
+        # update global cos, sin
+        update_cos_sin(positions)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
                                         moe_comm_type=moe_comm_type,
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
+                positions=positions,
                 hidden_states=self.hidden_states[:num_tokens],
             )
             dummy_compute_logits(self.hidden_states)
@@ -465,13 +469,18 @@ class EagleProposer(Proposer):
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
+
+        positions = self.positions[:num_input_tokens]
+        # update global cos, sin
+        update_cos_sin(positions)
+
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         moe_comm_type=moe_comm_type,
                                         num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
+                positions=positions,
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
@@ -574,6 +583,11 @@ class EagleProposer(Proposer):
             attn_metadata.attn_mask = attn_mask
             attn_metadata.block_tables = block_table.to(device)
             # Run the model.
+
+            positions = self.positions[:input_batch_size]
+            # update global cos, sin
+            update_cos_sin(positions)
+
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
                                             moe_comm_type=moe_comm_type,
@@ -581,7 +595,7 @@ class EagleProposer(Proposer):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
-                    positions=self.positions[:input_batch_size],
+                    positions=positions,
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
