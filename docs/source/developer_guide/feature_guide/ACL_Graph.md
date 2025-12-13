@@ -55,6 +55,8 @@ Obviously, we can solve this problem by capturing the biggest shape and padding 
 
 ```
 
+In vLLM, these thresholds are set by `cudagraph_capture_sizes`. The default capture sizes are like `[1,2,4,8,16,24,32,...,max_capture_size]`. You can customize capture sizes to get fine-grained control over performance. For example, we can set `cudagraph_capture_sizes` as `[1,2,4,6,12,18]` when running Qwen3-235B on decode node in large ep.
+
 ### Piecewise and Full graph
 
 Due to the increasing complexity of the attention layer in current LLM, we can't ensure all types of attention can run in graph. In MLA, prefill_tokens and decode_tokens have different calculation method, so when a batch has both prefills and decodes in MLA, graph mode is difficult to handle this situation.
