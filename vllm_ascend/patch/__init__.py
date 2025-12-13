@@ -253,3 +253,4 @@
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #
+from vllm_ascend.patch.worker import patch_deepseekv3
