@@ -1134,17 +1134,17 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids, inputs_embeds, intermediate_tensors,
                 max_num_scheduled_tokens)
 
-
     def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
         assert self.model is not None
-        hidden_states = self.model(input_ids=input_ids,
-                                   positions=positions,
-                                   intermediate_tensors=intermediate_tensors,
-                                   inputs_embeds=inputs_embeds,
-                                   **self._init_model_kwargs(maybe_padded_num_tokens))
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **self._init_model_kwargs(maybe_padded_num_tokens))
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
