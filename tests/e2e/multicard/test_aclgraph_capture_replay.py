@@ -28,7 +28,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
-    "Qwen/Qwen3-0.6B",
+    "facebook/opt-125m",
     "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 

@@ -185,7 +185,10 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
+    def __init__(self,
+                 fuse_norm_quant: bool = True,
+                 fuse_qknorm_rope: bool = True,
+                 **kwargs):
         """
         Initialize the configuration.
         
@@ -194,11 +197,15 @@ class AscendCompilationConfig:
                 When set to True, the system will optimize quantization-related operations,
                 reducing the number of quantization/dequantization nodes.
                 Default: True
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
                 
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: True
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
-        self.enable_quantization_fusion = enable_quantization_fusion
-        # Add more compilation related configs here as needed
+        self.fuse_norm_quant = fuse_norm_quant
+        self.fuse_qknorm_rope = fuse_qknorm_rope
 
 
 class XliteGraphConfig:
@@ -287,8 +294,3 @@ def get_ascend_config():
 
 def check_ascend_config(vllm_config, enforce_eager):
     ascend_config = get_ascend_config()
-
-    if ascend_config.ascend_compilation_config.enable_quantization_fusion:
-        logger.info(
-            "Quantization fusion enabled! op fusion on quantization are expected. "
-        )
