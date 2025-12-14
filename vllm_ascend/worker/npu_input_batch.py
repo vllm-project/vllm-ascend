@@ -657,20 +657,11 @@ class InputBatch:
         Any consecutive empty indices at the very end of the list are not
         filled.
 
-        Args:
-          empty_req_indices: empty indices which may be filled.
-
         Returns:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
         num_reqs = self.num_reqs
-
-        if self.is_pooling_model:
-            # Will be contiguous in pooling case, just trim the lists.
-            del self._req_ids[num_reqs:]
-            del self.req_output_token_ids[num_reqs:]
-            return
 
         if not (empty_req_indices := self.batch_update_builder.removed):
             # All removed requests were replaced by added requests, or else no
@@ -700,11 +691,6 @@ class InputBatch:
             # Move active request down into empty request
             # index.
             self.batch_update_builder.pop_removed()
-            # Autoregressive models require detailed tracking of condense
-            # operations to support logitsprocs
-            self.batch_update_builder.moved.append(
-                (last_req_index, empty_index,
-                 MoveDirectionality.UNIDIRECTIONAL))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -740,6 +726,21 @@ class InputBatch:
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
+
+            self.request_lora_mapping[empty_index] = self.request_lora_mapping[
+                last_req_index]
+
+            if self.is_pooling_model:
+                last_req_index -= 1
+                # Sampling state not used by pooling models.
+                continue
+
+            # Autoregressive models require detailed tracking of condense
+            # operations to support logitsprocs
+            self.batch_update_builder.moved.append(
+                (last_req_index, empty_index,
+                 MoveDirectionality.UNIDIRECTIONAL))
+
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
@@ -756,14 +757,10 @@ class InputBatch:
             if generator is not None:
                 self.generators[empty_index] = generator
 
-            self.request_lora_mapping[empty_index] = self.request_lora_mapping[
-                last_req_index]
-
             # TODO convert these to LogitsProcessors
             if self.allowed_token_ids_mask_cpu_tensor is not None:
-                self.allowed_token_ids_mask_cpu_tensor[
-                    empty_index] = self.allowed_token_ids_mask_cpu_tensor[
-                        last_req_index]
+                self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
+                    self.allowed_token_ids_mask_cpu_tensor[last_req_index])
 
             bad_words_token_ids = self.bad_words_token_ids.pop(
                 last_req_index, None)
