@@ -577,7 +577,7 @@ class EagleProposer(Proposer):
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
 
-            # TODO(wenlong): get more than one token for tree attention
+            # TODO: get more than one token for tree attention
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_tensor[now_speculative + 1] = draft_token_ids.cpu()
 
