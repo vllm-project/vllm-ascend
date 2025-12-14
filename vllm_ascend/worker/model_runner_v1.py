@@ -549,7 +549,9 @@ class NPUModelRunner(GPUModelRunner):
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
-        if self.pcp__world_szie > 1:
+        if self.pcp_size > 1:
+            if not self.vllm_config.model_config.use_mla:
+                self.pcp_manager.generate_kv_idx(scheduler_output)
             num_scheduled_tokens[:num_reqs], position_pcp = (
                 self.pcp_manager.update_tokens_for_pcp(
                     num_scheduled_tokens[:num_reqs],
