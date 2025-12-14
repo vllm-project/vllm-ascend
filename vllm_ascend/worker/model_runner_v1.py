@@ -2006,19 +2006,36 @@ class NPUModelRunner(GPUModelRunner):
                         self.speculative_config.method == "mtp":
                     attn_state = AscendAttentionState.SpecDecoding
 
-                common_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
+                if vllm_version_is("0.12.0"):
+                    common_metadata = CommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
                                                                  1],
-                    seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    seq_lens=self.seq_lens.cpu[:num_reqs],
-                    num_reqs=num_reqs,
-                    num_actual_tokens=num_tokens,
-                    block_table_tensor=block_table_tensor[:num_reqs],
-                    slot_mapping=slot_mapping.gpu,
-                    num_computed_tokens_cpu=num_computed_tokens_cpu,
-                    max_query_len=max_query_len,
-                    max_seq_len=seq_lens)
+                        query_start_loc_cpu=self.query_start_loc.
+                        cpu[:num_reqs + 1],
+                        seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                        seq_lens=self.seq_lens.cpu[:num_reqs],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        block_table_tensor=block_table_tensor[:num_reqs],
+                        slot_mapping=slot_mapping.gpu,
+                        num_computed_tokens_cpu=num_computed_tokens_cpu,
+                        max_query_len=max_query_len,
+                        max_seq_len=seq_lens)
+                else:
+                    common_metadata = CommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
+                                                                 1],
+                        query_start_loc_cpu=self.query_start_loc.
+                        cpu[:num_reqs + 1],
+                        _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                        seq_lens=self.seq_lens.cpu[:num_reqs],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        block_table_tensor=block_table_tensor[:num_reqs],
+                        slot_mapping=slot_mapping.gpu,
+                        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+                        max_query_len=max_query_len,
+                        max_seq_len=seq_lens)
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
