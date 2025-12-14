@@ -106,6 +106,8 @@ class AscendConfig:
                              enable_shared_expert_dp=True)
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
+        self.multistream_overlap_gate = additional_config.get(
+            "multistream_overlap_gate", False)
         self.recompute_scheduler_enable = additional_config.get(
             "recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get(
