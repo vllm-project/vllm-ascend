@@ -170,7 +170,8 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test (no triton)
+      # This test doesn't require triton-ascend, we run it to avoid potential triton issues.
+      - name: Run vllm-project/vllm-ascend test (no triton-ascend)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
