@@ -243,6 +243,11 @@ class QKNormRopeFusionPass(VllmInductorPass):
             return
         layer = next(iter(attn_layers.values()))
         for epsilon in [1e-6, 1e-5]:
+            if layer.head_size != 128:
+                logging.debug(
+                    "QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128",
+                    layer.head_size)
+                continue
             QKNormRopeFusionPattern(head_dim=layer.head_size,
                                     num_heads=layer.num_heads,
                                     num_kv_heads=layer.num_kv_heads,
