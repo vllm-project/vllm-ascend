@@ -200,7 +200,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        topk_weights, topk_ids = None, None
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None
@@ -219,7 +218,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
                 global_num_experts=global_num_experts)
-
+        assert topk_ids is not None
+        assert topk_weights is not None
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
