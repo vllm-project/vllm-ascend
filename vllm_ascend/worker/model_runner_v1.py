@@ -123,7 +123,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable, vllm_version_is)
+                               is_moe_model, lmhead_tp_enable, vllm_version_is, is_vl_model)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -282,6 +282,9 @@ class NPUModelRunner(GPUModelRunner):
 
         set_cos_and_sin(vllm_config, self.max_num_reqs,
                         self.uniform_decode_query_len, self.dtype, self.device)
+        if not is_vl_model(self.vllm_config
+                           ) and not self.vllm_config.model_config.use_mla:
+            initialize_cos_sin(self.vllm_config, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs,
                                 self.uniform_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
@@ -2110,6 +2113,9 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions.gpu[:num_tokens_padded]
+
+            # update global cos, sin
+            update_cos_sin(positions)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
