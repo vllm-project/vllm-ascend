@@ -20,9 +20,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
-from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VisionAttention, Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLImageInputs, Qwen2_5_VLVideoInputs)
+from vllm.model_executor.models.qwen2_5_vl import (Qwen2_5_VisionAttention,
+                                                   Qwen2_5_VLImageInputs,
+                                                   Qwen2_5_VLVideoInputs)
 from vllm.model_executor.models.qwen2_vl import Qwen2VisionAttention
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 
