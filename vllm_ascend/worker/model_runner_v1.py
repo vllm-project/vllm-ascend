@@ -3368,13 +3368,15 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         # DEBUG_START: 添加初始化信息 - 用于对比新老版本内存分配差异
         if is_310p_device:
             import torch
+            from vllm_ascend.ascend_config import get_ascend_config
+            ascend_config = get_ascend_config()
             total_memory_gb = torch.npu.get_device_properties(self.device).total_memory / (1024**3)
             print(f"[DEBUG KV_CACHE_NEW] Initializing KV Cache on 310P:")
             print(f"[DEBUG KV_CACHE_NEW]   Total GPU Memory: {total_memory_gb:.2f} GB")
             print(f"[DEBUG KV_CACHE_NEW]   KV Cache dtype: {self.kv_cache_dtype}")
             print(f"[DEBUG KV_CACHE_NEW]   Block size: {self.block_size}")
             print(f"[DEBUG KV_CACHE_NEW]   Max blocks: {kv_cache_config.num_blocks}")
-            print(f"[DEBUG KV_CACHE_NEW]   TorchAir Graph Enabled: {self.torchair_graph_enabled}")
+            print(f"[DEBUG KV_CACHE_NEW]   TorchAir Graph Enabled: {ascend_config.torchair_graph_config.enabled}")
         # DEBUG_END: 初始化信息
 
         kv_cache_config = deepcopy(kv_cache_config)
