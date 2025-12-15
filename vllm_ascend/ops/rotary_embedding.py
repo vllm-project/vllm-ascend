@@ -20,23 +20,82 @@ from typing import Optional, Tuple
 
 import torch
 import torch_npu
+from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type)
+                               get_ascend_device_type, is_vl_model)
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
 # So we have to preprocess cos_sin_cache int cos && sin. In the future,
 # we shall implement a new rope ops which accept cos_sin_cache as inputs.
+# NOTE(Angazenn): MLA && SFA models uses attn_metadata to pass cos && sin
+# to rope in AscendMLA(SFA)Impl. However, since rope is isolated from
+# AscendAttentionBackendImpl for GQA models, we cannot pass cos && sin by
+# attn_metadata. This causes that rope in GQA models must pass cos && sin
+# by different approaches.
+_cos_mla: Optional[torch.Tensor] = None
+_sin_mla: Optional[torch.Tensor] = None
 _cos_sin_cache: Optional[torch.Tensor] = None
-_cos_cache: Optional[torch.Tensor] = None
-_sin_cache: Optional[torch.Tensor] = None
 _cos: Optional[torch.Tensor] = None
 _sin: Optional[torch.Tensor] = None
+_cos_slice: Optional[torch.Tensor] = None
+_sin_slice: Optional[torch.Tensor] = None
+
+
+def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
+                    device):
+    global _cos_mla
+    global _sin_mla
+    global _cos
+    global _sin
+
+    if _cos_mla is not None or \
+        _sin_mla is not None or \
+        _cos is not None or \
+        _sin is not None:
+        return
+
+    compilation_config = vllm_config.compilation_config
+    model_config = vllm_config.model_config
+    head_dim = model_config.get_head_size()
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+    if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+        _cos_mla = torch.ones(max_num_reqs * decode_token_per_req,
+                              1,
+                              1,
+                              rope_dim,
+                              dtype=dtype,
+                              device=device)
+        _sin_mla = torch.zeros(max_num_reqs * decode_token_per_req,
+                               1,
+                               1,
+                               rope_dim,
+                               dtype=dtype,
+                               device=device)
+    elif not is_vl_model(vllm_config) and not vllm_config.model_config.use_mla:
+        _cos = torch.ones(1,
+                          max_num_batched_tokens,
+                          1,
+                          head_dim,
+                          dtype=dtype,
+                          device=device)
+        _sin = torch.zeros(1,
+                           max_num_batched_tokens,
+                           1,
+                           head_dim,
+                           dtype=dtype,
+                           device=device)
+
+
+def get_cos_and_sin_mla():
+    return _cos_mla, _sin_mla
 
 
 def _record_cos_sin_cache(cos_sin_cache):
@@ -46,50 +105,28 @@ def _record_cos_sin_cache(cos_sin_cache):
     _cos_sin_cache = cos_sin_cache
 
 
-def initialize_cos_sin(vllm_config, dtype, device):
-    global _cos_cache
-    global _sin_cache
-
-    head_dim = vllm_config.model_config.get_head_size()
-    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-    _cos_cache = torch.ones(1,
-                            max_num_batched_tokens,
-                            1,
-                            head_dim,
-                            dtype=dtype,
-                            device=device)
-    _sin_cache = torch.zeros(1,
-                             max_num_batched_tokens,
-                             1,
-                             head_dim,
-                             dtype=dtype,
-                             device=device)
-
-
 def update_cos_sin(positions):
-    global _cos_cache
-    global _sin_cache
     global _cos
     global _sin
+    global _cos_slice
+    global _sin_slice
 
     if _cos_sin_cache is None or \
-        _cos_cache is None or \
-        _sin_cache is None:
+        _cos is None or \
+        _sin is None:
         return
 
     num_tokens = positions.size(0)
-    _cos_cache[:, :num_tokens] = _cos_sin_cache.index_select(
-        0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2,
-                                                                    dim=-2)[0]
-    _sin_cache[:, :num_tokens] = _cos_sin_cache.index_select(
-        0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2,
-                                                                    dim=-2)[1]
-    _cos = _cos_cache[:, :num_tokens]
-    _sin = _sin_cache[:, :num_tokens]
+    _cos[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
+        num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
+    _sin[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
+        num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
+    _cos_slice = _cos[:, :num_tokens]
+    _sin_slice = _sin[:, :num_tokens]
 
 
-def get_cos_sin():
-    return _cos, _sin
+def get_cos_and_sin_slice():
+    return _cos_slice, _sin_slice
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -127,7 +164,7 @@ def _rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        cos, sin = get_cos_sin()
+        cos, sin = get_cos_and_sin_slice()
         if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
                 -1] == 128 and cos is not None and sin is not None:
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.

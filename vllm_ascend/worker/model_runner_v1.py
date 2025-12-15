@@ -88,7 +88,7 @@ from vllm_ascend.ascend_forward_context import (MoECommType,
                                                 get_mc2_tokens_capacity,
                                                 select_moe_comm_method,
                                                 set_ascend_forward_context,
-                                                set_cos_and_sin, set_mc2_mask,
+                                                set_mc2_mask,
                                                 set_mc2_tokens_capacity)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -111,7 +111,8 @@ from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
-from vllm_ascend.ops.rotary_embedding import initialize_cos_sin, update_cos_sin
+from vllm_ascend.ops.rotary_embedding import (initialize_cos_sin,
+                                              set_cos_and_sin, update_cos_sin)
 from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.logits_processor import build_logitsprocs
@@ -282,9 +283,6 @@ class NPUModelRunner(GPUModelRunner):
 
         set_cos_and_sin(vllm_config, self.max_num_reqs,
                         self.uniform_decode_query_len, self.dtype, self.device)
-        if not is_vl_model(self.vllm_config
-                           ) and not self.vllm_config.model_config.use_mla:
-            initialize_cos_sin(self.vllm_config, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs,
                                 self.uniform_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
