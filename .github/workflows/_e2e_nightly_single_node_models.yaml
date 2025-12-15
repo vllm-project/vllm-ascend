@@ -223,7 +223,7 @@ jobs:
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
           path: ./benchmarks/accuracy/
