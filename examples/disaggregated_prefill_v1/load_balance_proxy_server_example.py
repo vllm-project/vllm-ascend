@@ -625,8 +625,10 @@ async def _handle_completions(api: str, request: Request):
             proxy_state.release_decoder(instance_info.decoder_idx,
                                         instance_info.decoder_score)
 
+        # Determine the correct media type based on stream flag
+        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+                                 media_type=media_type)
     except Exception as e:
         import traceback
         exc_info = sys.exc_info()
