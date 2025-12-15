@@ -24,7 +24,7 @@ _MOE_LOAD_ASYNC_STREAM = None
 
 
 def get_expert_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.get_map()
+    return self.model.layers[layer_id].mlp.experts.expert_map
 
 
 def get_log2phy_map(self, layer_id):
