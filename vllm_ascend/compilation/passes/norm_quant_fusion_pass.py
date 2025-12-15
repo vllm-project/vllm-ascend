@@ -163,7 +163,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
-        logging.info("Replaced %s patterns", self.matched_count)
+        logging.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
     def is_applicable(self, runtime_shape: int | None = None) -> bool:
