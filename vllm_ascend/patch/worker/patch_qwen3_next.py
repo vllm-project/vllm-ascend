@@ -25,7 +25,8 @@ from vllm.triton_utils import triton
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
 
-from . import is_cuda_graph
+from vllm.forward_context import  get_forward_context 
+from vllm.config import CUDAGraphMode
 
 
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
@@ -48,6 +49,8 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        forward_context = get_forward_context() 
+        is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
         # triton grid should be less than 66536
         divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(
             self.num_k_heads, self.tp_size)
