@@ -3637,12 +3637,17 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    # Fixed: Skip format conversion for 310P in eager mode to avoid NPU timeout
-                    if not (is_310p_device and not ascend_config.torchair_graph_config.enabled):
-                        k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    # Fixed: Skip format conversion for 310P in eager mode to avoid NPU timeout
-                    if not (is_310p_device and not ascend_config.torchair_graph_config.enabled):
+
+                    # Fixed: For 310P, main tensors use ND format but KV cache needs NZ format for ReshapeAndCacheOperation
+                    if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                        # 310P eager mode: main tensors ND, but KV cache NZ for compatibility (like v0.10.0rc1)
+                        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+                        k_cache = torch_npu.npu_format_cast(k_cache, ACL_FORMAT_FRACTAL_NZ)
+                        v_cache = torch_npu.npu_format_cast(v_cache, ACL_FORMAT_FRACTAL_NZ)
+                    else:
+                        # Other devices: use standard format conversion
+                        k_cache = self._convert_torch_format(k_cache)
                         v_cache = self._convert_torch_format(v_cache)
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
