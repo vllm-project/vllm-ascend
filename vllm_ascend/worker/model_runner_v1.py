@@ -3700,6 +3700,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         v_cache = torch_npu.npu_format_cast(v_cache, ACL_FORMAT_FRACTAL_NZ)
                     else:
                         # Other devices: use standard format conversion
+                        k_cache = self._convert_torch_format(k_cache)
+                        v_cache = self._convert_torch_format(v_cache)
 
                     # DEBUG_START: 格式转换后的内存信息
                     if is_310p_device:
@@ -3714,10 +3716,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         print(f"[DEBUG KV_CACHE_NEW]   V memory increase: {memory_after_v_mb - memory_before_v_mb:.2f} MB")
                         print(f"[DEBUG KV_CACHE_NEW]   Total memory delta: {(memory_after_k_mb + memory_after_v_mb) - (memory_before_k_mb + memory_before_v_mb):.2f} MB")
                     # DEBUG_END: 格式转换信息
-                    else:
-                        # Other devices: use standard format conversion
-                        k_cache = self._convert_torch_format(k_cache)
-                        v_cache = self._convert_torch_format(v_cache)
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
                                              kv_cache_spec.block_size, 1, 128)
