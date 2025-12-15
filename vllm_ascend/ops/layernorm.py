@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Optional, Tuple, Union, cast
+from typing import Optional, Tuple, Union, cast, Dict, Any
 
 import torch
 from vllm.config import get_current_vllm_config
@@ -24,126 +24,111 @@ from vllm.triton_utils import tl, triton
 from functools import cache
 
 
-@triton.heuristics({
-    "HAS_BIAS": lambda args: args["B"] is not None
-})
-@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
+def get_device_properties():
+    return None, 40
+
+
 @triton.jit
-def rms_norm_fwd_kernel(
-        X,  # pointer to the input
-        Y,  # pointer to the output
-        W,  # pointer to the weights
-        B,  # pointer to the biases
-        Z,  # pointer to the residual
-        Z_Out,  # pointer to the residual output
-        stride_x_row,  # how much to increase the pointer when moving by 1 row
-        stride_y_row,
-        stride_z_row,
-        stride_z_out_row,
-        n_rows,  # number of rows in X_base
-        n_cols,  # number of columns in X_base
-        eps,  # epsilon to avoid division by zero
-        BLOCK_N: tl.constexpr,
-        HAS_BIAS: tl.constexpr,
-        HAS_Z: tl.constexpr,
+def add_rmsnorm_bias_kernel(
+        input_ptr,
+        residual_ptr,
+        norm_weight_ptr,
+        norm_bias_ptr,
+        quant_scale_ptr,
+        quant_offset_ptr,
+        output_ptr,
+        output2_ptr,
+        batch_size,
+        hidden_size: tl.constexpr,
+        eps: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+        COL_BLOCK_SIZE: tl.constexpr,
 ):
-    # Map the program id to the row of X_base and Y_base it should compute.
-    # Each program computes a row of X_base and store to Y_base
-    row_idx = tl.program_id(0)
-    row_mask = row_idx < n_rows
-    offsets = tl.arange(0, BLOCK_N)
-    col_mask = offsets < n_cols
-    if HAS_BIAS:
-        bias = tl.load(B + offsets, mask=col_mask, other=0.0).to(tl.float32)
-    w = tl.load(W + offsets, mask=col_mask, other=0.0).to(tl.float32)
-    start_x = X + row_idx * stride_x_row
-    start_y = Y + row_idx * stride_y_row
-    x = tl.load(start_x + offsets, mask=col_mask, other=0.0).to(tl.float32)
-    if HAS_Z:
-        start_z = Z + row_idx * stride_z_row
-        start_z_out = Z_Out + row_idx * stride_z_out_row
-        z = tl.load(start_z + offsets, mask=col_mask, other=0.0).to(tl.float32)
-        x = x + z
-        tl.store(start_z_out + offsets, x, mask=col_mask)
-    var = tl.sum(x * x, axis=0) / n_cols
-    rtsd = 1 / tl.sqrt(var + eps)
-    x_hat = x * rtsd
-    y = x_hat * w
-    if HAS_BIAS:
-        y = y + bias
-    tl.store(start_y + offsets, y, mask=col_mask)
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    cols = tl.arange(0, BLOCK_SIZE)
+    valid_mask = cols < hidden_size
+    norm_weight_values = tl.load(norm_weight_ptr + cols, mask=valid_mask, other=0.0)
+    input_offsets = row_start * hidden_size + cols
+    for i in tl.range(row_start, batch_size, row_step):
+        # add
+        buffered_values = tl.load(input_ptr + input_offsets, mask=valid_mask, other=0.0)
+        buffered_values += tl.load(
+            residual_ptr + input_offsets, mask=valid_mask, other=0.0
+        )
+        tl.store(output2_ptr + input_offsets, buffered_values, mask=valid_mask)
+        buffered_values = buffered_values.to(tl.float32)
+        # rmsnorm
+        squares = buffered_values * buffered_values
+        variance = tl.sum(squares) / hidden_size
+        reciprocal_std = 1 / tl.sqrt(variance + eps)
+        buffered_values = buffered_values * reciprocal_std
+        buffered_values = buffered_values * norm_weight_values
+        # add bias
+        norm_bias_values = tl.load(norm_bias_ptr + cols, mask=valid_mask, other=0.0)
+        buffered_values = buffered_values + norm_bias_values
+        tl.store(output_ptr + input_offsets, buffered_values, mask=valid_mask)
+
+        input_offsets += row_step * hidden_size
 
 
-def _rms_norm_fwd_triton(
-        x,
-        weight,
-        eps,
-        residual=None,
-        bias=None,
-        out=None,
-        residual_out=None,
+kernels = {}
+
+
+def add_rmsnorm_bias(
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_bias: Optional[torch.Tensor],
+        eps: float,
+        quant_scale: Optional[torch.Tensor] = None,
+        quant_offset: Optional[torch.Tensor] = None,
 ):
-    M, N = x.shape
-    assert x.stride(-1) == 1
-    assert weight.shape == (N,)
-    assert weight.stride(-1) == 1
-    # logger.info(f"bias is {bias}")
-    if bias is not None:
-        assert bias.stride(-1) == 1
-        assert bias.shape == (N,)
-    if residual is not None:
-        assert residual.shape == x.shape
-        assert residual.stride(-1) == 1
-        if residual_out is None:
-            residual_out = torch.empty_like(x)
-    # allocate output
-    if out is not None:
-        assert out.shape == x.shape
-    else:
-        out = torch.empty_like(x)
-    assert out.stride(-1) == 1
-    # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
-    if N > BLOCK_N:
-        raise RuntimeError(
-            "This rms norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK_N // 256, 1), 8)
-    # _, num_vectorcore = get_device_properties()
-    num_vectorcore = 48
-    grid = (M if M < num_vectorcore else num_vectorcore,)
-    # with torch.npu.device(x.device.index):
-    rms_norm_fwd_kernel[grid](
-        x,
-        out,
-        weight,
-        bias,
-        residual,
-        residual_out,
-        x.stride(0),
-        out.stride(0),
-        residual.stride(0) if residual is not None else None,
-        residual_out.stride(0) if residual is not None else None,
-        M,
-        N,
-        eps,
-        BLOCK_N=BLOCK_N,
-        num_warps=num_warps,
-        # multibuffer=True,
+    input = input.contiguous()
+    residual = residual.contiguous()
+    norm_weight = norm_weight.contiguous()
+    norm_bias = norm_bias.contiguous() if norm_bias is not None else torch.zeros_like(norm_weight).contiguous()
+
+    num_vectorcore = 40
+    batch_size = input.shape[0]
+    hidden_size = input.shape[1]
+    BLOCK_SIZE = triton.next_power_of_2(hidden_size)
+    COL_BLOCK_SIZE = 2048
+    n_rows = min(batch_size, num_vectorcore)
+    output = torch.empty(
+        batch_size, hidden_size, device=input.device, dtype=input.dtype
     )
-    return out, residual_out
+    output2 = torch.empty(
+        batch_size, hidden_size, device=input.device, dtype=input.dtype
+    )
+
+    add_rmsnorm_bias_kernel[(n_rows, 1, 1)](
+        input,
+        residual,
+        norm_weight,
+        norm_bias,
+        quant_scale,
+        quant_offset,
+        output,
+        output2,
+        batch_size,
+        hidden_size,
+        eps,
+        BLOCK_SIZE,
+        COL_BLOCK_SIZE,
+    )
+    return output, output2
 
 
 class AscendRMSNorm(RMSNorm):
 
     def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        var_hidden_size: Optional[int] = None,
-        has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
+            self,
+            hidden_size: int,
+            eps: float = 1e-6,
+            var_hidden_size: Optional[int] = None,
+            has_weight: bool = True,
+            dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         vllm_config = get_current_vllm_config()
@@ -155,9 +140,9 @@ class AscendRMSNorm(RMSNorm):
                                            requires_grad=False)
 
     def forward_oot(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+            self,
+            x: torch.Tensor,
+            residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
@@ -170,31 +155,47 @@ class AscendRMSNorm(RMSNorm):
                 x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                               self.variance_epsilon)
             else:
-                x, residual = _rms_norm_fwd_triton(x, self.weight, self.variance_epsilon, residual, self.bias)
+                x, residual = add_rmsnorm_bias(
+                    input=x,
+                    residual=residual,
+                    norm_weight=self.weight,
+                    norm_bias=self.bias,
+                    eps=self.variance_epsilon,
+                    quant_scale=None,
+                    quant_offset=None
+                )
             return x, residual
-
-        x, _ = _rms_norm_fwd_triton(x, self.weight, self.variance_epsilon, residual, self.bias)
+        residual = torch.zeros_like(x, device=x.device, dtype=x.dtype)
+        x, _ = add_rmsnorm_bias(
+            input=x,
+            residual=residual,
+            norm_weight=self.weight,
+            norm_bias=self.bias,
+            eps=self.variance_epsilon,
+            quant_scale=None,
+            quant_offset=None
+        )
         return x
 
 
 class AscendQuantRMSNorm(AscendRMSNorm):
 
     def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        var_hidden_size: Optional[int] = None,
-        has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
+            self,
+            hidden_size: int,
+            eps: float = 1e-6,
+            var_hidden_size: Optional[int] = None,
+            has_weight: bool = True,
+            dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
                                        requires_grad=False)
 
     def forward_oot(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+            self,
+            x: torch.Tensor,
+            residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is not None:
             x, residual = super().forward_oot(x, residual)
@@ -205,9 +206,9 @@ class AscendQuantRMSNorm(AscendRMSNorm):
 class AscendGemmaRMSNorm(GemmaRMSNorm):
 
     def forward_oot(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+            self,
+            x: torch.Tensor,
+            residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
