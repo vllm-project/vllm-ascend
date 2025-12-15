@@ -47,28 +47,31 @@ import torch_npu
 from torch import nn
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
-
 from vllm.model_executor.models.utils import extract_layer_index
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
+from vllm_ascend.ops.shared_weight_layer import (
+    is_hidden_layer, reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
-                               flashcomm2_enable, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer,
+                               flashcomm2_enable, flashcomm2_o_shared_enabled,
+                               get_flashcomm2_o_shard_layer,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable, register_flashcomm2_o_shard_layer, shared_expert_dp_enabled)
-from vllm_ascend.ops.shared_weight_layer import (
-    is_hidden_layer,
-    reach_layer_for_shared_weight_series,
-    register_layer_to_shared_weight_series)
-from vllm.config import get_current_vllm_config
+                               oproj_tp_enable,
+                               register_flashcomm2_o_shard_layer,
+                               shared_expert_dp_enabled)
+
 
 class CustomLinearOp:
 
@@ -405,7 +408,9 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(self.vllm_config, register_flashcomm2_o_shard_layer(self.layer)):
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(
+                self.vllm_config, register_flashcomm2_o_shard_layer(
+                    self.layer)):
             from vllm_ascend.distributed.parallel_state import \
                 get_shared_weight_group
             register_layer_to_shared_weight_series(
@@ -494,7 +499,8 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
-    
+
+
 # 该层用于flashcomm2开启oshard后，在QKV matmul之前调用异步broadcast，从而实现通算掩盖
 class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
 
@@ -518,8 +524,10 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
 
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
         layer_idx = extract_layer_index(self.layer.prefix)
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(self.vllm_config, get_flashcomm2_o_shard_layer(layer_idx)):
-            reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer(layer_idx))
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(
+                self.vllm_config, get_flashcomm2_o_shard_layer(layer_idx)):
+            reach_layer_for_shared_weight_series(
+                get_flashcomm2_o_shard_layer(layer_idx))
         # if flashcomm2_o_shared_enable():
         #     from vllm_ascend.multistream.context import get_multistream_microbatch_context
         #     if get_multistream_microbatch_context() != 0:

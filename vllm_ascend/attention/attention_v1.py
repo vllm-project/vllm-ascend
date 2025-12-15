@@ -38,9 +38,11 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               weak_ref_tensors, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer)
-from vllm_ascend.ops.shared_weight_layer import post_process_after_loading_for_shared_weight_series
+from vllm_ascend.ops.shared_weight_layer import \
+    post_process_after_loading_for_shared_weight_series
+from vllm_ascend.utils import (AscendDeviceType, flashcomm2_o_shared_enabled,
+                               get_ascend_device_type,
+                               get_flashcomm2_o_shard_layer, weak_ref_tensors)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -368,7 +370,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
         if flashcomm2_o_shared_enabled():
-            post_process_after_loading_for_shared_weight_series(get_flashcomm2_o_shard_layer()) 
+            post_process_after_loading_for_shared_weight_series(
+                get_flashcomm2_o_shard_layer())
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,
