@@ -178,7 +178,7 @@ uint64_t InnerMoeInitRoutingV2TilingBase::GetTilingKey() const {
     return TILING_KEY_HIGH_PERFORMANCE;
   }
   if (dropPadMode == 0) {
-    if (totalLength <= sortLoopMaxElement) {  // Sorting uses only one core
+    if (totalLength <= sortLoopMaxElement) {  // 排序只用到一个核排序
       return TILING_KEY_DROPLESS_SORT_ONE_CORE;
     } else {
       return TILING_KEY_DROPLESS_SORT_MULTI_CORE;
@@ -206,10 +206,10 @@ bool InnerMoeInitRoutingV2TilingBase::GetShapeAttrsInfo(int64_t m, int64_t cols,
   this->expertTokensCountOrCumsumFlag = expertTokensCountOrCumsumFlag;
   this->expertTokensBeforeCapacityFlag = expertTokensBeforeCapacityFlag;
   if (dropPadMode == 1) {
-    // Do not output expertTokensCountOrCumsum in drop-pad mode
+    // droppad场景下不输出expertTokensCountOrCumsum
     expertTokensCountOrCumsumFlag = 0;
   } else {
-    // Do not output expertTokensBeforeCapacity in dropless mode
+    // dropless场景下不输出expertTokensBeforeCapacity
     expertTokensBeforeCapacityFlag = false;
   }
   moeInitRoutingTilingData.cols = cols;
@@ -235,8 +235,8 @@ bool InnerMoeInitRoutingV2TilingBase::GetPlatformInfo(int64_t aivCoreNum, int64_
 
 
 bool InnerMoeInitRoutingV2TilingBase::GetWorkspaceSize() {
-  // Calculate workspace size
-  size_t sortWorkspaceSize = totalLength * sizeof(float) * NUM_TWO * NUM_THREE;  // Space needed for sorting
+  // 计算workspace大小
+  size_t sortWorkspaceSize = totalLength * sizeof(float) * NUM_TWO * NUM_THREE;  // 排序需要的空间
   size_t scatterWorkspaceSize = totalLength * sizeof(int32_t) * NUM_TWO;
   size_t expertTokenFlagSize = aivNum * 2 * sizeof(int32_t);
   workspaceSize_ = sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + SIZE_16 * LENGTH_1024 * LENGTH_1024;
@@ -257,11 +257,11 @@ void InnerMoeInitRoutingV2TilingBase::Tiling4VBSOneCoreCompute(InnerMoeV2VBSComp
 
 void InnerMoeInitRoutingV2TilingBase::Tiling4VBSMultiCoreCompute(InnerMoeV2VBSComputeTilingData* tilingData) {
       //Tiling4VBSMultiCoreCompute
-      int64_t needCoreNum = CeilDiv(totalLength, sortLoopMaxElement);  // Round up
+      int64_t needCoreNum = CeilDiv(totalLength, sortLoopMaxElement);  // 向上取整
       needCoreNum = static_cast<int64_t>(std::pow(4, CeilLog4(needCoreNum)));
-      needCoreNum = std::min(needCoreNum, aivNum);                     // Cannot exceed physical core count
+      needCoreNum = std::min(needCoreNum, aivNum);                     // 不能超过物理核数
       if (needCoreNum > 0) {
-          int64_t perCoreElements = totalLength / needCoreNum;  // Elements handled per core
+          int64_t perCoreElements = totalLength / needCoreNum;  // 每个核处理的元素数
           int64_t alineFloorPerCoreElements = perCoreElements - perCoreElements % SORT32_ALIGN_ELEMENT;
           int64_t lastCoreElement = totalLength - (needCoreNum - 1) * alineFloorPerCoreElements;
           int64_t alineCeilPerCoreElements = perCoreElements + SORT32_ALIGN_ELEMENT - perCoreElements % SORT32_ALIGN_ELEMENT;
@@ -274,7 +274,7 @@ void InnerMoeInitRoutingV2TilingBase::Tiling4VBSMultiCoreCompute(InnerMoeV2VBSCo
           tilingData->needCoreNum = needCoreNum;
           do {
               tilingData->perCoreElements = perCoreElements;
-              tilingData->perCoreLoops = CeilDiv(tilingData->perCoreElements, sortLoopMaxElement);  // Loops handled per core
+              tilingData->perCoreLoops = CeilDiv(tilingData->perCoreElements, sortLoopMaxElement);  // 每个核处理的loop数
               tilingData->perCorePerLoopElements = std::min(tilingData->perCoreElements, sortLoopMaxElement);
               tilingData->perCoreLastLoopElements = tilingData->perCoreElements - (tilingData->perCoreLoops - 1) * tilingData->perCorePerLoopElements;
               tilingData->lastCoreElements = totalLength - (tilingData->needCoreNum - 1) * tilingData->perCoreElements;
@@ -294,7 +294,7 @@ void InnerMoeInitRoutingV2TilingBase::Tiling4VBSMultiCoreCompute(InnerMoeV2VBSCo
 void InnerMoeInitRoutingV2TilingBase::Tiling4VBSCompute() {
   auto tilingData = &moeInitRoutingTilingData.vbsComputeParamsOp;
   tilingData->oneLoopMaxElements = sortLoopMaxElement;
-  if (totalLength <= sortLoopMaxElement) {  // Only one core is used
+  if (totalLength <= sortLoopMaxElement) {  // 只用到一个核
     Tiling4VBSOneCoreCompute(tilingData);
     return;
   }
@@ -304,11 +304,11 @@ void InnerMoeInitRoutingV2TilingBase::Tiling4VBSCompute() {
 void InnerMoeInitRoutingV2TilingBase::Tiling4VMSMiddleCompute() {
   auto vbsComputeTilingData = &moeInitRoutingTilingData.vbsComputeParamsOp;
   auto tilingData = &moeInitRoutingTilingData.vmsMiddleComputeParamsOp;
-  if (vbsComputeTilingData->needCoreNum <= MRG_LIST_NUM) {  // No intermediate merge if queue count fits one VMS
-      tilingData->needCoreNum = 0;                               // Required core count
+  if (vbsComputeTilingData->needCoreNum <= MRG_LIST_NUM) {  // 队列数小于一次vms则没有中间归并
+      tilingData->needCoreNum = 0;                               // 需要的核数
   } else {
       int64_t needCoreNum = CeilDiv(vbsComputeTilingData->needCoreNum, MRG_LIST_NUM);
-      tilingData->needCoreNum = needCoreNum;  // Required core count
+      tilingData->needCoreNum = needCoreNum;  // 需要的核数
   }
 }
 
@@ -333,7 +333,7 @@ void InnerMoeInitRoutingV2TilingBase::Tiling4SrcToDstCompute() {
   tilingData->needCoreNum = needCoreNum;
   int64_t lastCoreNum = totalLength - perCoreRows * (tilingData->needCoreNum - 1);
   tilingData->perCoreRows = perCoreRows;
-  if (perLoopMaxRows >= tilingData->perCoreRows) {  // One loop completes
+  if (perLoopMaxRows >= tilingData->perCoreRows) {  // 一个loop结束
       tilingData->perCorePerLoopRows = tilingData->perCoreRows;
       tilingData->perCoreLastLoopRows = tilingData->perCoreRows;
   } else {

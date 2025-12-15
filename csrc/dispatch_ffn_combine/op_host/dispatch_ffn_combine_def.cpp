@@ -56,7 +56,7 @@ class DispatchFFNCombine : public OpDef {
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
-    // Output
+    // 输出
     this->Output("out")
         .ParamType(REQUIRED)
         .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16})
@@ -79,7 +79,7 @@ class DispatchFFNCombine : public OpDef {
         .ExtendCfgInfo("jitCompile.flag", "static_false")
         .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel");
     this->AICore().AddConfig("ascend910_93", aicore_config);
-    this->AICore().AddConfig("ascend910b", aicore_config);
+    // this->AICore().AddConfig("ascend910b", aicore_config);
     this->MC2().HcclGroup("group");
   }
 };
