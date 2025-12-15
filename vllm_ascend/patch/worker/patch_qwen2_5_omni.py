@@ -66,7 +66,3 @@ class AscendQwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         return video_embeds.split(sizes.tolist())
 
-
-# NOTE: These will be removed after ascend_forward_context is refactored.
-Qwen2_5OmniThinkerForConditionalGeneration._process_image_input = AscendQwen2_5OmniThinkerForConditionalGeneration._process_image_input
-Qwen2_5OmniThinkerForConditionalGeneration._process_video_input = AscendQwen2_5OmniThinkerForConditionalGeneration._process_video_input
