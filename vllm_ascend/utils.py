@@ -1020,7 +1020,8 @@ def flashcomm2_enable() -> bool:
 def flashcomm2_o_shared_enabled() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
 
-def register_flashcomm2_o_shard_layer(layer = None):
+
+def register_flashcomm2_o_shard_layer(layer=None):
     global _FLASHCOMM2_OSHARD_LAYER
     # layer_idx = extract_layer_index(layer.prefix)
     _FLASHCOMM2_OSHARD_LAYER.append(layer)
@@ -1029,9 +1030,11 @@ def register_flashcomm2_o_shard_layer(layer = None):
     # assert _FLASHCOMM2_OSHARD_LAYER is not None, f"_FLASHCOMM2_OSHARD_LAYER is not init, please make sure that you input a valid layer parameter"
     return layer
 
-def get_flashcomm2_o_shard_layer(layer_idx = 0):
+
+def get_flashcomm2_o_shard_layer(layer_idx=0):
     global _FLASHCOMM2_OSHARD_LAYER
     return _FLASHCOMM2_OSHARD_LAYER[layer_idx]
+
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
