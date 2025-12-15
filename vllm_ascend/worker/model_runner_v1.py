@@ -3365,6 +3365,18 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        # DEBUG_START: 添加初始化信息 - 用于对比新老版本内存分配差异
+        if is_310p_device:
+            import torch
+            total_memory_gb = torch.npu.get_device_properties(self.device).total_memory / (1024**3)
+            print(f"[DEBUG KV_CACHE_NEW] Initializing KV Cache on 310P:")
+            print(f"[DEBUG KV_CACHE_NEW]   Total GPU Memory: {total_memory_gb:.2f} GB")
+            print(f"[DEBUG KV_CACHE_NEW]   KV Cache dtype: {self.kv_cache_dtype}")
+            print(f"[DEBUG KV_CACHE_NEW]   Block size: {self.block_size}")
+            print(f"[DEBUG KV_CACHE_NEW]   Max blocks: {kv_cache_config.num_blocks}")
+            print(f"[DEBUG KV_CACHE_NEW]   TorchAir Graph Enabled: {self.torchair_graph_enabled}")
+        # DEBUG_END: 初始化信息
+
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
@@ -3622,6 +3634,34 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
+
+                    # DEBUG_START: 添加KV缓存形状和大小信息 - 用于对比新老版本内存分配差异
+                    if is_310p_device:
+                        print(f"[DEBUG KV_CACHE_NEW] Layer {layer_name} KV Cache:")
+                        print(f"[DEBUG KV_CACHE_NEW]   Shape: {kv_cache_shape}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Block Size: {kv_cache_spec.block_size}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Heads: {kv_cache_spec.num_kv_heads}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Head Size: {kv_cache_spec.head_size}")
+
+                        # 计算实际内存使用 - 新版本310P返回5个值
+                        if len(kv_cache_shape) == 5 and is_310p_device:
+                            # 310P格式: (2, num_blocks, compressed_features, block_size, 16)
+                            num_blocks_debug = kv_cache_shape[1]
+                            compressed_features = kv_cache_shape[2]
+                            block_size_dim = kv_cache_shape[3]
+                            align_dim = kv_cache_shape[4]
+                            total_elements = 2 * num_blocks_debug * compressed_features * block_size_dim * align_dim
+                            kv_cache_memory_mb = (total_elements * torch.tensor([], dtype=dtype).element_size()) / (1024 * 1024)
+                            print(f"[DEBUG KV_CACHE_NEW]   310P Format: (2, {num_blocks_debug}, {compressed_features}, {block_size_dim}, {align_dim})")
+                            print(f"[DEBUG KV_CACHE_NEW]   Total elements per tensor: {total_elements}")
+                            print(f"[DEBUG KV_CACHE_NEW]   Memory per tensor: {kv_cache_memory_mb:.2f} MB")
+                            print(f"[DEBUG KV_CACHE_NEW]   Total for K+V: {kv_cache_memory_mb * 2:.2f} MB")
+                        else:
+                            # 普通格式或其他格式
+                            print(f"[DEBUG KV_CACHE_NEW]   Unexpected shape format: {kv_cache_shape}")
+
+                        print(f"[DEBUG KV_CACHE_NEW]   Num blocks: {num_blocks}")
+                    # DEBUG_END: KV缓存形状信息
                     if not self.model_config.is_deepseek_mla:
                         k_shape = kv_cache_shape[1:]
                         v_shape = k_shape
@@ -3636,8 +3676,21 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             mla_num_blocks, mla_block_size, num_kv_heads,
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
+                    # DEBUG_START: 添加格式转换前的内存信息
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
+
+                    if is_310p_device:
+                        memory_before_k_mb = k_cache.numel() * k_cache.element_size() / (1024 * 1024)
+                        memory_before_v_mb = v_cache.numel() * v_cache.element_size() / (1024 * 1024)
+                        print(f"[DEBUG KV_CACHE_NEW] Before format cast - Layer {layer_name}:")
+                        print(f"[DEBUG KV_CACHE_NEW]   K cache shape: {k_cache.shape}")
+                        print(f"[DEBUG KV_CACHE_NEW]   V cache shape: {v_cache.shape}")
+                        print(f"[DEBUG KV_CACHE_NEW]   K cache memory: {memory_before_k_mb:.2f} MB")
+                        print(f"[DEBUG KV_CACHE_NEW]   V cache memory: {memory_before_v_mb:.2f} MB")
+                        print(f"[DEBUG KV_CACHE_NEW]   K current format: {torch_npu.get_npu_format(k_cache)}")
+                        print(f"[DEBUG KV_CACHE_NEW]   V current format: {torch_npu.get_npu_format(v_cache)}")
+                    # DEBUG_END: 格式转换前信息
 
                     # Fixed: For 310P, main tensors use ND format but KV cache needs NZ format for ReshapeAndCacheOperation
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
@@ -3645,6 +3698,22 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
                         k_cache = torch_npu.npu_format_cast(k_cache, ACL_FORMAT_FRACTAL_NZ)
                         v_cache = torch_npu.npu_format_cast(v_cache, ACL_FORMAT_FRACTAL_NZ)
+                    else:
+                        # Other devices: use standard format conversion
+
+                    # DEBUG_START: 格式转换后的内存信息
+                    if is_310p_device:
+                        memory_after_k_mb = k_cache.numel() * k_cache.element_size() / (1024 * 1024)
+                        memory_after_v_mb = v_cache.numel() * v_cache.element_size() / (1024 * 1024)
+                        print(f"[DEBUG KV_CACHE_NEW] After format cast - Layer {layer_name}:")
+                        print(f"[DEBUG KV_CACHE_NEW]   K new format: {torch_npu.get_npu_format(k_cache)}")
+                        print(f"[DEBUG KV_CACHE_NEW]   V new format: {torch_npu.get_npu_format(v_cache)}")
+                        print(f"[DEBUG KV_CACHE_NEW]   K memory after cast: {memory_after_k_mb:.2f} MB")
+                        print(f"[DEBUG KV_CACHE_NEW]   V memory after cast: {memory_after_v_mb:.2f} MB")
+                        print(f"[DEBUG KV_CACHE_NEW]   K memory increase: {memory_after_k_mb - memory_before_k_mb:.2f} MB")
+                        print(f"[DEBUG KV_CACHE_NEW]   V memory increase: {memory_after_v_mb - memory_before_v_mb:.2f} MB")
+                        print(f"[DEBUG KV_CACHE_NEW]   Total memory delta: {(memory_after_k_mb + memory_after_v_mb) - (memory_before_k_mb + memory_before_v_mb):.2f} MB")
+                    # DEBUG_END: 格式转换信息
                     else:
                         # Other devices: use standard format conversion
                         k_cache = self._convert_torch_format(k_cache)
