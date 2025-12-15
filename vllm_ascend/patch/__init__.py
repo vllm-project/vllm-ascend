@@ -237,7 +237,7 @@
 #       Replace with a new bind_kv_cache.
 #       Skip the raise.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/4770
+#       It need discuss.
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
@@ -245,13 +245,17 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
-#       'torch.argsort' func of npu does not support bool.
+#       1. 'torch.argsort' func of npu does not support bool.
+#       2. Without `stable=True`, the output will have a lot of redundant tokens.
 #    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32.
+#       Replace with a new torch.argsort that will cast the input to torch.int32
+#       and do stable sort.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/4770
+#       1. It depends on torch_npu.
+#       2. https://github.com/vllm-project/vllm/pull/30632
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
 # ** 13. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
