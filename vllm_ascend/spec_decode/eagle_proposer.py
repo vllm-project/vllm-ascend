@@ -150,6 +150,7 @@ class EagleProposer(Proposer):
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
+                positions=self.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
             dummy_compute_logits(self.hidden_states)
