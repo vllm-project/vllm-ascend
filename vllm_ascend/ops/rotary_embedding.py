@@ -62,7 +62,6 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
 
     compilation_config = vllm_config.compilation_config
     model_config = vllm_config.model_config
-    head_dim = model_config.get_head_size()
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
     if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:

@@ -150,7 +150,6 @@ class EagleProposer(Proposer):
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
-                positions=positions,
                 hidden_states=self.hidden_states[:num_tokens],
             )
             dummy_compute_logits(self.hidden_states)
@@ -350,7 +349,7 @@ class EagleProposer(Proposer):
                                         num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
-                positions=positions,
+                positions=self.positions[:num_input_tokens],
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
@@ -450,9 +449,8 @@ class EagleProposer(Proposer):
             attn_metadata.attn_mask = attn_mask
             # Run the model.
 
-            positions = self.positions[:input_batch_size]
             # update global cos, sin
-            update_cos_sin(positions)
+            update_cos_sin(self.positions[:input_batch_size])
 
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
@@ -460,7 +458,7 @@ class EagleProposer(Proposer):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
-                    positions=positions,
+                    positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
