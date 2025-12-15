@@ -261,6 +261,11 @@ class NPUWorker(WorkerBase):
             total_npu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
+
+        # DEBUG: 输出关键内存信息
+        GiB = 1024**3
+        print(f"[ASCEND NEW] available_kv_cache_memory: {available_kv_cache_memory} bytes ({available_kv_cache_memory/GiB:.2f} GiB)")
+
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
         )
