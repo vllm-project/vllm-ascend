@@ -41,7 +41,7 @@ class NPUInputBatch(InputBatch):
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        kernel_block_sizes: [list[list[int]]],
+        kernel_block_sizes: list[list[int]],
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
