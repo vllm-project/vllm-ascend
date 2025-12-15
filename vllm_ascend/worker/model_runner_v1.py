@@ -3679,8 +3679,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
                     # DEBUG_START: 添加格式转换前的内存信息
-                    k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(dtype).view(v_shape)
+                    # FIX_START: 像老版本一样直接创建最终形状的张量，获得NCHW格式
+                    if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                        # 对于310P，直接创建最终形状的张量以获得NCHW格式（像老版本一样）
+                        k_cache = torch.zeros(k_shape, dtype=dtype, device=self.device)
+                        v_cache = torch.zeros(v_shape, dtype=dtype, device=self.device)
+                    else:
+                        # 其他设备保持原有逻辑
+                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
+                    # FIX_END: 直接创建最终形状的张量
 
                     if is_310p_device:
                         memory_before_k_mb = k_cache.numel() * k_cache.element_size() / (1024 * 1024)
