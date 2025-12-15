@@ -288,6 +288,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             get_tp_group().world_size)
         self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
         self.layer._quant_comm_config = {}
+        self.vllm_config = get_current_vllm_config()
 
     @property
     def comm_group(self):
@@ -405,7 +406,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), register_flashcomm2_o_shard_layer(self.layer)):
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(self.vllm_config, register_flashcomm2_o_shard_layer(self.layer)):
             from vllm_ascend.distributed.parallel_state import \
                 get_shared_weight_group
             register_layer_to_shared_weight_series(
@@ -494,6 +495,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 # 该层用于flashcomm2开启oshard后，在QKV matmul之前调用异步broadcast，从而实现通算掩盖
 class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
 
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.vllm_config = get_current_vllm_config()
+
     def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -510,7 +515,7 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
 
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
         layer_idx = extract_layer_index(self.layer.prefix)
-        if flashcomm2_o_shared_enabled() and is_hidden_layer(get_current_vllm_config(), get_flashcomm2_o_shard_layer(layer_idx)):
+        if flashcomm2_o_shared_enabled() and is_hidden_layer(self.vllm_config, get_flashcomm2_o_shard_layer(layer_idx)):
             reach_layer_for_shared_weight_series(get_flashcomm2_o_shard_layer(layer_idx))
         # if flashcomm2_o_shared_enable():
         #     from vllm_ascend.multistream.context import get_multistream_microbatch_context
