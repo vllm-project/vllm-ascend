@@ -257,19 +257,10 @@ class NPUWorker(WorkerBase):
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
-        # DEBUG: 详细内存计算分析
-        GiB = 1024**3
-        raw_memory = total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory
-        print(f"[ASCEND NEW] Memory Analysis:")
-        print(f"[ASCEND NEW]   total_npu_memory: {total_npu_memory} bytes ({total_npu_memory/GiB:.2f} GiB)")
-        print(f"[ASCEND NEW]   gpu_memory_utilization: {self.cache_config.gpu_memory_utilization}")
-        print(f"[ASCEND NEW]   peak_memory: {peak_memory} bytes ({peak_memory/GiB:.2f} GiB)")
-        print(f"[ASCEND NEW]   raw calculation: {total_npu_memory} * {self.cache_config.gpu_memory_utilization} - {peak_memory} = {raw_memory}")
-
-        available_kv_cache_memory = int(raw_memory)
+        available_kv_cache_memory = int(
+            total_npu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
-
-        print(f"[ASCEND NEW] available_kv_cache_memory: {available_kv_cache_memory} bytes ({available_kv_cache_memory/GiB:.2f} GiB)")
 
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
