@@ -1322,5 +1322,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 [[], [1]], 
                 [[], [1]]))
                 
+        self.assertEqual(get_kv_split_metadata(True, 1, 2, 8, 0, 1, 0, 0, 1, 30200, 8, 2, 2, 30000, 
+                                                [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3], [1, 2, 3, 4, 5]), 
+            ([[30008], [30000]], 
+                [[1, 2], [3, 4, 5]], 
+                [[1, 2], [1, 2, 3]]))
+                
 if __name__ == '__main__':
     unittest.main()
