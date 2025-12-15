@@ -121,8 +121,8 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable)
-from vllm_ascend.worker.npu_input_batch import InputBatch
+                               is_moe_model, lmhead_tp_enable, vllm_version_is)
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -249,13 +249,24 @@ class NPUModelRunner(GPUModelRunner):
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
                                   "index_topk")
-        self.attn_backend = get_attn_backend(0,
-                                             self.dtype,
-                                             None,
-                                             self.block_size,
-                                             use_mla=self.model_config.use_mla,
-                                             use_sparse=self.use_sparse)
-
+        if vllm_version_is('0.12.0'):
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse)
+        else:
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None
+                and self.model_config.is_mm_prefix_lm)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
@@ -353,7 +364,7 @@ class NPUModelRunner(GPUModelRunner):
         # solution, we initialize the input batch here, and re-initialize it
         # in `initialize_kv_cache` if the block_sizes here is different from
         # the block_sizes in the kv cache config.
-        self.input_batch = InputBatch(
+        self.input_batch = NPUInputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.model_config.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
@@ -2000,19 +2011,36 @@ class NPUModelRunner(GPUModelRunner):
                         self.speculative_config.method == "mtp":
                     attn_state = AscendAttentionState.SpecDecoding
 
-                common_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
+                if vllm_version_is("0.12.0"):
+                    common_metadata = CommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
                                                                  1],
-                    seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    seq_lens=self.seq_lens.cpu[:num_reqs],
-                    num_reqs=num_reqs,
-                    num_actual_tokens=num_tokens,
-                    block_table_tensor=block_table_tensor[:num_reqs],
-                    slot_mapping=slot_mapping.gpu,
-                    num_computed_tokens_cpu=num_computed_tokens_cpu,
-                    max_query_len=max_query_len,
-                    max_seq_len=seq_lens)
+                        query_start_loc_cpu=self.query_start_loc.
+                        cpu[:num_reqs + 1],
+                        seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                        seq_lens=self.seq_lens.cpu[:num_reqs],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        block_table_tensor=block_table_tensor[:num_reqs],
+                        slot_mapping=slot_mapping.gpu,
+                        num_computed_tokens_cpu=num_computed_tokens_cpu,
+                        max_query_len=max_query_len,
+                        max_seq_len=seq_lens)
+                else:
+                    common_metadata = CommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
+                                                                 1],
+                        query_start_loc_cpu=self.query_start_loc.
+                        cpu[:num_reqs + 1],
+                        _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                        seq_lens=self.seq_lens.cpu[:num_reqs],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        block_table_tensor=block_table_tensor[:num_reqs],
+                        slot_mapping=slot_mapping.gpu,
+                        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+                        max_query_len=max_query_len,
+                        max_seq_len=seq_lens)
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
@@ -2778,7 +2806,7 @@ class NPUModelRunner(GPUModelRunner):
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
-            self.input_batch = InputBatch(
+            self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.model_config.max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
