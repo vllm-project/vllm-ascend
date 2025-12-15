@@ -41,7 +41,7 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                flashcomm2_o_shared_enabled, is_enable_nz,
                                weak_ref_tensors)
-from vllm_ascend.worker.npu_input_batch import InputBatch
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -280,7 +280,7 @@ class AscendMLAMetadataBuilder:
                                               dtype=torch.uint8,
                                               device=device)
 
-    def reorder_batch(self, input_batch: "InputBatch",
+    def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
         # the front and the "prefill" requests are at the using the least amount
