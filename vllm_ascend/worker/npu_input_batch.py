@@ -17,18 +17,13 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
-from dataclasses import dataclass
 from typing import Optional, cast
 
 import numpy as np
 import torch
-from typing_extensions import deprecated
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import (MultiModalFeatureSpec,
-                                    MultiModalKwargsItem,
-                                    MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
