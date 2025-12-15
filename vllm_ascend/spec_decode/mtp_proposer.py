@@ -227,7 +227,7 @@ class MtpProposer(Proposer):
     def dummy_run(self,
                   num_tokens: int,
                   with_prefill: bool = False,
-                  skip_attn: bool = False,
+                  in_graph_capturing: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -251,9 +251,7 @@ class MtpProposer(Proposer):
         moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
                          == MoECommType.FUSED_ALLTOALL else moe_comm_type)
 
-        if skip_attn:
-            attn_metadata = None
-        elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
                     self.runner.input_batch.
@@ -298,7 +296,7 @@ class MtpProposer(Proposer):
         positions = self.positions[:num_tokens]
         previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
-            if i > 0 and not skip_attn and aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            if i > 0 and not in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,

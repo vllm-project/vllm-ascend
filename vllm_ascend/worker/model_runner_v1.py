@@ -2296,7 +2296,7 @@ class NPUModelRunner(GPUModelRunner):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
-                    skip_attn=not force_attention)
+                    in_graph_capturing=not force_attention)
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
