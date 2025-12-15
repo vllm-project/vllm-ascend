@@ -8,7 +8,6 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     "deepseek-ai/DeepSeek-V2-Lite",
-    "deepseek-ai/DeepSeek-V2-Lite",
 ]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
