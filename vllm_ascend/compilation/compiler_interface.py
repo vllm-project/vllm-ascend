@@ -49,7 +49,9 @@ def fusion_pass_compile(
     runtime_shape: Optional[int] = None,
     key: Optional[str] = None,
 ) -> tuple[Optional[Callable], Optional[Any]]:
-
+    print("=========torch compile graph=========")
+    print(graph.graph)
+    
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config["graph_fusion_manager"]
         graph = current_pass_manager(graph, runtime_shape)
