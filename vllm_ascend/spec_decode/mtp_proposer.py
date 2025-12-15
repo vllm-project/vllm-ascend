@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.distributed import get_pcp_group
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -205,9 +206,11 @@ class MtpProposer(Proposer):
         if self.vllm_config.model_config.is_deepseek_mla:
             # check if mtp model use main model's embedding and LMhead
             main_model = model
-            if torch.equal(self.model.model.embed_tokens.weight,
-                           main_model.model.embed_tokens.weight):
-                self.model.model.embed_tokens = main_model.model.embed_tokens
+            if get_pp_group().world_size == 1:
+                # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
+                if torch.equal(self.model.model.embed_tokens.weight,
+                               main_model.model.embed_tokens.weight):
+                    self.model.model.embed_tokens = main_model.model.embed_tokens
             for _, layer_module in self.model.model.layers.items():
                 if torch.equal(layer_module.shared_head.head.weight,
                                main_model.lm_head.weight):
@@ -734,6 +737,9 @@ class MtpProposer(Proposer):
              num_input_tokens, self.runner.with_prefill)
 
         moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
+        # TODO: remove this after moe_comm_type selection logic is finalized
+        moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
+                         == MoECommType.FUSED_ALLTOALL else moe_comm_type)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
