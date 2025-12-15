@@ -63,7 +63,7 @@ class PCPManager:
         )
         self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
         self.cp_kv_recover_idx_for_chunk: List[List[int]] = [
-            [] for _ in range(self.pcp_size)
+            [] for _ in range(self.pcp_world_size)
         ]
         if self.speculative_config and self.pcp_world_size > 1:
             self.input_ids_pcp_full = CpuGpuBuffer(self.max_num_tokens,
@@ -352,7 +352,7 @@ class PCPManager:
                out=positions_pcp_full_np)
         token_indices_pcp_full = (
             positions_pcp_full_np +
-            req_indices_pcp_full * self.input_batch.token_ids_cpu.shape[1])
+            req_indices_pcp_full * input_batch.token_ids_cpu.shape[1])
         torch.index_select(input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices_pcp_full),
@@ -393,15 +393,15 @@ class PCPManager:
         return dcp_local_seq_lens
 
     def generate_kv_idx(self, scheduler_output, input_batch):
-        if not self.pcp_size > 1:
+        if not self.pcp_world_size > 1:
             return
-        self.cp_kv_recover_idx_for_chunk = [[] for _ in range(self.pcp_size)]
+        self.cp_kv_recover_idx_for_chunk = [[] for _ in range(self.pcp_world_size)]
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             is_prefill = input_batch.num_computed_tokens_cpu[
-                i] < self.input_batch.num_prompt_tokens[i]
+                i] < input_batch.num_prompt_tokens[i]
             if is_prefill:
                 num_cp_padded_scheduled_tokens = cdiv(
                     num_scheduled_tokens,
