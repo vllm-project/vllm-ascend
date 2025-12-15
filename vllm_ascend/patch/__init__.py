@@ -228,7 +228,7 @@
 #    Future Plan:
 #       Remove this patch when the bug is fixed.
 #
-# ** File: worker/patch_qwen3_next_mtp.py**
+# ** 11. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -241,7 +241,7 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** File: worker/patch_module.py**
+# ** 12. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
@@ -252,4 +252,20 @@
 #       https://github.com/vllm-project/vllm/pull/4770
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#
+# ** 13. File: worker/patch_rejection_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.rejection_sampler`
+#    Why:
+#       - some functions from `rejection_sampler` are not supported or slow on npu.
+#    How：
+#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
+#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/874
+#       https://github.com/vllm-project/vllm/pull/4849
+#    Future Plan:
+#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
+#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
+#       2. make these functions as costom op, then remove AscendRejectionSampler
 #
