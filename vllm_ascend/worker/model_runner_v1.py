@@ -3644,6 +3644,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         print(f"[DEBUG KV_CACHE_NEW]   Block Size: {kv_cache_spec.block_size}")
                         print(f"[DEBUG KV_CACHE_NEW]   Heads: {kv_cache_spec.num_kv_heads}")
                         print(f"[DEBUG KV_CACHE_NEW]   Head Size: {kv_cache_spec.head_size}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Raw tensor size: {kv_cache_tensor.size}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Page size bytes: {kv_cache_spec.page_size_bytes}")
 
                         # 计算实际内存使用 - 新版本310P返回5个值
                         if len(kv_cache_shape) == 5 and is_310p_device:
@@ -3663,6 +3665,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             print(f"[DEBUG KV_CACHE_NEW]   Unexpected shape format: {kv_cache_shape}")
 
                         print(f"[DEBUG KV_CACHE_NEW]   Num blocks: {num_blocks}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Calculated from size: {kv_cache_tensor.size} / {kv_cache_spec.page_size_bytes} = {kv_cache_tensor.size // kv_cache_spec.page_size_bytes}")
                     # DEBUG_END: KV缓存形状信息
                     if not self.model_config.is_deepseek_mla:
                         k_shape = kv_cache_shape[1:]
@@ -3715,16 +3718,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                     # DEBUG_START: 格式转换后的内存信息
                     if is_310p_device:
-                        memory_after_k_mb = k_cache.numel() * k_cache.element_size() / (1024 * 1024)
-                        memory_after_v_mb = v_cache.numel() * v_cache.element_size() / (1024 * 1024)
                         print(f"[DEBUG KV_CACHE_NEW] After format cast - Layer {layer_name}:")
                         print(f"[DEBUG KV_CACHE_NEW]   K new format: {torch_npu.get_npu_format(k_cache)}")
                         print(f"[DEBUG KV_CACHE_NEW]   V new format: {torch_npu.get_npu_format(v_cache)}")
-                        print(f"[DEBUG KV_CACHE_NEW]   K memory after cast: {memory_after_k_mb:.2f} MB")
-                        print(f"[DEBUG KV_CACHE_NEW]   V memory after cast: {memory_after_v_mb:.2f} MB")
-                        print(f"[DEBUG KV_CACHE_NEW]   K memory increase: {memory_after_k_mb - memory_before_k_mb:.2f} MB")
-                        print(f"[DEBUG KV_CACHE_NEW]   V memory increase: {memory_after_v_mb - memory_before_v_mb:.2f} MB")
-                        print(f"[DEBUG KV_CACHE_NEW]   Total memory delta: {(memory_after_k_mb + memory_after_v_mb) - (memory_before_k_mb + memory_before_v_mb):.2f} MB")
                     # DEBUG_END: 格式转换信息
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
