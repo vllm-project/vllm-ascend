@@ -122,7 +122,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                enable_sp, get_ascend_device_type, is_enable_nz,
                                is_moe_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.utils import PCPManager
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -213,7 +213,7 @@ class NPUModelRunner(GPUModelRunner):
             self.dcp_rank = 0
             self.pcp_size = 1
             self.pcp_rank = 0
-        max_buffer_num_tokens = self.max_num_token
+        max_buffer_num_tokens = self.max_num_tokens
         if self.pcp_size > 1:
             max_buffer_num_tokens = (self.max_num_tokens +
                                      self.max_num_reqs * 2 * self.pcp_size)
