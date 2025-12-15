@@ -3646,7 +3646,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         free_memory, total_memory = torch_npu.npu.mem_get_info()
                         print(f"[DEBUG MEMORY BEFORE ALLOC] Layer {layer_name}:")
                         print(f"[DEBUG MEMORY BEFORE ALLOC]   Free memory: {free_memory} bytes ({free_memory/1024**3:.2f} GiB)")
-                        print(f"[DEBUG MEMORY BEFORE ALLOC]   Required memory: {2 * k_shape.numel() * dtype.itemsize} bytes ({2 * k_shape.numel() * dtype.itemsize/1024**3:.2f} GiB)")
+                        # 计算需要的内存大小 (k_shape是tuple)
+                        k_elements = 1
+                        for dim in k_shape:
+                            k_elements *= dim
+                        required_memory = 2 * k_elements * dtype.itemsize  # K+V cache
+                        print(f"[DEBUG MEMORY BEFORE ALLOC]   Required memory: {required_memory} bytes ({required_memory/1024**3:.2f} GiB)")
 
                         # 对于310P，直接创建最终形状的张量以获得NCHW格式（像老版本一样）
                         k_cache = torch.zeros(k_shape, dtype=dtype, device=self.device)
