@@ -374,4 +374,4 @@ class LasyerMultiBlockReqMeta:
     ends: list[int]
     block_ids: list[int]
     layer_id: int
-    is_last_chunk: bool = True
+    is_last_chunk: Optional[bool] = True
