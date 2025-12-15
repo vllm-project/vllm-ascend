@@ -123,7 +123,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable, vllm_version_is, is_vl_model)
+                               is_moe_model, lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
