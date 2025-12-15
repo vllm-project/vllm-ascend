@@ -75,10 +75,11 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
         # FIX_START: 恢复老版本310P的内存压缩优化，解决内存分配失败问题
         # 老版本使用 num_kv_heads * head_size // 16 来压缩内存，减少310P内存占用
-        if is_310p():
+        # 新版本移除了 is_310p() 函数，改用 get_ascend_device_type() 检测设备类型
+        if get_ascend_device_type() == AscendDeviceType._310P:
             return (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
         # FIX_END: 恢复310P压缩优化
         return (2, num_blocks, block_size, num_kv_heads, head_size)
