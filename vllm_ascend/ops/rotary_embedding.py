@@ -80,16 +80,21 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
                                dtype=dtype,
                                device=device)
     elif not is_vl_model(vllm_config) and not vllm_config.model_config.use_mla:
+        rope_dim = model_config.get_head_size()
+        # For models using partial rope like Qwen3-Next.
+        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+            rope_dim = int(rope_dim *
+                           model_config.hf_text_config.partial_rotary_factor)
         _cos = torch.ones(1,
                           max_num_batched_tokens,
                           1,
-                          head_dim,
+                          rope_dim,
                           dtype=dtype,
                           device=device)
         _sin = torch.zeros(1,
                            max_num_batched_tokens,
                            1,
-                           head_dim,
+                           rope_dim,
                            dtype=dtype,
                            device=device)
 
