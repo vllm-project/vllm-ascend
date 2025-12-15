@@ -12,9 +12,9 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | >= 8.3.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.7.1             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.7.1                         | Required for torch-npu and vllm           |
+    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
 
 There are two installation methods:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.

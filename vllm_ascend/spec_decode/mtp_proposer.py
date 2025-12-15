@@ -256,11 +256,12 @@ class MtpProposer(Proposer):
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.runner.query_start_loc[:num_reqs + 1],
-                    query_start_loc_cpu=self.runner.
-                    query_start_loc_cpu[:num_reqs + 1],
-                    seq_lens_cpu=self.runner.seq_lens_cpu,
-                    seq_lens=self.runner.seq_lens[:num_reqs],
+                    query_start_loc=self.runner.query_start_loc.gpu[:num_reqs +
+                                                                    1],
+                    query_start_loc_cpu=self.runner.query_start_loc.
+                    cpu[:num_reqs + 1],
+                    seq_lens_cpu=self.runner.seq_lens.cpu,
+                    seq_lens=self.runner.seq_lens.gpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     num_input_tokens=num_tokens,
@@ -268,16 +269,14 @@ class MtpProposer(Proposer):
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                     block_table_tensor=self.runner.input_batch.block_table[0].
-                    get_device_tensor()[:num_reqs],
+                    get_device_tensor(),
                     slot_mapping=self.runner.input_batch.block_table[0].
-                    slot_mapping,
-                    positions=self.runner.positions,
+                    slot_mapping.gpu,
+                    positions=self.runner.positions.gpu,
                     attn_mask=self.runner.attn_mask,
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
-                    cos=self.runner.cos,
-                    sin=self.runner.sin,
                 )
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -304,7 +303,6 @@ class MtpProposer(Proposer):
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0,
@@ -406,7 +404,8 @@ class MtpProposer(Proposer):
             else:
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
-                target_token_ids = self.runner.input_ids[:num_scheduled_tokens]
+                target_token_ids = self.runner.input_ids.gpu[:
+                                                             num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
                 target_hidden_states = hidden_states[:num_scheduled_tokens]
         else:
@@ -435,7 +434,7 @@ class MtpProposer(Proposer):
                 target_positions = positions
                 target_hidden_states = hidden_states
             else:
-                target_token_ids = self.runner.input_ids[token_indices]
+                target_token_ids = self.runner.input_ids.gpu[token_indices]
                 target_positions = positions[token_indices]
                 target_hidden_states = hidden_states[token_indices]
 
@@ -748,7 +747,8 @@ class MtpProposer(Proposer):
             uniform_decode = False
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+            self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+        original_aclgraph_runtime_mode = aclgraph_runtime_mode
         if self.use_async_scheduling:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -781,7 +781,6 @@ class MtpProposer(Proposer):
                     num_tokens=num_input_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
@@ -804,6 +803,17 @@ class MtpProposer(Proposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
+                    if original_aclgraph_runtime_mode == CUDAGraphMode.FULL and \
+                        self.use_async_scheduling and attn_metadata[layer_name].decode is not None:
+                        for layer_name in self.attn_layer_name:
+                            actual_size = len(attn_metadata[layer_name].decode.
+                                              actual_seq_lengths_q)
+
+                            attn_metadata[layer_name].decode.seq_lens_list = \
+                                attn_metadata[layer_name].decode.seq_lens_list[:actual_size]
+                            attn_metadata[layer_name].decode.block_table = \
+                                attn_metadata[layer_name].decode.block_table[:actual_size]
+
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
                                                hidden_states=hidden_states)
@@ -823,10 +833,7 @@ class MtpProposer(Proposer):
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
-                if not self.runner.with_prefill:
-                    max_num_reqs_across_dp = num_input_tokens
-                else:
-                    max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
+                max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 last_token_indices = nn.functional.pad(
                     last_token_indices,
                     (0, max_num_reqs_across_dp - num_indices))
@@ -1138,8 +1145,9 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens)
 
-        token_indices_to_sample = (common_attn_metadata.query_start_loc[1:] -
-                                   1 - num_rejected_tokens_gpu)
+        query_start_loc = common_attn_metadata.query_start_loc[
+            1:1 + num_rejected_tokens_gpu.shape[0]]
+        token_indices_to_sample = query_start_loc - 1 - num_rejected_tokens_gpu
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample
 

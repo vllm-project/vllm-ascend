@@ -3,9 +3,9 @@
 ## Environmental Dependencies
 
 * Software:
-  * Python >= 3.9, < 3.12
-  * CANN >= 8.3.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
+  * Python >= 3.10, < 3.12
+  * CANN == 8.3.rc2
+  * PyTorch == 2.8.0, torch-npu == 2.8.0
   * vLLM：main branch
   * vLLM-Ascend：main branch
 
@@ -113,6 +113,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                 "kv_role": "kv_producer",
                 "kv_port": "20001",
                 "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
                     "prefill": {
                         "dp_size": 1,
                         "tp_size": 1
