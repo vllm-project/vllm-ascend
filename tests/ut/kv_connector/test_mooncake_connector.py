@@ -1259,8 +1259,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
     def test_get_kv_split_metadata(self):
 
-        def get_kv_split_metadata(use_mla, pcp_size,  dcp_size, tp_size, tp_rank, num_key_value_head, dcp_rank, pcp_rank, tp_num_need_pulls, side_channel_port, _prefill_tp_size, 
-        remote_pcp_size, remote_dcp_size, remote_port, request_blocks, remote_block_ids, local_block_ids):
+        def get_kv_split_metadata(use_mla, pcp_size,  dcp_size, tp_size, tp_rank, pcp_rank, _prefill_tp_size, 
+        remote_pcp_size, remote_dcp_size, remote_port, remote_block_ids, local_block_ids):
 
             worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
             
@@ -1269,21 +1269,15 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             worker.dcp_size = dcp_size
             worker.tp_size = tp_size
             worker.tp_rank = tp_rank
-            worker.num_key_value_heads = num_key_value_head
-            worker.dcp_rank = dcp_rank
             worker.pcp_rank = pcp_rank
-            worker.tp_num_need_pulls = tp_num_need_pulls
-            worker.side_channel_port = side_channel_port
             worker._prefill_tp_size = _prefill_tp_size
             worker.local_remote_block_port_mapping = None
-            worker.handshake_port = worker.side_channel_port + worker.pcp_rank * worker.tp_size + worker.tp_rank
 
             meta = types.SimpleNamespace()
             
             meta.remote_pcp_size = remote_pcp_size
             meta.remote_dcp_size = remote_dcp_size
             meta.remote_port = remote_port
-            meta.request_blocks = request_blocks
             meta.remote_block_ids = remote_block_ids
             meta.local_block_ids = local_block_ids
 
@@ -1292,38 +1286,37 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
                 
-        self.assertEqual(get_kv_split_metadata(True, 1, 1, 8, 1, 1, 0, 0, 1, 30201, 8, 1, 8, 30000, [1], [1], [1]), 
+        self.assertEqual(get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1], [1]), 
             ([[30001], [30002], [30003], [30004], [30005], [30006], [30007], [30000]], 
                 [[], [], [], [], [], [], [], [1]], 
                 [[], [], [], [], [], [], [], [1]]))
         
-        self.assertEqual(get_kv_split_metadata(False, 1, 1, 8, 1, 4, 0, 0, 1, 30201, 8, 2, 8, 30000, [1], [1], [1]), 
+        self.assertEqual(get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 8, 30000, [1], [1]), 
             ([[30001], [30002], [30003], [30004], [30005], [30006], [30007], [30008], [30009], [30010], [30011], [30012], [30013], [30014], [30015], [30000]], 
                 [[], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [1]], 
                 [[], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [1]]))
         
-        self.assertEqual(get_kv_split_metadata(True, 1, 1, 8, 1, 1, 0, 0, 1, 30201, 8, 2, 2, 30000, [1], [1], [1]), 
+        self.assertEqual(get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 2, 2, 30000, [1], [1]), 
             ([[30001], [30008], [30009], [30000]], 
                 [[], [], [], [1]], 
                 [[], [], [], [1]]))
         
-        self.assertEqual(get_kv_split_metadata(False, 1, 1, 8, 1, 4, 0, 0, 1, 30201, 8, 2, 2, 30000, [1], [1], [1]), 
+        self.assertEqual(get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 2, 30000, [1], [1]), 
             ([[30001], [30008], [30009], [30000]], 
                 [[], [], [], [1]], 
                 [[], [], [], [1]]))
         
-        self.assertEqual(get_kv_split_metadata(True, 1, 2, 8, 1, 1, 0, 0, 1, 30201, 8, 2, 2, 30000, [1], [1], [1]), 
+        self.assertEqual(get_kv_split_metadata(True, 1, 2, 8, 1, 0, 8, 2, 2, 30000, [1], [1]), 
             ([[30009], [30001]], 
                 [[], [1]], 
                 [[], [1]]))
         
-        self.assertEqual(get_kv_split_metadata(False, 1, 2, 8, 1, 4, 0, 0, 1, 30201, 8, 2, 2, 30000, [1], [1], [1]), 
+        self.assertEqual(get_kv_split_metadata(False, 1, 2, 8, 1, 0, 8, 2, 2, 30000, [1], [1]), 
             ([[30009], [30001]], 
                 [[], [1]], 
                 [[], [1]]))
                 
-        self.assertEqual(get_kv_split_metadata(True, 1, 2, 8, 0, 1, 0, 0, 1, 30200, 8, 2, 2, 30000, 
-                                                [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3], [1, 2, 3, 4, 5]), 
+        self.assertEqual(get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000, [1, 2, 3], [1, 2, 3, 4, 5]), 
             ([[30008], [30000]], 
                 [[1, 2], [3, 4, 5]], 
                 [[1, 2], [1, 2, 3]]))
