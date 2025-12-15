@@ -128,7 +128,7 @@ class AddRMSNormQuantPatternWithBias:
                 scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
                 offset,
                 epsilon=self.eps,
-                bias=bias)
+                beta=bias)
             quantized_output = output[0]
             out1 = output[2]
             return quantized_output, out1
