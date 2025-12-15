@@ -5,6 +5,8 @@ import torch
 # TODO When the operator of argsort is ready, this patch must be removed.
 def _argsort(tensor, *args, **kwargs):
     if tensor.dtype == torch.bool:
+        # If it is not stable, it will have redundant outputs.
+        kwargs["stable"] = True
         return torch.argsort(tensor.to(torch.int32), *args, **kwargs)
     else:
         return torch.argsort(tensor, *args, **kwargs)
