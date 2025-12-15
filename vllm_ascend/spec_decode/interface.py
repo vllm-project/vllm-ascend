@@ -48,7 +48,6 @@ class Proposer:
                            positions: torch.Tensor = None,
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
         """Called by execute_model in model_runner"""
         raise NotImplementedError

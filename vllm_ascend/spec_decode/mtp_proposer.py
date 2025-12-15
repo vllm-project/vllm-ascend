@@ -51,10 +51,6 @@ _MTP_MODELS = {
     ("vllm.model_executor.models.qwen3_next_mtp", "Qwen3NextMTP")
 }
 
-_DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
-
-_FIRST_LAYERS = {"Qwen3NextForCausalLM": 'model.layers.3.self_attn.attn'}
-
 
 def _load_model(architecture):
     if architecture not in _MTP_MODELS:
@@ -345,10 +341,8 @@ class MtpProposer(Proposer):
                            positions: torch.Tensor = None,
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
         common_attn_metadata = self.runner.spec_decode_common_attn_metadata
-        attn_metadata = self._get_attn_metadata(attn_metadata)
 
         if self.speculative_config.disable_padded_drafter_batch:
             # When padded-batch is disabled, the sampled_token_ids should be
@@ -486,14 +480,6 @@ class MtpProposer(Proposer):
         target_device = self.vllm_config.device_config.device
         model = _load_model(architecture)
         self.model = model(vllm_config=self.vllm_config).to(target_device)
-
-    def _get_attn_metadata(self, attn_metadata):
-        if attn_metadata is not None and isinstance(attn_metadata, dict):
-            architecture = self.vllm_config.model_config.architecture
-            layer_name = _FIRST_LAYERS.get(architecture, _DEFAULT_FIRST_LAYER)
-            attn_metadata = attn_metadata[layer_name]
-
-        return attn_metadata
 
     def _prepare_inputs(
         self,
