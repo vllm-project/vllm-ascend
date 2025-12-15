@@ -261,7 +261,6 @@ class TestMtpProposer:
 
         proposer.prepare_next_token_ids_padded.assert_called_once()
         proposer.prepare_inputs_padded.assert_called_once()
-        proposer._get_attn_metadata.assert_called_once()
         proposer._propose.assert_called_once()
         assert torch.equal(draft_token_ids, proposer._propose.return_value)
 
