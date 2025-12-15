@@ -19,7 +19,7 @@ import torch
 from einops import rearrange
 from torch import nn
 from vllm.config import CUDAGraphMode
-from vllm.forward_context import  get_forward_context 
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 from vllm.triton_utils import triton
@@ -48,7 +48,7 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
-        forward_context = get_forward_context() 
+        forward_context = get_forward_context()
         is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
         # triton grid should be less than 66536
         divide_grid = projected_states_qkvz.shape[0] * triton.cdiv(

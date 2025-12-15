@@ -253,3 +253,15 @@
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #
+# ** File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
+#    Why:
+#       The model cannot directly accommodate these custom operators.
+#    How：
+#       Add a branch in Qwen3NextGatedDeltaNet.forward to adapt to fused_qkvzba_split_reshape_cat.
+#    Related PR (if no, explain why):
+#       The model in VLLM can run, but now the performance is better.
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
