@@ -1689,6 +1689,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
+        print("___________")
+        print(self.input_batch.req_ids)
         need_dump = self.dump_enable and self.debugger is not None
         # Unpack ephemeral state.
         (

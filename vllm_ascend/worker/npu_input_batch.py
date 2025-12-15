@@ -39,74 +39,11 @@ from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 from vllm_ascend.pool.medatata import PoolingStates
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
-
-
-@dataclass
-class CachedRequestState:
-
-    req_id: str
-    prompt_token_ids: Optional[list[int]]
-    sampling_params: Optional[SamplingParams]
-    generator: Optional[torch.Generator]
-
-    block_ids: tuple[list[int], ...]
-    num_computed_tokens: int
-    output_token_ids: list[int]
-
-    mrope_positions: Optional[torch.Tensor] = None
-    mrope_position_delta: Optional[int] = None
-
-    mm_features: Optional[list[MultiModalFeatureSpec]] = None
-    # for back-compatibility, will be removed in next major release
-    mm_kwargs: Optional[list[MultiModalKwargsItem]] = None
-    mm_positions: Optional[list[PlaceholderRange]] = None
-    mm_hashes: Optional[list[PlaceholderRange]] = None
-
-    # for pooling models
-    pooling_params: PoolingParams | None = None
-    pooling_states: PoolingStates | None = None
-
-    lora_request: Optional[LoRARequest] = None
-    prompt_embeds: Optional[torch.Tensor] = None
-
-    prev_num_draft_len: int = 0  # previous number of draft tokens
-
-    def __post_init__(self):
-        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds)
-        if self.pooling_params is not None:
-            self.pooling_states = PoolingStates()
-
-    @property
-    def num_tokens(self) -> int:
-        return self.num_prompt_tokens + len(self.output_token_ids)
-
-    # Temporary back-compatibility for plugins that define model runner
-    @property
-    @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
-                "removed in v0.13. Please use `mm_kwargs` instead.")
-    def mm_inputs(self) -> list[MultiModalKwargsItems]:
-        assert self.mm_features is not None
-        return [
-            MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
-            if f.data is not None
-        ]
-
-    def get_token_id(self, idx: int) -> int:
-        if idx < self.num_prompt_tokens:
-            if self.prompt_token_ids is None:
-                raise ValueError(
-                    f"Tried to access token index {idx}, but that token was "
-                    "provided via prompt_embeds, and its ID is unknown.")
-            return self.prompt_token_ids[idx]
-        elif idx - self.num_prompt_tokens < len(self.output_token_ids):
-            return self.output_token_ids[idx - self.num_prompt_tokens]
-        else:
-            return -1
 
 
 class InputBatch:
@@ -476,7 +413,11 @@ class InputBatch:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
         elif pooling_params := request.pooling_params:
-            pooling_states = request.pooling_states
+            if vllm_version_is("0.12.0"):
+                # For backward compatibility, build an empty PoolingStates
+                pooling_states = PoolingStates()
+            else:
+                pooling_states = request.pooling_states
             assert pooling_states is not None
 
             self.pooling_params[req_id] = pooling_params
@@ -537,6 +478,7 @@ class InputBatch:
 
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
+            self.pooling_states.pop(req_id, None)
             return req_index
 
         self.greedy_reqs.discard(req_id)
