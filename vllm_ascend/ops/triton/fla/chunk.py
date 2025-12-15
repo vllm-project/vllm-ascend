@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 from einops import rearrange
-from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+from .l2norm import l2norm_fwd
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
