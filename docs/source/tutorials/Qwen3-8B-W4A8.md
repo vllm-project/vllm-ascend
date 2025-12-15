@@ -47,6 +47,8 @@ cd example/Qwen
 MODEL_PATH=/home/models/Qwen3-8B
 # Path to save converted weight, Replace with your local path
 SAVE_PATH=/home/models/Qwen3-8B-w4a8
+# Set an idle NPU card
+export ASCEND_RT_VISIBLE_DEVICES=0
 
 python quant_qwen.py \
           --model_path $MODEL_PATH \
