@@ -465,16 +465,15 @@ class EagleProposer(Proposer):
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
 
-        positions = self.positions[:num_input_tokens]
         # update global cos, sin
-        update_cos_sin(positions)
+        update_cos_sin(self.positions[:num_input_tokens])
 
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
-                positions=positions,
+                positions=self.positions[:num_input_tokens],
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
@@ -576,9 +575,8 @@ class EagleProposer(Proposer):
             attn_metadata.block_tables = block_table.to(device)
             # Run the model.
 
-            positions = self.positions[:input_batch_size]
             # update global cos, sin
-            update_cos_sin(positions)
+            update_cos_sin(self.positions[:input_batch_size])
 
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
@@ -586,7 +584,7 @@ class EagleProposer(Proposer):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
-                    positions=positions,
+                    positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
