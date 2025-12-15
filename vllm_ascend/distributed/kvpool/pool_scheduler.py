@@ -310,8 +310,7 @@ class LookupKeyClient:
         self.socket.close(linger=0)
 
 
-def get_zmq_rpc_path_lookup(
-    vllm_config: Optional["VllmConfig"] = None, ) -> str:
+def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured

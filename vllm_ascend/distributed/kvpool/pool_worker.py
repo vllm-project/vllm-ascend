@@ -295,8 +295,9 @@ class KVPoolWorker:
             only be returned in the last iteration. 
         """
         token_len = request.token_len_chunk
-        mask_num = (request.load_spec.vllm_cached_tokens // self.block_size *
-                    self.block_size)
+        mask_num = (
+            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+            // self.block_size * self.block_size)
         num_required_tokens = token_len - mask_num
 
         ret_mask = torch.zeros(token_len, dtype=torch.bool, device="cpu")

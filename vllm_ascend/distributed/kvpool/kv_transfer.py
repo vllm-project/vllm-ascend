@@ -183,8 +183,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
     def _handle_request(self, req_meta: ReqMeta):
         req_id = req_meta.req_id
-        mask_num = (req_meta.load_spec.vllm_cached_tokens // self.block_size *
-                    self.block_size)
+        mask_num = (
+            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+            // self.block_size * self.block_size)
         addr_list = []
         size_list = []
         key_list = []
