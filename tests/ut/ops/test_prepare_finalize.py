@@ -13,6 +13,10 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
     def setUp(self):
         # Mock FusedMoEConfig
+        fake_stream = MagicMock()
+        patcher = patch("torch.npu.Stream", return_value=fake_stream)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.tp_group = MagicMock()
         self.moe_config.tp_group.device_group = MagicMock()
