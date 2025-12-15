@@ -19,7 +19,7 @@ class MemcacheBackend(Backend):
 
     def __init__(self, parallel_config: ParallelConfig):
         try:
-            from memcache import DistributedObjectStore  # type: ignore
+            from memcache_hybrid import DistributedObjectStore  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "Please install memcache by following the instructions at "
@@ -43,10 +43,7 @@ class MemcacheBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        for ptr, size in zip(ptrs, sizes):
-            ret_value = self.store.register_buffer(ptr, size)
-            if ret_value != 0:
-                raise RuntimeError("Memcache memory registration failed.")
+        pass
 
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
