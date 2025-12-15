@@ -572,7 +572,8 @@ class KVPoolWorker:
                 num_block = len(keys) // self.num_layers
             multi_tp_values = [
                 res[i * num_block:(i + 1) * num_block]  # type: ignore[index]
-                for i in range(min(self.tp_size, self.num_kv_head))
+                for i in range(
+                    min(self.tp_size, self.num_kv_head) * self.pp_size)
             ]
             index = self.find_min_first_non_one_index(multi_tp_values)
             if index != -1:
