@@ -835,7 +835,7 @@ class MooncakeConnectorScheduler:
         self._reqs_need_send: dict[str, float] = {}
 
         # master-slave meta information for cross-nodes
-        self.multi_nodes_meta_mapping: dict[int, dict[str, Any]] = {}
+        self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
