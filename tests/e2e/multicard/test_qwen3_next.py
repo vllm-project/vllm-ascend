@@ -61,9 +61,14 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
-# TODO: Fix the accuary of batch chunked prefill
 def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
-    example_prompts = ["Hello, my name is"]
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
     max_tokens = 20
 
     with VllmRunner(
