@@ -92,7 +92,7 @@ Run the following script to start the vLLM server on multi-NPU:
 For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 4, and for 32 GB of memory, tensor-parallel-size should be at least 8.
 
 ```bash
-vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 4096 --gpu-memory-utilization 0.7 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 4096 --gpu-memory-utilization 0.85 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 Once your server is started, you can query the model with input prompts.
