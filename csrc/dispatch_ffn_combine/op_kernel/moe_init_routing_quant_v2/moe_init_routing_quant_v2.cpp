@@ -114,7 +114,6 @@ __aicore__ inline  void moe_init_routing_quant_v2(
       srcToDstAndGatherOp.Init(x, scale, expandedRowIdx, expandedX, dynamicQuantScale, workspace, tilingData, &srcToDstGatherPipe);
       srcToDstAndGatherOp.Process();
       srcToDstGatherPipe.Destroy();
-      return;
     }
   }
 

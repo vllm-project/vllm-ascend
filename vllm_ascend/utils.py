@@ -31,6 +31,7 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -844,6 +845,13 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+    # For IntermediateTensors used in pipeline parallelism
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -920,16 +928,17 @@ def calculate_ep_buffer_size() -> int:
     try:
         from vllm.config import get_current_vllm_config
         vllm_config = get_current_vllm_config()
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
         hf_config = vllm_config.model_config.hf_config
 
         hidden_size = hf_config.hidden_size
-        topk = getattr(hf_config, "num_experts_per_token", 1)
-        batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        topk = getattr(hf_config, "num_experts_per_tok", 1)
+        batch_size = vllm_config.scheduler_config.max_num_batched_tokens // tp_size
         int8_size = torch.iinfo(torch.int8).bits // 8
         bf16_size = torch.finfo(torch.bfloat16).bits // 8
         ep_buffer_size = math.ceil(
             (batch_size * hidden_size * topk *
-             (int8_size * 2 + bf16_size)) / (1024 * 1024))
+             (int8_size + bf16_size) * 3) / (1024 * 1024))
     except Exception:
         pass
     return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
