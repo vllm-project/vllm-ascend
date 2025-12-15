@@ -38,7 +38,6 @@ class NgramProposer(VllmNgramProposer, Proposer):
                            positions=None,
                            num_scheduled_tokens=None,
                            hidden_states=None,
-                           attn_metadata=None,
                            aux_hidden_states=None) -> list[list[int]]:
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(valid_sampled_token_ids):
