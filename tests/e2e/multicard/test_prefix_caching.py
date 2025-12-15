@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare the with and without prefix caching on V1 scheduler or AscendScheduler."""
+"""Compare the with and without prefix caching."""
 
 import pytest
 
@@ -9,7 +9,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     # for MHA
-    "Qwen/Qwen3-8B-Base",
+    "Qwen/Qwen3-8B",
     # for MLA
     "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]
@@ -60,9 +60,8 @@ INPUT_PROMPTS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
-def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
+def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -71,7 +70,6 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
 
     with VllmRunner(model,
                     enable_prefix_caching=False,
-                    enforce_eager=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:

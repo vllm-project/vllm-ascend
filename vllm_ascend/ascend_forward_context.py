@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import (get_dp_group, get_ep_group,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
@@ -18,34 +17,6 @@ if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 else:
     WeightPrefetchMethod = None
-
-
-class FusedMoEState(Enum):
-    AllGather = 0
-    All2All = 1
-    MC2 = 2
-    AllGatherEP = 3
-    NaiveMulticast = 4
-    All2AllSeq = 5
-
-
-def get_fused_moe_state(ep_size: int, with_prefill: bool,
-                        is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return FusedMoEState.AllGatherEP
-    elif ep_size == 1:
-        if with_prefill:
-            return FusedMoEState.NaiveMulticast
-        else:
-            return FusedMoEState.AllGather
-    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
-    elif ep_size < 16 or with_prefill:
-        return FusedMoEState.All2All
-    else:
-        return FusedMoEState.MC2
 
 
 class MoECommType(Enum):
@@ -64,7 +35,6 @@ def set_ascend_forward_context(
         num_tokens_across_dp: Optional[torch.Tensor] = None,
         with_prefill: bool = True,
         in_profile_run: bool = False,
-        reserved_mc2_mask: Optional[torch.Tensor] = None,
         moe_comm_type: Optional[MoECommType] = None,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -95,16 +65,7 @@ def set_ascend_forward_context(
 
         forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
-        ep_size = (get_ep_group().world_size if
-                   vllm_config.parallel_config.enable_expert_parallel else 1)
 
-        # fused_moe_state is used in torchair, it will be deleted along with torchair
-        is_deepseek_v3_r1 = hasattr(
-            vllm_config.model_config.hf_config, 'n_routed_experts'
-        ) and vllm_config.model_config.hf_config.n_routed_experts == 256
-        fused_moe_state = get_fused_moe_state(ep_size, with_prefill,
-                                              is_deepseek_v3_r1)
-        forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
         # NOTE: This cannot be set using set_forward_context
@@ -185,7 +146,7 @@ def set_ascend_forward_context(
             # NOTE: token num which need to pad to when mc2
             forward_context.padded_num_tokens = math.ceil(
                 max_tokens_across_dp / tp_world_size) * tp_world_size
-
+            reserved_mc2_mask = get_mc2_mask()
             if reserved_mc2_mask is not None:
                 mc2_mask = reserved_mc2_mask[:forward_context.
                                              padded_num_tokens]
@@ -197,3 +158,76 @@ def set_ascend_forward_context(
             yield
         finally:
             pass
+
+
+_mc2_tokens_capacity: Optional[int] = None
+_reserved_mc2_mask: Optional[torch.Tensor] = None
+_sin: Optional[torch.Tensor] = None
+_cos: Optional[torch.Tensor] = None
+
+
+def set_mc2_tokens_capacity(vllm_config, max_num_reqs,
+                            uniform_decode_query_len):
+    global _mc2_tokens_capacity
+    if _mc2_tokens_capacity is not None:
+        return
+    if vllm_config.compilation_config.cudagraph_capture_sizes:
+        max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+    else:
+        # NOTE: To save memory, we cap the max number of tokens to 512.
+        max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    # Use integer arithmetic for ceiling division.
+    num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+    _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+
+
+def get_mc2_tokens_capacity():
+    return _mc2_tokens_capacity
+
+
+def set_mc2_mask(vllm_config, device):
+    global _reserved_mc2_mask
+    if _reserved_mc2_mask is not None:
+        return
+    if is_moe_model(vllm_config):
+        _reserved_mc2_mask = torch.zeros(get_mc2_tokens_capacity(),
+                                         dtype=torch.bool,
+                                         device=device)
+    else:
+        _reserved_mc2_mask = None
+
+
+def get_mc2_mask():
+    return _reserved_mc2_mask
+
+
+def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
+                    device):
+    global _cos
+    global _sin
+    if _cos is not None:
+        return
+    compilation_config = vllm_config.compilation_config
+    model_config = vllm_config.model_config
+    if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+        _cos = torch.ones(max_num_reqs * decode_token_per_req,
+                          1,
+                          1,
+                          rope_dim,
+                          dtype=dtype,
+                          device=device)
+        _sin = torch.zeros(max_num_reqs * decode_token_per_req,
+                           1,
+                           1,
+                           rope_dim,
+                           dtype=dtype,
+                           device=device)
+    else:
+        _cos = None
+        _sin = None
+
+
+def get_cos_and_sin():
+    return _cos, _sin

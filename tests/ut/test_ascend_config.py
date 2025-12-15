@@ -41,14 +41,14 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
-        self.assertTrue(ascend_compilation_config.enable_quantization_fusion)
+        self.assertTrue(ascend_compilation_config.fuse_norm_quant)
 
     @_clean_up_ascend_config
     def test_init_ascend_config_with_additional_config(self):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "ascend_compilation_config": {
-                "enable_quantization_fusion": False,
+                "fuse_norm_quant": False,
             },
             "multistream_overlap_shared_expert": True,
             "expert_map_path": "test_expert_map_path",
@@ -57,9 +57,20 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertFalse(ascend_config.enable_npugraph_ex)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
-        self.assertFalse(ascend_compilation_config.enable_quantization_fusion)
+        self.assertFalse(ascend_compilation_config.fuse_norm_quant)
+
+    @_clean_up_ascend_config
+    def test_init_ascend_config_enable_npugraph_ex(self):
+        with self.assertRaises(NotImplementedError):
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {
+                "enable_npugraph_ex": True,
+                "refresh": True,
+            }
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     def test_get_ascend_config(self):

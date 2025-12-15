@@ -52,9 +52,9 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (check_ascend_device_type, enable_sp,
-                               is_enable_nz, register_ascend_customop,
-                               sleep_mode_enabled, try_register_lib)
+from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -88,7 +88,8 @@ class NPUWorker(WorkerBase):
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
-        _register_atb_extensions()
+        if get_ascend_device_type() != AscendDeviceType._910_95:
+            _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
@@ -111,11 +112,6 @@ class NPUWorker(WorkerBase):
             except Exception:
                 logger.info("Skip binding cpu.")
 
-        # Try to import mindie_turbo to accelerate vLLM inference.
-        try_register_lib(
-            "mindie_turbo",
-            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
-        )
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -129,7 +125,7 @@ class NPUWorker(WorkerBase):
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
-        if sleep_mode_enabled():
+        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -140,10 +136,6 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
     def sleep(self, level: int = 1) -> None:
-        if not sleep_mode_enabled():
-            raise ValueError(
-                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
-            )
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -164,11 +156,6 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        if not sleep_mode_enabled():
-            raise ValueError(
-                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
-            )
-
         if is_enable_nz():
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
@@ -371,7 +358,8 @@ class NPUWorker(WorkerBase):
             self.model_runner.capture_model()
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        self._warm_up_atb()
+        if get_ascend_device_type() != AscendDeviceType._910_95:
+            self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)

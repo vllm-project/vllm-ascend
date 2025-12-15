@@ -26,7 +26,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
@@ -88,8 +88,7 @@ class NPUPlatform(Platform):
         Get the custom compile backend. Previously, we used EagerAdaptor by default. 
         To use graph fusion operations, we defined our own backend compiler.
         """
-        from vllm_ascend.compilation.compiler_interface import AscendCompiler
-        return AscendCompiler.__module__ + "." + AscendCompiler.__name__
+        return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
     def pre_register_and_update(cls,
@@ -181,7 +180,6 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        check_ascend_config(vllm_config, enforce_eager)
         from vllm.config.compilation import CUDAGraphMode
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
@@ -226,11 +224,12 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        from vllm_ascend.compilation.compiler_interface import AscendCompiler
-        compilation_config.oot_compiler = AscendCompiler.__module__ + "." + AscendCompiler.__name__
+        # get custom compile backend for graph fusion
+        compilation_config.oot_compiler = cls.get_compile_backend()
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
+            ascend_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
@@ -241,12 +240,14 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
+            ascend_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             logger.info(
                 "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
+            compilation_config.splitting_ops = []
             warning_message = """\033[91m
             **********************************************************************************
             * WARNING: You have enabled the *full graph* feature.
@@ -266,6 +267,7 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_mode)
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
+            ascend_config.enable_npugraph_ex = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -296,10 +298,9 @@ class NPUPlatform(Platform):
             compilation_config.custom_ops = ["all"]
 
         if ascend_config.recompute_scheduler_enable:
-            from vllm_ascend.core.recompute_schedule_config import \
-                RecomputeSchedulerConfig
+            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config)
+                vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
