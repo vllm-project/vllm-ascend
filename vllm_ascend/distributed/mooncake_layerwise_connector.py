@@ -1030,9 +1030,8 @@ class MooncakeLayerwiseConnectorWorker:
         if final_block_idx is not None:
             final_block_num = local_block_nums.pop(final_block_idx)
             local_block_nums.append(final_block_num)
-            for mapping in self.local_remote_block_port_mapping:
-                final_block_port = mapping.pop(final_block_idx)
-                mapping.append(final_block_port)
+            final_block_mapping = self.local_remote_block_port_mapping.pop(final_block_idx)
+            self.local_remote_block_port_mapping.append(final_block_mapping)
 
         remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = [], [], []
         for idx in range(len(self.local_remote_block_port_mapping[0])):
