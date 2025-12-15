@@ -1661,7 +1661,7 @@ class NPUModelRunner(GPUModelRunner):
             # Compute prompt logprobs if needed.
             prompt_logprobs_dict = self._get_prompt_logprobs_dict(
                 hidden_states[:scheduler_output.total_num_scheduled_tokens],
-                scheduler_output,
+                scheduler_output.num_scheduled_tokens,
             )
 
             num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
