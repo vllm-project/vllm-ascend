@@ -50,7 +50,8 @@ class MatmulAllReduceAddRMSNormPattern:
             Pattern for AddRMSNormQuant fusion.
             """
             tmp = torch.nn.functional.linear(x, weight)
-            all_reduce_ = torch.ops.vllm.all_reduce(tmp, group_name="")
+            # all_reduce_ = torch.ops.vllm.all_reduce(tmp, group_name="")
+            all_reduce_ = torch.ops.vllm.tensor_model_parallel_all_reduce(tmp)
             output = torch.ops.npu.npu_add_rms_norm(all_reduce_, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
