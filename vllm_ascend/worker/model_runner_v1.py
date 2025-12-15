@@ -3644,7 +3644,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         print(f"[DEBUG KV_CACHE_NEW]   Block Size: {kv_cache_spec.block_size}")
                         print(f"[DEBUG KV_CACHE_NEW]   Heads: {kv_cache_spec.num_kv_heads}")
                         print(f"[DEBUG KV_CACHE_NEW]   Head Size: {kv_cache_spec.head_size}")
-                        print(f"[DEBUG KV_CACHE_NEW]   Raw tensor size: {kv_cache_tensor.size}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Sum page size bytes: {sum_page_size_bytes}")
                         print(f"[DEBUG KV_CACHE_NEW]   Page size bytes: {kv_cache_spec.page_size_bytes}")
 
                         # 计算实际内存使用 - 新版本310P返回5个值
@@ -3665,7 +3665,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             print(f"[DEBUG KV_CACHE_NEW]   Unexpected shape format: {kv_cache_shape}")
 
                         print(f"[DEBUG KV_CACHE_NEW]   Num blocks: {num_blocks}")
-                        print(f"[DEBUG KV_CACHE_NEW]   Calculated from size: {kv_cache_tensor.size} / {kv_cache_spec.page_size_bytes} = {kv_cache_tensor.size // kv_cache_spec.page_size_bytes}")
+                        print(f"[DEBUG KV_CACHE_NEW]   Calculated from size: {sum_page_size_bytes} / {kv_cache_spec.page_size_bytes} = {sum_page_size_bytes // kv_cache_spec.page_size_bytes}")
                     # DEBUG_END: KV缓存形状信息
                     if not self.model_config.is_deepseek_mla:
                         k_shape = kv_cache_shape[1:]
