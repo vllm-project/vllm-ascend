@@ -296,7 +296,7 @@ class KVPoolWorker:
         """
         token_len = request.token_len_chunk
         mask_num = (
-            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+            request.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
             // self.block_size * self.block_size)
         num_required_tokens = token_len - mask_num
 
