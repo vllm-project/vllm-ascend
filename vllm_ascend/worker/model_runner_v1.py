@@ -1882,8 +1882,6 @@ class NPUModelRunner(GPUModelRunner):
                 # when preparing inputs.
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
 
-            self.input_batch.prev_sampled_token_ids_invalid_indices = \
-                invalid_req_indices_set
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
