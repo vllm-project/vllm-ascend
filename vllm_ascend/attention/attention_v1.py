@@ -75,6 +75,12 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
+        from vllm_ascend.utils import is_310p
+        # FIX_START: 恢复老版本310P的内存压缩优化，解决内存分配失败问题
+        # 老版本使用 num_kv_heads * head_size // 16 来压缩内存，减少310P内存占用
+        if is_310p():
+            return (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
+        # FIX_END: 恢复310P压缩优化
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
