@@ -803,7 +803,9 @@ class TestPCPDCPGraphParams(TestBase):
             (q_nope, q_pe, k_nope, k_pe, block_table, seq_lens, num_heads,
              scale, num_kv_heads, out, lse))
 
-        update_mla_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
+        with patch("torch_npu._C._npu_setStream", return_value=None):
+            update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           4)
 
         _mock_graph_task_end.assert_called_once()
 
@@ -842,6 +844,7 @@ class TestPCPDCPGraphParams(TestBase):
              block_table, 128, actual_seq_lengths_kv, actual_seq_lengths_q,
              out, lse, 2, 0, 0))
 
-        update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
+        with patch("torch_npu._C._npu_setStream", return_value=None):
+            update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
 
         _mock_graph_task_end.assert_called_once()
