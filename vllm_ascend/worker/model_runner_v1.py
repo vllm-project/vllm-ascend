@@ -221,7 +221,7 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self.prefetch_stream = None
         self.sampler = AscendSampler()
-        
+
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
         self.attn_mask = None
@@ -3666,6 +3666,7 @@ class NPUModelRunner(GPUModelRunner):
                 kv_caches[layer_name] = tensor
 
         return kv_caches, cross_layers_k_cache, cross_layers_v_cache, attn_backend
+
 
 @contextmanager
 def _torch_cuda_wrapper():
