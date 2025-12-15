@@ -77,7 +77,7 @@ class ReqMeta:
     remote_engine_id: str
     remote_pcp_size: int
     remote_dcp_size: int
-    remote_multi_nodes_meta_mapping: dict[int, dict[str, Any]]
+    remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
 
 
 @dataclass
