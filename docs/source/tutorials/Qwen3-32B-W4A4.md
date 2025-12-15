@@ -55,10 +55,12 @@ cd example/Qwen
 MODEL_PATH=/home/models/Qwen3-32B
 # Path to save converted weight, Replace with your local path
 SAVE_PATH=/home/models/Qwen3-32B-w4a4
+# Set two idle NPU cards
+export ASCEND_RT_VISIBLE_DEVICES=0,1
 
 python3 w4a4.py --model_path $MODEL_PATH \
                 --save_directory $SAVE_PATH \
-                --calib_file ../common/qwen_qwen3_cot_w4a4.json \
+                --calib_file ./calib_data/qwen3_cot_w4a4.json \
                 --trust_remote_code True \
                 --batch_size 1
 ```
