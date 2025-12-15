@@ -40,7 +40,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ### Online Inference
 
 ```bash
-vllm serve Qwen/Qwen3-Embedding-8B --task embed
+vllm serve Qwen/Qwen3-Embedding-8B --runner pooling
 ```
 
 Once your server is started, you can query the model with input prompts.
@@ -81,7 +81,7 @@ if __name__=="__main__":
     input_texts = queries + documents
 
     model = LLM(model="Qwen/Qwen3-Embedding-8B",
-                task="embed",
+                runner="pooling",
                 distributed_executor_backend="mp")
 
     outputs = model.embed(input_texts)
