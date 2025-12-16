@@ -3556,18 +3556,48 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                     # for other attentions, e.g., self_attn, sliding window attn
                     if self.vllm_config.kv_transfer_config is None:
-                        k_tensor = torch.zeros(k_tensor_size,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size,
-                                               dtype=torch.int8,
-                                               device=self.device)
+                        # Special handling for 310P: allocate NCHW format directly to avoid format conversion overhead
+                        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+                        ascend_config = get_ascend_config()
+                        is_310p_device = get_ascend_device_type() == AscendDeviceType._310P
+
+                        if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                            # For 310P: directly allocate NCHW format tensors to avoid expensive format conversion
+                            # Calculate the final shape based on current layer's kv_cache_spec
+                            num_blocks = kv_cache_tensor.size // kv_cache_tensor.page_size_bytes
+                            block_size = kv_cache_tensor.block_size
+                            num_kv_heads = kv_cache_spec.num_kv_heads
+                            head_size = kv_cache_spec.head_size
+                            dtype = kv_cache_spec.dtype
+
+                            # Use 310P-optimized compressed format (5-dim NCHW format)
+                            k_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
+                            v_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
+
+                            # Allocate directly in final NCHW format
+                            k_tensor = torch.zeros(k_final_shape, dtype=dtype, device=self.device)  # NCHW format
+                            v_tensor = torch.zeros(v_final_shape, dtype=dtype, device=self.device)  # NCHW format
+                        else:
+                            # Standard path for other devices: allocate raw int8 tensors
+                            k_tensor = torch.zeros(k_tensor_size,
+                                                   dtype=torch.int8,
+                                                   device=self.device)
+                            v_tensor = torch.zeros(v_tensor_size,
+                                                   dtype=torch.int8,
+                                                   device=self.device)
+
                         #### k cache: for deepseek sparse attention
                         if dsa_k_cache_factor is not None:
-                            dsa_k_cache_tensor = torch.zeros(
-                                dsa_k_cache_size,
-                                dtype=torch.int8,
-                                device=self.device)
+                            if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                                # 310P: allocate DSA tensor in appropriate format
+                                dsa_k_cache_shape = (2, num_blocks, 1, 128, 16)  # Compressed format for 310P
+                                dsa_k_cache_tensor = torch.zeros(dsa_k_cache_shape, dtype=dtype, device=self.device)
+                            else:
+                                # Standard path
+                                dsa_k_cache_tensor = torch.zeros(
+                                    dsa_k_cache_size,
+                                    dtype=torch.int8,
+                                    device=self.device)
                     else:
                         k_tensor = torch.zeros(k_tensor_size + alignment,
                                                dtype=torch.int8,
@@ -3729,35 +3759,34 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     #     v_cache = raw_v_tensor.view(dtype).view(v_shape)
                     # FIX_END: 直接创建最终形状的张量
 
-                    # 使用标准路径（包括310P）
-                    k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(dtype).view(v_shape)
-
-                    
-                    # DEBUG: 监控格式转换前后的内存
-                    if is_310p_device:
-                        from vllm_ascend.platform import NPUPlatform
-                        free_before_format, _ = NPUPlatform.mem_get_info()
-                        print(f"[DEBUG FORMAT CAST] Layer {layer_name}:")
-                        print(f"[DEBUG FORMAT CAST]   Before format cast: Free={free_before_format/1024**3:.2f}GiB")
-
-                    # Fixed: For 310P, main tensors use ND format but KV cache needs NZ format for ReshapeAndCacheOperation
+                    # Check if we already have properly shaped tensors (310P NCHW format)
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
-                        # 310P eager mode: main tensors ND, but KV cache NZ for compatibility (like v0.10.0rc1)
-                        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
-                        k_cache = torch_npu.npu_format_cast(k_cache, ACL_FORMAT_FRACTAL_NZ)
-                        v_cache = torch_npu.npu_format_cast(v_cache, ACL_FORMAT_FRACTAL_NZ)
+                        # For 310P: tensors are already in final NCHW format, skip reshape and format conversion
+                        k_cache = raw_k_tensor  # Already in correct NCHW format
+                        v_cache = raw_v_tensor  # Already in correct NCHW format
+                        print(f"[DEBUG 310P OPTIMIZATION] Layer {layer_name}: Using pre-allocated NCHW format, skipping format conversion")
                     else:
-                        # Other devices: use standard format conversion
+                        # Standard path: reshape pre-allocated tensors and convert format
+                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
+
+                        # DEBUG: 监控格式转换前后的内存
+                        if is_310p_device:
+                            from vllm_ascend.platform import NPUPlatform
+                            free_before_format, _ = NPUPlatform.mem_get_info()
+                            print(f"[DEBUG FORMAT CAST] Layer {layer_name}:")
+                            print(f"[DEBUG FORMAT CAST]   Before format cast: Free={free_before_format/1024**3:.2f}GiB")
+
+                        # Apply standard format conversion for other devices
                         k_cache = self._convert_torch_format(k_cache)
                         v_cache = self._convert_torch_format(v_cache)
 
-                    # DEBUG: 监控格式转换后的内存
-                    if is_310p_device:
-                        free_after_format, _ = NPUPlatform.mem_get_info()
-                        format_memory_consumed = (free_before_format - free_after_format) / 1024**3
-                        print(f"[DEBUG FORMAT CAST]   After format cast: Free={free_after_format/1024**3:.2f}GiB")
-                        print(f"[DEBUG FORMAT CAST]   Memory consumed by format cast: {format_memory_consumed:.2f}GiB")
+                        # DEBUG: 监控格式转换后的内存
+                        if is_310p_device:
+                            free_after_format, _ = NPUPlatform.mem_get_info()
+                            format_memory_consumed = (free_before_format - free_after_format) / 1024**3
+                            print(f"[DEBUG FORMAT CAST]   After format cast: Free={free_after_format/1024**3:.2f}GiB")
+                            print(f"[DEBUG FORMAT CAST]   Memory consumed by format cast: {format_memory_consumed:.2f}GiB")
 
                     # DEBUG_START: 格式转换后的内存信息
                     if is_310p_device:
