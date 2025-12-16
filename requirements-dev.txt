@@ -17,4 +17,3 @@ ray>=2.47.1
 protobuf>3.20.0
 librosa 
 soundfile
-fastapi<0.124.0
