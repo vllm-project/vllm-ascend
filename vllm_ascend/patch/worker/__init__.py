@@ -33,3 +33,4 @@ import vllm_ascend.patch.worker.patch_qwen2_5_omni  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_vl  # noqa
 import vllm_ascend.patch.worker.patch_rope  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
+import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
