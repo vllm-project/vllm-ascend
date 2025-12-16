@@ -186,8 +186,20 @@ class NPUWorker(WorkerBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        from vllm.logger import logger
+        from vllm.utils.mem_constants import GiB_bytes
+        from vllm_ascend.platform import NPUPlatform
+
+        # Monitor memory before any cache operations
+        free_before, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] initialize_cache start: Free={free_before/GiB_bytes:.2f}GiB")
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        # Monitor memory after setting block counts
+        free_after_config, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after cache config: Free={free_after_config/GiB_bytes:.2f}GiB")
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
@@ -388,6 +400,14 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        from vllm.logger import logger
+        from vllm.utils.mem_constants import GiB_bytes
+        from vllm_ascend.platform import NPUPlatform
+
+        # Monitor memory before KV cache allocation
+        free_before_kv, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] before model_runner.initialize_kv_cache: Free={free_before_kv/GiB_bytes:.2f}GiB")
+
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -396,6 +416,10 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+
+        # Monitor memory after KV cache allocation
+        free_after_kv, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after model_runner.initialize_kv_cache: Free={free_after_kv/GiB_bytes:.2f}GiB")
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
