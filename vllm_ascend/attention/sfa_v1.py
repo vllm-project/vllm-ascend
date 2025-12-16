@@ -32,7 +32,7 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                _round_up, dispose_layer, enable_sp,
                                is_enable_nz, replace_layer)
-from vllm_ascend.worker.npu_input_batch import InputBatch
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -149,7 +149,7 @@ class AscendSFAMetadataBuilder:
         self.enable_sfa_cp = enable_sp() and \
             hasattr(self.model_config.hf_config, "index_topk")
 
-    def reorder_batch(self, input_batch: "InputBatch",
+    def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
         return False

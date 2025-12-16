@@ -51,10 +51,6 @@ _MTP_MODELS = {
     ("vllm.model_executor.models.qwen3_next_mtp", "Qwen3NextMTP")
 }
 
-_DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
-
-_FIRST_LAYERS = {"Qwen3NextForCausalLM": 'model.layers.3.self_attn.attn'}
-
 
 def _load_model(architecture):
     if architecture not in _MTP_MODELS:
@@ -227,7 +223,7 @@ class MtpProposer(Proposer):
     def dummy_run(self,
                   num_tokens: int,
                   with_prefill: bool = False,
-                  skip_attn: bool = False,
+                  in_graph_capturing: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -251,9 +247,7 @@ class MtpProposer(Proposer):
         moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
                          == MoECommType.FUSED_ALLTOALL else moe_comm_type)
 
-        if skip_attn:
-            attn_metadata = None
-        elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
                     self.runner.input_batch.
@@ -298,7 +292,7 @@ class MtpProposer(Proposer):
         positions = self.positions[:num_tokens]
         previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
-            if i > 0 and not skip_attn and aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            if i > 0 and not in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,
@@ -345,10 +339,8 @@ class MtpProposer(Proposer):
                            positions: torch.Tensor = None,
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
         common_attn_metadata = self.runner.spec_decode_common_attn_metadata
-        attn_metadata = self._get_attn_metadata(attn_metadata)
 
         if self.speculative_config.disable_padded_drafter_batch:
             # When padded-batch is disabled, the sampled_token_ids should be
@@ -486,14 +478,6 @@ class MtpProposer(Proposer):
         target_device = self.vllm_config.device_config.device
         model = _load_model(architecture)
         self.model = model(vllm_config=self.vllm_config).to(target_device)
-
-    def _get_attn_metadata(self, attn_metadata):
-        if attn_metadata is not None and isinstance(attn_metadata, dict):
-            architecture = self.vllm_config.model_config.architecture
-            layer_name = _FIRST_LAYERS.get(architecture, _DEFAULT_FIRST_LAYER)
-            attn_metadata = attn_metadata[layer_name]
-
-        return attn_metadata
 
     def _prepare_inputs(
         self,
