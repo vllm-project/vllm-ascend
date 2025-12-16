@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
+import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.logger import logger
@@ -284,6 +285,8 @@ class ReqMeta:
 
     is_last_chunk: Optional[bool] = None
 
+    current_event: Optional[torch.npu.Event] = None
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
@@ -375,3 +378,4 @@ class LasyerMultiBlockReqMeta:
     block_ids: list[int]
     layer_id: int
     is_last_chunk: Optional[bool] = True
+    current_event: Optional[torch.npu.Event] = None

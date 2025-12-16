@@ -114,6 +114,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_ids = req_meta.block_ids
         req_id = req_meta.req_id
         is_last_chunk = req_meta.is_last_chunk
+        current_event = req_meta.current_event
         starts = []
         ends = []
         keys = []
@@ -161,6 +162,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
             addrs.append(addr)
             sizes.append(size)
         if keys:
+            """
+            Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
+            This issue will be fixed in CANN version 8.5.rc1.
+            You can manually build the master branch of the project at https://gitcode.com/cann/hixl
+            to resolve this issue before the 8.5.RC1 release.
+            """
+            if current_event is not None:
+                current_event.synchronize()
             self.m_store.put(keys, addrs, sizes)
 
         if is_last_chunk:
@@ -235,6 +244,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         ends = req_meta.ends
         keys = req_meta.keys
         layer_id = req_meta.layer_id
+        current_event = req_meta.current_event
         total_block = len(keys)
         is_last_chunk = req_meta.is_last_chunk
         if not self.dcp_size > 1:
@@ -270,6 +280,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             addr_list.append(addr)
             size_list.append(size)
 
+        if current_event is not None:
+            current_event.synchronize()
         self.m_store.put(key_list, addr_list, size_list)
 
         if layer_id == self.final_layer_id and is_last_chunk:
