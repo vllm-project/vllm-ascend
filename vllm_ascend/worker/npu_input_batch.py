@@ -26,7 +26,7 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.gpu_input_batch import InputBatch, LogitsProcessors
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.sample.sampler import AscendSamplingMetadata
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
