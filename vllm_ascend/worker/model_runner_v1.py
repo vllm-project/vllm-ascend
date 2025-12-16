@@ -1431,7 +1431,6 @@ class NPUModelRunner(GPUModelRunner):
                     self.vllm_config,
                     num_tokens=num_input_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
-
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
