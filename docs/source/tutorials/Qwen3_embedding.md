@@ -24,7 +24,6 @@ if you don't want to use the docker image as above, you can also build all from 
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
 
 ## Deployment
-*only support single node single npu deployment*
 
 Using the Qwen3-Embedding-8B model as an example, first run the docker container with the following command:
 
@@ -92,6 +91,7 @@ Processed prompts: 100%|██████████████████�
 ```
 
 ## Performance
+
 ```bash
 vllm bench serve --model Qwen3-embedding --backend openai-embeddings --dataset-name random --tokenizer /data/Qwen3-reembedding --host 127.0.0.1 --port 8888 --endpoint /v1/embeddings
 ```

@@ -25,7 +25,6 @@ if you don't want to use the docker image as above, you can also build all from 
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
 
 ## Deployment
-*only support single node single npu deployment*
 
 Using the Qwen3-Reranker-8B model as an example, first run the docker container with the following command:
 
@@ -162,6 +161,7 @@ If you run this script successfully, you will see a list of scores printed to th
 ```
 
 ## Performance
+
 ```bash
 vllm bench serve --model Qwen3-reranker --backend vllm-rerank --dataset-name random-rerank --tokenizer /data/Qwen3-reranker --host 127.0.0.1 --port 8888 --endpoint /v1/rerank
 ```
