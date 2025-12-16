@@ -102,7 +102,7 @@ class EagleProposer(Proposer):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     def get_model_name(self, model: nn.Module) -> str:
-        if hasattr(model, "module"):  # multi-GPU
+        if hasattr(model, "module"):
             model = model.module
         return model.__class__.__name__
 
@@ -623,7 +623,7 @@ class EagleProposer(Proposer):
                 exceeds_max_model_len = positions_cpu[0] >= self.vllm_config.model_config.max_model_len
                 # Mask out the position ids that exceed the max model length.
                 # Otherwise, we may get out-of-range error in RoPE.
-                clamped_positions_cpu = torch.where(exceeds_max_model_len.unsqueeze(0), 
+                clamped_positions_cpu = torch.where(exceeds_max_model_len.unsqueeze(0),
                                                 torch.zeros_like(positions_cpu),
                                                 positions_cpu)
             else:
