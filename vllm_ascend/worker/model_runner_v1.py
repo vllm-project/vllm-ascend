@@ -21,7 +21,7 @@ import math
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
@@ -399,13 +399,10 @@ class NPUModelRunner(GPUModelRunner):
         # the attr below is in gpu_modelrunner, but occurs lint so add them here
         self.intermediate_tensors: IntermediateTensors | None = None
         self.execute_model_state: ExecuteModelState | None = None
-<<<<<<< HEAD
         self.reorder_batch_threshold: int | None = None
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
-=======
         self.kv_connector_output: KVConnectorOutput | None = None
->>>>>>> 751cdd26 (fix async-scheduling with pp)
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -1554,12 +1551,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             hidden_states,
             sample_hidden_states,
-<<<<<<< HEAD
-            aux_hidden_states,  # noqa
-            kv_connector_output,
-=======
             aux_hidden_states,
->>>>>>> 751cdd26 (fix async-scheduling with pp)
             attn_metadata,
             positions,
         ) = self.execute_model_state
