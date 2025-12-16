@@ -55,7 +55,6 @@ There are mainly three types of variables.
 **Note**: Both of these two tables are come from the `_update_states` method before **preparing inputs**. You can take a look if you need more inspiration.
 
 ### Tips
-What is `Token ID`?
 Simply put, a `token ID` is an **integer** (usually `int32`), which represents a token.
 Example of `Token ID`:
 
