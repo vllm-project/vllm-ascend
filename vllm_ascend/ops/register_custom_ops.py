@@ -2,22 +2,39 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import (npu_stream_switch, prefetch_stream,
-                               vllm_version_is)
+from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import direct_register_custom_op
-else:
-    from vllm.utils.torch_utils import direct_register_custom_op
+
+def _maybe_chunk_residual_impl(x: torch.Tensor,
+                               residual: torch.Tensor) -> torch.Tensor:
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return residual
+
+    if x.size(0) != residual.size(0):
+        sp_enabled = forward_context.sp_enabled
+        assert sp_enabled is True, ("Currently, this situation only occurs "
+                                    "when sp is enabled")
+        pad_size = forward_context.pad_size
+        if pad_size > 0:
+            residual = F.pad(residual, (0, 0, 0, pad_size))
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
+
+    return residual
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(
@@ -99,7 +116,7 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     model_instance = forward_context.model_instance
     prefetch_stream = forward_context.prefetch_stream
@@ -156,7 +173,7 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     forward_context.prefetch_mlp_down_proj = True
     model_instance = forward_context.model_instance
@@ -185,7 +202,7 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     if forward_context.prefetch_mlp_gate_up_proj or \
         forward_context.prefetch_mlp_down_proj:
@@ -232,8 +249,9 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         final_hidden_states: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
-    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2
-                         } or forward_context.sp_enabled:
+    if moe_comm_type in {
+            MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL
+    } or forward_context.sp_enabled:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -263,6 +281,12 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
 
     return output
 
+
+direct_register_custom_op(op_name="maybe_chunk_residual",
+                          op_func=_maybe_chunk_residual_impl,
+                          fake_impl=lambda x, residual: x,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,

@@ -13,6 +13,7 @@ class SpecDcodeType(enum.Enum):
     EAGLE = 1
     EAGLE3 = 2
     MTP = 4
+    SUFFIX = 5
 
 
 class Proposer:
@@ -31,7 +32,7 @@ class Proposer:
     def dummy_run(self,
                   num_tokens: int,
                   with_prefill: bool = False,
-                  skip_attn: bool = False,
+                  in_graph_capturing: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -47,7 +48,6 @@ class Proposer:
                            positions: torch.Tensor = None,
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
         """Called by execute_model in model_runner"""
         raise NotImplementedError

@@ -20,10 +20,16 @@
 
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
+
+import os
+from unittest.mock import patch
+
+from modelscope import snapshot_download  # type: ignore
+
 from tests.e2e.conftest import VllmRunner
 
 
-def test_models_distributed_Qwen3_NEXT_TP4():
+def test_qwen3_next_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
     ] * 4
@@ -32,13 +38,12 @@ def test_models_distributed_Qwen3_NEXT_TP4():
                     tensor_parallel_size=4,
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp",
-                    enforce_eager=True) as vllm_model:
+                    distributed_executor_backend="mp") as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model
 
 
-def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
+def test_qwen3_next_distributed_mp_full_decode_only_tp4():
     example_prompts = [
         "Hello, my name is",
     ] * 4
@@ -48,7 +53,6 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
-                    enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL_DECODE_ONLY",
                         "cudagraph_capture_sizes": [1, 8, 24, 48, 60]
@@ -57,20 +61,24 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
         del vllm_model
 
 
-def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
+def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
     ]
+
     max_tokens = 20
 
-    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp") as vllm_model:
+    with VllmRunner(
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            tensor_parallel_size=4,
+            max_model_len=4096,
+            gpu_memory_utilization=0.8,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+    ) as vllm_model:
         ref_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
@@ -79,12 +87,7 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
-                    additional_config={
-                        "ascend_scheduler_config": {
-                            "enabled": True,
-                            "enable_chunked_prefill": False
-                        }
-                    },
+                    enforce_eager=True,
                     speculative_config={
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 1
@@ -106,3 +109,22 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
             print(f"spec_output: {spec_output[1]}")
 
     assert matches > int(0.66 * len(ref_outputs))
+
+
+# TODO: will conduct accuracy verification after the subsequent version becomes stable
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"),
+            max_model_len=4096,
+            tensor_parallel_size=4,
+            gpu_memory_utilization=0.4,
+            max_num_seqs=1,
+            enable_expert_parallel=True,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)

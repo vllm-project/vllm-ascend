@@ -15,10 +15,6 @@ class TestAscendSFABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
-    def test_get_metadata_cls(self):
-        self.assertEqual(AscendSFABackend.get_metadata_cls(),
-                         AscendSFAMetadata)
-
     def test_get_builder_cls(self):
         self.assertEqual(AscendSFABackend.get_builder_cls(),
                          AscendSFAMetadataBuilder)
@@ -128,6 +124,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.block_table_tensor = torch.randn(100, 4)
+        common_attn_metadata.cos = None
+        common_attn_metadata.sin = None
+        common_attn_metadata.num_input_tokens = 100
 
         model = MagicMock()
         model.model.layers = [MagicMock() for _ in range(10)]
@@ -170,6 +169,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.block_table_tensor = torch.randn(100, 4)
+        common_attn_metadata.cos = None
+        common_attn_metadata.sin = None
+        common_attn_metadata.num_input_tokens = 100
 
         model = MagicMock()
         model.model.layers = [MagicMock() for _ in range(10)]

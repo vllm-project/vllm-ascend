@@ -7,10 +7,12 @@ from transformers.configuration_utils import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import CpuArchEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
+from vllm_ascend.utils import AscendDeviceType
 
 MODEL = "Qwen3-0.6B"
 MODEL_VL = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -96,7 +98,8 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.mock_self.is_neox_style = self.is_neox_style
 
     @patch('torch.ops._C_ascend')
-    @patch('vllm_ascend.ops.rotary_embedding.is_310p', return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
@@ -105,13 +108,8 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
-                                            mock_custom_enabled, mock_is_310p,
-                                            mock__c):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
-        # Setup mock for custom kernel path
-
+                                            mock_custom_enabled,
+                                            mock_soc_version, mock__c):
         mock__c.rotary_embedding.return_value = self.query, self.key
         vllm_config = VllmConfig()
         model_config = ModelConfig(MODEL,
@@ -136,9 +134,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_contiguous(self, mock_npu_rotary,
                                          mock_custom_enabled):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # Test contiguous path when custom is disabled
         non_contig_query = self.query.transpose(0, 1)
         non_contig_key = self.key.transpose(0, 1)
@@ -162,9 +157,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_with_offsets(self):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # Test that NotImplementedError is raised when offsets is provided
         offsets = torch.tensor([1, 2, 3])
         with self.assertRaises(NotImplementedError):
@@ -187,9 +179,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary,
                                                   mock_custom_enabled):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # Test neox_style override
         vllm_config = VllmConfig()
         model_config = ModelConfig(MODEL,
@@ -216,9 +205,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_rotary_dim_less_than_head_size(
             self, mock_npu_rotary, mock_custom_enabled):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # test case when rotary_dim < head_size
         org_rotary_dim = self.layer.rotary_dim
         self.layer.rotary_dim = self.layer.head_size // 2
@@ -412,7 +398,6 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
                                       mrope_section=self.mrope_section)
 
         self.mock_config = MagicMock()
-        self.mock_config.torchair_graph_config.enabled = False
 
     def _create_vllm_config(self):
         vllm_config = VllmConfig()
@@ -424,11 +409,14 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         return vllm_config
 
     @patch('torch_npu.npu_mrope')
+    @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
-    def test_forward_oot_1d_positions(self, mock_npu_mrope):
+    def test_forward_oot_1d_positions(self, mock_cpu_arc, mock_npu_mrope):
+        mock_cpu_arc.return_value = CpuArchEnum.ARM
+
         mock_npu_mrope.return_value = (torch.zeros_like(self.query),
                                        torch.zeros_like(self.key))
 
@@ -443,11 +431,14 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         self.assertEqual(result_q.shape, self.query.shape)
 
     @patch('torch_npu.npu_mrope')
+    @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
-    def test_forward_oot_2d_positions(self, mock_npu_mrope):
+    def test_forward_oot_2d_positions(self, mock_cpu_arc, mock_npu_mrope):
+        mock_cpu_arc.return_value = CpuArchEnum.ARM
+
         mock_npu_mrope.return_value = (torch.zeros_like(self.query),
                                        torch.zeros_like(self.key))
 

@@ -27,7 +27,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast, QuantType)
+    PrepareAndFinalizeWithMC2, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2, TokenDispatcherWithMoge)
@@ -44,7 +44,7 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.NAIVE_MULTICAST] = NaiveMulticastCommImpl(
+    _MoECommMethods[MoECommType.FUSED_ALLTOALL] = FusedAlltoAllCommImpl(
         moe_config)
 
 
@@ -85,22 +85,23 @@ class MoECommMethod(ABC):
     def fused_experts(
             self,
             hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
+            w1: torch.Tensor | list[torch.Tensor],
+            w2: torch.Tensor | list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
             apply_router_weight_on_input: bool = False,
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
+            use_int4_w4a16: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[torch.Tensor] = None,
-            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale: Optional[list[torch.Tensor]] = None,
+            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
-            # For TorchAir graph
-            is_torchair: bool = False,
+            w1_offset: Optional[torch.Tensor] = None,
+            w2_offset: Optional[torch.Tensor] = None,
             # For Cube/Vector parallel
             shared_experts: Optional[Any] = None,
             quantized_x_for_share: Optional[Any] = None,
@@ -149,9 +150,11 @@ class MoECommMethod(ABC):
                                        group_list_type=group_list_type,
                                        w1_scale_bias=w1_scale_bias,
                                        w2_scale_bias=w2_scale_bias,
+                                       w1_offset=w1_offset,
+                                       w2_offset=w2_offset,
                                        topk_scales=topk_scales,
                                        with_quant=use_int8_w8a8
-                                       or use_int4_w4a8,
+                                       or use_int4_w4a8 or use_int4_w4a16,
                                        fusion=use_int8_w8a8,
                                        need_trans=need_trans,
                                        dynamic_eplb=dynamic_eplb)
@@ -247,30 +250,68 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
-class NaiveMulticastCommImpl(MoECommMethod):
-    """This implementation is the same as NativeAllGatherCommImpl,
-    but uses NPU-specific ops for better performance.
+class FusedAlltoAllCommImpl(MoECommMethod):
+    """This implementation is for the scenarios listed below:
+    1. `enable_expert_parallel=True`.
+    2. `npu_grouped_matmul` is available.
 
-    This implementation should be compatible with all scenarios, and
-    thus it is the default implementation for MoE communication methods.
-    It uses `torch_npu.npu_moe_init_routing_v2` for pre-processing
-    and `torch_npu.npu_moe_token_unpermute` for post-processing
-    to handle the token-to-expert mapping and communication efficiently.
-
-    NOTE(Yizhou): TBH, it is really weird that we were supposed to use
-    `torch_npu.npu_moe_init_routing_v2` and `torch_npu.npu_moe_finalize_routing`
-    or `torch_npu.npu_moe_token_permute` and `torch_npu.npu_moe_token_unpermute`
-    for pre-processing and post-processing, respectively.
-    But `npu_moe_finalize_routing` will lead to accuracy issues so we have to
-    use `torch_npu.npu_moe_token_unpermute` instead.
-    This is a workaround and should be removed after the issue is fixed.
+    This implementation uses all-to-all communication to exchange tokens
+    between data parallel ranks before and after the MLP computation. It should
+    have better performance than AllGatherCommImpl when DP size > 1.
     """
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithAllGather(
+        return TokenDispatcherWithAll2AllV(
             top_k=self.moe_config.experts_per_token,
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithNaiveMulticast(self.moe_config)
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def fused_experts(
+            self,
+            hidden_states: torch.Tensor,
+            w1: torch.Tensor,
+            w2: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            activation: str = "silu",
+            apply_router_weight_on_input: bool = False,
+            use_int8_w8a8: bool = False,
+            use_int4_w4a8: bool = False,
+            use_int4_w4a16: bool = False,
+            global_num_experts: Optional[int] = None,
+            expert_map: Optional[torch.Tensor] = None,
+            w1_scale: Optional[torch.Tensor] = None,
+            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale_bias: torch.Tensor = None,
+            w2_scale_bias: torch.Tensor = None,
+            w1_offset: Optional[torch.Tensor] = None,
+            w2_offset: Optional[torch.Tensor] = None,
+            # For Cube/Vector parallel
+            shared_experts: Optional[Any] = None,
+            quantized_x_for_share: Optional[Any] = None,
+            dynamic_scale_for_share: Optional[Any] = None,
+            # For load balance
+            log2phy: torch.Tensor = None,
+            global_redundant_expert_num: int = 0,
+            need_trans: bool = False,
+            dynamic_eplb: bool = False,
+            mc2_mask: torch.Tensor = None,
+            pertoken_scale: Optional[torch.Tensor] = None):
+        out = torch.empty_like(hidden_states)
+
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            x=hidden_states,
+            weight1=w1,
+            weight2=w2,
+            expert_idx=topk_ids,
+            scale1=w1_scale,
+            scale2=w2_scale,
+            probs=topk_weights.to(torch.float32),
+            group=self.token_dispatcher.moe_all_to_all_group_name,
+            max_output_size=65536,
+            out=out,
+        )
+        return out

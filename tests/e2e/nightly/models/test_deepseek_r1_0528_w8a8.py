@@ -29,11 +29,9 @@ MODELS = [
 ]
 
 MODES = [
-    "torchair",
     "single",
     "aclgraph",
     "aclgraph_mlapo",
-    "no_chunkprefill",
 ]
 
 prompts = [
@@ -77,21 +75,8 @@ async def test_models(model: str, mode: str) -> None:
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
     }
-    speculative_config = {
-        "num_speculative_tokens": 1,
-        "method": "deepseek_mtp"
-    }
+    speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     additional_config = {
-        "ascend_scheduler_config": {
-            "enabled": False
-        },
-        "torchair_graph_config": {
-            "enabled": True,
-            "enable_multistream_moe": False,
-            "enable_multistream_mla": True,
-            "graph_batch_sizes": [16],
-            "use_cached_graph": True
-        },
         "chunked_prefill_for_mla": True,
         "enable_weight_nz_layout": True
     }
@@ -106,16 +91,8 @@ async def test_models(model: str, mode: str) -> None:
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
-        additional_config["torchair_graph_config"] = {"enabled": False}
-    if mode == "aclgraph":
-        additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "aclgraph_mlapo":
         env_dict["VLLM_ASCEND_ENABLE_MLAPO"] = "1"
-        additional_config["torchair_graph_config"] = {"enabled": False}
-    if mode == "no_chunkprefill":
-        additional_config["ascend_scheduler_config"] = {"enabled": True}
-        i = server_args.index("--max-num-batched-tokens") + 1
-        server_args[i] = "36864"
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -134,7 +111,7 @@ async def test_models(model: str, mode: str) -> None:
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         print(choices)
-        if mode in ["single", "no_chunkprefill"]:
+        if mode in ["single"]:
             return
         # aisbench test
         run_aisbench_cases(model,

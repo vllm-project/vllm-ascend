@@ -260,7 +260,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 requires_grad=False)
         return layer
 
-    @patch('vllm_ascend.utils._ENABLE_NZ', False)
     @patch('torch_npu.npu_format_cast')
     @patch('torch_npu.npu_quantize')
     @patch('torch.Tensor.npu')

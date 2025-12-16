@@ -3,18 +3,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config.compilation import CUDAGraphMode
-from vllm.engine.arg_utils import EngineArgs
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.config.compilation import CompilationLevel
-else:
-    from vllm.config.compilation import CompilationMode
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType)
 
 
 class TestNPUPlatform(TestBase):
@@ -28,15 +23,14 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.speculative_config = None
-        mock_vllm_config.compilation_config.pass_config.enable_sequence_parallelism = False
+        mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = None
         return mock_vllm_config
 
     @staticmethod
     def mock_vllm_ascend_config():
         mock_ascend_config = MagicMock()
-        mock_ascend_config.torchair_graph_config.enabled = False
-        mock_ascend_config.ascend_scheduler_config.enabled = False
+        mock_ascend_config.xlite_graph_config.enabled = False
         mock_ascend_config.enable_shared_expert_dp = False
         return mock_ascend_config
 
@@ -52,8 +46,9 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_control_env_var,
                          "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
-        self.assertEqual(NPUPlatform.supported_quantization,
-                         [ASCEND_QUANTIZATION_METHOD])
+        self.assertEqual(
+            NPUPlatform.supported_quantization,
+            [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
@@ -233,21 +228,25 @@ class TestNPUPlatform(TestBase):
         mock_empty_cache.assert_called_once()
         mock_reset_stats.assert_called_once()
 
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("os.environ", {})
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_basic_config_update(
-            self, mock_init_recompute, mock_is_310p, mock_update_acl,
-            mock_init_ascend, mock_check_ascend):
+            self, mock_init_recompute, mock_soc_version, mock_update_acl,
+            mock_init_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_expert_parallel = False
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
@@ -262,21 +261,21 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
 
         mock_init_ascend.assert_called_once_with(vllm_config)
-        mock_check_ascend.assert_called_once()
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_no_model_config_warning(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config = None
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
@@ -288,19 +287,20 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
         self.assertTrue("Model config is missing" in cm.output[0])
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_enforce_eager_mode(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = True
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
@@ -313,43 +313,38 @@ class TestNPUPlatform(TestBase):
         self.assertTrue("Compilation disabled, using eager mode by default" in
                         cm.output[0])
 
-        if vllm_version_is("0.11.0"):
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
-            )
-        else:
-            self.assertEqual(
-                vllm_config.compilation_config.mode,
-                CompilationMode.NONE,
-            )
+        self.assertEqual(
+            vllm_config.compilation_config.mode,
+            CompilationMode.NONE,
+        )
 
         self.assertEqual(
             vllm_config.compilation_config.cudagraph_mode,
             CUDAGraphMode.NONE,
         )
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
+    @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_unsupported_compilation_level(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_update_default,
+            mock_soc_version):
+        mock_update_default.return_value = MagicMock()
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        if vllm_version_is("0.11.0"):
-            vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
-        else:
-            vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+        vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -357,16 +352,11 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
             self.assertTrue("NPU does not support" in cm.output[0])
-            if vllm_version_is("0.11.0"):
-                self.assertEqual(
-                    vllm_config.compilation_config.level,
-                    CompilationLevel.NO_COMPILATION,
-                )
-            else:
-                self.assertEqual(
-                    vllm_config.compilation_config.mode,
-                    CompilationMode.NONE,
-                )
+
+            self.assertEqual(
+                vllm_config.compilation_config.mode,
+                CompilationMode.NONE,
+            )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
@@ -374,11 +364,11 @@ class TestNPUPlatform(TestBase):
 
     @pytest.mark.skip(
         "Revert me when vllm support setting cudagraph_mode on oot platform")
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     def test_check_and_update_config_unsupported_cudagraph_mode(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -394,80 +384,30 @@ class TestNPUPlatform(TestBase):
                 "cudagraph_mode is not support on NPU. falling back to NONE" in
                 cm.output[0])
 
-            if vllm_version_is("0.11.0"):
-                self.assertEqual(
-                    vllm_config.compilation_config.level,
-                    CompilationLevel.NO_COMPILATION,
-                )
-            else:
-                self.assertEqual(
-                    vllm_config.compilation_config.mode,
-                    CompilationMode.NONE,
-                )
+            self.assertEqual(
+                vllm_config.compilation_config.mode,
+                CompilationMode.NONE,
+            )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
             )
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_torchair_enabled_compilation(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
-        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.torchair_graph_config.enabled = True
-        mock_init_ascend.return_value = mock_ascend_config
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.model_config.enforce_eager = False
-        vllm_config.parallel_config.tensor_parallel_size = 1
-        mock_init_recompute.return_value = MagicMock()
-        vllm_config.scheduler_config = MagicMock()
-
-        if vllm_version_is("0.11.0"):
-            vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
-        else:
-            vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
-
-        with self.assertLogs(logger="vllm", level="INFO") as cm:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
-        self.assertTrue("Torchair compilation enabled" in cm.output[0])
-
-        if vllm_version_is("0.11.0"):
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
-            )
-        else:
-            self.assertEqual(
-                vllm_config.compilation_config.mode,
-                CompilationMode.NONE,
-            )
-        self.assertEqual(
-            vllm_config.compilation_config.cudagraph_mode,
-            CUDAGraphMode.NONE,
-        )
-
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_cache_config_block_size(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.cache_config.block_size = None
         vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
@@ -480,19 +420,20 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 128)
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_v1_worker_class_selection(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.worker_cls = "auto"
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
@@ -508,28 +449,29 @@ class TestNPUPlatform(TestBase):
         )
 
         test_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        test_ascend_config.torchair_graph_config.enabled = True
+        test_ascend_config.xlite_graph_config.enabled = True
         mock_init_ascend.return_value = test_ascend_config
         vllm_config.parallel_config.worker_cls = "auto"
         self.platform.check_and_update_config(vllm_config)
         self.assertEqual(
             vllm_config.parallel_config.worker_cls,
-            "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker",
+            "vllm_ascend.xlite.xlite_worker.XliteWorker",
         )
 
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+        "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_310p_no_custom_ops(
-            self, mock_init_recompute, mock_is_310p, mock_init_ascend,
-            mock_check_ascend):
+            self, mock_init_recompute, mock_soc_version, mock_init_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
 
@@ -541,110 +483,26 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
         self.assertEqual(vllm_config.compilation_config.custom_ops, [])
 
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
-    )
-    def test_check_and_update_config_ascend_scheduler_config(
-            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
-        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        mock_ascend_config.ascend_scheduler_config.enabled = True
-        mock_init_ascend.return_value = mock_ascend_config
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.parallel_config.tensor_parallel_size = 1
-        mock_init_recompute.return_value = MagicMock()
-
-        with patch("vllm_ascend.core.schedule_config.AscendSchedulerConfig"
-                   ) as mock_scheduler:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
-            mock_scheduler.initialize_from_config.assert_called_once()
-
-    @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_use_v1_and_mla(self, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-        mock_config.enable_shared_expert_dp = False
-
-        mock_get_ascend_config.return_value = mock_config
-
+    def test_get_attn_backend_cls_use_v1_and_mla(self):
         result = self.platform.get_attn_backend_cls(
             selected_backend="ascend",
             head_size=64,
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=True,
         )
         self.assertEqual(result,
                          "vllm_ascend.attention.mla_v1.AscendMLABackend")
 
-    @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_use_v1_mla_and_torchair(
-            self, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = True
-
-        mock_get_ascend_config.return_value = mock_config
-
+    def test_get_attn_backend_cls_use_v1_only(self):
         result = self.platform.get_attn_backend_cls(
             selected_backend="ascend",
             head_size=64,
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            use_v1=True,
-            #use_sfa=False,
-            use_mla=True,
-        )
-        self.assertEqual(
-            result,
-            "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend")
-
-    @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_use_v1_and_torchair(self,
-                                                      mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = True
-
-        mock_get_ascend_config.return_value = mock_config
-
-        result = self.platform.get_attn_backend_cls(
-            selected_backend="ascend",
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="float16",
-            block_size=64,
-            use_v1=True,
-            #use_sfa=False,
-            use_mla=False,
-        )
-        self.assertEqual(
-            result,
-            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend"
-        )
-
-    @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_use_v1_only(self, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
-        mock_get_ascend_config.return_value = mock_config
-
-        result = self.platform.get_attn_backend_cls(
-            selected_backend="ascend",
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="float16",
-            block_size=64,
-            use_v1=True,
             #use_sfa=False,
             use_mla=False,
         )
@@ -654,12 +512,9 @@ class TestNPUPlatform(TestBase):
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()
-        if vllm_version_is("0.11.0"):
-            self.assertEqual(
-                result, "vllm_ascend.lora.punica_npu.PunicaWrapperNPU0110")
-        else:
-            self.assertEqual(result,
-                             "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
+
+        self.assertEqual(result,
+                         "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.max_memory_allocated")
@@ -723,32 +578,3 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
-
-    def test_aclgraph_enable(self):
-        config = EngineArgs()
-        VllmConfig = config.create_engine_config()
-        self.assertEqual(VllmConfig.compilation_config.cudagraph_mode,
-                         CUDAGraphMode.PIECEWISE)
-
-        with self.assertLogs(logger="vllm", level="INFO") as cm:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.check_and_update_config(VllmConfig)
-            self.assertTrue(
-                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode" in cm.output[0])
-            if vllm_version_is("0.11.0"):
-                self.assertEqual(
-                    VllmConfig.compilation_config.level,
-                    CompilationLevel.PIECEWISE,
-                )
-            else:
-                self.assertEqual(
-                    VllmConfig.compilation_config.mode,
-                    CompilationMode.VLLM_COMPILE,
-                )
-            self.assertEqual(
-                VllmConfig.compilation_config.cudagraph_mode,
-                CUDAGraphMode.PIECEWISE,
-            )

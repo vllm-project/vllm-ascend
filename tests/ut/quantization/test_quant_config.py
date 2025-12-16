@@ -65,11 +65,19 @@ class TestAscendQuantConfig(TestBase):
         # Test when NPU is available
         mock_is_available.return_value = True
         result = AscendQuantConfig.override_quantization_method(None, None)
-        self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
+        self.assertIsNone(result)
+        hf_quant_cfg = {"quant_method": ""}
+        result = AscendQuantConfig.override_quantization_method(
+            hf_quant_cfg, None)
+        self.assertEqual(result, "ascend")
 
         # Test when NPU is not available
         mock_is_available.return_value = False
         result = AscendQuantConfig.override_quantization_method(None, None)
+        self.assertIsNone(result)
+        hf_quant_cfg = {"quant_method": ""}
+        result = AscendQuantConfig.override_quantization_method(
+            hf_quant_cfg, None)
         self.assertIsNone(result)
 
     def test_get_quant_method_for_linear(self):
@@ -93,7 +101,7 @@ class TestAscendQuantConfig(TestBase):
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(
                 self.ascend_config, ".attn",
-                self.ascend_config.packed_modules_mapping)
+                self.ascend_config.packed_modules_mapping, linear_layer)
 
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
