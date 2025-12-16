@@ -3564,8 +3564,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         if is_310p_device and not ascend_config.torchair_graph_config.enabled:
                             # For 310P: directly allocate NCHW format tensors to avoid expensive format conversion
                             # Calculate the final shape based on current layer's kv_cache_spec
-                            num_blocks = kv_cache_tensor.size // kv_cache_tensor.page_size_bytes
-                            block_size = kv_cache_tensor.block_size
+                            num_blocks = kv_cache_tensor.size // kv_cache_tensor.page_size
+                            block_size = kv_cache_tensor.page_size
                             num_kv_heads = kv_cache_spec.num_kv_heads
                             head_size = kv_cache_spec.head_size
                             dtype = kv_cache_spec.dtype
