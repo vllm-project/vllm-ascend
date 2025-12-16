@@ -2216,7 +2216,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.dynamic_eplb:
                 self.eplb_adaptor_cls = EplbAdaptorFactory.get_eplb_adapator(
                     vllm_config=self.vllm_config)
-                VllmEplbAdaptor.model_register(self)
+                VllmEplbAdaptor.model_register(self.model)
             if get_ascend_device_type() == AscendDeviceType._310P:
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
