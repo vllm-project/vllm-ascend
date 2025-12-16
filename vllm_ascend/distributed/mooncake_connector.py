@@ -23,6 +23,7 @@ import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
@@ -41,8 +42,6 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import prefill_context_parallel_enable
-from vllm.distributed import get_pcp_group
-
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
