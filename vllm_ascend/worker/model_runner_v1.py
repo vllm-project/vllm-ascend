@@ -3771,6 +3771,17 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         ) + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
                     assert raw_v_tensor is not None
+                    # 310P Debug: Check size mismatch
+                    if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                        print(f"[DEBUG 310P SIZE CHECK] Layer {layer_name}:")
+                        print(f"[DEBUG 310P SIZE CHECK]   sum_page_size_bytes: {sum_page_size_bytes}")
+                        print(f"[DEBUG 310P SIZE CHECK]   page_size_bytes: {kv_cache_spec.page_size_bytes}")
+                        print(f"[DEBUG 310P SIZE CHECK]   remainder: {sum_page_size_bytes % kv_cache_spec.page_size_bytes}")
+                        print(f"[DEBUG 310P SIZE CHECK]   k_tensor.numel: {raw_k_tensor.numel()}")
+                        print(f"[DEBUG 310P SIZE CHECK]   v_tensor.numel: {raw_v_tensor.numel()}")
+                        print(f"[DEBUG 310P SIZE CHECK]   k_tensor.shape: {raw_k_tensor.shape}")
+                        print(f"[DEBUG 310P SIZE CHECK]   v_tensor.shape: {raw_v_tensor.shape}")
+
                     assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
                     num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
 
