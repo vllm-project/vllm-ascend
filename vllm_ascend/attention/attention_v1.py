@@ -594,8 +594,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if forward_context.capturing:
             return self.full_graph_fia(query, key, value, attn_metadata,
                                        output)
-        if self.sliding_window is not None and attn_metadata.seq_lens.shape[
-                0] == query.size(0):
+        if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                and self.sliding_window is not None
+                and attn_metadata.seq_lens.shape[0] == query.size(0)):
             return self._forward_fia_slidingwindow(query, attn_metadata,
                                                    output)
         key, value, block_size, block_table, actual_seq_lengths_kv \
