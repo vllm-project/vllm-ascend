@@ -18,8 +18,7 @@
 import torch
 import torch.nn as nn
 from vllm.model_executor.models.qwen2_5_omni_thinker import (
-    Qwen2_5_VLImageInputs, Qwen2_5_VLVideoInputs,
-    Qwen2_5OmniThinkerForConditionalGeneration)
+    Qwen2_5_VLImageInputs, Qwen2_5_VLVideoInputs)
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
@@ -65,8 +64,3 @@ class AscendQwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         sizes = grid_thw.prod(-1) // merge_size // merge_size
 
         return video_embeds.split(sizes.tolist())
-
-
-# NOTE: These will be removed after ascend_forward_context is refactored.
-Qwen2_5OmniThinkerForConditionalGeneration._process_image_input = AscendQwen2_5OmniThinkerForConditionalGeneration._process_image_input
-Qwen2_5OmniThinkerForConditionalGeneration._process_video_input = AscendQwen2_5OmniThinkerForConditionalGeneration._process_video_input
