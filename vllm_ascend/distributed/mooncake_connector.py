@@ -40,7 +40,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import prefill_context_parallel_enable
+from vllm_ascend.utils import prefill_context_parallel_enable, is_vl_model
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -320,11 +320,11 @@ class KVCacheRecvingThread(threading.Thread):
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
-        if self.use_mla:
+        if self.use_mla and not is_vl_model(vllm_config):
             self.k_head_dim = self.model_config.hf_config.kv_lora_rank
             self.v_head_dim = self.model_config.hf_config.qk_rope_head_dim
             self.num_kv_heads = 1
-        else:
+        elif not is_vl_model(vllm_config):
             self.k_head_dim = self.model_config.hf_config.head_dim
             self.v_head_dim = self.model_config.hf_config.head_dim
             self.num_kv_heads = max(
