@@ -343,11 +343,9 @@ class EagleProposer(Proposer):
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
-
-        positions = self.positions[:num_input_tokens]
         # update global cos, sin
-        update_cos_sin(positions)
-        
+        update_cos_sin(self.positions[:num_input_tokens])
+
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         num_tokens=num_input_tokens):
