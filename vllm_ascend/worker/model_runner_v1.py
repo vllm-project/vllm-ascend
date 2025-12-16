@@ -3390,12 +3390,21 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         from vllm_ascend.platform import NPUPlatform
         free_before, total = NPUPlatform.mem_get_info()
         logger.info(f"[NEW_MEMORY_DEBUG] Before initialize_kv_cache: Free={free_before/GiB_bytes:.2f}GiB")
-        
+
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
+
+        # Monitor after config setup
+        free_after_config, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after kv cache config setup: Free={free_after_config/GiB_bytes:.2f}GiB")
+
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
+
+        # Monitor after attention backend initialization
+        free_after_attn, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after initialize_attn_backend: Free={free_after_attn/GiB_bytes:.2f}GiB")
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any([
@@ -3403,7 +3412,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             for attn_group in self.attn_groups
         ])
 
+        # Monitor after attention groups setup
+        free_after_groups, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after attention groups setup: Free={free_after_groups/GiB_bytes:.2f}GiB")
+
         self.may_reinitialize_input_batch(kv_cache_config)
+
+        # Monitor after input batch reinitialization
+        free_after_batch, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after input batch reinit: Free={free_after_batch/GiB_bytes:.2f}GiB")
+
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if has_kv_transfer_group():
