@@ -64,7 +64,7 @@ def set_ascend_forward_context(
             get_moe_comm_method
         moe_comm_type = select_moe_comm_method(num_tokens, vllm_config)
         # TODO: remove this after moe_comm_type selection logic is finalized
-        if in_profile_run and is_mtp_model:
+        if is_mtp_model:
             moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
                              == MoECommType.FUSED_ALLTOALL else moe_comm_type)
         forward_context.moe_comm_type = moe_comm_type
