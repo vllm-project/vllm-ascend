@@ -251,12 +251,20 @@ class KVPoolWorker:
                       connector_metadata: AscendConnectorMetadata) -> None:
         if self.current_layer == 0:
             self.layerwise_storers = []
+            current_event = None
+            for request in connector_metadata.requests:
+                can_save = request.can_save
+                if can_save is None or not can_save:
+                    continue
+                current_event = torch.npu.Event()
+                current_event.record()
+                break
             for request in connector_metadata.requests:
                 can_save = request.can_save
                 if can_save is None or not can_save:
                     continue
 
-                layerwise_storer = self.store_layer(request)
+                layerwise_storer = self.store_layer(request, current_event)
                 self.layerwise_storers.append(layerwise_storer)
         for layerwise_storer in self.layerwise_storers:
             try:
@@ -266,11 +274,21 @@ class KVPoolWorker:
         self.current_layer = self.current_layer + 1
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
+        current_event = None
+        for request in connector_metadata.requests:
+            can_save = request.can_save
+            if can_save is None or not can_save:
+                continue
+            current_event = torch.npu.Event()
+            current_event.record()
+            break
+
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
                 continue
 
+            request.current_event = current_event
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 request, )
 
@@ -347,6 +365,7 @@ class KVPoolWorker:
     def store_layer(
         self,
         request: ReqMeta,
+        current_event: Optional[torch.npu.Event],
     ) -> Generator[None, None, None]:
         """
         Store the KV cache in a layerwise manner.
@@ -385,7 +404,8 @@ class KVPoolWorker:
                                                    keys_multi_chunk, starts,
                                                    ends, request.block_ids,
                                                    layer_id,
-                                                   request.is_last_chunk)
+                                                   request.is_last_chunk,
+                                                   current_event)
                 self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 yield
