@@ -167,8 +167,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         chunked_context_metadata.padded_local_chunk_seq_lens = padded_local_chunk_seq_lens.tolist()
         if local_context_lens_allranks is not None:
             chunked_context_metadata.local_context_lens_allranks = local_context_lens_allranks.tolist()
-        chunked_context_metadata.padded_local_cu_seq_lens =(
-            padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True),)
+        chunked_context_metadata.padded_local_cu_seq_lens = \
+            padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True)
         chunked_context_metadata.cu_seq_lens_lst = self.cu_seq_lens_cpu.tolist()
         chunked_context_metadata.chunk_size = padded_local_max_context_chunk_across_ranks
 
