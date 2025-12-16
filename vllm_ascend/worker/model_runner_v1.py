@@ -767,6 +767,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1:num_reqs + 1] = cu_num_tokens
+        self.query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = (
@@ -774,8 +775,6 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens)
         self.seq_lens.copy_to_gpu()
 
-        # Fill unused with -1. Needed for reshape_and_cache
-        self.query_start_loc.gpu[num_reqs + 1:].fill_(-1)
         self.seq_lens.gpu[num_reqs:].fill_(0)
 
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
