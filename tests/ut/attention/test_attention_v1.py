@@ -508,6 +508,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         prefix_chunk_lse = torch.randn(2, 4, 1)
         self.impl.dcp_size = 2
         self.impl.pcp_size = 3
+        self.impl.head_size = 8
 
         # Mock output
         mock_cat.return_value = torch.randn(2, 4, 9)
