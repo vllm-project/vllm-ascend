@@ -1,4 +1,4 @@
-# Qwen3-Embedding-8B
+# Qwen3-Embedding
 
 ## Introduction
 The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This guide describes how to run the model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of vLLM Ascend support the model.
@@ -91,8 +91,7 @@ Processed prompts: 100%|██████████████████�
 [[0.7477798461914062, 0.07548339664936066], [0.0886271521449089, 0.6311039924621582]]
 ```
 
-## Accuracy Evaluation
-will be provided later...
-
 ## Performance
-will be provided later...
+```bash
+vllm bench serve --model Qwen3-embedding --backend openai-embeddings --dataset-name random --tokenizer /data/Qwen3-reembedding --host 127.0.0.1 --port 8888 --endpoint /v1/embeddings
+```

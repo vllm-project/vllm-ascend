@@ -46,8 +46,8 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 
 | Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
-| Qwen3-Embedding               | ✅        | [Qwen3-Embedding tutorials](../../tutorials/Qwen3-Embedding.md)      |||||||||||||||||||
-| Qwen3-Reranker                | ✅        | [Qwen3-Reranker tutorials](../../tutorials/Qwen3-Reranker.md)        |||||||||||||||||||
+| Qwen3-Embedding               | ✅        |                                                                      |||||||||||||||||||
+| Qwen3-Reranker                | ✅        |                                                                      |||||||||||||||||||
 | Molmo                         | ✅        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |||||||||||||||||||
 | XLM-RoBERTa-based             | ✅        |                                                                      |||||||||||||||||||
 | Bert                          | ✅        |                                                                      |||||||||||||||||||
