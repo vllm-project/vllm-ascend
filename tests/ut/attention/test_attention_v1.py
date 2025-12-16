@@ -839,10 +839,10 @@ class TestAttentionWithNomaskAndMask(TestBase):
 
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
     @patch(
-        'vllm_ascend.attention.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
+        'vllm_ascend.attention.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update'
     )
     def test_attention_with_nomask_and_mask_nochunk(
-            self, mock_update_out_and_lse,
+            self, mock_npu_attn_out_lse_update,
             mock_npu_fused_infer_attention_score):
         self.impl._npu_attn_out_lse_update = MagicMock()
         # Mock input data
@@ -866,7 +866,7 @@ class TestAttentionWithNomaskAndMask(TestBase):
             self.q_total_tokens, self.impl.num_heads,
             self.impl.head_size), torch.randn(self.q_total_tokens,
                                               self.impl.num_heads, 1)
-        mock_update_out_and_lse.return_value = torch.randn(
+        mock_npu_attn_out_lse_update.return_value = torch.randn(
             self.q_total_tokens, self.impl.num_heads, self.impl.head_size)
 
         # Call the method under test
