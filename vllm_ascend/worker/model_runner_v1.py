@@ -3573,14 +3573,33 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             # Get the spec from our pre-built mapping
                             kv_cache_spec = layer_to_spec[layer_name]
                             block_size = kv_cache_spec.block_size
-                            num_blocks = kv_cache_tensor.size // block_size
+
+                            # Fix: Use page_size_bytes instead of block_size for correct calculation
+                            page_size_bytes = kv_cache_spec.page_size_bytes
+                            num_blocks = kv_cache_tensor.size // page_size_bytes
                             num_kv_heads = kv_cache_spec.num_kv_heads
                             head_size = kv_cache_spec.head_size
                             dtype = kv_cache_spec.dtype
 
+                            # DEBUG: Print calculated values for verification
+                            print(f"[DEBUG 310P SHAPE] Layer {layer_name}:")
+                            print(f"[DEBUG 310P SHAPE]   kv_cache_tensor.size: {kv_cache_tensor.size}")
+                            print(f"[DEBUG 310P SHAPE]   page_size_bytes: {page_size_bytes}")
+                            print(f"[DEBUG 310P SHAPE]   num_blocks: {num_blocks}")
+                            print(f"[DEBUG 310P SHAPE]   num_kv_heads: {num_kv_heads}")
+                            print(f"[DEBUG 310P SHAPE]   head_size: {head_size}")
+
                             # Use 310P-optimized compressed format (5-dim NCHW format)
                             k_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
                             v_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
+
+                            # DEBUG: Print final shapes
+                            k_elements = 1
+                            for dim in k_final_shape:
+                                k_elements *= dim
+                            k_memory_gb = (k_elements * 2) / (1024**3)  # K+V cache, assuming 2 bytes per element
+                            print(f"[DEBUG 310P SHAPE]   k_final_shape: {k_final_shape}")
+                            print(f"[DEBUG 310P SHAPE]   Estimated memory: {k_memory_gb:.2f} GiB")
 
                             # Allocate directly in final NCHW format
                             k_tensor = torch.zeros(k_final_shape, dtype=dtype, device=self.device)  # NCHW format
