@@ -549,6 +549,14 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         self.use_aclgraph = self._use_aclgraph()
 
+        # DEBUG: 验证enforce_eager是否生效
+        print(f"[DEBUG ENFORCE_EAGER] Model Config enforce_eager: {self.model_config.enforce_eager}")
+        print(f"[DEBUG ENFORCE_EAGER] CompilationConfig cudagraph_mode: {self.compilation_config.cudagraph_mode}")
+        print(f"[DEBUG ENFORCE_EAGER] CompilationConfig mode: {self.compilation_config.mode}")
+        print(f"[DEBUG ENFORCE_EAGER] use_aclgraph: {self.use_aclgraph}")
+        print(f"[DEBUG ENFORCE_EAGER] torchair_graph_enabled: {self.ascend_config.torchair_graph_config.enabled}")
+        # DEBUG END
+
         # self.aclgraph_batch_sizes sorts in ascending order.
         if (self.compilation_config.cudagraph_capture_sizes and
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
