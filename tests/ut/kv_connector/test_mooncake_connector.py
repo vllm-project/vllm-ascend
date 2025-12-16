@@ -1289,7 +1289,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
-
         self.assertEqual(
             get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1],
                                   [1]),
