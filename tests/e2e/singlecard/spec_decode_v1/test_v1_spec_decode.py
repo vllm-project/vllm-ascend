@@ -161,7 +161,7 @@ def test_eagle_correctness(
     assert matches > int(0.66 * len(ref_outputs))
 
 
-def test_vl_eagle_correctness(
+def test_qwen3_vl_eagle_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     vl_model_name: str,

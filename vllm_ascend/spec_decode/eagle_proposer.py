@@ -186,19 +186,16 @@ class EagleProposer(Proposer):
             )
             dummy_compute_logits(self.hidden_states)
 
-    def generate_token_ids(
-            self,
-            valid_sampled_token_ids: torch.Tensor
-        | list[list[int]],
-            sampling_metadata: SamplingMetadata = None,
-            scheduler_output: SchedulerOutput = None,
-            spec_decode_metadata: SpecDecodeMetadata = None,
-            positions: torch.Tensor = None,
-            num_scheduled_tokens: int = 0,
-            hidden_states: torch.Tensor = None,
-            aux_hidden_states: torch.Tensor = None,
-            mm_embed_input: tuple[list[torch.Tensor], torch.Tensor]
-        | None = None):
+    def generate_token_ids(self,
+                           valid_sampled_token_ids: torch.Tensor
+                           | list[list[int]],
+                           sampling_metadata: SamplingMetadata = None,
+                           scheduler_output: SchedulerOutput = None,
+                           spec_decode_metadata: SpecDecodeMetadata = None,
+                           positions: torch.Tensor = None,
+                           num_scheduled_tokens: int = 0,
+                           hidden_states: torch.Tensor = None,
+                           aux_hidden_states: torch.Tensor = None):
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
@@ -577,11 +574,11 @@ class EagleProposer(Proposer):
             dtype=draft_token_ids.dtype)
         draft_token_ids_tensor[0] = draft_token_ids
         if self.uses_mrope:
-            positions_cpu = target_positions[:,last_token_indices].cpu().to(
-            torch.int64)
+            positions_cpu = target_positions[:, last_token_indices].cpu().to(
+                torch.int64)
         else:
             positions_cpu = target_positions[last_token_indices].cpu().to(
-            torch.int64)
+                torch.int64)
         hidden_states = hidden_states[last_token_indices]
         if self.use_cuda_graph and \
             batch_size <= self.cudagraph_batch_sizes[-1]:
@@ -620,16 +617,17 @@ class EagleProposer(Proposer):
             # out-of-range access during the model execution. The draft tokens
             # generated with this adjustment should be ignored.
             if self.uses_mrope:
-                exceeds_max_model_len = positions_cpu[0] >= self.vllm_config.model_config.max_model_len
+                exceeds_max_model_len = positions_cpu[
+                    0] >= self.vllm_config.model_config.max_model_len
                 # Mask out the position ids that exceed the max model length.
                 # Otherwise, we may get out-of-range error in RoPE.
-                clamped_positions_cpu = torch.where(exceeds_max_model_len.unsqueeze(0),
-                                                torch.zeros_like(positions_cpu),
-                                                positions_cpu)
+                clamped_positions_cpu = torch.where(
+                    exceeds_max_model_len.unsqueeze(0),
+                    torch.zeros_like(positions_cpu), positions_cpu)
             else:
                 exceeds_max_model_len = positions_cpu >= self.vllm_config.model_config.max_model_len
                 clamped_positions_cpu = torch.where(exceeds_max_model_len, 0,
-                                                positions_cpu)
+                                                    positions_cpu)
             clamped_positions = clamped_positions_cpu.to(device)
 
             # TODO: Increment the sequence lengths.
