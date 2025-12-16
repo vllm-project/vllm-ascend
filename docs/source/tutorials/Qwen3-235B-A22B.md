@@ -51,6 +51,7 @@ Select an image based on your machine type and start the docker image on your no
   --name $NAME \
   --net=host \
   --shm-size=1g \
+  --privileged=true \
   --device /dev/davinci0 \
   --device /dev/davinci1 \
   --device /dev/davinci2 \

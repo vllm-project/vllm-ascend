@@ -54,6 +54,7 @@ export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
+    --privileged=true \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
@@ -205,6 +206,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
+    --privileged=true \
     --net=host \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
@@ -411,6 +413,7 @@ docker run --rm \
 --name vllm-ascend \
 --net=host \
 --shm-size=1g \
+--privileged=true \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -452,6 +455,7 @@ docker run --rm \
 --name vllm-ascend \
 --net=host \
 --shm-size=1g \
+--privileged=true \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \

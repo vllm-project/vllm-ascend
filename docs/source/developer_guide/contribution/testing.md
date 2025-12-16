@@ -26,6 +26,7 @@ cd ~/vllm-project/
 # docker pull quay.nju.edu.cn/ascend/cann:|cann_image_tag|
 export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm --name vllm-ascend-ut \
+    --privileged=true \
     -v $(pwd):/vllm-project \
     -v ~/.cache:/root/.cache \
     -ti $IMAGE bash
@@ -67,6 +68,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:main
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
+    --privileged=true \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
@@ -103,6 +105,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:main
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \

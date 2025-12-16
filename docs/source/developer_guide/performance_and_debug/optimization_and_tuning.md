@@ -15,6 +15,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
 docker run --rm \
 --name performance-test \
 --shm-size=1g \
+--privileged=true \
 --device $DEVICE \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \

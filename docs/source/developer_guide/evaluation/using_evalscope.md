@@ -14,6 +14,7 @@ export DEVICE=/dev/davinci7
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --shm-size=1g \
+--privileged=true \
 --name vllm-ascend \
 --device $DEVICE \
 --device /dev/davinci_manager \

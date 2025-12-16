@@ -27,6 +27,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --shm-size=1g \
+--privileged=true \
 --name vllm-ascend-qwen3 \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
