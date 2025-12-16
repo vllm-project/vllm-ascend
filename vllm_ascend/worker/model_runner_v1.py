@@ -21,7 +21,7 @@ import math
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
