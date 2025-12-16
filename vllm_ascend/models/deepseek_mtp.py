@@ -112,6 +112,8 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+        self.speculative_config=vllm_config.speculative_config
+        self.afd_config=vllm_config.afd_config
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict({
             str(idx):
