@@ -234,7 +234,6 @@ class TestMtpProposer:
         proposer.speculative_config = MagicMock(
             disable_padded_drafter_batch=False)
         proposer.pcp_size = mock_deps.runner.pcp_size
-        proposer._get_attn_metadata = MagicMock(return_value=MagicMock())
         proposer.prepare_next_token_ids_padded = MagicMock(
             return_value=(torch.tensor([101, 200, 302]), 3))
         proposer.prepare_inputs_padded = MagicMock(
@@ -257,7 +256,6 @@ class TestMtpProposer:
 
         proposer.prepare_next_token_ids_padded.assert_called_once()
         proposer.prepare_inputs_padded.assert_called_once()
-        proposer._get_attn_metadata.assert_called_once()
         proposer._propose.assert_called_once()
         assert torch.equal(draft_token_ids, proposer._propose.return_value)
 

@@ -5,11 +5,13 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
                                is_moe_model)
@@ -275,7 +277,8 @@ def select_moe_comm_method(num_tokens: int,
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType._910B}:
         if (num_tokens <= mc2_tokens_capacity
-                and vllm_config.parallel_config.world_size_across_dp >= 16):
+                and vllm_config.parallel_config.world_size_across_dp /
+                vllm_config.parallel_config.pipeline_parallel_size >= 16):
             moe_comm_type = MoECommType.MC2
         else:
             # Currently, w4a8_dynamic does not support allgatherep
@@ -285,12 +288,18 @@ def select_moe_comm_method(num_tokens: int,
                 moe_comm_type = MoECommType.ALLGATHER
 
     elif soc_version in {AscendDeviceType._910_93}:
+        ascend_config = get_ascend_config()
+        dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+        fused_all2all_enable = quant_type == "w8a8_dynamic" and get_ep_group(
+        ).world_size <= 16 and (not dynamic_eplb)
         moe_comm_type = (MoECommType.MC2 if num_tokens <= mc2_tokens_capacity
-                         else MoECommType.FUSED_ALLTOALL if quant_type
-                         == "w8a8_dynamic" else MoECommType.ALLTOALL)
+                         else MoECommType.FUSED_ALLTOALL
+                         if fused_all2all_enable else MoECommType.ALLTOALL)
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
-
+    moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
+                     == MoECommType.FUSED_ALLTOALL else moe_comm_type)
     # PanguProMoE only supports allgather
     if model_type == "PanguProMoE":
         moe_comm_type = MoECommType.ALLGATHER

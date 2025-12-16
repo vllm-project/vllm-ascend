@@ -44,7 +44,7 @@ def main():
     ]
     input_texts = queries + documents
 
-    model = LLM(model="Qwen/Qwen3-Embedding-0.6B", task="embed")
+    model = LLM(model="Qwen/Qwen3-Embedding-0.6B", runner="pooling")
 
     outputs = model.embed(input_texts)
     embeddings = torch.tensor([o.outputs.embedding for o in outputs])

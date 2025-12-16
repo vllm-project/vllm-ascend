@@ -95,12 +95,12 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
@@ -134,7 +134,7 @@ jobs:
 
       - name: Upload benchmark artifacts
         if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: "benchmark-performance-${{ matrix.vllm_branch }}-${{ matrix.vllm_ascend_branch }}-report"
           path: ./benchmarks/results/benchmark_results.md
