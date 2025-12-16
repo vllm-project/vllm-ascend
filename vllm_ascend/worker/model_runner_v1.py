@@ -3807,9 +3807,27 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                     # Check if we already have properly shaped tensors (310P NCHW format)
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                        # DEBUG: 监控310P设备处理前的内存状态
+                        from vllm_ascend.platform import NPUPlatform
+                        free_before_310p, total_before_310p = NPUPlatform.mem_get_info()
+                        print(f"[DEBUG MEMORY 310P BEFORE] Layer {layer_name}:")
+                        print(f"[DEBUG MEMORY 310P BEFORE]   Free memory: {free_before_310p} bytes ({free_before_310p/1024**3:.2f} GiB)")
+                        print(f"[DEBUG MEMORY 310P BEFORE]   Total memory: {total_before_310p} bytes ({total_before_310p/1024**3:.2f} GiB)")
+                        print(f"[DEBUG MEMORY 310P BEFORE]   Used memory: {(total_before_310p-free_before_310p)/1024**3:.2f} GiB)")
+
                         # For 310P: tensors are already in final NCHW format, skip reshape and format conversion
                         k_cache = raw_k_tensor  # Already in correct NCHW format
                         v_cache = raw_v_tensor  # Already in correct NCHW format
+
+                        # DEBUG: 监控310P设备处理后的内存状态
+                        free_after_310p, total_after_310p = NPUPlatform.mem_get_info()
+                        memory_consumed_310p = (free_before_310p - free_after_310p) / 1024**3
+                        print(f"[DEBUG MEMORY 310P AFTER] Layer {layer_name}:")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Free memory: {free_after_310p} bytes ({free_after_310p/1024**3:.2f} GiB)")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Total memory: {total_after_310p} bytes ({total_after_310p/1024**3:.2f} GiB)")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Used memory: {(total_after_310p-free_after_310p)/1024**3:.2f} GiB)")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Memory consumed: {memory_consumed_310p:.2f} GiB")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Format conversion: SKIPPED (already NCHW format)")
                         print(f"[DEBUG 310P OPTIMIZATION] Layer {layer_name}: Using pre-allocated NCHW format, skipping format conversion")
                     else:
                         # Standard path: reshape pre-allocated tensors and convert format
