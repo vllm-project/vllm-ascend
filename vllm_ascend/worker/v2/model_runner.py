@@ -4,20 +4,23 @@
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.core.sched.output import SchedulerOutput, GrammarOutput
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
 from vllm.v1.worker.gpu.input_batch import (InputBatch,
                                             combine_sampled_and_draft_tokens,
                                             prepare_pos_seq_lens,
                                             prepare_prefill_inputs)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata,
+    build_attn_state,
+    make_attention_mask,
+)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -32,7 +35,8 @@ class NPUModelRunner(GPUModelRunner):
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
-        # release original object.
+        # because we will override these attribute, delete these attribute to
+        # make sure it's collected by python gc immediately.
         del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
@@ -40,7 +44,8 @@ class NPUModelRunner(GPUModelRunner):
         # NPU specific initializations can be added below.
         self.cudagraph_manager = AclGraphManager(vllm_config, device)
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
-        self.req_states = AscendRequestState(
+        # so reinitialize req_states here.
+        self.req_states: AscendRequestState = AscendRequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
@@ -50,7 +55,8 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
-        self.input_buffers = AscendInputBuffers(
+        # so reinitialize input_buffers here.
+        self.input_buffers: AscendInputBuffers = AscendInputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             inputs_embeds_size=self.inputs_embeds_size,
@@ -60,25 +66,20 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
 
-        self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group(
-        ).rank_in_group if self.pcp_size > 1 else 0
-
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
-        self.attn_mask = None
-        self.spec_attn_mask = None
-        self.attn_state = None
-
+        # actual seq lengths for query (used in attention backends).
         self.actual_seq_lengths_q: list[int] = []
+        # decode token per request (used in attention backends).
         self.decode_token_per_req = 1
 
-        # this is for async scheduling with speculative decoding.
+        # there attributes are for async scheduling with speculative decoding.
+        # because npu attention backend still need to use seq_lens_cpu,
+        # we need to copy num_rejected_tokens back to cpu to help
+        # update actual seq_lens_cpu. gpu attention backend do not need these
+        # attributes, cause their attention backends do not use seq_lens_cpu.
+        # and seq_lens_cpu is deprecated in gpu_model_runner_v2.
         self.num_rejected_tokens_event = None
         self.num_rejectd_tokens_cpu = None
         self.num_rejected_token_stream = None
-        self.req_ids: list[str] = []
         if self.use_async_scheduling and self.do_spec_decode:
             self.num_rejected_tokens_event = torch.npu.Event()
             self.num_rejected_token_stream = torch.npu.Stream()
@@ -91,8 +92,8 @@ class NPUModelRunner(GPUModelRunner):
 
     def prepare_inputs(
         self,
-        scheduler_output,
-        num_tokens_after_padding,
+        scheduler_output: SchedulerOutput,
+        num_tokens_after_padding: int,
     ) -> InputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention bakcends need seq_lens_cpu to work.
@@ -109,26 +110,35 @@ class NPUModelRunner(GPUModelRunner):
             key=lambda k: scheduler_output.num_scheduled_tokens[k],
         )
 
-        # special handling for npu.
-        self.req_ids = req_ids
         self._update_seq_lens_cpu(scheduler_output, req_ids)
+
         num_scheduled_tokens = np.array(
             [scheduler_output.num_scheduled_tokens[i] for i in req_ids],
             dtype=np.int32)
         num_valid_tokens = num_scheduled_tokens
         if scheduler_output.scheduled_spec_decode_tokens:
-            num_valid_tokens = np.array([
-                num_tokens -
-                len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                for num_tokens, i in zip(num_scheduled_tokens, req_ids)
-            ],
-                                        dtype=np.int32)
-        self.attn_state = self._build_attn_state(
+            num_valid_tokens = np.array(
+                [
+                    num_tokens - len(
+                        scheduler_output.scheduled_spec_decode_tokens.get(
+                            i, []))
+                    for num_tokens, i in zip(num_scheduled_tokens, req_ids)
+                ],
+                dtype=np.int32,
+            )
+        attn_state = build_attn_state(
+            self.vllm_config,
+            self.input_buffers.seq_lens_np,
             num_reqs,
             num_scheduled_tokens,
             num_valid_tokens,
         )
-        self.attn_mask = self._make_attention_mask(self.attn_state)
+        attn_mask = make_attention_mask(
+            self.vllm_config,
+            attn_state,
+            self.dtype,
+            self.device,
+        )
 
         idx_mapping_list = [
             self.req_states.req_id_to_index[req_id] for req_id in req_ids
@@ -136,7 +146,11 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping = self.input_buffers.idx_mapping
         idx_mapping.np[:num_reqs] = idx_mapping_list
         idx_mapping_np = idx_mapping.np[:num_reqs]
-        idx_mapping = idx_mapping.copy_to_gpu(num_reqs)
+        # add `idx_mapping_cpu` here, because vllm-ascend's  self.req_states.
+        # num_computed_tokens_cpu is actually cpu's tensor, while it's a gpu's
+        # tensor in vllm gpu_model_runner_v2.
+        idx_mapping_cpu = idx_mapping.cpu[:num_reqs]
+        idx_mapping_npu = idx_mapping.copy_to_gpu(num_reqs)
 
         # Get the number of draft tokens for each request.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -166,7 +180,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs + 1)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(idx_mapping)
+        block_tables = self.block_tables.gather_block_tables(idx_mapping_npu)
 
         # Get query_start_loc.
         np.cumsum(
@@ -190,7 +204,7 @@ class NPUModelRunner(GPUModelRunner):
         prepare_prefill_inputs(
             self.input_buffers.input_ids,
             self.req_states.next_prefill_tokens,
-            idx_mapping,
+            idx_mapping_npu,
             query_start_loc_gpu,
             self.req_states.prefill_token_ids.gpu,
             self.req_states.prefill_len.gpu,
@@ -199,7 +213,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
-            idx_mapping,
+            idx_mapping_npu,
             query_start_loc_gpu,
             self.req_states.num_computed_tokens,
             self.input_buffers.positions,
@@ -211,7 +225,7 @@ class NPUModelRunner(GPUModelRunner):
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
-            idx_mapping,
+            idx_mapping_npu,
             self.req_states.last_sampled_tokens,
             query_start_loc_gpu,
             seq_lens,
@@ -226,6 +240,9 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_gpu, self.input_buffers.positions[:num_tokens])
 
         # Layer name -> attention metadata.
+        # TODO(Ronald1995): try to add a new method `build_attn_metadata` in
+        # vllm gpu_model_runner_v2, maybe we don't overwrite `prepare_inputs`
+        # method like this.
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
@@ -236,14 +253,13 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu=self.input_buffers.seq_lens_cpu,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
             num_computed_tokens_cpu=self.req_states.
-            num_computed_tokens_cpu[idx_mapping],
+            num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             decode_token_per_req=self.decode_token_per_req,
-            attn_mask=self.attn_mask,
-            spec_attn_mask=self.spec_attn_mask,
-            attn_state=self.attn_state,
+            attn_mask=attn_mask,
+            attn_state=attn_state,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
@@ -251,7 +267,7 @@ class NPUModelRunner(GPUModelRunner):
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
-            idx_mapping=idx_mapping,
+            idx_mapping=idx_mapping_npu,
             idx_mapping_np=idx_mapping_np,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
@@ -260,7 +276,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc=query_start_loc_gpu,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=seq_lens_np,
+            seq_lens_np=self.input_buffers.seq_lens_np,
             input_ids=input_ids,
             positions=positions,
             attn_metadata=attn_metadata,
@@ -268,24 +284,19 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits=cu_num_logits,
         )
 
-    def sample_tokens(self, grammar_output):
-        with torch_cuda_wrapper():
-            output = super().sample_tokens(grammar_output)
-            self.num_rejected_tokens_event.synchronize()
-            n_rejected = self.num_rejectd_tokens_cpu[:len(self.req_ids
-                                                          )].tolist()
-            for req_id, rejected in zip(self.req_ids, n_rejected):
-                req_idx = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_idx] -= rejected
-        return output
-
     def sample(
         self,
-        hidden_states,
-        input_batch,
-        sampling_metadata,
-        grammar_output,
-    ):
+        hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        sampling_metadata: SamplingMetadata,
+        grammar_output: GrammarOutput | None,
+    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        """Override GPUModelRunner.sample for Ascend NPUs.
+        when using async scheduling with speculative decoding,
+        we need to copy mpu's num_rejected tensor to cpu.
+        these operations aren't needed in gpu_model_runner_v2,
+        because gpu attention backends do not use seq_lens_cpu anymore.
+        """
         sampler_output, num_sampled, num_rejected = super().sample(
             hidden_states,
             input_batch,
@@ -309,75 +320,25 @@ class NPUModelRunner(GPUModelRunner):
     def _update_seq_lens_cpu(
         self,
         scheduler_output: SchedulerOutput,
-        req_ids: list[int],
+        req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        for req_id, num_computed_tokens in zip(
+
+        # update num_computed_tokens_cpu
+        # TODO(Ronald1995): update num_computed_tokens_cpu by considering
+        # num_rejectd_tokens.
+        for req_id, num_computed_token in zip(
                 scheduler_output.scheduled_cached_reqs.req_ids,
                 scheduler_output.scheduled_cached_reqs.num_computed_tokens,
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             self.req_states.num_computed_tokens_cpu[
-                req_index] = num_computed_tokens
+                req_index] = num_computed_token
+
+        # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[
                 req_index]
             self.input_buffers.seq_lens_cpu[
-                i] = num_computed_token + num_scheduled_tokens[req_id]
-
-    def _revert_num_computed_tokens_cpu(self):
-        for req_id, req_index in self.req_states.req_id_to_index.items():
-            self.req_states.num_computed_tokens_cpu[
-                req_index] = self.req_states.num_computed_tokens[
-                    req_index].item()
-
-    def _build_attn_state(self, num_reqs, num_scheduled_tokens,
-                          num_valid_tokens):
-        if self.model_config.runner_type == "pooling":
-            if isinstance(
-                    self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-                    EncoderOnlyAttentionSpec):
-                attn_state = AscendAttentionState.PrefillNoCache
-            else:
-                attn_state = AscendAttentionState.PrefillCacheHit
-        elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
-            attn_state = AscendAttentionState.PrefillNoCache
-        # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        elif np.all(num_scheduled_tokens == 1):
-            attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and self.speculative_config.method == 'mtp':
-                # SpecDecoding now supports seq_len=1 and seq_len=2
-                # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
-                attn_state = AscendAttentionState.SpecDecoding
-        # Speculative decoding.
-        elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'mtp':
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
-                attn_state = AscendAttentionState.ChunkedPrefill
-        # splitfuse
-        elif self.scheduler_config.enable_chunked_prefill:
-            attn_state = AscendAttentionState.ChunkedPrefill
-        else:
-            attn_state = AscendAttentionState.PrefillCacheHit
-        return attn_state
-
-    def _make_attention_mask(
-        self,
-        attn_state: AscendAttentionState,
-    ) -> torch.Tensor:
-        # pcp situation.
-        if self.attn_mask_builder is None:
-            raise ValueError("Attn mask builder is None")
-        # Pooling situation.
-        if self.model_config.runner_type == "pooling":
-            return self.attn_mask_builder.get_attn_mask(2048, torch.bool)
-
-        if self.vllm_config.model_config.use_mla:
-            if self.pcp_size > 1:
-                return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
-            # mla prefill
-            if attn_state != AscendAttentionState.DecodeOnly:
-                return self.attn_mask_builder.get_mla_mask(self.dtype)
-        return self.attn_mask_builder.get_splitfuse_attn_mask()
+                i] = num_computed_tokens + num_scheduled_tokens[req_id]

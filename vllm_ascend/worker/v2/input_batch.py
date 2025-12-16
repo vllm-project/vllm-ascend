@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
@@ -24,8 +25,13 @@ class AscendInputBuffers(InputBuffers):
             device,
             pin_memory,
         )
+        # Create seq_lens_cpu and seq_lens_np.
+        # npu's attention backend still needs seq_lens on CPU side.
         self.seq_lens_cpu: torch.Tensor = torch.zeros(
             max_num_reqs,
             dtype=torch.int32,
             device="cpu",
         )
+        # seq_len_np and seq_lens_cpu share the same memory.
+        # define seq_lens_np for easier calculation with numpy.
+        self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
