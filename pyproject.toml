@@ -20,6 +20,7 @@ requires = [
     "msgpack",
     "quart",
     "numba",
+    "fastapi<0.124.0",
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
 ]
 build-backend = "setuptools.build_meta"

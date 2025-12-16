@@ -28,3 +28,4 @@ numba
 torch-npu==2.7.1
 
 transformers<=4.57.1
+fastapi<0.124.0
