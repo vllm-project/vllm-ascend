@@ -20,9 +20,9 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
+from vllm.attention.selector import AttentionSelectorConfig
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.attention.selector import AttentionSelectorConfig
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
@@ -357,7 +357,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend,
-                             attn_selector_config:"AttentionSelectorConfig"):
+                             attn_selector_config: "AttentionSelectorConfig"):
         # choose attention backend based on use_mla
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
