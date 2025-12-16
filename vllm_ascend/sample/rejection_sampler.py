@@ -144,7 +144,7 @@ def rejection_sample(
             grid = triton.cdiv(n, BLOCK_SIZE)
             if n >= vectorcore_num:
                 grid = vectorcore_num  # Empirically tuned value
-                BLOCK_SIZE = triton.next_power_of_2(n // grid)
+                BLOCK_SIZE = triton.next_power_of_2(triton.cdiv(n, grid))
 
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
@@ -284,7 +284,7 @@ def expand_batch_to_tokens(
         grid = triton.cdiv(n, BLOCK_SIZE)
         if n >= vectorcore_num:
             grid = vectorcore_num
-            BLOCK_SIZE = triton.next_power_of_2(n // grid)
+            BLOCK_SIZE = triton.next_power_of_2(triton.cdiv(n, grid))
 
         expand_kernel[(grid, )](
             expanded_x,
