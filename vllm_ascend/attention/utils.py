@@ -23,7 +23,7 @@ def using_paged_attention(runtime_shape: int) -> bool:
         return False
     from vllm.config.compilation import CUDAGraphMode
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-    if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY and cudagraph_mode != CUDAGraphMode.NONE:
+    if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY and cudagraph_mode != CUDAGraphMode.NONE and cudagraph_mode != CUDAGraphMode.PIECEWISE:
         return False
 
     return runtime_shape in get_ascend_config().pa_shape_list
