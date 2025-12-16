@@ -49,6 +49,7 @@ from vllm_ascend.ops.layer_shard_linear import post_process_after_loading_for_sh
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+from vllm_ascend.ops.utils import flashcomm2_oshard_manager
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
