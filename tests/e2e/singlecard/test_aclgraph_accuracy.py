@@ -28,6 +28,7 @@ from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
+from vllm_ascend.utils import vllm_version_is
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
@@ -45,12 +46,20 @@ def test_output_with_aclgraph(
         "Hello, my name is", "The president of the United States is",
         "The capital of France is", "The future of AI is"
     ]
-    vllm_aclgraph_qwen_answers = [
-        " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
-        ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
-        ' Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of',
-        ' not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
-    ]
+    if vllm_version_is("0.12.0"):
+        vllm_aclgraph_qwen_answers = [
+            " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
+            ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
+            ' Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of',
+            ' not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
+        ]
+    else:
+        vllm_aclgraph_qwen_answers = [
+            " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
+            ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
+            ' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
+            ' not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
+        ]
 
     vllm_aclgraph_ds_answers = [
         '\nI am a 20 year old student from the UK. I am currently studying for a degree in English Literature and Creative Writing. I have a passion',
@@ -132,12 +141,18 @@ def test_output_between_eager_and_full_decode_only(
          'and $x^2 + cx + b = 0$ also have a common real root.'
          'Compute the sum $a + b + c$.')
     ]
-    vllm_aclgraph_qwen_answers = [
-        ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-        ' \n\nTo solve this problem, we can use the following approach: Let $ABCD$ be a unit square with coordinates $A(0,0), B',
-        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
-    ]
-
+    if vllm_version_is("0.12.0"):
+        vllm_aclgraph_qwen_answers = [
+            ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
+            ' \n\nTo solve this problem, we can use the following approach: Let $ABCD$ be a unit square with coordinates $A(0,0), B',
+            ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
+        ]
+    else:
+        vllm_aclgraph_qwen_answers = [
+            ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
+            ' \n\nTo solve this problem, we can use the fact that the expected value of the area of a triangle formed by two random points on a square\'s perimeter is',
+            ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
+        ]
     vllm_aclgraph_ds_answers = [
         '\n\nSelect an assignment template',
         '\n\nSelect an assignment template',
