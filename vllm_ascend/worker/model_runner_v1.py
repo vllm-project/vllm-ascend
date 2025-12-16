@@ -699,13 +699,9 @@ class NPUModelRunner(GPUModelRunner):
                 common_attn_metadata.block_table_tensor = \
                     blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
 
+            # TODO(zhenwenqi) it is different from gpu_model_runner
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
-                    if self.drafter.attn_layer_names[
-                            0] in kv_cache_group.layer_names:
-                        spec_decode_common_attn_metadata = common_attn_metadata
-                else:
-                    spec_decode_common_attn_metadata = common_attn_metadata
+                spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_gid]:
                 builder = attn_group.get_metadata_builder()
@@ -731,16 +727,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
-            if spec_decode_common_attn_metadata is not None and (
-                    num_reqs != num_reqs_padded
-                    or num_tokens != num_tokens_padded):
-                # Currently the drafter still only uses piecewise cudagraphs (and modifies
-                # the attention metadata in directly), and therefore does not want to use
-                # padded attention metadata.
-                spec_decode_common_attn_metadata = (
-                    spec_decode_common_attn_metadata.unpadded(
-                        num_tokens, num_reqs))
-            return attn_metadata, spec_decode_common_attn_metadata
+        return attn_metadata, spec_decode_common_attn_metadata
 
     def _prepare_inputs(
         self,
