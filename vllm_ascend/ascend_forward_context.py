@@ -33,7 +33,6 @@ def set_ascend_forward_context(
         virtual_engine: int = 0,
         num_tokens: Optional[int] = None,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
-        with_prefill: bool = True,
         in_profile_run: bool = False,
         moe_comm_type: Optional[MoECommType] = None,
         num_actual_tokens: Optional[int] = None,
@@ -63,7 +62,6 @@ def set_ascend_forward_context(
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
-        forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
 
         forward_context.in_profile_run = in_profile_run
