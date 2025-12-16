@@ -56,7 +56,7 @@ FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *
 class HcclShmem {
 public:
     #ifdef HCCL_COMM    // hccl需要初始化hccl context
-        __gm__ HcclOpResParam *WinContext_{nullptr};
+        __gm__ HcclOpResParamCustom *WinContext_{nullptr};
         Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
         GM_ADDR m_ptrArray[MAX_RANK_SIZE];
         
