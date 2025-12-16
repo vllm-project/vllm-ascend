@@ -2162,7 +2162,8 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = (len(self.input_batch.lora_id_to_lora_request) > 0
                     if force_has_lora is None else force_has_lora)
 
-        def dispatch_cudagraph(num_tokens):
+        def dispatch_cudagraph(num_tokens, has_lora, use_cascade_attn,
+                               uniform_decode):
             if not force_eager:
                 return self.cudagraph_dispatcher.dispatch(
                     num_tokens=num_tokens,
@@ -2174,7 +2175,7 @@ class NPUModelRunner(GPUModelRunner):
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded)
+            num_tokens_padded, has_lora, use_cascade_attn, uniform_decode)
         num_tokens_padded = batch_descriptor.num_tokens
 
         # Extra coordination when running data-parallel since we need to coordinate
@@ -2203,7 +2204,8 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Re-dispatch with DP padding
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                    num_tokens_padded)
+                    num_tokens_padded, has_lora, use_cascade_attn,
+                    uniform_decode)
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
