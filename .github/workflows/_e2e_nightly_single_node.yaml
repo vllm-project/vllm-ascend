@@ -128,3 +128,9 @@ jobs:
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           pytest -sv ${{ inputs.tests }}
+
+      - name: Install triton-ascend
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+          pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
