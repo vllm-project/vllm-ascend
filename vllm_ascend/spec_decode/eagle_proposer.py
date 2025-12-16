@@ -186,17 +186,19 @@ class EagleProposer(Proposer):
             )
             dummy_compute_logits(self.hidden_states)
 
-    def generate_token_ids(self,
-                           valid_sampled_token_ids: torch.Tensor
-                           | list[list[int]],
-                           sampling_metadata: SamplingMetadata = None,
-                           scheduler_output: SchedulerOutput = None,
-                           spec_decode_metadata: SpecDecodeMetadata = None,
-                           positions: torch.Tensor = None,
-                           num_scheduled_tokens: int = 0,
-                           hidden_states: torch.Tensor = None,
-                           aux_hidden_states: torch.Tensor = None,
-                           mm_embed_input: tuple[list[torch.Tensor], torch.Tensor] | None = None):
+    def generate_token_ids(
+            self,
+            valid_sampled_token_ids: torch.Tensor
+        | list[list[int]],
+            sampling_metadata: SamplingMetadata = None,
+            scheduler_output: SchedulerOutput = None,
+            spec_decode_metadata: SpecDecodeMetadata = None,
+            positions: torch.Tensor = None,
+            num_scheduled_tokens: int = 0,
+            hidden_states: torch.Tensor = None,
+            aux_hidden_states: torch.Tensor = None,
+            mm_embed_input: tuple[list[torch.Tensor], torch.Tensor]
+        | None = None):
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
