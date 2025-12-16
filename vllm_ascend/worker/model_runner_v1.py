@@ -3386,6 +3386,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             cache size of each layer
         """
         from vllm.logger import logger
+        from vllm.utils.mem_constants import GiB_bytes
         from vllm_ascend.platform import NPUPlatform
         free_before, total = NPUPlatform.mem_get_info()
         logger.info(f"[NEW_MEMORY_DEBUG] Before initialize_kv_cache: Free={free_before/GiB_bytes:.2f}GiB")
