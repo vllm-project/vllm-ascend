@@ -125,7 +125,7 @@ class EagleProposer(Proposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None):
         # update global cos, sin
-        update_cos_sin(self.positions[:num_tokens])
+        update_cos_sin(self.model, self.vllm_config, self.positions[:num_tokens])
         with set_ascend_forward_context(None,
                                         self.vllm_config,
                                         in_profile_run=True,
@@ -466,7 +466,7 @@ class EagleProposer(Proposer):
         attn_metadata.block_tables = block_table.to(device)
 
         # update global cos, sin
-        update_cos_sin(self.positions[:num_input_tokens])
+        update_cos_sin(self.model, self.vllm_config, self.positions[:num_input_tokens])
 
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
@@ -576,7 +576,7 @@ class EagleProposer(Proposer):
             # Run the model.
 
             # update global cos, sin
-            update_cos_sin(self.positions[:input_batch_size])
+            update_cos_sin(self.model, self.vllm_config, self.positions[:input_batch_size])
 
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
