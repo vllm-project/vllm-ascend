@@ -3204,6 +3204,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             self.in_profile_run = False
 
     def profile_run(self) -> None:
+        from vllm.logger import logger
+        from vllm_ascend.platform import NPUPlatform
+        from vllm.utils import GiB_bytes
+
+        free_before, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_PROFILE_RUN] Start: Free={free_before/GiB_bytes:.2f}GiB")
+
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
             hidden_states = self._dummy_run(
@@ -3241,6 +3248,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
+
+        free_after, total = NPUPlatform.mem_get_info()
+        memory_consumed = (free_before - free_after) / GiB_bytes
+        logger.info(f"[NEW_PROFILE_RUN] End: Free={free_after/GiB_bytes:.2f}GiB, "
+                   f"Consumed={memory_consumed:.2f}GiB")
 
     def _dummy_pooler_run_task(
         self,
