@@ -40,11 +40,6 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
-    try:
-        if not vllm_version_is('0.12.0'):
-            from vllm.attention.selector import AttentionSelectorConfig
-    except ImportError:
-        pass
 else:
     ModelConfig = None
     VllmConfig = None
