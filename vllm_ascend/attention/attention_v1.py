@@ -587,9 +587,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return output
 
     def forward_fused_infer_attention(self, query: torch.Tensor,
-                                       key: torch.Tensor, value: torch.Tensor,
-                                       attn_metadata: AscendMetadata,
-                                       output: torch.Tensor):
+                                      key: torch.Tensor, value: torch.Tensor,
+                                      attn_metadata: AscendMetadata,
+                                      output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             return self.full_graph_fia(query, key, value, attn_metadata,

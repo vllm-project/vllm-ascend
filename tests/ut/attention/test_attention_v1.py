@@ -236,9 +236,9 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
-    def test_forward_fused_infer_attention(self, mock_get_forward_context,
-                             mock_npu_fused_infer_attention_score,
-                             mock_npu_reshape_and_cache):
+    def test_forward_fused_infer_attention(
+            self, mock_get_forward_context,
+            mock_npu_fused_infer_attention_score, mock_npu_reshape_and_cache):
         """Test forward pass in PrefillCacheHit state"""
         query = torch.randn(10, 8, 64)
         key = torch.randn(10, 8, 64)
@@ -272,8 +272,8 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     def test_forward_paged_attention(self, mock_get_forward_context,
-                                 mock_npu_reshape_and_cache,
-                                 mock_paged_attention):
+                                     mock_npu_reshape_and_cache,
+                                     mock_paged_attention):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
