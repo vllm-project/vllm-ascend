@@ -3582,12 +3582,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             dtype = kv_cache_spec.dtype
 
                             # DEBUG: Print calculated values for verification
+                            # 检查分配前的内存状态
+                            from vllm_ascend.platform import NPUPlatform
+                            free_memory_before, total_memory = NPUPlatform.mem_get_info()
+
                             print(f"[DEBUG 310P SHAPE] Layer {layer_name}:")
                             print(f"[DEBUG 310P SHAPE]   kv_cache_tensor.size: {kv_cache_tensor.size}")
                             print(f"[DEBUG 310P SHAPE]   page_size_bytes: {page_size_bytes}")
                             print(f"[DEBUG 310P SHAPE]   num_blocks: {num_blocks}")
                             print(f"[DEBUG 310P SHAPE]   num_kv_heads: {num_kv_heads}")
                             print(f"[DEBUG 310P SHAPE]   head_size: {head_size}")
+                            print(f"[DEBUG MEMORY BEFORE ALLOC NEW] Layer {layer_name}:")
+                            print(f"[DEBUG MEMORY BEFORE ALLOC NEW]   Free memory: {free_memory_before} bytes ({free_memory_before/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY BEFORE ALLOC NEW]   Total memory: {total_memory} bytes ({total_memory/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY BEFORE ALLOC NEW]   Used memory: {(total_memory-free_memory_before)/1024**3:.2f} GiB)")
 
                             # Use 310P-optimized compressed format (5-dim NCHW format)
                             k_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
@@ -3604,6 +3612,17 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             # Allocate directly in final NCHW format
                             k_tensor = torch.zeros(k_final_shape, dtype=dtype, device=self.device)  # NCHW format
                             v_tensor = torch.zeros(v_final_shape, dtype=dtype, device=self.device)  # NCHW format
+
+                            # 检查分配后的内存状态
+                            free_memory_after, total_memory_after = NPUPlatform.mem_get_info()
+                            memory_consumed = (free_memory_before - free_memory_after)/1024**3
+
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW] Layer {layer_name}:")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Free memory: {free_memory_after} bytes ({free_memory_after/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Total memory: {total_memory_after} bytes ({total_memory_after/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Used memory: {(total_memory_after-free_memory_after)/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Memory consumed: {memory_consumed:.2f} GiB")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Skipped format conversion (NCHW format)")
                         else:
                             # Standard path for other devices: allocate raw int8 tensors
                             k_tensor = torch.zeros(k_tensor_size,
