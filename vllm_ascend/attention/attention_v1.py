@@ -586,7 +586,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output = output.view(batch_size, self.num_heads, self.head_size)
         return output
 
-    def _forward_fused_infer_attention(self, query: torch.Tensor,
+    def forward_fused_infer_attention(self, query: torch.Tensor,
                                        key: torch.Tensor, value: torch.Tensor,
                                        attn_metadata: AscendMetadata,
                                        output: torch.Tensor):
@@ -725,7 +725,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 and self.sliding_window is None):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
-            output = self._forward_fused_infer_attention(
+            output = self.forward_fused_infer_attention(
                 query, key, value, attn_metadata, output)
 
         return output
