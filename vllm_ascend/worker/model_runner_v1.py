@@ -3700,33 +3700,38 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         ]
                     # DEBUG_START: 添加格式转换前的内存信息
                     # FIX_START: 像老版本一样直接创建最终形状的张量，获得NCHW格式
-                    if is_310p_device and not ascend_config.torchair_graph_config.enabled:
-                        # DEBUG: 检查分配前的内存状态
-                        from vllm_ascend.platform import NPUPlatform
-                        free_memory, total_memory = NPUPlatform.mem_get_info()
-                        print(f"[DEBUG MEMORY BEFORE ALLOC] Layer {layer_name}:")
-                        print(f"[DEBUG MEMORY BEFORE ALLOC]   Free memory: {free_memory} bytes ({free_memory/1024**3:.2f} GiB)")
-                        # 计算需要的内存大小 (k_shape是tuple)
-                        k_elements = 1
-                        for dim in k_shape:
-                            k_elements *= dim
-                        required_memory = 2 * k_elements * dtype.itemsize  # K+V cache
-                        print(f"[DEBUG MEMORY BEFORE ALLOC]   Required memory: {required_memory} bytes ({required_memory/1024**3:.2f} GiB)")
-
-                        # 对于310P，直接创建最终形状的张量以获得NCHW格式（像老版本一样）
-                        k_cache = torch.zeros(k_shape, dtype=dtype, device=self.device)
-                        v_cache = torch.zeros(v_shape, dtype=dtype, device=self.device)
-
-                        # DEBUG: 检查分配后的内存状态
-                        free_memory_after, _ = NPUPlatform.mem_get_info()
-                        print(f"[DEBUG MEMORY AFTER ALLOC] Layer {layer_name}:")
-                        print(f"[DEBUG MEMORY AFTER ALLOC]   Free memory: {free_memory_after} bytes ({free_memory_after/1024**3:.2f} GiB)")
-                        print(f"[DEBUG MEMORY AFTER ALLOC]   Memory consumed: {(free_memory - free_memory_after)/1024**3:.2f} GiB")
-                    else:
-                        # 其他设备保持原有逻辑
-                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
+                    # TEMP_COMMENTED: 测试新版本标准路径是否支持310P
+                    # if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                    #     # DEBUG: 检查分配前的内存状态
+                    #     from vllm_ascend.platform import NPUPlatform
+                    #     free_memory, total_memory = NPUPlatform.mem_get_info()
+                    #     print(f"[DEBUG MEMORY BEFORE ALLOC] Layer {layer_name}:")
+                    #     print(f"[DEBUG MEMORY BEFORE ALLOC]   Free memory: {free_memory} bytes ({free_memory/1024**3:.2f} GiB)")
+                    #     # 计算需要的内存大小 (k_shape是tuple)
+                    #     k_elements = 1
+                    #     for dim in k_shape:
+                    #         k_elements *= dim
+                    #     required_memory = 2 * k_elements * dtype.itemsize  # K+V cache
+                    #     print(f"[DEBUG MEMORY BEFORE ALLOC]   Required memory: {required_memory} bytes ({required_memory/1024**3:.2f} GiB)")
+                    #
+                    #     # 对于310P，直接创建最终形状的张量以获得NCHW格式（像老版本一样）
+                    #     k_cache = torch.zeros(k_shape, dtype=dtype, device=self.device)
+                    #     v_cache = torch.zeros(v_shape, dtype=dtype, device=self.device)
+                    #
+                    #     # DEBUG: 检查分配后的内存状态
+                    #     free_memory_after, _ = NPUPlatform.mem_get_info()
+                    #     print(f"[DEBUG MEMORY AFTER ALLOC] Layer {layer_name}:")
+                    #     print(f"[DEBUG MEMORY AFTER ALLOC]   Free memory: {free_memory_after} bytes ({free_memory_after/1024**3:.2f} GiB)")
+                    #     print(f"[DEBUG MEMORY AFTER ALLOC]   Memory consumed: {(free_memory - free_memory_after)/1024**3:.2f} GiB")
+                    # else:
+                    #     # 其他设备保持原有逻辑
+                    #     k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                    #     v_cache = raw_v_tensor.view(dtype).view(v_shape)
                     # FIX_END: 直接创建最终形状的张量
+
+                    # 使用标准路径（包括310P）
+                    k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                    v_cache = raw_v_tensor.view(dtype).view(v_shape)
 
                     
                     # Fixed: For 310P, main tensors use ND format but KV cache needs NZ format for ReshapeAndCacheOperation
