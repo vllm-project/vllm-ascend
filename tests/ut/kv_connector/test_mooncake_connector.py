@@ -22,6 +22,7 @@ sys.modules["mooncake.engine"] = fake_engine
 _mock_ascend_config = MagicMock(enable_kv_nz=False)
 _mock_pp_group = MagicMock(rank_in_group=0, world_size=1)
 _mock_tp_group = MagicMock(rank_in_group=0, world_size=4)
+_mock_pcp_group = MagicMock(rank_in_group=0, world_size=1)
 patch('vllm_ascend.distributed.mooncake_connector.get_pp_group',
       return_value=_mock_pp_group).start()
 patch('vllm_ascend.distributed.mooncake_connector.get_tp_group',
@@ -32,6 +33,11 @@ patch(
 patch(
     'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank',
     return_value=0).start()
+patch(
+    'vllm_ascend.distributed.mooncake_connector.get_pcp_group',
+    return_value=_mock_pcp_group
+).start()
+
 
 from vllm_ascend.distributed.mooncake_connector import (  # noqa: E402
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
