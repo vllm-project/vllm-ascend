@@ -375,7 +375,11 @@ class NPUModelRunner(GPUModelRunner):
             device="cpu",
             pin_memory=self.pin_memory,
         )
+        # for cleancode , actualy the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
+        # None in the first PP rank. The rest are set after load_model.
+        self.intermediate_tensors: IntermediateTensors | None = None
+        self.reorder_batch_threshold: int | None = None
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
