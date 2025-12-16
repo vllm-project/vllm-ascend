@@ -339,9 +339,9 @@ class TestAscendAttentionBackendImpl(TestBase):
             self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score,
             mock_paged_attention, mock_get_forward_context):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
@@ -354,6 +354,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
         metadata.num_decodes = 10
         metadata.num_prefills = 0
+        metadata.actual_seq_lengths_q = [10]
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
@@ -363,10 +364,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl_swa.forward(layer, query, key, value, kv_cache,
                                        metadata, output)
 
-        mock_paged_attention.assert_called_once()
-        mock_fused_infer_attention_score.assert_not_called()
+        mock_paged_attention.assert_not_called()
+        mock_fused_infer_attention_score.assert_called_once()
 
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (10, 8, 64)
 
     @patch('torch_npu._npu_reshape_and_cache')
     def test_forward_raise_error(self, mock_paged_attention):
