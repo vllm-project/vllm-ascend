@@ -3667,8 +3667,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     # FIX_START: 像老版本一样直接创建最终形状的张量，获得NCHW格式
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
                         # DEBUG: 检查分配前的内存状态
-                        import torch_npu
-                        free_memory, total_memory = torch_npu.npu.mem_get_info()
+                        from vllm_ascend.platform import NPUPlatform
+                        free_memory, total_memory = NPUPlatform.mem_get_info()
                         print(f"[DEBUG MEMORY BEFORE ALLOC] Layer {layer_name}:")
                         print(f"[DEBUG MEMORY BEFORE ALLOC]   Free memory: {free_memory} bytes ({free_memory/1024**3:.2f} GiB)")
                         # 计算需要的内存大小 (k_shape是tuple)
@@ -3683,7 +3683,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         v_cache = torch.zeros(v_shape, dtype=dtype, device=self.device)
 
                         # DEBUG: 检查分配后的内存状态
-                        free_memory_after, _ = torch_npu.npu.mem_get_info()
+                        free_memory_after, _ = NPUPlatform.mem_get_info()
                         print(f"[DEBUG MEMORY AFTER ALLOC] Layer {layer_name}:")
                         print(f"[DEBUG MEMORY AFTER ALLOC]   Free memory: {free_memory_after} bytes ({free_memory_after/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY AFTER ALLOC]   Memory consumed: {(free_memory - free_memory_after)/1024**3:.2f} GiB")
@@ -4252,12 +4252,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
-        start_free_npu_memory = torch.npu.mem_get_info()[0]
+        start_free_npu_memory = NPUPlatform.mem_get_info()[0]
 
         self._capture_model()
 
         end_time = time.perf_counter()
-        end_free_npu_memory = torch.npu.mem_get_info()[0]
+        end_free_npu_memory = NPUPlatform.mem_get_info()[0]
         elapsed_time = end_time - start_time
         npu_graph_size = start_free_npu_memory - end_free_npu_memory
         # This usually takes 5~20 seconds.
