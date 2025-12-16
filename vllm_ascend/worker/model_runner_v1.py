@@ -244,8 +244,6 @@ class NPUModelRunner(GPUModelRunner):
         self.need_accepted_tokens: bool = False
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
-        self.is_pooling_model = self.model_config.pooler_config is not None
-        self.enable_prompt_embeds = self.model_config.enable_prompt_embeds
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
@@ -338,24 +336,6 @@ class NPUModelRunner(GPUModelRunner):
             ascend_config = get_ascend_config()
             self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
                                             self.eplb_process, self.process)
-
-        self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.async_output_copy_stream = torch.npu.Stream() if \
-            self.use_async_scheduling else None
-        self.num_spec_tokens = 0
-        if self.speculative_config:
-            self.num_spec_tokens = self.speculative_config.num_speculative_tokens  # noqa
-        self.valid_sampled_token_count_event: torch.npu.Event | None = None
-        self.valid_sampled_token_count_copy_stream: torch.npu.Stream | None = None
-        if self.use_async_scheduling and self.num_spec_tokens:
-            self.valid_sampled_token_count_event = torch.npu.Event()
-            self.valid_sampled_token_count_copy_stream = torch.npu.Stream()
-        self.valid_sampled_token_count_cpu = torch.empty(
-            self.max_num_reqs,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=self.pin_memory,
-        )
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -386,23 +366,16 @@ class NPUModelRunner(GPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.
             cp_kv_cache_interleave_size,
         )
-        self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
-                                                     dtype=torch.int64)
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
+        # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
             dtype=torch.int32,
             device="cpu",
             pin_memory=self.pin_memory,
         )
-        # None in the first PP rank. The rest are set after load_model.
-        # the attr below is in gpu_modelrunner, but occurs lint so add them here
-        self.intermediate_tensors: IntermediateTensors | None = None
         self.execute_model_state: ExecuteModelState | None = None
-        self.reorder_batch_threshold: int | None = None
-        self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
-                                                 dtype=torch.int32)
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -3389,6 +3362,7 @@ def _torch_cuda_wrapper():
 
     try:
         # replace cuda APIs with xpu APIs, this should work by default
+        torch.Event = torch.npu.Event
         torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
         torch.cuda.default_stream = torch.npu.default_stream

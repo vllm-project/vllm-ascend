@@ -298,8 +298,6 @@ def select_moe_comm_method(num_tokens: int,
                          if fused_all2all_enable else MoECommType.ALLTOALL)
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
-    moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
-                     == MoECommType.FUSED_ALLTOALL else moe_comm_type)
     # PanguProMoE only supports allgather
     if model_type == "PanguProMoE":
         moe_comm_type = MoECommType.ALLGATHER
