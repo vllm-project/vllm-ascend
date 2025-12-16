@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' }}
     steps:
-    - uses: actions/checkout@v6.0.1
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -137,7 +137,7 @@ jobs:
       }}
     if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
-    - uses: actions/checkout@v6.0.1
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -212,7 +212,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
-    - uses: actions/checkout@v6.0.1
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -292,7 +292,7 @@ jobs:
       }}
     if: ${{ github.event_name == 'push' }}
     steps:
-    - uses: actions/checkout@v6.0.1
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -369,7 +369,7 @@ jobs:
     # if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     if: false
     steps:
-    - uses: actions/checkout@v6.0.1
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -455,7 +455,7 @@ jobs:
     # if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     if: false
     steps:
-    - uses: actions/checkout@v6.0.1
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false

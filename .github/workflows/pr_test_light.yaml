@@ -54,7 +54,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -105,7 +105,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -118,7 +118,7 @@ jobs:
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
 
       - name: Install vllm-project/vllm-ascend
         run: |
