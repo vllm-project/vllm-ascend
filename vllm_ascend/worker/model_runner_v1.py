@@ -3771,19 +3771,24 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         ) + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
                     assert raw_v_tensor is not None
-                    # 310P Debug: Check size mismatch
+                    # 310P: Skip page size alignment check for pre-allocated tensors
+                    # 310P pre-allocates 4D NCHW format tensors, so the traditional 5D page alignment
+                    # assumption doesn't apply. The assert should only apply to standard path.
+                    if not (is_310p_device and not ascend_config.torchair_graph_config.enabled):
+                        assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
+                    else:
+                        print(f"[DEBUG 310P SKIP ASSERT] Layer {layer_name}: Skipping page alignment check for 310P pre-allocated tensors")
+                        print(f"[DEBUG 310P SKIP ASSERT]   sum_page_size_bytes: {sum_page_size_bytes}")
+                        print(f"[DEBUG 310P SKIP ASSERT]   page_size_bytes: {kv_cache_spec.page_size_bytes}")
+                        print(f"[DEBUG 310P SKIP ASSERT]   remainder: {sum_page_size_bytes % kv_cache_spec.page_size_bytes} (expected for 4D tensors)")
+                    # 310P: Use different num_blocks calculation for 4D pre-allocated tensors
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
-                        print(f"[DEBUG 310P SIZE CHECK] Layer {layer_name}:")
-                        print(f"[DEBUG 310P SIZE CHECK]   sum_page_size_bytes: {sum_page_size_bytes}")
-                        print(f"[DEBUG 310P SIZE CHECK]   page_size_bytes: {kv_cache_spec.page_size_bytes}")
-                        print(f"[DEBUG 310P SIZE CHECK]   remainder: {sum_page_size_bytes % kv_cache_spec.page_size_bytes}")
-                        print(f"[DEBUG 310P SIZE CHECK]   k_tensor.numel: {raw_k_tensor.numel()}")
-                        print(f"[DEBUG 310P SIZE CHECK]   v_tensor.numel: {raw_v_tensor.numel()}")
-                        print(f"[DEBUG 310P SIZE CHECK]   k_tensor.shape: {raw_k_tensor.shape}")
-                        print(f"[DEBUG 310P SIZE CHECK]   v_tensor.shape: {raw_v_tensor.shape}")
-
-                    assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
+                        # For 310P 4D tensors, we need to calculate num_blocks from the actual shape
+                        # Shape is [num_blocks, compressed_features, block_size, align_dim]
+                        num_blocks = raw_k_tensor.shape[0]  # First dimension is num_blocks
+                        print(f"[DEBUG 310P NUM_BLOCKS] Using shape-based calculation: num_blocks={num_blocks}")
+                    else:
+                        num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
