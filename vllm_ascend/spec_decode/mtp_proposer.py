@@ -293,7 +293,6 @@ class MtpProposer(Proposer):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
-                    in_profile_run=True,
                     num_tokens_across_dp=num_tokens_across_dp,
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
