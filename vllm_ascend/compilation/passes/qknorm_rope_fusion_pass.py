@@ -29,7 +29,13 @@ from vllm.config import (VllmConfig, get_current_vllm_config,
 
 class QKNormRopeFusionPattern:
 
-    def __init__(self, head_dim, num_heads, num_kv_heads, eps=1e-6):
+    def __init__(self,
+                 vllm_config,
+                 head_dim,
+                 num_heads,
+                 num_kv_heads,
+                 eps=1e-6):
+        self.vllm_config = vllm_config
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -121,14 +127,19 @@ class QKNormRopeFusionPattern:
 
 class QKNormRopeFusionPatternWithBias:
 
-    def __init__(self, head_dim, num_heads, num_kv_heads, eps=1e-6):
+    def __init__(self,
+                 vllm_config,
+                 head_dim,
+                 num_heads,
+                 num_kv_heads,
+                 eps=1e-6):
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
     def get_inputs(self):
@@ -248,13 +259,15 @@ class QKNormRopeFusionPass(VllmInductorPass):
                     "QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128",
                     layer.head_size)
                 continue
-            QKNormRopeFusionPattern(head_dim=layer.head_size,
+            QKNormRopeFusionPattern(vllm_config=vllm_config,
+                                    head_dim=layer.head_size,
                                     num_heads=layer.num_heads,
                                     num_kv_heads=layer.num_kv_heads,
                                     eps=epsilon).register(
                                         self.pattern_match_passes)
 
-            QKNormRopeFusionPatternWithBias(head_dim=layer.head_size,
+            QKNormRopeFusionPatternWithBias(vllm_config=vllm_config,
+                                            head_dim=layer.head_size,
                                             num_heads=layer.num_heads,
                                             num_kv_heads=layer.num_kv_heads,
                                             eps=epsilon).register(

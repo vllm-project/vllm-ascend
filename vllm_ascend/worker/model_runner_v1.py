@@ -84,12 +84,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import (MoECommType,
-                                                get_mc2_tokens_capacity,
-                                                select_moe_comm_method,
-                                                set_ascend_forward_context,
-                                                set_mc2_mask,
-                                                set_mc2_tokens_capacity)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -125,6 +119,10 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                enable_sp, get_ascend_device_type, is_enable_nz,
                                is_moe_model, lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+
+from vllm_ascend.ascend_forward_context import (  # isort: skip
+    MoECommType, get_mc2_tokens_capacity, select_moe_comm_method,
+    set_ascend_forward_context, set_mc2_mask, set_mc2_tokens_capacity)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
