@@ -10,7 +10,10 @@ from vllm.forward_context import ForwardContext
 from vllm.utils import current_stream
 
 _THREAD_ID_TO_CONTEXT: dict = {}
-_CURRENT_CONTEXTS: list[Optional['UBatchContext']] = [None, None]
+
+# Here we hardcode the number of microbatches to 2 for default.
+_NUM_UBATCHES: int = 2
+_CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = []
 
 
 class UBatchContext:
@@ -180,7 +183,7 @@ dbo_switch_to_compute_sync = _register_ubatch_function(
 def dbo_register_recv_hook(recv_hook):
     if len(_THREAD_ID_TO_CONTEXT) > 0:
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
+        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
         next_ctx.recv_hook = recv_hook
 
 
@@ -192,10 +195,18 @@ def make_ubatch_contexts(
     ready_barrier: threading.Barrier,
     schedule: str = "default",
 ) -> list[UBatchContext]:
-    assert num_micro_batches == 2, "only been tested with 2 micro-batches"
     """
     Create a context manager for micro-batching synchronization.
     """
+
+    global _NUM_UBATCHES, _CURRENT_CONTEXTS
+    assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
+
+    _NUM_UBATCHES = num_micro_batches
+    # Ensure the global context list is large enough
+    if len(_CURRENT_CONTEXTS) < num_micro_batches:
+        _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
+
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
     npu_comm_done_events = [
         torch.npu.Event() for _ in range(num_micro_batches)
@@ -203,8 +214,6 @@ def make_ubatch_contexts(
     npu_compute_done_events = [
         torch.npu.Event() for _ in range(num_micro_batches)
     ]
-
-    assert len(forward_contexts) == 2
 
     ctxs = []
     for i in range(num_micro_batches):

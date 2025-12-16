@@ -6,7 +6,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm_ascend.worker.ubatch_utils import UBatchSlice, UBatchSlices
+from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
 
 @dataclass
@@ -202,7 +202,10 @@ def _make_metadata_with_slice(
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
     if splits_last_request:
-        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
+        # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
+        # the tokens skipped because query_start_loc_cpu might have been modified
+        # if splits_first_request is True.
+        tokens_skipped = start_locs[last_req + 1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
 

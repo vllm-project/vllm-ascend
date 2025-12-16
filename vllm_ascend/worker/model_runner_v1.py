@@ -139,8 +139,8 @@ from vllm.distributed.afd_transfer import AFDConnectorFactory
 
 # -------------------
 from vllm_ascend.worker.npu_ubatch_wrapper import UBatchWrapper
-from vllm_ascend.worker.ubatch_splitting import check_ubatch_thresholds, ubatch_split
-from vllm_ascend.worker.ubatch_utils import UBatchSlice, UBatchSlices
+from vllm.v1.worker.ubatch_splitting import check_ubatch_thresholds
+from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -1476,6 +1476,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if ubatch_slices is not None:
             print(f'ubatch_slices: {ubatch_slices}')
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+        else:
+            print(f"ubatch_slices is None")
         use_cascade_attn = False
 
         # Used in the below loop.
@@ -1526,29 +1528,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 cos=self.cos,
                 sin=self.sin,
             )
-
-            if self.afd_config:
-                if ubatch_slices and len(ubatch_slices) > 1:
-                    afd_tokens_start_loc = [ub.token_slice.start for ub in ubatch_slices]
-                    afd_reqs_start_loc = [ub.request_slice.start for ub in ubatch_slices]
-                    afd_tokens_lens = [ub.num_tokens for ub in ubatch_slices]
-                    logger.info(f"afd_tokens_start_loc: {afd_tokens_start_loc} "
-                                f"afd_reqs_start_loc: {afd_reqs_start_loc} "
-                                f"afd_tokens_lens: {afd_tokens_lens}")
-                else:
-                    afd_tokens_start_loc = [0]
-                    afd_reqs_start_loc = [0]
-                    afd_tokens_lens = [num_tokens_unpadded]
-
-                afd_metadata = AFDMetadata(
-                    afd_tokens_start_loc=afd_tokens_start_loc,
-                    afd_reqs_start_loc=afd_reqs_start_loc,
-                    afd_stage_idx=0,
-                    afd_connector=self.afd_connector,
-                    afd_tokens_lens=afd_tokens_lens,
-                )
-            else:
-                afd_metadata = None
 
             if self.speculative_config and \
                     spec_decode_common_attn_metadata is None:
@@ -1603,6 +1582,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logits_indices = nn.functional.pad(
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+        
+        afd_metadata = self._build_afd_metadata(ubatch_slices, maybe_padded_num_tokens)
 
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
@@ -2086,11 +2067,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(batch_descriptor)
 
-        if afd_metadata == None and self.afd_config is not None:
-            afd_metadata = AFDMetadata(
-                [0], [0], 0, self.afd_connector, [0]
-            )
-
         # self.prof.step()
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -2490,6 +2466,38 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             hidden_states = hidden_states
         return hidden_states
+    
+    def _build_afd_metadata(
+        self, ubatch_slices: UBatchSlices | None, num_tokens_unpadded: int
+    ):
+        afd_metadata = None
+        if self.afd_config:
+            # For prefill, compute tokens per stage based on actual token
+            # counts
+            afd_tokens_start_loc = [0]
+            afd_tokens_lens = []
+            if ubatch_slices and len(ubatch_slices) > 1:
+                afd_tokens_start_loc = [ub.token_slice.start for ub in ubatch_slices]
+                afd_reqs_start_loc = [ub.request_slice.start for ub in ubatch_slices]
+                logger.info(
+                    f"afd_tokens_start_loc: {afd_tokens_start_loc} "
+                    f"afd_reqs_start_loc: {afd_reqs_start_loc} "
+                    f"ubatch_slices: {ubatch_slices}"
+                )
+                afd_tokens_lens = [ub.num_tokens for ub in ubatch_slices]
+            else:
+                afd_tokens_start_loc = [0]
+                afd_reqs_start_loc = [0]
+                afd_tokens_lens = [num_tokens_unpadded]
+            afd_metadata = AFDMetadata(
+                afd_tokens_start_loc=afd_tokens_start_loc,
+                afd_reqs_start_loc=afd_reqs_start_loc,
+                afd_stage_idx=0,
+                afd_connector=self.afd_connector,
+                afd_tokens_lens=afd_tokens_lens,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+            )
+        return afd_metadata
 
     @torch.inference_mode()
     def _dummy_run(
@@ -2512,48 +2520,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
 
         moe_comm_type = self._select_moe_comm_method(num_tokens, with_prefill)
-        # AFD padding (stage-level alignment) before DP padding
-        if self.vllm_config.afd_config:
-            if num_tokens > self.vllm_config.afd_config.num_afd_stages:
-                num_tokens_per_stage = (
-                        num_tokens // self.vllm_config.afd_config.num_afd_stages)
-                max_num_reqs = self.scheduler_config.max_num_seqs
-                num_reqs = min(num_tokens, max_num_reqs)
-                num_reqs_per_stage = (
-                        num_reqs // self.vllm_config.afd_config.num_afd_stages)
-                afd_tokens_start_loc = [
-                    i * num_tokens_per_stage
-                    for i in range(self.vllm_config.afd_config.num_afd_stages +
-                                   1)
-                ]
-                afd_reqs_start_loc = [
-                    i * num_reqs_per_stage
-                    for i in range(self.vllm_config.afd_config.num_afd_stages +
-                                   1)
-                ]
-                afd_tokens_lens = [
-                    num_tokens_per_stage
-                    for _ in range(self.vllm_config.afd_config.num_afd_stages)
-                ]
-                afd_tokens_lens[-1] += num_tokens % num_tokens_per_stage
-                afd_tokens_start_loc[-1] = num_tokens
-                afd_metadata = AFDMetadata(
-                    afd_tokens_start_loc=afd_tokens_start_loc,
-                    afd_reqs_start_loc=afd_reqs_start_loc,
-                    afd_stage_idx=0,
-                    afd_connector=self.afd_connector,
-                    afd_tokens_lens=afd_tokens_lens,
-                )
-            else:
-                afd_metadata = AFDMetadata(
-                    afd_tokens_start_loc=list(range(num_tokens + 1)),
-                    afd_reqs_start_loc=list(range(num_tokens + 1)),
-                    afd_stage_idx=0,
-                    afd_connector=self.afd_connector,
-                    afd_tokens_lens=[1] * num_tokens,
-                )
-        else:
-            afd_metadata = None
+        
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
@@ -2696,6 +2663,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 def dummy_compute_logits(hidden_states):
                     return self.model.compute_logits(
                         hidden_states[dummy_indices])
+            
+            afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_after_padding)
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2898,13 +2867,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs() \
-                and not self.parallel_config.enable_dbo:
+                and not self.parallel_config.use_ubatching:
             self.update_stream = torch.npu.Stream()
             set_graph_params(self.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
-        elif self.parallel_config.enable_dbo:
+        elif self.parallel_config.use_ubatching:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.FULL, self.device)
@@ -3442,7 +3411,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     self.device,
                     num_metadata_builders=1
-                    if not self.parallel_config.enable_dbo else 2,
+                    if not self.parallel_config.use_ubatching else self.parallel_config.num_ubatches,
                 )
                 attn_groups.append(attn_group)
             return attn_groups
@@ -3666,7 +3635,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for num_tokens in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph and for uniform decode batches.
-            capture_ubatched_graph = self.parallel_config.enable_dbo \
+            capture_ubatched_graph = self.parallel_config.use_ubatching \
                                      and aclgraph_runtime_mode == CUDAGraphMode.FULL \
                                      and uniform_decode \
                                      and check_ubatch_thresholds(
