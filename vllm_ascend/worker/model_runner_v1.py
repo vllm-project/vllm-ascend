@@ -3597,16 +3597,29 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             print(f"[DEBUG MEMORY BEFORE ALLOC NEW]   Total memory: {total_memory} bytes ({total_memory/1024**3:.2f} GiB)")
                             print(f"[DEBUG MEMORY BEFORE ALLOC NEW]   Used memory: {(total_memory-free_memory_before)/1024**3:.2f} GiB)")
 
-                            # Use 310P-optimized compressed format (5-dim NCHW format)
-                            k_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
-                            v_final_shape = (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
+                            # Use the same shape calculation as old version via attn_backend
+                            if self.vllm_config.additional_config.get("kv_cache_dtype", None) == 'int8':
+                                kv_cache_shape = self.attn_backend.get_bsh_kv_cache_shape(
+                                    num_blocks, kv_cache_spec.block_size,
+                                    kv_cache_spec.num_kv_heads,
+                                    kv_cache_spec.head_size)
+                            else:
+                                kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                                    num_blocks, kv_cache_spec.block_size,
+                                    kv_cache_spec.num_kv_heads,
+                                    kv_cache_spec.head_size)
 
-                            # DEBUG: Print final shapes
+                            # Same as old version: use kv_cache_shape[1:] for individual cache shape
+                            k_final_shape = kv_cache_shape[1:]  # Same as old version line 2385
+                            v_final_shape = kv_cache_shape[1:]  # Same as old version
+
+                            # DEBUG: Print shapes for comparison with old version
                             k_elements = 1
                             for dim in k_final_shape:
                                 k_elements *= dim
                             k_memory_gb = (k_elements * 2) / (1024**3)  # K+V cache, assuming 2 bytes per element
-                            print(f"[DEBUG 310P SHAPE]   k_final_shape: {k_final_shape}")
+                            print(f"[DEBUG 310P SHAPE]   kv_cache_shape from attn_backend: {kv_cache_shape}")
+                            print(f"[DEBUG 310P SHAPE]   k_final_shape (same as old version): {k_final_shape}")
                             print(f"[DEBUG 310P SHAPE]   Estimated memory: {k_memory_gb:.2f} GiB")
 
                             # Allocate directly in final NCHW format
