@@ -22,13 +22,11 @@ Run `pytest tests/compile/test_aclgraph_accuracy.py`.
 
 import os
 
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
@@ -38,34 +36,13 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_output_with_aclgraph(
+def test_output_between_eager_and_aclgraph(
     model: str,
     max_tokens: int,
 ) -> None:
     prompts = [
         "Hello, my name is", "The president of the United States is",
         "The capital of France is", "The future of AI is"
-    ]
-    if vllm_version_is("0.12.0"):
-        vllm_aclgraph_qwen_answers = [
-            " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I want to know if there are any",
-            ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
-            ' Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of',
-            ' not just a technological frontier but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
-        ]
-    else:
-        vllm_aclgraph_qwen_answers = [
-            " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
-            ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
-            ' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
-            ' not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
-        ]
-
-    vllm_aclgraph_ds_answers = [
-        '\nI am a 20 year old student from the UK. I am currently studying for a degree in English Literature and Creative Writing. I have a passion',
-        ' a man who has been in the public eye for decades. He has been a senator, a governor, and a businessman. He has also been married to the',
-        ' Paris, which is also the largest city in the country. The city is located on the River Seine and is known for its beautiful architecture, museums, and art',
-        ' here.\nThe future of AI is here.\nThe future of AI is here.\nThe future of AI is here.\nThe future of AI is'
     ]
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
@@ -78,6 +55,15 @@ def test_output_with_aclgraph(
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
+
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+                quantization="ascend",
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
     else:
         with VllmRunner(
                 model,
@@ -86,16 +72,23 @@ def test_output_with_aclgraph(
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
+
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
         vllm_aclgraph_outputs_list.append(
-            ([output.outputs[0].index], output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text))
 
-    vllm_eager_outputs_list = ([
-        ([0], answer) for answer in vllm_aclgraph_ds_answers
-    ] if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8" else [
-        ([0], answer) for answer in vllm_aclgraph_qwen_answers
-    ])
+    vllm_eager_outputs_list = []
+    for output in vllm_eager_outputs:
+        vllm_eager_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,
@@ -141,18 +134,12 @@ def test_output_between_eager_and_full_decode_only(
          'and $x^2 + cx + b = 0$ also have a common real root.'
          'Compute the sum $a + b + c$.')
     ]
-    if vllm_version_is("0.12.0"):
-        vllm_aclgraph_qwen_answers = [
-            ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-            ' \n\nTo solve this problem, we can use the following approach: Let $ABCD$ be a unit square with coordinates $A(0,0), B',
-            ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
-        ]
-    else:
-        vllm_aclgraph_qwen_answers = [
-            ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-            ' \n\nTo solve this problem, we can use the fact that the expected value of the area of a triangle formed by two random points on a square\'s perimeter is',
-            ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
-        ]
+    vllm_aclgraph_qwen_answers = [
+        ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
+        " \n\nTo solve this problem, we can use the fact that the expected value of the area of a triangle formed by two random points on a square's perimeter is",
+        ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
+    ]
+
     vllm_aclgraph_ds_answers = [
         '\n\nSelect an assignment template',
         '\n\nSelect an assignment template',

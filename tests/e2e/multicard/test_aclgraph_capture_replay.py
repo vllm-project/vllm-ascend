@@ -27,8 +27,10 @@ from vllm.utils.network_utils import get_open_port
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# here we delete qwen3-0.6b, please add it when the test can be enabled when trion-ascend is supported.
-MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+MODELS = [
+    "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+]
 
 
 def _install_spies(counters: dict[str, Any]) -> contextlib.ExitStack:
