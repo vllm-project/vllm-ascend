@@ -844,7 +844,6 @@ class TestAttentionWithNomaskAndMask(TestBase):
     def test_attention_with_nomask_and_mask_nochunk(
             self, mock_npu_attn_out_lse_update,
             mock_npu_fused_infer_attention_score):
-        self.impl._npu_attn_out_lse_update = MagicMock()
         # Mock input data
         q = torch.randn(self.q_total_tokens, self.impl.num_heads,
                         self.impl.head_size)
@@ -882,6 +881,7 @@ class TestAttentionWithNomaskAndMask(TestBase):
             mask=mask,
             attn_metadata=attn_metadata)
         # Assert the method call
+        mock_npu_attn_out_lse_update.assert_called_once()
         self.assertEqual(mock_npu_fused_infer_attention_score.call_count, 2)
         self.assertIsNotNone(output)
         self.assertEqual(attn_lse, None)
