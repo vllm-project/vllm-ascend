@@ -68,18 +68,21 @@ docker run --rm \
 
 #### Single NPU (Qwen2.5-Omni-7B)
 
+:::{note}
+The env `LOCAL_MEDIA_PATH` which allowing API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
+
 ```bash
 export VLLM_USE_MODELSCOPE=true
-export MODEL_PATH=vllm-ascend/Qwen2.5-Omni-7B
-export LOCAL_MEDIA_PATH=/local_path/to_media/
+export MODEL_PATH="Qwen/Qwen2.5-Omni-7B"
+export LOCAL_MEDIA_PATH=$HOME/.cache/vllm/assets/vllm_public_assets/
 
-vllm serve ${MODEL_PATH}\
+vllm serve "${MODEL_PATH}" \
 --host 0.0.0.0 \
 --port 8000 \
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config {"full_cuda_graph": 1} \
+--compilation-config '{"full_cuda_graph": 1}' \
 --no-enable-prefix-caching
 ```
 
@@ -100,7 +103,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 ```bash
 export VLLM_USE_MODELSCOPE=true
-export MODEL_PATH=vllm-ascend/Qwen2.5-Omni-7B
+export MODEL_PATH=Qwen/Qwen2.5-Omni-7B
 export LOCAL_MEDIA_PATH=/local_path/to_media/
 export DP_SIZE=8
 
@@ -200,7 +203,7 @@ There are three `vllm bench` subcommand:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model vllm-ascend/Qwen2.5-Omni-7B --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen2.5-Omni-7B --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
