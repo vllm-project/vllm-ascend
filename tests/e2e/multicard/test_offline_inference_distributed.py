@@ -115,7 +115,7 @@ def test_sp_for_qwen3_moe() -> None:
                     distributed_executor_backend="mp",
                     compilation_config={
                         "pass_config": {
-                            "enable_sequence_parallelism": True
+                            "enable_sp": True
                         }
                     },
                     enable_expert_parallel=True,
