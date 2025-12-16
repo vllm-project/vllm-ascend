@@ -721,7 +721,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and using_paged_attention(num_tokens)
-                and self.sliding_window is not None):
+                and self.sliding_window is None):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self._forward_fused_infer_attention(
