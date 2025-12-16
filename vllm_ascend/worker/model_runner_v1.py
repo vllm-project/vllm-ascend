@@ -3734,6 +3734,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
 
                     
+                    # DEBUG: 监控格式转换前后的内存
+                    if is_310p_device:
+                        from vllm_ascend.platform import NPUPlatform
+                        free_before_format, _ = NPUPlatform.mem_get_info()
+                        print(f"[DEBUG FORMAT CAST] Layer {layer_name}:")
+                        print(f"[DEBUG FORMAT CAST]   Before format cast: Free={free_before_format/1024**3:.2f}GiB")
+
                     # Fixed: For 310P, main tensors use ND format but KV cache needs NZ format for ReshapeAndCacheOperation
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
                         # 310P eager mode: main tensors ND, but KV cache NZ for compatibility (like v0.10.0rc1)
@@ -3744,6 +3751,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         # Other devices: use standard format conversion
                         k_cache = self._convert_torch_format(k_cache)
                         v_cache = self._convert_torch_format(v_cache)
+
+                    # DEBUG: 监控格式转换后的内存
+                    if is_310p_device:
+                        free_after_format, _ = NPUPlatform.mem_get_info()
+                        format_memory_consumed = (free_before_format - free_after_format) / 1024**3
+                        print(f"[DEBUG FORMAT CAST]   After format cast: Free={free_after_format/1024**3:.2f}GiB")
+                        print(f"[DEBUG FORMAT CAST]   Memory consumed by format cast: {format_memory_consumed:.2f}GiB")
 
                     # DEBUG_START: 格式转换后的内存信息
                     if is_310p_device:
