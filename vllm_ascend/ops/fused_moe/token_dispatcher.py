@@ -422,69 +422,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         return final_hidden_states
 
 
-# mypy: disable-error-code="override"
-class TokenDispatcherWithMoge(MoETokenDispatcher):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.apply_router_weight_on_input = False
-        self.local_num_experts = self.num_experts // self.ep_size
-        self.local_num_group = self.top_k // self.ep_size
-        self.bsz = None
-
-    def token_dispatch(self,
-                       hidden_states: torch.Tensor,
-                       topk_weights: torch.Tensor,
-                       topk_ids: torch.Tensor,
-                       expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
-                       global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[Any] = None,
-                       quantized_x_for_share: Optional[Any] = None,
-                       dynamic_scale_for_share: Optional[Any] = None,
-                       mc2_mask: Optional[torch.Tensor] = None,
-                       apply_router_weight_on_input: bool = False,
-                       with_quant: bool = False,
-                       dynamic_eplb: bool = False,
-                       pertoken_scale: Optional[torch.Tensor] = None):
-        self.bsz, _ = hidden_states.shape
-        flatten_topk_ids = topk_ids.view(-1)
-        self.sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
-        self.sorted_topk_ids = self.sorted_topk_ids.to(torch.int32)
-        sorted_hidden_states = hidden_states.index_select(
-            0, self.sorted_topk_ids // self.local_num_group)
-
-        experts_id = torch.arange(0,
-                                  self.local_num_experts,
-                                  dtype=topk_ids.dtype,
-                                  device=topk_ids.device)
-        num_tokens_per_expert = (
-            flatten_topk_ids.unsqueeze(-1) == experts_id).to(
-                torch.float32).sum(0)
-        topk_scales = topk_weights.view(-1).index_select(
-            0, self.sorted_topk_ids).unsqueeze(-1)
-        group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
-        group_list_type = 0
-        return {
-            "group_list_type": group_list_type,
-            "hidden_states": sorted_hidden_states,
-            "group_list": group_list,
-            "topk_scales": topk_scales
-        }
-
-    def token_combine(self,
-                      hidden_states: torch.Tensor,
-                      context_metadata: dict,
-                      bias: torch.Tensor = None):
-        unsorted_topk_ids = torch.argsort(self.sorted_topk_ids.float()).to(
-            torch.int32)
-        unsorted_hidden_states = hidden_states.index_select(
-            0, unsorted_topk_ids)
-        final_hidden_states = unsorted_hidden_states.reshape(
-            self.bsz, self.top_k // self.ep_size, -1).sum(1)
-        return final_hidden_states
-
-
 class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
     """
     The implementation of the AlltoAll-based token dispatcher, which handles token
