@@ -2162,14 +2162,15 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = (len(self.input_batch.lora_id_to_lora_request) > 0
                     if force_has_lora is None else force_has_lora)
 
-        dispatch_cudagraph = (
-            lambda num_tokens: self.cudagraph_dispatcher.dispatch(
+        def dispatch_cudagraph(num_tokens):
+            return CUDAGraphMode.NONE, BatchDescriptor(
+                num_tokens_padded
+            ) if force_eager else self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 use_cascade_attn=use_cascade_attn,
                 uniform_decode=uniform_decode,
-            ) if not force_eager else
-            (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded)))
+            )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded)
@@ -2335,7 +2336,7 @@ class NPUModelRunner(GPUModelRunner):
                 remove_lora,
         ):
             # Make sure padding doesn't exceed max_num_tokens
-            # TODO(zhenwenqi) Here we do not do multimodal , it is defferent from gpu
+            # TODO(zhenwenqi) Here we do not do multimodal, it is different from gpu
             assert num_tokens_padded <= self.max_num_tokens
             if self.is_multimodal_model:
                 input_ids = None
