@@ -303,10 +303,10 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
-    @patch("torch.distributed.all_gather")
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("torch.distributed.all_to_all_single")
-    def test_process_attn_out_lse(self, mock_all_to_all_single,
-                                  mock_all_gather):
+    def test_process_attn_out_lse(self, mock_all_to_all_single, mock_pcp):
         self.impl.dcp_size = 2
         self.impl.pcp_size = 2
 
@@ -320,11 +320,10 @@ class TestAscendMLAImpl(TestBase):
         mock_all_to_all_single.side_effect = lambda output, input, *args, **kwargs: output.copy_(
             input)
 
-        def mock_all_gather_func(tensor_list, tensor, group=None):
-            tensor_list[0] = tensor
-            tensor_list[1] = tensor.clone()
+        def make_all_gather(ws):
+            return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-        mock_all_gather.side_effect = mock_all_gather_func
+        mock_pcp.all_gather = MagicMock(side_effect=make_all_gather(2))
 
         decode_metadata = MagicMock()
         decode_metadata.actual_seq_lengths_q = MagicMock()
@@ -339,7 +338,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result[0].shape[1], N / self.impl.dcp_size)
         self.assertEqual(result[0].shape[2], self.impl.kv_lora_rank + 1)
 
-    @patch("torch.distributed.all_gather")
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("torch.distributed.all_to_all_single")
     @patch('vllm_ascend.attention.mla_cp.get_forward_context')
     @patch("torch_npu.atb.npu_multi_head_latent_attention")
@@ -347,7 +347,7 @@ class TestAscendMLAImpl(TestBase):
     def test_forward_decode_pcp_dcp(self, mock_npu_attention_update,
                                     mock_npu_multi_head_latent_attention,
                                     mock_get_forward_context,
-                                    mock_all_to_all_single, mock_all_gather):
+                                    mock_all_to_all_single, mock_pcp):
         self.impl.dcp_size = 2
         self.impl.pcp_size = 2
         self.impl.num_kv_heads = 1
@@ -386,11 +386,10 @@ class TestAscendMLAImpl(TestBase):
         mock_all_to_all_single.side_effect = lambda output, input, *args, **kwargs: output.copy_(
             input)
 
-        def mock_all_gather_func(tensor_list, tensor, group=None):
-            tensor_list[0] = tensor
-            tensor_list[1] = tensor.clone()
+        def make_all_gather(ws):
+            return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-        mock_all_gather.side_effect = mock_all_gather_func
+        mock_pcp.all_gather = MagicMock(side_effect=make_all_gather(2))
 
         self.impl._v_up_proj = MagicMock()
         self.impl._v_up_proj.return_value = torch.randn(
