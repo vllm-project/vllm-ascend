@@ -20,7 +20,8 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-from vllm.attention.selector import AttentionSelectorConfig
+if not vllm_version_is('0.12.0'):
+    from vllm.attention.selector import AttentionSelectorConfig
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -356,17 +357,19 @@ class NPUPlatform(Platform):
         CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend,
-                             attn_selector_config: "AttentionSelectorConfig"):
-        # choose attention backend based on use_mla
+    def get_attn_backend_cls(cls, selected_backend, *args, **kwargs):
+        if "attn_selector_config" in kwargs:
+            use_mla = kwargs["attn_selector_config"].use_mla
+            use_sparse = kwargs["attn_selector_config"].use_sparse
+        else:
+            use_mla = kwargs.get("use_mla", args[4] if len(args) >= 5 else None)
+            use_sparse = kwargs.get("use_sparse", args[5] if len(args) >= 6 else None)
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False):
-            "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(attn_selector_config.use_mla,
-                            attn_selector_config.use_sparse)]
+        return backend_map[(use_mla, use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
