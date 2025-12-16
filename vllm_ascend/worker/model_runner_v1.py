@@ -116,10 +116,7 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.sampler import AscendSampler
-from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.spec_decode.interface import SpecDcodeType
-from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
+from vllm_ascend.spec_decode.eagle import NPUEagleProposer as EagleProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_enable_nz,
@@ -418,6 +415,7 @@ class NPUModelRunner(GPUModelRunner):
                                      SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
+        self.use_aux_hidden_state_outputs = False
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
@@ -435,8 +433,21 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = 0
 
     def _get_drafter(self):
-        return get_spec_decode_method(self.speculative_config.method,
-                                      self.vllm_config, self.device, self)
+        # NOTE: ngram and suffix here have been reverted to vllm.v1.spec_decode
+        if self.speculative_config.method == "ngram":
+            drafter = NgramProposer(self.vllm_config)
+        elif self.speculative_config.method == "suffix":
+            drafter = SuffixDecodingProposer(self.vllm_config)
+        elif self.speculative_config.use_eagle():
+            drafter = EagleProposer(self.vllm_config, self.device, self)
+            if self.speculative_config.method == "eagle3":
+                self.use_aux_hidden_state_outputs = drafter.eagle3_use_aux_hidden_state
+        else:
+            raise ValueError(
+                "Unknown speculative decoding method: "
+                f"{self.speculative_config.method}"
+            )
+        return drafter
 
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.mode == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
@@ -1252,13 +1263,13 @@ class NPUModelRunner(GPUModelRunner):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and self.speculative_config.method == 'mtp':
+            if self.speculative_config and self.speculative_config.use_eagle():
                 # SpecDecoding now supports seq_len=1 and seq_len=2
                 # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'mtp':
+            if self.speculative_config and self.speculative_config.use_eagle():
                 attn_state = AscendAttentionState.SpecDecoding
             else:
                 attn_state = AscendAttentionState.ChunkedPrefill
@@ -1364,26 +1375,154 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
+    # TODO: pcp/dcp-related code should be considered carefully
     def propose_draft_token_ids(
         self,
-        valid_sampled_token_ids: torch.Tensor | list[list[int]],
-        sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
-        spec_decode_metadata: SpecDecodeMetadata,
-        positions: torch.Tensor,
-        num_scheduled_tokens: int,
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
-        attn_metadata: dict[str, Any],
-        aux_hidden_states: torch.Tensor = None,
-    ) -> Optional[list[list[int]]]:
-        if not self.drafter:
-            # Speculative decoding is not enabled.
-            draft_token_ids = None
-        else:
-            draft_token_ids = self.drafter.generate_token_ids(
-                valid_sampled_token_ids, sampling_metadata, scheduler_output,
-                spec_decode_metadata, positions, num_scheduled_tokens,
-                hidden_states, aux_hidden_states)
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        common_attn_metadata: CommonAttentionMetadata,
+        positions: torch.Tensor = None,
+    ) -> list[list[int]] | torch.Tensor:
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        spec_config = self.speculative_config
+        assert spec_config is not None
+        if spec_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
+
+            if spec_config.disable_padded_drafter_batch:
+                # When padded-batch is disabled, the sampled_token_ids should be
+                # the cpu-side list[list[int]] of valid sampled tokens for each
+                # request, with invalid requests having empty lists.
+                assert isinstance(sampled_token_ids, list), (
+                    "sampled_token_ids should be a python list when"
+                    "padded-batch is disabled."
+                )
+                next_token_ids = self.drafter.prepare_next_token_ids_cpu(
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    scheduler_output.num_scheduled_tokens,
+                )
+            else:
+                # When using padded-batch, the sampled_token_ids should be
+                # the gpu tensor of sampled tokens for each request, of shape
+                # (num_reqs, num_spec_tokens + 1) with rejected tokens having
+                # value -1.
+                assert isinstance(sampled_token_ids, torch.Tensor), (
+                    "sampled_token_ids should be a torch.Tensor when"
+                    "padded-batch is enabled."
+                )
+                next_token_ids, valid_sampled_tokens_count = (
+                    self.drafter.prepare_next_token_ids_padded(
+                        common_attn_metadata,
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests,
+                    )
+                )
+                self._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count
+                )
+
+            req_scheduled_tokens = scheduler_output.num_scheduled_tokens
+            if self.pcp_size > 1:
+                long_seq_metadata = self.long_seq_metadata
+                input_ids_pcp_full = self.input_ids_pcp_full
+                query_start_loc_pcp_full = self.query_start_loc_pcp_full
+                query_start_loc_pcp_full_cpu = self.query_start_loc_pcp_full_cpu
+                num_reqs = self.input_batch.num_reqs
+                ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
+                    query_start_loc_pcp_full_cpu[:num_reqs]
+                num_prefill_reqs = (ori_query_lens
+                                    > self.decode_threshold).sum().item()
+                num_decode_reqs = num_reqs - num_prefill_reqs
+            else:
+                long_seq_metadata = None
+                num_prefill_reqs = 0
+                num_decode_reqs = 0
+
+            if spec_decode_metadata is None:
+                # update pcp related params
+                if self.pcp_size > 1:
+                    token_indices_to_sample = \
+                        query_start_loc_pcp_full_cpu[1:num_reqs + 1] - 1
+                    target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
+                    target_positions = positions[:num_scheduled_tokens]
+                    target_hidden_states = hidden_states
+                else:
+                    token_indices_to_sample = None
+                    # input_ids can be None for multimodal models.
+                    target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
+                    target_positions = self._get_positions(num_scheduled_tokens)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
+                        )
+                    else:
+                        target_hidden_states = hidden_states[:num_scheduled_tokens]
+            else:
+                if self.pcp_size > 1:
+                    common_attn_metadata.query_start_loc_cpu = \
+                        query_start_loc_pcp_full_cpu[:num_reqs + 1]
+                    common_attn_metadata.query_start_loc = \
+                        query_start_loc_pcp_full[:num_reqs + 1]
+                if spec_config.disable_padded_drafter_batch:
+                    token_indices_to_sample = None
+                    common_attn_metadata, token_indices = self.drafter.prepare_inputs(
+                        common_attn_metadata,
+                        sampled_token_ids,
+                        spec_decode_metadata.num_draft_tokens,
+                    )
+                else:
+                    common_attn_metadata, token_indices, token_indices_to_sample = (
+                        self.drafter.prepare_inputs_padded(
+                            common_attn_metadata,
+                            spec_decode_metadata,
+                            valid_sampled_tokens_count,
+                        )
+                    )
+                if self.pcp_size > 1:
+                    target_token_ids = input_ids_pcp_full[token_indices]
+                    target_positions = positions
+                    target_hidden_states = hidden_states
+                else:
+                    target_token_ids = self.input_ids.gpu[token_indices]
+                    target_positions = self._get_positions(token_indices)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[token_indices] for h in aux_hidden_states], dim=-1
+                        )
+                    else:
+                        target_hidden_states = hidden_states[token_indices]
+
+            if self.supports_mm_inputs:
+                mm_embed_inputs = self._gather_mm_embeddings(
+                    scheduler_output,
+                    shift_computed_tokens=1,
+                )
+            else:
+                mm_embed_inputs = None
+
+            draft_token_ids = self.drafter.propose(
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids,
+                last_token_indices=token_indices_to_sample,
+                sampling_metadata=sampling_metadata,
+                common_attn_metadata=common_attn_metadata,
+                mm_embed_inputs=mm_embed_inputs,
+            )
+
         return draft_token_ids
 
     def _select_moe_comm_method(self,
@@ -1554,7 +1693,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output)
 
             aux_hidden_states = None
-            if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
+            if self.drafter and self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
 
         kv_connector_output = KVConnectorOutput(
@@ -1663,17 +1802,18 @@ class NPUModelRunner(GPUModelRunner):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
-            assert self.spec_decode_common_attn_metadata is not None
+            spec_decode_common_attn_metadata = self.spec_decode_common_attn_metadata
+            assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
+                scheduler_output,
                 sampled_token_ids,
                 self.input_batch.sampling_metadata,
-                scheduler_output,
-                spec_decode_metadata,
-                positions,
-                scheduler_output.total_num_scheduled_tokens,
                 hidden_states,
-                attn_metadata,
+                sample_hidden_states,
                 aux_hidden_states,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+                positions,
             )
 
         (
@@ -1695,7 +1835,7 @@ class NPUModelRunner(GPUModelRunner):
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.method == "mtp" and \
+                    self.speculative_config.use_eagle() and \
                     not self.speculative_config.disable_padded_drafter_batch
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens
@@ -1987,7 +2127,7 @@ class NPUModelRunner(GPUModelRunner):
                         block_table_tensor[:num_reqs * self.decode_threshold]
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
-                        self.speculative_config.method == "mtp":
+                        self.speculative_config.use_eagle():
                     attn_state = AscendAttentionState.SpecDecoding
 
                 if vllm_version_is("0.12.0"):
@@ -2070,7 +2210,7 @@ class NPUModelRunner(GPUModelRunner):
                     update_attn_params(self.update_stream, forward_context,
                                        num_tokens)
 
-        if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
+        if self.drafter and self.use_aux_hidden_state_outputs:
             hidden_states, _ = hidden_states
         else:
             hidden_states = hidden_states
@@ -2272,7 +2412,7 @@ class NPUModelRunner(GPUModelRunner):
                     with_prefill=with_prefill,
                     num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    cudagraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention)
@@ -2364,7 +2504,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
-                if self.drafter.name == SpecDcodeType.EAGLE3:
+                if self.use_aux_hidden_state_outputs:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
 

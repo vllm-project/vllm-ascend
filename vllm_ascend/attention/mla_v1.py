@@ -8,7 +8,7 @@ import torch_npu
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size,
                               get_pcp_group)
@@ -19,6 +19,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -679,6 +680,113 @@ class AscendMLAMetadataBuilder:
 
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
+        model: Optional[nn.Module]=None,
+    ):
+        """
+        Build attention metadata for draft model. Uses build by default.
+
+        Args:
+            common_attn_metadata: The common attention metadata.
+            draft_index: The index of the current draft operation.
+                When speculating a chain of tokens, this index refers to the
+                draft attempt for the i-th token.
+                For tree-based attention, this index instead refers to the
+                draft attempt for the i-th level in the tree of tokens.
+        """
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            model=model,
+        )
+
+    # TODO: change it to build_for_drafting
+    def update_for_drafting(
+        self,
+        attn_metadata,
+        draft_index,
+        slot_mapping,
+        arange,
+        arange_cpu,
+        token_arange_np,
+        batch_size,
+        cudagraph_runtime_mode,
+        positions,
+        exceeds_max_model_len,
+        clamped_positions,
+        num_input_tokens,
+    ):
+        if draft_index == 0:
+            attn_metadata.slot_mapping.fill_(PADDING_SLOT_ID)
+            attn_metadata.query_start_loc = arange[:batch_size + 1]
+            if getattr(attn_metadata, "num_decode_tokens", 0):
+                attn_metadata.num_decode_tokens = batch_size
+
+        decode_metadata = getattr(attn_metadata, "decode", None)
+        prefill_metadata = getattr(attn_metadata, "prefill", None)
+        # When disable_padded_drafter_batch=False, it should not to be updating these params, maybe.
+        if decode_metadata is not None and (self.speculative_config.disable_padded_drafter_batch or \
+                cudagraph_runtime_mode != CUDAGraphMode.FULL):
+            decode_metadata.actual_seq_lengths_q = arange_cpu[
+                1:batch_size + 1].tolist()
+            if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                decode_metadata.actual_seq_lengths_q = \
+                    self.pad_actual_seq_len_q_mtp_disable_pad(
+                        attn_metadata.graph_pad_size - batch_size,
+                        batch_size,
+                        decode_metadata.actual_seq_lengths_q)
+            decode_metadata.cos = self.cos_cache[
+                positions[:batch_size]].unsqueeze(1).unsqueeze(2)
+            decode_metadata.sin = self.sin_cache[
+                positions[:batch_size]].unsqueeze(1).unsqueeze(2)
+
+        # Increment the sequence lengths.
+        # This is an out-of-place operation to avoid modifying the original tensor
+        # when enable async_scheduling.
+        attn_metadata.seq_lens = attn_metadata.seq_lens + 1
+        # For the requests that exceed the max model length, we set the
+        # sequence length to 1 to minimize their overheads in attention.
+        exceeds_mask = attn_metadata.seq_lens[:batch_size] > \
+            self.model_config.max_model_len
+        attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
+        # Mask out the slot mappings that exceed the max model length.
+        # Otherwise, the KV cache will be inadvertently updated with the
+        # padding tokens.
+        slot_mapping += 1
+        slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+        attn_metadata.slot_mapping[:batch_size] = slot_mapping
+
+        if prefill_metadata is not None:
+            prefill_metadata.seq_lens = attn_metadata.seq_lens
+            prefill_metadata.seq_lens_list = prefill_metadata.seq_lens.tolist(
+            )
+            prefill_metadata.context_lens = attn_metadata.seq_lens
+            prefill_metadata.input_positions = clamped_positions[:
+                                                                 num_input_tokens]
+            prefill_metadata.max_seq_lens += 1
+            prefill_metadata.max_seq_lens = min(
+                prefill_metadata.max_seq_lens,
+                self.model_config.max_model_len)
+        if decode_metadata is not None:
+            decode_metadata.seq_lens = attn_metadata.seq_lens
+            decode_metadata.seq_lens_list = decode_metadata.seq_lens.tolist(
+            )
+            decode_seq_lens_list = decode_metadata.seq_lens_list
+            if cudagraph_runtime_mode == CUDAGraphMode.FULL and \
+                    self.speculative_config.disable_padded_drafter_batch:
+                decode_metadata.seq_lens_list = decode_seq_lens_list + [
+                    0
+                ] * (attn_metadata.graph_pad_size - len(decode_seq_lens_list))
+            decode_metadata.input_positions = clamped_positions[:
+                                                                num_input_tokens]
+            decode_metadata.max_seq_lens += 1
+            decode_metadata.max_seq_lens = min(
+                decode_metadata.max_seq_lens,
+                self.model_config.max_model_len)
 
 
 class DecodeMLAPreprocessResult(NamedTuple):

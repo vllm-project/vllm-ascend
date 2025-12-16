@@ -32,6 +32,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
@@ -349,6 +350,70 @@ class AscendAttentionMetadataBuilder:
 
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
+        model: Optional[nn.Module]=None,
+    ):
+        """
+        Build attention metadata for draft model. Uses build by default.
+
+        Args:
+            common_attn_metadata: The common attention metadata.
+            draft_index: The index of the current draft operation.
+                When speculating a chain of tokens, this index refers to the
+                draft attempt for the i-th token.
+                For tree-based attention, this index instead refers to the
+                draft attempt for the i-th level in the tree of tokens.
+        """
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
+
+    # TODO: change it to build_for_drafting
+    def update_for_drafting(
+        self,
+        attn_metadata,
+        draft_index,
+        slot_mapping,
+        arange,
+        arange_cpu,
+        token_arange_np,
+        batch_size,
+        cudagraph_runtime_mode,
+        positions,
+        exceeds_max_model_len,
+        clamped_positions,
+        num_input_tokens,
+    ):
+        if draft_index == 0:
+            attn_metadata.slot_mapping.fill_(PADDING_SLOT_ID)
+            attn_metadata.query_start_loc = arange[:batch_size + 1]
+            if getattr(attn_metadata, "num_decode_tokens", 0):
+                attn_metadata.num_decode_tokens = batch_size
+
+            query_start_loc_cpu = torch.from_numpy(token_arange_np[:batch_size + 1]).clone()
+            attn_metadata.query_start_loc_list = query_start_loc_cpu[1:].tolist()
+            attn_metadata.actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
+
+        # Increment the sequence lengths.
+        # This is an out-of-place operation to avoid modifying the original tensor
+        # when enable async_scheduling.
+        attn_metadata.seq_lens = attn_metadata.seq_lens + 1
+        # For the requests that exceed the max model length, we set the
+        # sequence length to 1 to minimize their overheads in attention.
+        exceeds_mask = attn_metadata.seq_lens[:batch_size] > \
+            self.model_config.max_model_len
+        attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
+        # Mask out the slot mappings that exceed the max model length.
+        # Otherwise, the KV cache will be inadvertently updated with the
+        # padding tokens.
+        slot_mapping += 1
+        slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+        attn_metadata.slot_mapping[:batch_size] = slot_mapping
 
 
 class AscendAttentionBackendImpl(AttentionImpl):
