@@ -46,3 +46,8 @@ class EplbAdaptor():
                                 local_expert_to_replace: Any,
                                 buffer_tensor_id: Any) -> Any:
         raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def model_register(model, model_config):
+        raise NotImplementedError

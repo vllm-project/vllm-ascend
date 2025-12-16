@@ -318,12 +318,13 @@ class VllmEplbAdaptor(EplbAdaptor):
 
         return expert_map_all
 
-    def model_register(self):
-        self.model.get_expert_map = types.MethodType(get_expert_map, self.model)
-        self.model.get_log2phy_map = types.MethodType(get_log2phy_map, self.model)
-        self.model.get_all_expert_map = types.MethodType(get_all_expert_map, self.model)
-        self.model.get_all_moe_loads = types.MethodType(get_all_moe_loads, self.model)
-        self.model.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, self.model)
+    @staticmethod
+    def model_register(model, model_config=None):
+        model.get_expert_map = types.MethodType(get_expert_map, model)
+        model.get_log2phy_map = types.MethodType(get_log2phy_map, model)
+        model.get_all_expert_map = types.MethodType(get_all_expert_map, model)
+        model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)
+        model.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, model)
 
 def get_expert_map(self, layer_id):
     return self.model.layers[layer_id].mlp.experts.get_map()
