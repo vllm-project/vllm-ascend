@@ -3424,6 +3424,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
+        # Monitor after KV cache tensors initialization
+        free_after_kv_tensors, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after initialize_kv_cache_tensors: Free={free_after_kv_tensors/GiB_bytes:.2f}GiB")
+
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
@@ -3445,8 +3449,21 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        from vllm.logger import logger
+        from vllm.utils.mem_constants import GiB_bytes
+        from vllm_ascend.platform import NPUPlatform
+
+        # Monitor before allocation
+        free_before_alloc, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] before _allocate_kv_cache_tensors: Free={free_before_alloc/GiB_bytes:.2f}GiB")
+
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+
+        # Monitor after allocation
+        free_after_alloc, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] after _allocate_kv_cache_tensors: Free={free_after_alloc/GiB_bytes:.2f}GiB")
+
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
                                                    kv_cache_raw_tensors)
