@@ -64,7 +64,7 @@ def set_ascend_forward_context(
             get_moe_comm_method
         moe_comm_type = select_moe_comm_method(num_tokens, vllm_config)
         # TODO: remove this after moe_comm_type selection logic is finalized
-        if in_profile_run and is_mtp_model:
+        if is_mtp_model:
             moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
                              == MoECommType.FUSED_ALLTOALL else moe_comm_type)
         forward_context.moe_comm_type = moe_comm_type
@@ -298,8 +298,6 @@ def select_moe_comm_method(num_tokens: int,
                          if fused_all2all_enable else MoECommType.ALLTOALL)
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
-    moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
-                     == MoECommType.FUSED_ALLTOALL else moe_comm_type)
     # PanguProMoE only supports allgather
     if model_type == "PanguProMoE":
         moe_comm_type = MoECommType.ALLGATHER
