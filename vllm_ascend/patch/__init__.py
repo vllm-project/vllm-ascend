@@ -228,7 +228,7 @@
 #    Future Plan:
 #       Remove this patch when the bug is fixed.
 #
-# ** File: worker/patch_qwen3_next_mtp.py**
+# ** 11. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -237,19 +237,39 @@
 #       Replace with a new bind_kv_cache.
 #       Skip the raise.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/4770
+#       It need discuss.
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** File: worker/patch_module.py**
+# ** 12. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
-#       'torch.argsort' func of npu does not support bool.
+#       1. 'torch.argsort' func of npu does not support bool.
+#       2. Without `stable=True`, the output will have a lot of redundant tokens.
 #    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32.
+#       Replace with a new torch.argsort that will cast the input to torch.int32
+#       and do stable sort.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/4770
+#       1. It depends on torch_npu.
+#       2. https://github.com/vllm-project/vllm/pull/30632
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
+#
+# ** 13. File: worker/patch_rejection_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.rejection_sampler`
+#    Why:
+#       - some functions from `rejection_sampler` are not supported or slow on npu.
+#    How：
+#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
+#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/874
+#       https://github.com/vllm-project/vllm/pull/4849
+#    Future Plan:
+#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
+#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
+#       2. make these functions as costom op, then remove AscendRejectionSampler
 #

@@ -3,9 +3,9 @@
 ## Environmental Dependencies
 
 * Software:
-  * Python >= 3.9, < 3.12
-  * CANN >= 8.3.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
+  * Python >= 3.10, < 3.12
+  * CANN == 8.3.rc2
+  * PyTorch == 2.8.0, torch-npu == 2.8.0
   * vLLM：main branch
   * vLLM-Ascend：main branch
 
@@ -85,9 +85,16 @@ export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
-export ASCEND_BUFFER_POOL=4:8
+
 # ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB.
+export ASCEND_BUFFER_POOL=4:8
+
+# Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
+# The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
+# This ensures that even in the worst-case scenario—where all Decode cards simultaneously attempt to connect to the same Prefill card the connection will not time out.
 export ASCEND_CONNECT_TIMEOUT=10000
+
+# Unit: ms. The timeout for one-sided communication transfer is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039).
 export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
@@ -113,6 +120,7 @@ python3 -m vllm.entrypoints.openai.api_server \
                 "kv_role": "kv_producer",
                 "kv_port": "20001",
                 "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
                     "prefill": {
                         "dp_size": 1,
                         "tp_size": 1

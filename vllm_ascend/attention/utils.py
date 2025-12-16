@@ -1,12 +1,28 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, List, Optional
 
 import torch
 import torch.nn.functional as F
+from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+
+from vllm_ascend.utils import get_ascend_config
+
+
+@lru_cache
+def using_paged_attention(runtime_shape: int) -> bool:
+    vllm_config = get_current_vllm_config()
+    if vllm_config.speculative_config is not None:
+        return False
+    from vllm.config.compilation import CUDAGraphMode
+    if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+        return False
+
+    return runtime_shape in get_ascend_config().pa_shape_list
 
 
 @dataclass
@@ -99,10 +115,6 @@ class AscendCommonAttentionMetadata:
     # num_input_tokens refers to total number of tokens including
     # padding tokens. It is used to handle some padding operations.
     num_input_tokens: int = 0
-
-    # NOTE: This is a temporary solution for rotary embedding in MLA
-    cos: torch.Tensor = None
-    sin: torch.Tensor = None
 
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None

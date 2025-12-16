@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import math
 import os
 import random
 from typing import Any
@@ -239,3 +240,56 @@ def test_suffix_acceptance(
 
     # Heuristic: expect at least 80% acceptance rate at the end.
     assert last_accept_rate > 0.60
+
+
+@pytest.mark.parametrize("use_eagle3", [True], ids=["eagle3"])
+def test_eagle_logprobs(
+    model_name: str,
+    use_eagle3: bool,
+):
+    prompt = {"role": "user", "content": "Hello world " * 10}
+    sampling_params = SamplingParams(temperature=0,
+                                     logprobs=1,
+                                     max_tokens=10,
+                                     ignore_eos=False)
+
+    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=False)
+    ref_outputs = ref_llm.chat([prompt], sampling_params)
+    ref_logprobs = []
+    for output in ref_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                ref_logprobs.append(logprobs[token_id])
+    del ref_llm
+
+    spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
+    with VllmRunner(
+            model_name,
+            max_num_seqs=1,
+            max_num_batched_tokens=2048,
+            gpu_memory_utilization=0.6,
+            speculative_config={
+                "method": "eagle3" if use_eagle3 else "eagle",
+                "model": spec_model_name,
+                "num_speculative_tokens": 2,
+                "max_model_len": 128,
+            },
+            max_model_len=128,
+            enforce_eager=False,
+    ) as runner:
+        spec_outputs = runner.model.chat([prompt], sampling_params)
+
+    # Collect logprobs outputs from spec decode LLM.
+    spec_logprobs = []
+    for output in spec_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                spec_logprobs.append(logprobs[token_id])
+
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(ref_logprob.logprob,
+                            spec_logprob.logprob,
+                            rel_tol=5e-2,
+                            abs_tol=1e-1)
+        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token
