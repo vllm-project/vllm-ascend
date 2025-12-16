@@ -2163,14 +2163,15 @@ class NPUModelRunner(GPUModelRunner):
                     if force_has_lora is None else force_has_lora)
 
         def dispatch_cudagraph(num_tokens):
-            return CUDAGraphMode.NONE, BatchDescriptor(
-                num_tokens_padded
-            ) if force_eager else self.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens,
-                has_lora=has_lora,
-                use_cascade_attn=use_cascade_attn,
-                uniform_decode=uniform_decode,
-            )
+            if not force_eager:
+                return self.cudagraph_dispatcher.dispatch(
+                    num_tokens=num_tokens,
+                    has_lora=has_lora,
+                    use_cascade_attn=use_cascade_attn,
+                    uniform_decode=uniform_decode,
+                )
+            else:
+                return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
             num_tokens_padded)
