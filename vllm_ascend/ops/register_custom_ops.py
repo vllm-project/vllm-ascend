@@ -116,7 +116,7 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     model_instance = forward_context.model_instance
     prefetch_stream = forward_context.prefetch_stream
@@ -173,7 +173,7 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     forward_context.prefetch_mlp_down_proj = True
     model_instance = forward_context.model_instance
@@ -202,7 +202,7 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     if forward_context.prefetch_mlp_gate_up_proj or \
         forward_context.prefetch_mlp_down_proj:
