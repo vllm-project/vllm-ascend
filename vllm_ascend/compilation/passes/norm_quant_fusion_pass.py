@@ -28,24 +28,26 @@ class AddRMSNormQuantPattern:
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
         self.eps = eps
 
     def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
-        rms_norm_input = torch.randn(2, 4, device="npu")
-        residual = torch.randn(2, 4, device="npu")
-        rms_norm_weight = torch.randn(4, device="npu")
-        scale = torch.tensor([1.0], device="npu")
-        offset = torch.tensor([0.0], device="npu")
-        return [rms_norm_input, residual, rms_norm_weight, scale, offset]
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        scale = torch.ones(4, device="npu", dtype=self.dtype)
+        scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
+        offset = torch.zeros(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                     rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                    offset: torch.Tensor):
+                    scale_reciprocal: torch.Tensor, offset: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
             """
@@ -53,13 +55,12 @@ class AddRMSNormQuantPattern:
                                                     rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.npu.npu_quantize(
-                out0, scale, offset, torch.qint8, -1, False)
+            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                         rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                        offset: torch.Tensor):
+                        scale_reciprocal: torch.Tensor, offset: torch.Tensor):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
@@ -83,25 +84,26 @@ class AddRMSNormQuantPatternWithBias:
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
         self.eps = eps
 
     def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
-        rms_norm_input = torch.randn(2, 4, device="npu")
-        residual = torch.randn(2, 4, device="npu")
-        rms_norm_weight = torch.randn(4, device="npu")
-        scale = torch.tensor([1.0], device="npu")
-        offset = torch.tensor([0.0], device="npu")
-        bias = torch.randn(4, device="npu")
-        return [rms_norm_input, residual, rms_norm_weight, scale, offset, bias]
-
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        scale = torch.ones(4, device="npu", dtype=self.dtype)
+        scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
+        offset = torch.zeros(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                     rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                    offset: torch.Tensor, bias: torch.Tensor):
+                    scale_reciprocal: torch.Tensor, offset: torch.Tensor,
+                    bias: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
             """
@@ -110,13 +112,13 @@ class AddRMSNormQuantPatternWithBias:
             out0 = output[0]
             out1 = output[2]
             out0 = out0 + bias
-            quantized_output = torch.ops.npu.npu_quantize(
-                out0, scale, offset, torch.qint8, -1, False)
+            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                         rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                        offset: torch.Tensor, bias: torch.Tensor):
+                        scale_reciprocal: torch.Tensor, offset: torch.Tensor,
+                        bias: torch.Tensor):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
@@ -124,8 +126,7 @@ class AddRMSNormQuantPatternWithBias:
                 rms_norm_input,
                 residual,
                 rms_norm_weight,
-                1. /
-                scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+                scale,
                 offset,
                 epsilon=self.eps,
                 beta=bias)
@@ -141,24 +142,26 @@ class AddRMSNormQuantSPPattern:
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
         self.eps = eps
 
     def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
-        rms_norm_input = torch.randn(2, 4, device="npu")
-        residual = torch.randn(2, 4, device="npu")
-        rms_norm_weight = torch.randn(4, device="npu")
-        scale = torch.tensor([1.0], device="npu")
-        offset = torch.tensor([0.0], device="npu")
-        return [rms_norm_input, residual, rms_norm_weight, scale, offset]
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        scale = torch.ones(4, device="npu", dtype=self.dtype)
+        scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
+        offset = torch.zeros(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                     rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                    offset: torch.Tensor):
+                    scale_reciprocal: torch.Tensor, offset: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
             """
@@ -167,13 +170,12 @@ class AddRMSNormQuantSPPattern:
             out0 = output[0]
             out1 = output[2]
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-            quantized_output = torch.ops.npu.npu_quantize(
-                out0, scale, offset, torch.qint8, -1, True)
+            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                         rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                        offset: torch.Tensor):
+                        scale_reciprocal: torch.Tensor, offset: torch.Tensor):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
@@ -181,8 +183,7 @@ class AddRMSNormQuantSPPattern:
                 rms_norm_input,
                 residual,
                 rms_norm_weight,
-                1. /
-                scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+                scale,
                 offset,
                 epsilon=self.eps)
             quantized_output = output[0]
@@ -199,25 +200,27 @@ class AddRMSNormQuantSPPatternWithBias:
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
         self.eps = eps
 
     def get_inputs(self):
         """
         Generate example inputs for the AddRMSNormQuant fusion pattern.
         """
-        rms_norm_input = torch.randn(2, 4, device="npu")
-        residual = torch.randn(2, 4, device="npu")
-        rms_norm_weight = torch.randn(4, device="npu")
-        scale = torch.tensor([1.0], device="npu")
-        offset = torch.tensor([0.0], device="npu")
-        bias = torch.randn(4, device="npu")
-        return [rms_norm_input, residual, rms_norm_weight, scale, offset, bias]
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        scale = torch.ones(4, device="npu", dtype=self.dtype)
+        scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
+        offset = torch.zeros(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                     rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                    offset: torch.Tensor, bias: torch.Tensor):
+                    scale_reciprocal: torch.Tensor, offset: torch.Tensor,
+                    bias: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
             """
@@ -227,13 +230,13 @@ class AddRMSNormQuantSPPatternWithBias:
             out1 = output[2]
             out0 = out0 + bias
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-            quantized_output = torch.ops.npu.npu_quantize(
-                out0, scale, offset, torch.qint8, -1, False)
+            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
                         rms_norm_weight: torch.Tensor, scale: torch.Tensor,
-                        offset: torch.Tensor, bias: torch.Tensor):
+                        scale_reciprocal: torch.Tensor, offset: torch.Tensor,
+                        bias: torch.Tensor):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
@@ -241,8 +244,7 @@ class AddRMSNormQuantSPPatternWithBias:
                 rms_norm_input,
                 residual,
                 rms_norm_weight,
-                1. /
-                scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+                scale,
                 offset,
                 epsilon=self.eps,
                 beta=bias)
