@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.attention.selector import AttentionSelectorConfig
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
@@ -358,18 +359,7 @@ class NPUPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_mla,
-        has_sink=False,
-        use_sparse=False,
-        # NOTE: Please pay special attention to the order of these parameters.
-        # Although we are only using some of them so far
-        # vllm passes them in sequence when using this interface.
-        use_mm_prefix: bool = False,
-        attn_type: str | None = None,
+        attn_selector_config:"AttentionSelectorConfig"
     ):
         # choose attention backend based on use_mla
         backend_map = {
@@ -378,7 +368,7 @@ class NPUPlatform(Platform):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(use_mla, use_sparse)]
+        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
