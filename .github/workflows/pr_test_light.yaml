@@ -90,7 +90,7 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [c01d589813f40c9ea25db3cdaa2c6c2144ab4e53, v0.12.0]
+        vllm_version: [c01d589813f40c9ea25db3cdaa2c6c2144ab4e53, v0.13.0]
 
     steps:
       - name: Free up disk space
@@ -154,7 +154,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [c01d589813f40c9ea25db3cdaa2c6c2144ab4e53, v0.12.0]
+        vllm_version: [c01d589813f40c9ea25db3cdaa2c6c2144ab4e53, v0.13.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
