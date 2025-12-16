@@ -10,7 +10,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 
-from vllm_ascend.utils import get_ascend_config, get_ascend_device_type, AscendDeviceType
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_config,
+                               get_ascend_device_type)
 
 
 @lru_cache

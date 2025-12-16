@@ -387,9 +387,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.value_cache = None
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
-                             value: torch.Tensor,
-                             attn_metadata: AscendMetadata,
-                             output: torch.Tensor) -> torch.Tensor:
+                       value: torch.Tensor, attn_metadata: AscendMetadata,
+                       output: torch.Tensor) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv \
             = self._get_fia_params(key, value, attn_metadata)
 
@@ -551,8 +550,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:batch_size] = attn_output[:batch_size]
         return output
 
-    def _get_fia_params(self,key: torch.Tensor,
-                         value: torch.Tensor, attn_metadata: AscendMetadata):
+    def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor,
+                        attn_metadata: AscendMetadata):
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
@@ -587,8 +586,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
-    def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata,
-                         output: torch.Tensor):
+    def _forward_fia_slidingwindow(self, query: torch.Tensor,
+                                   attn_metadata: AscendMetadata,
+                                   output: torch.Tensor):
         batch_size = attn_metadata.seq_lens.shape[0]
         block_size = 128
         query = query.view(batch_size, 1, self.num_heads * self.head_size)
@@ -617,14 +617,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return output
 
     def _forward_fia(self, query: torch.Tensor, key: torch.Tensor,
-                         value: torch.Tensor, attn_metadata: AscendMetadata,
-                         output: torch.Tensor):
+                     value: torch.Tensor, attn_metadata: AscendMetadata,
+                     output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
-            return self.full_graph_fia(query, key, value, attn_metadata, output)
+            return self.full_graph_fia(query, key, value, attn_metadata,
+                                       output)
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
                 0] == query.size(0):
-            return self._forward_fia_slidingwindow(query, attn_metadata, output)
+            return self._forward_fia_slidingwindow(query, attn_metadata,
+                                                   output)
         key, value, block_size, block_table, actual_seq_lengths_kv \
             = self._get_fia_params(key, value, attn_metadata)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -651,22 +653,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
-    def forward_pa(self, query: torch.Tensor,
+    def forward_pa(
+        self,
+        query: torch.Tensor,
         attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,) -> torch.Tensor:
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
-        torch_npu._npu_paged_attention(
-            query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            num_kv_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale_value=self.scale,
-            block_table=attn_metadata.block_tables,
-            context_lens=attn_metadata.seq_lens,
-            out=output)
+        torch_npu._npu_paged_attention(query=query,
+                                       key_cache=self.key_cache,
+                                       value_cache=self.value_cache,
+                                       num_kv_heads=self.num_kv_heads,
+                                       num_heads=self.num_heads,
+                                       scale_value=self.scale,
+                                       block_table=attn_metadata.block_tables,
+                                       context_lens=attn_metadata.seq_lens,
+                                       out=output)
         return output
 
     def _forward_decode_only(
@@ -793,10 +797,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        if using_paged_attention(num_tokens) and self.sliding_window is not None:
+        if using_paged_attention(
+                num_tokens) and self.sliding_window is not None:
             output = self.forward_pa(query, attn_metadata, output)
         else:
-            output = self._forward_fia(query, key, value, attn_metadata, output)
+            output = self._forward_fia(query, key, value, attn_metadata,
+                                       output)
 
         return output
 
