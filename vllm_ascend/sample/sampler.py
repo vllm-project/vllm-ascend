@@ -125,7 +125,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         if getattr(self, "q", None) is not None:
-            # If we enable async exponential, we re-use the results.
             # Add synchronize to prevent synchronize error.
             self.async_event.synchronize()
             return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
