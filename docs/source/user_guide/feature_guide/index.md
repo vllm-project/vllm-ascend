@@ -17,4 +17,5 @@ dynamic_batch
 kv_pool
 external_dp
 large_scale_ep
+ucm_deployment
 :::
