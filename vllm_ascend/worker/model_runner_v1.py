@@ -3819,38 +3819,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             mla_num_blocks, mla_block_size, num_kv_heads,
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
-                    # DEBUG_START: 添加格式转换前的内存信息
-                    # FIX_START: 像老版本一样直接创建最终形状的张量，获得NCHW格式
-                    # TEMP_COMMENTED: 测试新版本标准路径是否支持310P
-                    # if is_310p_device and not ascend_config.torchair_graph_config.enabled:
-                    #     # DEBUG: 检查分配前的内存状态
-                    #     from vllm_ascend.platform import NPUPlatform
-                    #     free_memory, total_memory = NPUPlatform.mem_get_info()
-                    #     print(f"[DEBUG MEMORY BEFORE ALLOC] Layer {layer_name}:")
-                    #     print(f"[DEBUG MEMORY BEFORE ALLOC]   Free memory: {free_memory} bytes ({free_memory/1024**3:.2f} GiB)")
-                    #     # 计算需要的内存大小 (k_shape是tuple)
-                    #     k_elements = 1
-                    #     for dim in k_shape:
-                    #         k_elements *= dim
-                    #     required_memory = 2 * k_elements * dtype.itemsize  # K+V cache
-                    #     print(f"[DEBUG MEMORY BEFORE ALLOC]   Required memory: {required_memory} bytes ({required_memory/1024**3:.2f} GiB)")
-                    #
-                    #     # 对于310P，直接创建最终形状的张量以获得NCHW格式（像老版本一样）
-                    #     k_cache = torch.zeros(k_shape, dtype=dtype, device=self.device)
-                    #     v_cache = torch.zeros(v_shape, dtype=dtype, device=self.device)
-                    #
-                    #     # DEBUG: 检查分配后的内存状态
-                    #     free_memory_after, _ = NPUPlatform.mem_get_info()
-                    #     print(f"[DEBUG MEMORY AFTER ALLOC] Layer {layer_name}:")
-                    #     print(f"[DEBUG MEMORY AFTER ALLOC]   Free memory: {free_memory_after} bytes ({free_memory_after/1024**3:.2f} GiB)")
-                    #     print(f"[DEBUG MEMORY AFTER ALLOC]   Memory consumed: {(free_memory - free_memory_after)/1024**3:.2f} GiB")
-                    # else:
-                    #     # 其他设备保持原有逻辑
-                    #     k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    #     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    # FIX_END: 直接创建最终形状的张量
 
-                    # Check if we already have properly shaped tensors (310P NCHW format)
                     if is_310p_device and not ascend_config.torchair_graph_config.enabled:
                         # DEBUG: 监控310P设备处理前的内存状态
                         from vllm_ascend.platform import NPUPlatform
@@ -3860,37 +3829,24 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         print(f"[DEBUG MEMORY 310P BEFORE]   Total memory: {total_before_310p} bytes ({total_before_310p/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY 310P BEFORE]   Used memory: {(total_before_310p-free_before_310p)/1024**3:.2f} GiB)")
 
-                        # For 310P: need to reshape from pre-allocated tensors and apply format conversion
-                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
+                        # For 310P: tensors are already in final shape and format from pre-allocation stage
+                        # Skip view and format conversion operations to save memory
+                        k_cache = raw_k_tensor
+                        v_cache = raw_v_tensor
 
-                        # DEBUG: 监控310P设备格式转换前的内存状态
+                        # DEBUG: 监控310P设备处理后的内存状态（跳过view和格式转换）
                         import torch_npu
-                        free_before_format, total_before_format = NPUPlatform.mem_get_info()
-                        print(f"[DEBUG FORMAT CAST 310P] Layer {layer_name}:")
-                        print(f"[DEBUG FORMAT CAST 310P]   Before format cast: Free={free_before_format/1024**3:.2f}GiB")
-                        print(f"[DEBUG FORMAT CAST 310P]   K format: {torch_npu.get_npu_format(k_cache)}")
-                        print(f"[DEBUG FORMAT CAST 310P]   V format: {torch_npu.get_npu_format(v_cache)}")
-
-                        # Apply format conversion for 310P (NCHW -> NZ, like old version)
-                        import torch_npu
-                        acl_format = ACL_FORMAT_FRACTAL_NZ if not ascend_config.torchair_graph_config.enabled else ACL_FORMAT_FRACTAL_ND
-                        k_cache = torch_npu.npu_format_cast(k_cache, acl_format)
-                        v_cache = torch_npu.npu_format_cast(v_cache, acl_format)
-
-                        # DEBUG: 监控310P设备处理后的内存状态
                         free_after_310p, total_after_310p = NPUPlatform.mem_get_info()
                         memory_consumed_310p = (free_before_310p - free_after_310p) / 1024**3
-                        format_memory_consumed = (free_before_format - free_after_310p) / 1024**3
-                        print(f"[DEBUG FORMAT CAST 310P]   After format cast: Free={free_after_310p/1024**3:.2f}GiB")
-                        print(f"[DEBUG FORMAT CAST 310P]   K new format: {torch_npu.get_npu_format(k_cache)}")
-                        print(f"[DEBUG FORMAT CAST 310P]   V new format: {torch_npu.get_npu_format(v_cache)}")
+
                         print(f"[DEBUG MEMORY 310P AFTER] Layer {layer_name}:")
                         print(f"[DEBUG MEMORY 310P AFTER]   Free memory: {free_after_310p} bytes ({free_after_310p/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY 310P AFTER]   Total memory: {total_after_310p} bytes ({total_after_310p/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY 310P AFTER]   Used memory: {(total_after_310p-free_after_310p)/1024**3:.2f} GiB)")
-                        print(f"[DEBUG MEMORY 310P AFTER]   Total memory consumed: {memory_consumed_310p:.2f} GiB")
-                        print(f"[DEBUG MEMORY 310P AFTER]   Format conversion consumed: {format_memory_consumed:.2f} GiB")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Memory consumed: {memory_consumed_310p:.2f} GiB")
+                        print(f"[DEBUG MEMORY 310P AFTER]   K format: {torch_npu.get_npu_format(k_cache)}")
+                        print(f"[DEBUG MEMORY 310P AFTER]   V format: {torch_npu.get_npu_format(v_cache)}")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Skipped view and format conversion (already done in pre-allocation)")
                     else:
                         # Standard path: reshape pre-allocated tensors and convert format
                         k_cache = raw_k_tensor.view(dtype).view(k_shape)
@@ -3900,20 +3856,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         k_cache = self._convert_torch_format(k_cache)
                         v_cache = self._convert_torch_format(v_cache)
 
-                    # DEBUG_START: 格式转换后的内存信息
-                    if is_310p_device:
-                        print(f"[DEBUG KV_CACHE_NEW] After format cast - Layer {layer_name}:")
-                        print(f"[DEBUG KV_CACHE_NEW]   K new format: {torch_npu.get_npu_format(k_cache)}")
-                        print(f"[DEBUG KV_CACHE_NEW]   V new format: {torch_npu.get_npu_format(v_cache)}")
-                    # DEBUG_END: 格式转换信息
                     if self.use_sparse and raw_dsa_k_tensor is not None:
-                        dsa_k_cache_shape = (num_blocks,
-                                             kv_cache_spec.block_size, 1, 128)
-                        dsa_k_cache_size = (
-                            num_blocks
-                        ) * kv_cache_spec.block_size * 128 * dtype.itemsize
-                        dsa_k_cache = raw_dsa_k_tensor[:dsa_k_cache_size].view(
-                            dtype).view(dsa_k_cache_shape)
+                        if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                            # 310P: DSA tensor already processed in pre-allocation stage
+                            dsa_k_cache = raw_dsa_k_tensor  # Already in final shape and format
+                            print(f"[DEBUG 310P DSA] Layer {layer_name}: Using pre-allocated DSA tensor, skipping reshape")
+                        else:
+                            # Standard path: reshape DSA tensor
+                            dsa_k_cache_shape = (num_blocks,
+                                                 kv_cache_spec.block_size, 1, 128)
+                            dsa_k_cache_size = (
+                                num_blocks
+                            ) * kv_cache_spec.block_size * 128 * dtype.itemsize
+                            dsa_k_cache = raw_dsa_k_tensor[:dsa_k_cache_size].view(
+                                dtype).view(dsa_k_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
