@@ -391,7 +391,6 @@ class NPUModelRunner(GPUModelRunner):
         self.reorder_batch_threshold: int | None = None
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
-        self.enable_async_exp = self.ascend_config.enable_async_exponential
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -1509,7 +1508,7 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if self.enable_async_exp != 0:
+        if self.ascend_config.enable_async_exponential != 0:
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
                 head_dim=self.model_config.get_vocab_size(),

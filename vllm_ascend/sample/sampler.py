@@ -65,6 +65,8 @@ class AscendSampler(Sampler):
 class AscendTopKTopPSampler(TopKTopPSampler):
 
     def set_q_event(self, q, event):
+        # Pass in async exponential results.
+        # Also pass in event to prevent synchronize errors.
         self.q = q
         self.async_event = event
 
