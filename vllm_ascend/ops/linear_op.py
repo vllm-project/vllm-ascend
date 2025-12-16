@@ -68,7 +68,6 @@ from vllm_ascend.utils import (enable_dsa_cp, enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
-from vllm_ascend.ops.utils import flashcomm2_oshard_manager
 
 
 class CustomLinearOp:

@@ -1,10 +1,12 @@
+from typing import Any, Dict, Optional
+
+from vllm.model_executor.models.utils import extract_layer_index
+
+from vllm_ascend.distributed.parallel_state import get_shared_weight_group
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
     register_layer_to_shared_weight_series)
-from vllm.model_executor.models.utils import extract_layer_index
-from vllm_ascend.distributed.parallel_state import get_shared_weight_group
-from typing import Dict, Any, Optional
 
 
 class Flashcomm2OShardManager:
@@ -92,7 +94,7 @@ class Flashcomm2OShardManager:
 
         This should be called once after the model weights have been fully loaded.
         """
-        # Iterate through all registered layers to preform post_process_after_loading
+        # Iterate through all registered layers to perform post_process_after_loading
         for layer_idx in sorted(self._shard_layers.keys()):
             layer = self._shard_layers[layer_idx]
             post_process_after_loading_for_shared_weight_series(layer)
