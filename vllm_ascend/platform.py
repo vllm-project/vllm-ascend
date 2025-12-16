@@ -40,8 +40,11 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
-    if not vllm_version_is('0.12.0'):
-        from vllm.attention.selector import AttentionSelectorConfig
+    try:
+        if not vllm_version_is('0.12.0'):
+            from vllm.attention.selector import AttentionSelectorConfig
+    except ImportError:
+        pass
 else:
     ModelConfig = None
     VllmConfig = None
@@ -362,11 +365,14 @@ class NPUPlatform(Platform):
             use_mla = kwargs["attn_selector_config"].use_mla
             use_sparse = kwargs["attn_selector_config"].use_sparse
         else:
-            use_mla = kwargs.get("use_mla", args[4] if len(args) >= 5 else None)
-            use_sparse = kwargs.get("use_sparse", args[6] if len(args) >= 7 else None)
+            use_mla = kwargs.get("use_mla",
+                                 args[4] if len(args) >= 5 else None)
+            use_sparse = kwargs.get("use_sparse",
+                                    args[6] if len(args) >= 7 else None)
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (False, False):
+            "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
         return backend_map[(use_mla, use_sparse)]
