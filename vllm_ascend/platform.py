@@ -363,7 +363,7 @@ class NPUPlatform(Platform):
             use_sparse = kwargs["attn_selector_config"].use_sparse
         else:
             use_mla = kwargs.get("use_mla", args[4] if len(args) >= 5 else None)
-            use_sparse = kwargs.get("use_sparse", args[5] if len(args) >= 6 else None)
+            use_sparse = kwargs.get("use_sparse", args[6] if len(args) >= 7 else None)
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
