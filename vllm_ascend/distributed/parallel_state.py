@@ -182,9 +182,8 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     global _SHARED_WEIGHT
     # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
     is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
-    if enable_sp() and is_ds_v32:
+    if enable_sp() and is_ds_v32 and _SHARED_WEIGHT is None:
         _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
-
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config(
@@ -240,7 +239,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         # Create shared weight group for flashcomm2 oproj
         if flashcomm2_o_shared_enabled():
             assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
-            _SHARED_WEIGHT = _create_shared_weight_group("flashcomm2_o_shared")
+            if _SHARED_WEIGHT is None:
+                _SHARED_WEIGHT = _create_shared_weight_group(
+                    "flashcomm2_o_shared")
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X
