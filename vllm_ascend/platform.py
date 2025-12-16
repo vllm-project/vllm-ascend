@@ -298,10 +298,9 @@ class NPUPlatform(Platform):
             compilation_config.custom_ops = ["all"]
 
         if ascend_config.recompute_scheduler_enable:
-            from vllm_ascend.core.recompute_schedule_config import \
-                RecomputeSchedulerConfig
+            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config)
+                vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
@@ -366,6 +365,10 @@ class NPUPlatform(Platform):
         use_mla,
         has_sink=False,
         use_sparse=False,
+        # NOTE: Please pay special attention to the order of these parameters.
+        # Although we are only using some of them so far
+        # vllm passes them in sequence when using this interface.
+        use_mm_prefix: bool = False,
         attn_type: str | None = None,
     ):
         # choose attention backend based on use_mla

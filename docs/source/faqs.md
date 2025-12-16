@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.9.1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2643)
-- [[v0.11.0rc3] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/4642)
+- [[v0.12.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/4808)
 
 ## General FAQs
 
@@ -104,7 +104,7 @@ vllm-ascend is a hardware plugin for vLLM. Basically, the version of vllm-ascend
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node_pd_disaggregation_mooncake.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 

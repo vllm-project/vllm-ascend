@@ -75,6 +75,12 @@ class TestAscendMLAPrefillMetadata(TestBase):
         max_seq_lens = [2, 2]
         workspace = torch.randn(2, 4)
         chunk_seq_lens = torch.tensor([2, 2])
+        padded_chunk_seq_lens_npu = torch.tensor([2, 2])
+        padded_local_chunk_seq_lens = [[2], [2]]
+        local_context_lens_allranks = [[1, 1], [1, 1]]
+        padded_local_cu_seq_lens = torch.tensor([0, 2, 4])
+        cu_seq_lens_lst = [[0, 2], [2, 4]]
+        chunk_size = 2
 
         chunked_context = AscendMLAPrefillMetadata.ChunkedContextMetadata(
             cu_seq_lens=cu_seq_lens,
@@ -83,7 +89,13 @@ class TestAscendMLAPrefillMetadata(TestBase):
             max_seq_lens=max_seq_lens,
             workspace=workspace,
             chunk_seq_lens=chunk_seq_lens,
-            chunk_seq_lens_npu=chunk_seq_lens)
+            chunk_seq_lens_npu=chunk_seq_lens,
+            padded_chunk_seq_lens_npu=padded_chunk_seq_lens_npu,
+            padded_local_chunk_seq_lens=padded_local_chunk_seq_lens,
+            local_context_lens_allranks=local_context_lens_allranks,
+            padded_local_cu_seq_lens=padded_local_cu_seq_lens,
+            cu_seq_lens_lst=cu_seq_lens_lst,
+            chunk_size=chunk_size)
 
         metadata = AscendMLAPrefillMetadata(
             attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
@@ -106,6 +118,17 @@ class TestAscendMLAPrefillMetadata(TestBase):
         self.assertIs(metadata.chunked_context.chunk_seq_lens, chunk_seq_lens)
         self.assertIs(metadata.chunked_context.chunk_seq_lens_npu,
                       chunk_seq_lens)
+        self.assertIs(metadata.chunked_context.padded_chunk_seq_lens_npu,
+                      padded_chunk_seq_lens_npu)
+        self.assertEqual(metadata.chunked_context.padded_local_chunk_seq_lens,
+                         padded_local_chunk_seq_lens)
+        self.assertEqual(metadata.chunked_context.local_context_lens_allranks,
+                         local_context_lens_allranks)
+        self.assertIs(metadata.chunked_context.padded_local_cu_seq_lens,
+                      padded_local_cu_seq_lens)
+        self.assertEqual(metadata.chunked_context.cu_seq_lens_lst,
+                         cu_seq_lens_lst)
+        self.assertEqual(metadata.chunked_context.chunk_size, chunk_size)
 
 
 class TestAscendMLADecodeMetadata(TestBase):
@@ -117,10 +140,17 @@ class TestAscendMLADecodeMetadata(TestBase):
         max_seq_lens = 4
         seq_lens_list = [2, 3]
         attn_mask = None
+        cp_seq_len = torch.tensor([2, 3])
+        batch_seq_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
 
-        metadata = AscendMLADecodeMetadata(input_positions, block_table,
-                                           seq_lens, max_seq_lens,
-                                           seq_lens_list, attn_mask)
+        metadata = AscendMLADecodeMetadata(input_positions=input_positions,
+                                           block_table=block_table,
+                                           seq_lens=seq_lens,
+                                           max_seq_lens=max_seq_lens,
+                                           seq_lens_list=seq_lens_list,
+                                           attn_mask=attn_mask,
+                                           cp_seq_len=cp_seq_len,
+                                           batch_seq_mask=batch_seq_mask)
 
         self.assertIs(metadata.input_positions, input_positions)
         self.assertIs(metadata.block_table, block_table)
@@ -128,6 +158,8 @@ class TestAscendMLADecodeMetadata(TestBase):
         self.assertEqual(metadata.max_seq_lens, max_seq_lens)
         self.assertEqual(metadata.seq_lens_list, seq_lens_list)
         self.assertIsNone(attn_mask)
+        self.assertIs(metadata.cp_seq_len, cp_seq_len)
+        self.assertIs(metadata.batch_seq_mask, batch_seq_mask)
 
 
 class TestAscendMLAMetadata(TestBase):
@@ -200,17 +232,19 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
 
-        mock_dcp.world_size = 1
+        mock_dcp.world_size = 2
+        mock_dcp.rank_in_group = 0
         dcp_group = MagicMock(spec=GroupCoordinator)
         dcp_group.rank_in_group = 0
-        dcp_group.world_size = 1
+        dcp_group.world_size = 2
         dcp_group.device_group = MagicMock()
         mock_get_dcp_group.return_value = dcp_group
 
-        mock_pcp.world_size = 1
+        mock_pcp.world_size = 2
+        mock_pcp.rank_in_group = 0
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.rank_in_group = 0
-        pcp_group.world_size = 1
+        pcp_group.world_size = 2
         pcp_group.device_group = MagicMock()
         mock_get_pcp_group.return_value = pcp_group
 
@@ -227,6 +261,8 @@ class TestAscendMLAMetadataBuilder(TestBase):
             self.assertEqual(
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.enable_chunked_prefill)
+            self.assertEqual(builder.dcp_size, mock_dcp.world_size)
+            self.assertEqual(builder.pcp_size, mock_pcp.world_size)
 
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP',
@@ -912,7 +948,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(self.impl.kv_a_proj_with_mqa)
         self.assertIsNotNone(self.impl.kv_a_layernorm)
         self.assertEqual(self.impl.num_queries_per_kv, 32)
-        self.assertEqual(self.impl.tp_size, 2)
 
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
