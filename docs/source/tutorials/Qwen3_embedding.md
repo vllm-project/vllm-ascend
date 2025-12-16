@@ -24,7 +24,6 @@ if you don't want to use the docker image as above, you can also build all from 
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
 
 ## Deployment
-*only support single node single npu deployment*
 
 Using the Qwen3-Embedding-8B model as an example, first run the docker container with the following command:
 
