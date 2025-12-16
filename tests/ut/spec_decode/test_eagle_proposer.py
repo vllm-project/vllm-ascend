@@ -31,6 +31,7 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.speculative_config.enforce_eager = False
 
         proposer = EagleProposer(vllm_config=self.vllm_config,
                                  device=self.device,
