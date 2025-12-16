@@ -33,11 +33,8 @@ patch(
 patch(
     'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank',
     return_value=0).start()
-patch(
-    'vllm_ascend.distributed.mooncake_connector.get_pcp_group',
-    return_value=_mock_pcp_group
-).start()
-
+patch('vllm_ascend.distributed.mooncake_connector.get_pcp_group',
+      return_value=_mock_pcp_group).start()
 
 from vllm_ascend.distributed.mooncake_connector import (  # noqa: E402
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
