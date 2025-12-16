@@ -3385,6 +3385,10 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        from vllm.logger import logger
+        from vllm_ascend.platform import NPUPlatform
+        free_before, total = NPUPlatform.mem_get_info()
+        logger.info(f"[NEW_MEMORY_DEBUG] Before initialize_kv_cache: Free={free_before/GiB_bytes:.2f}GiB")
         
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
