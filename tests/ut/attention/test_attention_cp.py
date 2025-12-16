@@ -324,7 +324,7 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(value.shape[2], head_size)
 
 
-class UpdateNpuAttnOutLse(TestBase):
+class TestUpdateNpuAttnOutLse(TestBase):
 
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP',
