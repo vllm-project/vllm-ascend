@@ -356,11 +356,8 @@ class NPUPlatform(Platform):
         CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(
-        cls,
-        selected_backend,
-        attn_selector_config:"AttentionSelectorConfig"
-    ):
+    def get_attn_backend_cls(cls, selected_backend,
+                             attn_selector_config:"AttentionSelectorConfig"):
         # choose attention backend based on use_mla
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
@@ -368,7 +365,8 @@ class NPUPlatform(Platform):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse)]
+        return backend_map[(attn_selector_config.use_mla,
+                            attn_selector_config.use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
