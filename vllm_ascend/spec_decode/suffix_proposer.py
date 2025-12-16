@@ -22,7 +22,7 @@ class SuffixDecodingProposer(VllmSuffixDecodingProposer, Proposer):
     def dummy_run(self,
                   num_tokens,
                   with_prefill=None,
-                  skip_attn=None,
+                  in_graph_capturing=None,
                   num_reqs=None,
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,

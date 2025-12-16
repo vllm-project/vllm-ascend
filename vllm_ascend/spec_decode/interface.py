@@ -32,7 +32,7 @@ class Proposer:
     def dummy_run(self,
                   num_tokens: int,
                   with_prefill: bool = False,
-                  skip_attn: bool = False,
+                  in_graph_capturing: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
