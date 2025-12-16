@@ -1259,14 +1259,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
     def test_get_kv_split_metadata(self):
 
-        def get_kv_split_metadata(use_mla, pcp_size, dcp_size, tp_size, 
-                                  tp_rank, pcp_rank,  _prefill_tp_size, 
-                                  remote_pcp_size, remote_dcp_size, 
+        def get_kv_split_metadata(use_mla, pcp_size, dcp_size, tp_size,
+                                  tp_rank, pcp_rank, _prefill_tp_size,
+                                  remote_pcp_size, remote_dcp_size,
                                   remote_port, remote_block_ids,
                                   local_block_ids):
 
             worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
-            
+
             worker.use_mla = use_mla
             worker.pcp_size = pcp_size
             worker.dcp_size = dcp_size
@@ -1289,7 +1289,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
-               
+
         self.assertEqual(
             get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1],
                                   [1]),
