@@ -79,7 +79,8 @@ docker run --rm \
 
 ## Install Mooncake
 
-Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. First, we need to obtain the Mooncake project. Refer to the following command:
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
 git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
@@ -112,6 +113,17 @@ cd build
 cmake .. -DUSE_ASCEND_DIRECT=ON
 make -j
 make install
+```
+
+Set environment variables
+
+**Note:**
+
+- Adjust the Python path according to your specific Python installation
+- Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
+
+```shell
+export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
 ```
 
 ## Prefiller/Decoder Deployment
