@@ -22,3 +22,4 @@ msserviceprofiler>=1.2.2
 mindstudio-probe>=8.3.0
 arctic-inference==0.1.1
 xlite
+uc-manager
