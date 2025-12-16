@@ -40,10 +40,13 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
 def _maybe_all_gather_and_maybe_unpad_impl(
         x: torch.Tensor,
         label: bool,
-        is_ep_comm: bool = False) -> torch.Tensor:
+        is_ep_comm: bool = False,
+        is_first_allgather: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
+        return x
+    if forward_context.is_multimodal_model and is_first_allgather:
         return x
 
     sp_enabled = forward_context.sp_enabled
@@ -139,9 +142,10 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
 def _maybe_all_gather_and_maybe_unpad_fake(
         x: torch.Tensor,
         label: bool,
-        is_ep_comm: bool = False) -> torch.Tensor:
-
-    if get_forward_context().sp_enabled and label:
+        is_ep_comm: bool = False,
+        is_first_allgather: bool = False) -> torch.Tensor:
+    forward_context = get_forward_context()
+    if forward_context.sp_enabled and label:
         return torch.empty(
             (x.shape[0] * get_tensor_model_parallel_world_size(),
              *x.shape[1:]),
