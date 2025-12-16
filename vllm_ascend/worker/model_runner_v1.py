@@ -3614,15 +3614,47 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             v_tensor = torch.zeros(v_final_shape, dtype=dtype, device=self.device)  # NCHW format
 
                             # 检查分配后的内存状态
-                            free_memory_after, total_memory_after = NPUPlatform.mem_get_info()
-                            memory_consumed = (free_memory_before - free_memory_after)/1024**3
+                            free_memory_after_alloc, total_memory_after_alloc = NPUPlatform.mem_get_info()
+                            memory_consumed_alloc = (free_memory_before - free_memory_after_alloc)/1024**3
 
                             print(f"[DEBUG MEMORY AFTER ALLOC NEW] Layer {layer_name}:")
-                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Free memory: {free_memory_after} bytes ({free_memory_after/1024**3:.2f} GiB)")
-                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Total memory: {total_memory_after} bytes ({total_memory_after/1024**3:.2f} GiB)")
-                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Used memory: {(total_memory_after-free_memory_after)/1024**3:.2f} GiB)")
-                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Memory consumed: {memory_consumed:.2f} GiB")
-                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Skipped format conversion (NCHW format)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Free memory: {free_memory_after_alloc} bytes ({free_memory_after_alloc/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Total memory: {total_memory_after_alloc} bytes ({total_memory_after_alloc/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Used memory: {(total_memory_after_alloc-free_memory_after_alloc)/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY AFTER ALLOC NEW]   Memory consumed by allocation: {memory_consumed_alloc:.2f} GiB")
+
+                            # DEBUG: 检查预分配阶段是否需要格式转换
+                            import torch_npu
+                            print(f"[DEBUG PRE-ALLOC FORMAT] Layer {layer_name}:")
+                            print(f"[DEBUG PRE-ALLOC FORMAT]   K tensor format: {torch_npu.get_npu_format(k_tensor)}")
+                            print(f"[DEBUG PRE-ALLOC FORMAT]   V tensor format: {torch_npu.get_npu_format(v_tensor)}")
+
+                            # 检查是否需要格式转换 (NCHW -> NZ)
+                            if not ascend_config.torchair_graph_config.enabled:
+                                # 需要转换为NZ格式
+                                free_before_format, _ = NPUPlatform.mem_get_info()
+                                print(f"[DEBUG PRE-ALLOC FORMAT]   Before format conversion: Free={free_before_format/1024**3:.2f}GiB")
+
+                                acl_format = ACL_FORMAT_FRACTAL_NZ
+                                k_tensor = torch_npu.npu_format_cast(k_tensor, acl_format)
+                                v_tensor = torch_npu.npu_format_cast(v_tensor, acl_format)
+
+                                free_after_format, _ = NPUPlatform.mem_get_info()
+                                format_memory_consumed = (free_before_format - free_after_format) / 1024**3
+
+                                print(f"[DEBUG PRE-ALLOC FORMAT]   After format conversion: Free={free_after_format/1024**3:.2f}GiB")
+                                print(f"[DEBUG PRE-ALLOC FORMAT]   K new format: {torch_npu.get_npu_format(k_tensor)}")
+                                print(f"[DEBUG PRE-ALLOC FORMAT]   V new format: {torch_npu.get_npu_format(v_tensor)}")
+                                print(f"[DEBUG PRE-ALLOC FORMAT]   Format conversion consumed: {format_memory_consumed:.2f} GiB")
+                            else:
+                                print(f"[DEBUG PRE-ALLOC FORMAT]   No format conversion needed (torchair graph enabled)")
+
+                            # 最终内存状态
+                            free_memory_final, total_memory_final = NPUPlatform.mem_get_info()
+                            total_memory_consumed = (free_memory_before - free_memory_final) / 1024**3
+                            print(f"[DEBUG MEMORY FINAL NEW] Layer {layer_name}:")
+                            print(f"[DEBUG MEMORY FINAL NEW]   Final free memory: {free_memory_final} bytes ({free_memory_final/1024**3:.2f} GiB)")
+                            print(f"[DEBUG MEMORY FINAL NEW]   Total memory consumed: {total_memory_consumed:.2f} GiB")
                         else:
                             # Standard path for other devices: allocate raw int8 tensors
                             k_tensor = torch.zeros(k_tensor_size,
