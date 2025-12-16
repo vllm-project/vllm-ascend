@@ -45,7 +45,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
 | `enable_async_exponential`          | int  | `0`     | Wheter to enable async exponential overlap. To enable async exponential, set this config to 1.                                                                |
 
-
 The details of each configuration option are as follows:
 
 **xlite_graph_config**
