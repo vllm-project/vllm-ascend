@@ -3495,6 +3495,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                               Optional[torch.Tensor]]] = {}
         # llmdatadist need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
+
+        # Pre-build a mapping from layer_name to kv_cache_spec for easy lookup
+        layer_to_spec = {}
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            for layer_name in kv_cache_group.layer_names:
+                layer_to_spec[layer_name] = kv_cache_group.kv_cache_spec
+
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
@@ -3563,8 +3570,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                         if is_310p_device and not ascend_config.torchair_graph_config.enabled:
                             # For 310P: directly allocate NCHW format tensors to avoid expensive format conversion
-                            # Calculate the final shape based on current layer's kv_cache_spec
-                            block_size = kv_cache_spec.block_size  # Get block size from kv_cache_spec
+                            # Get the spec from our pre-built mapping
+                            kv_cache_spec = layer_to_spec[layer_name]
+                            block_size = kv_cache_spec.block_size
                             num_blocks = kv_cache_tensor.size // block_size
                             num_kv_heads = kv_cache_spec.num_kv_heads
                             head_size = kv_cache_spec.head_size
