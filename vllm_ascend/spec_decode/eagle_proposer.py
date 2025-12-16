@@ -117,16 +117,15 @@ class EagleProposer(Proposer):
     def dummy_run(self,
                   num_tokens: int,
                   with_prefill: bool = False,
-                  skip_attn: bool = False,
+                  in_graph_capturing: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None):
-        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
-                                        moe_comm_type=moe_comm_type,
+                                        in_profile_run=True,
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
@@ -144,7 +143,6 @@ class EagleProposer(Proposer):
                            positions: torch.Tensor = None,
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
 
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
@@ -459,15 +457,12 @@ class EagleProposer(Proposer):
         else:
             num_input_tokens = num_tokens
 
-        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
-
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
-                                        moe_comm_type=moe_comm_type,
                                         num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
@@ -498,8 +493,6 @@ class EagleProposer(Proposer):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
-
-        moe_comm_type = self.runner._select_moe_comm_method(input_batch_size)
 
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
@@ -576,7 +569,6 @@ class EagleProposer(Proposer):
             # Run the model.
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
-                                            moe_comm_type=moe_comm_type,
                                             num_tokens=input_batch_size):
 
                 last_hidden_states, hidden_states = self.model(

@@ -49,13 +49,13 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
+              - '.github/workflows/pr_test_full.yaml'
               - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
@@ -74,7 +74,7 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [97f2f160fda2805f9149b0e44da76b5d3b1f7c7e, v0.12.0]
+        vllm_version: [4429d934de3c5cc327b0d7aec8e473aeba38db90, v0.12.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
