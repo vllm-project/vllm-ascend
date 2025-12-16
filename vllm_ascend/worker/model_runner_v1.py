@@ -3815,42 +3815,45 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         print(f"[DEBUG MEMORY 310P BEFORE]   Total memory: {total_before_310p} bytes ({total_before_310p/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY 310P BEFORE]   Used memory: {(total_before_310p-free_before_310p)/1024**3:.2f} GiB)")
 
-                        # For 310P: tensors are already in final NCHW format, skip reshape and format conversion
-                        k_cache = raw_k_tensor  # Already in correct NCHW format
-                        v_cache = raw_v_tensor  # Already in correct NCHW format
+                        # For 310P: need to reshape from pre-allocated tensors and apply format conversion
+                        k_cache = raw_k_tensor.view(dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(dtype).view(v_shape)
+
+                        # DEBUG: 监控310P设备格式转换前的内存状态
+                        import torch_npu
+                        free_before_format, total_before_format = NPUPlatform.mem_get_info()
+                        print(f"[DEBUG FORMAT CAST 310P] Layer {layer_name}:")
+                        print(f"[DEBUG FORMAT CAST 310P]   Before format cast: Free={free_before_format/1024**3:.2f}GiB")
+                        print(f"[DEBUG FORMAT CAST 310P]   K format: {torch_npu.get_npu_format(k_cache)}")
+                        print(f"[DEBUG FORMAT CAST 310P]   V format: {torch_npu.get_npu_format(v_cache)}")
+
+                        # Apply format conversion for 310P (NCHW -> NZ, like old version)
+                        import torch_npu
+                        acl_format = ACL_FORMAT_FRACTAL_NZ if not ascend_config.torchair_graph_config.enabled else ACL_FORMAT_FRACTAL_ND
+                        k_cache = torch_npu.npu_format_cast(k_cache, acl_format)
+                        v_cache = torch_npu.npu_format_cast(v_cache, acl_format)
 
                         # DEBUG: 监控310P设备处理后的内存状态
                         free_after_310p, total_after_310p = NPUPlatform.mem_get_info()
                         memory_consumed_310p = (free_before_310p - free_after_310p) / 1024**3
+                        format_memory_consumed = (free_before_format - free_after_310p) / 1024**3
+                        print(f"[DEBUG FORMAT CAST 310P]   After format cast: Free={free_after_310p/1024**3:.2f}GiB")
+                        print(f"[DEBUG FORMAT CAST 310P]   K new format: {torch_npu.get_npu_format(k_cache)}")
+                        print(f"[DEBUG FORMAT CAST 310P]   V new format: {torch_npu.get_npu_format(v_cache)}")
                         print(f"[DEBUG MEMORY 310P AFTER] Layer {layer_name}:")
                         print(f"[DEBUG MEMORY 310P AFTER]   Free memory: {free_after_310p} bytes ({free_after_310p/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY 310P AFTER]   Total memory: {total_after_310p} bytes ({total_after_310p/1024**3:.2f} GiB)")
                         print(f"[DEBUG MEMORY 310P AFTER]   Used memory: {(total_after_310p-free_after_310p)/1024**3:.2f} GiB)")
-                        print(f"[DEBUG MEMORY 310P AFTER]   Memory consumed: {memory_consumed_310p:.2f} GiB")
-                        print(f"[DEBUG MEMORY 310P AFTER]   Format conversion: SKIPPED (already NCHW format)")
-                        print(f"[DEBUG 310P OPTIMIZATION] Layer {layer_name}: Using pre-allocated NCHW format, skipping format conversion")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Total memory consumed: {memory_consumed_310p:.2f} GiB")
+                        print(f"[DEBUG MEMORY 310P AFTER]   Format conversion consumed: {format_memory_consumed:.2f} GiB")
                     else:
                         # Standard path: reshape pre-allocated tensors and convert format
                         k_cache = raw_k_tensor.view(dtype).view(k_shape)
                         v_cache = raw_v_tensor.view(dtype).view(v_shape)
 
-                        # DEBUG: 监控格式转换前后的内存
-                        if is_310p_device:
-                            from vllm_ascend.platform import NPUPlatform
-                            free_before_format, _ = NPUPlatform.mem_get_info()
-                            print(f"[DEBUG FORMAT CAST] Layer {layer_name}:")
-                            print(f"[DEBUG FORMAT CAST]   Before format cast: Free={free_before_format/1024**3:.2f}GiB")
-
                         # Apply standard format conversion for other devices
                         k_cache = self._convert_torch_format(k_cache)
                         v_cache = self._convert_torch_format(v_cache)
-
-                        # DEBUG: 监控格式转换后的内存
-                        if is_310p_device:
-                            free_after_format, _ = NPUPlatform.mem_get_info()
-                            format_memory_consumed = (free_before_format - free_after_format) / 1024**3
-                            print(f"[DEBUG FORMAT CAST]   After format cast: Free={free_after_format/1024**3:.2f}GiB")
-                            print(f"[DEBUG FORMAT CAST]   Memory consumed by format cast: {format_memory_consumed:.2f}GiB")
 
                     # DEBUG_START: 格式转换后的内存信息
                     if is_310p_device:
