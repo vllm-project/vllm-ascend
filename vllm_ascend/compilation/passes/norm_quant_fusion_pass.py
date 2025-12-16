@@ -68,8 +68,7 @@ class AddRMSNormQuantPattern:
                 rms_norm_input,
                 residual,
                 rms_norm_weight,
-                1. /
-                scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+                scale,
                 offset,
                 epsilon=self.eps)
             quantized_output = output[0]
@@ -94,10 +93,11 @@ class AddRMSNormQuantPatternWithBias:
         rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
         residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
         rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        rmsnorm_bias = torch.randn(4, device="npu", dtype=self.dtype)
         scale = torch.ones(4, device="npu", dtype=self.dtype)
         scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
         offset = torch.zeros(4, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
+        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset, rmsnorm_bias]
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -210,10 +210,11 @@ class AddRMSNormQuantSPPatternWithBias:
         rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
         residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
         rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        rmsnorm_bias = torch.randn(4, device="npu", dtype=self.dtype)
         scale = torch.ones(4, device="npu", dtype=self.dtype)
         scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
         offset = torch.zeros(4, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
+        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset, rmsnorm_bias]
 
     def register(self, pm_pass: PatternMatcherPass):
 
