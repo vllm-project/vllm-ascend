@@ -31,6 +31,7 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -475,9 +476,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Calculate maximum supported batch sizes considering model architecture
     resources_per_graph = num_hidden_layers + 1
-    if vllm_config.speculative_config is not None:
-        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
-        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+    # For suffix decoding, use the suffix path when no draft_model_config is provided.
+    if (spec := vllm_config.speculative_config) and \
+    (draft := spec.draft_model_config):
+        resources_per_graph += draft.hf_config.num_hidden_layers + 1
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
@@ -844,6 +846,13 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+    # For IntermediateTensors used in pipeline parallelism
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
