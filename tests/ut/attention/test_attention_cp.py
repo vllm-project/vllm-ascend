@@ -202,8 +202,9 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(output.shape[1], 8)
         self.assertEqual(output.shape[2], 128)
 
+    @patch('vllm_ascend.attention.attention_cp.get_pcp_group')
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
-    def test_compute_prefill_context(self, mock_npu_attention):
+    def test_compute_prefill_context(self, mock_npu_attention, mock_pcp_group):
 
         block_num = 100
         block_size = 128
@@ -237,6 +238,11 @@ class TestAscendAttentionCPImpl(TestBase):
 
         self.impl._load_kv_for_chunk = MagicMock()
         self.impl._load_kv_for_chunk.side_effect = mock_load_kv_for_chunk
+
+        def mock_all_gather_func(tensor, dim):
+            return torch.cat([tensor, tensor], dim=dim)
+
+        mock_pcp_group.all_gather = mock_all_gather_func
 
         mock_npu_attention.return_value = torch.randn(batch_size, num_heads,
                                                       head_size), torch.randn(
