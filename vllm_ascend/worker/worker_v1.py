@@ -31,7 +31,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -52,8 +54,9 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (check_ascend_device_type, enable_sp,
-                               is_enable_nz, register_ascend_customop)
+from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
+                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -87,7 +90,8 @@ class NPUWorker(WorkerBase):
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
-        _register_atb_extensions()
+        if get_ascend_device_type() != AscendDeviceType._910_95:
+            _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
@@ -356,7 +360,8 @@ class NPUWorker(WorkerBase):
             self.model_runner.capture_model()
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        self._warm_up_atb()
+        if get_ascend_device_type() != AscendDeviceType._910_95:
+            self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)
@@ -371,7 +376,17 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_model()
 
     def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
-        return None
+        """Get KV connector metadata from this worker if available."""
+        if not has_kv_transfer_group():
+            return None
+
+        connector = get_kv_transfer_group()
+
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
+        if (metadata := connector.get_handshake_metadata()) is None:
+            return None
+        return {self.rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
