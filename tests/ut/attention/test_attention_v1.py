@@ -268,7 +268,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
 
-    @patch('vllm_ascend.attention.utils.using_paged_attention')
+    @patch('vllm_ascend.attention.attention_v1.using_paged_attention')
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
