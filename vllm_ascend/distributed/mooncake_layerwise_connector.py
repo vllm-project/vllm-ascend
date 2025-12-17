@@ -1045,7 +1045,8 @@ class MooncakeLayerwiseConnectorWorker:
         # remote_handshake_port_list[[30000],[30001],[30004],[30005]]
         # D rank will get remote block 1 in port 30004 and save it in local block 5
         remote_block_offset = 0
-        for local_kv_id in range(len(remote_handshake_port_list)):
+        cp_size = self.pcp_size * self.dcp_size
+        for local_kv_id in range(len(cp_size)):
             num_blocks_to_push = local_block_nums[local_kv_id]
             local_block_ids_list.append(
                 meta.local_block_ids[:num_blocks_to_push])
