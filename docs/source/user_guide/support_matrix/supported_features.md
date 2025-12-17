@@ -6,26 +6,26 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 
 | Feature                       |      Status    | Next Step                                                              |
 |-------------------------------|----------------|------------------------------------------------------------------------|
-| Chunked Prefill               | 🟢 Functional  | Functional, see detailed note: [Chunked Prefill][cp]                     |
-| Automatic Prefix Caching      | 🟢 Functional  | Functional, see detailed note: [vllm-ascend#732][apc]                    |
-| LoRA                          | 🟢 Functional  | [vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]          |
+| Chunked Prefill               | 🟢 Functional  | Functional, see detailed note: [Chunked Prefill][cp]                   |
+| Automatic Prefix Caching      | 🟢 Functional  | Functional, see detailed note: [Automatic Prefix Caching][apc]         |
+| LoRA                          | 🟢 Functional  | Functional, see detailed note: [LoRA][lora]                            |
 | Speculative decoding          | 🟢 Functional  | Basic support                                                          |
-| Pooling                       | 🟢 Functional  | CI needed to adapt to more models; V1 support rely on vLLM support.   |
+| Pooling                       | 🟢 Functional  | CI needed to adapt to more models;                                     |
 | Enc-dec                       | 🟡 Planned     | vLLM should support this feature first.                                |
 | Multi Modality                | 🟢 Functional  | [Tutorial][multimodal], optimizing and adapting more models            |
 | LogProbs                      | 🟢 Functional  | CI needed                                                              |
 | Prompt logProbs               | 🟢 Functional  | CI needed                                                              |
 | Async output                  | 🟢 Functional  | CI needed                                                              |
 | Beam search                   | 🟢 Functional  | CI needed                                                              |
-| Guided Decoding               | 🟢 Functional  | [vllm-ascend#177][guided_decoding]                                     |
-| Tensor Parallel               | 🟢 Functional  | Make TP >4 work with graph mode.                                        |
-| Pipeline Parallel             | 🟢 Functional  | Write official guide and tutorial.                                     |
-| Expert Parallel               | 🟢 Functional  | Support dynamic EPLB.                                                  |
+| Guided Decoding               | 🟢 Functional  | See detailed note: [Structured Output Guide][guided_decoding]          |
+| Tensor Parallel               | 🟢 Functional  | Make TP >4 work with graph mode.                                       |
+| Pipeline Parallel             | 🟡 Planned     | Broken in this version, will fix in next release.                      |
+| Expert Parallel               | 🟢 Functional  | See detailed note: [Expert Load Balance (EPLB)][graph_mode]            |
 | Data Parallel                 | 🟢 Functional  | Data Parallel support for Qwen3 MoE.                                   |
 | Prefill Decode Disaggregation | 🟢 Functional  | Functional, xPyD is supported.                                         |
-| Quantization                  | 🟢 Functional  | W8A8 available; working on more quantization method support (W4A8, etc) |
-| Graph Mode                    | 🔵 Experimental| Experimental, see detailed note: [vllm-ascend#767][graph_mode]           |
-| Sleep Mode                    | 🟢 Functional  |                                                                        |
+| Quantization                  | 🟢 Functional  | See detailed note: [Quantization Guide][qaunt]                         |
+| Graph Mode                    | 🟢 Functional  | See detailed note: [Graph Mode Guide][graph_mode]                      |
+| Sleep Mode                    | 🟢 Functional  | See detailed note: [Sleep Mode][sleep]                                 |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
@@ -33,13 +33,14 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 - 🟡 Planned: Scheduled for future implementation (some may have open PRs/RFCs).
 - 🔴 NO plan/Deprecated: No plan or deprecated by vLLM.
 
-[v1_user_guide]: https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html
+[v1_user_guide]: https://docs.vllm.ai/en/latest/usage/v1_guide/
 [multimodal]: https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_npu_multimodal.html
-[guided_decoding]: https://github.com/vllm-project/vllm-ascend/issues/177
-[multilora]: https://github.com/vllm-project/vllm-ascend/issues/396
-[v1 multilora]: https://github.com/vllm-project/vllm-ascend/pull/893
-[graph_mode]: https://github.com/vllm-project/vllm-ascend/issues/767
-[apc]: https://github.com/vllm-project/vllm-ascend/issues/732
+[guided_decoding]: https://docs.vllm.ai/projects/ascend/en/v0.11.0-dev/user_guide/feature_guide/structured_output.html
+[lora]: https://docs.vllm.ai/en/stable/features/lora/
+[graph_mode]: https://docs.vllm.ai/projects/ascend/en/v0.11.0-dev/user_guide/feature_guide/graph_mode.html
+[apc]: https://docs.vllm.ai/en/stable/features/automatic_prefix_caching/
 [cp]: https://docs.vllm.ai/en/stable/performance/optimization.html#chunked-prefill
 [1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
 [ray]: https://github.com/vllm-project/vllm-ascend/issues/1751
+[sleep]:https://docs.vllm.ai/projects/ascend/en/v0.11.0-dev/user_guide/feature_guide/sleep_mode.html
+[quant]:https://docs.vllm.ai/projects/ascend/en/v0.11.0-dev/user_guide/feature_guide/quantization.html
