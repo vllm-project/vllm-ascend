@@ -72,9 +72,6 @@ def setup_vllm_config_mock(mocker: MockerFixture):
 
     mocker.patch('vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config',
                  return_value=mock_vllm_config)
-    mocker.patch(
-        'vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config',
-        return_value=mock_vllm_config)
 
 
 @pytest.fixture
