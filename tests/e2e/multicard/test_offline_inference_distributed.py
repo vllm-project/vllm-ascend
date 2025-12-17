@@ -139,7 +139,8 @@ def test_models_distributed_DeepSeek_W4A8ACC(model):
                     quantization="ascend",
                     enforce_eager=True,
                     enable_expert_parallel=True) as vllm_model:
-        vllm_quant_outputs = vllm_model.model.generate(prompts, sampling_params)
+        vllm_quant_outputs = vllm_model.model.generate(prompts,
+                                                       sampling_params)
 
     vllm_quant_outputs_list = []
     for output in vllm_quant_outputs:
@@ -148,12 +149,10 @@ def test_models_distributed_DeepSeek_W4A8ACC(model):
     vllm_answer_list = []
     vllm_answer_list = ([([0], answer) for answer in vllm_ds_w4a8_answers])
 
-    check_outputs_equal(
-        outputs_0_lst=vllm_answer_list,
-        outputs_1_lst=vllm_quant_outputs_list,
-        name_0="vllm_quant_outputs",
-        name_1="vllm_answer_outputs"
-    )
+    check_outputs_equal(outputs_0_lst=vllm_answer_list,
+                        outputs_1_lst=vllm_quant_outputs_list,
+                        name_0="vllm_quant_outputs",
+                        name_1="vllm_answer_outputs")
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
