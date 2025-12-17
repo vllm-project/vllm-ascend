@@ -93,5 +93,5 @@ Processed prompts: 100%|██████████████████�
 ## Performance
 
 ```bash
-vllm bench serve --model Qwen3-embedding --backend openai-embeddings --dataset-name random --tokenizer /data/Qwen3-reembedding --host 127.0.0.1 --port 8888 --endpoint /v1/embeddings
+vllm bench serve --model Qwen3-Embedding-8B --backend openai-embeddings --dataset-name random --tokenizer /root/.cache/Qwen3-Embedding-8B --host 127.0.0.1 --port 8888 --endpoint /v1/embeddings
 ```

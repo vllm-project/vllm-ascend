@@ -163,5 +163,5 @@ If you run this script successfully, you will see a list of scores printed to th
 ## Performance
 
 ```bash
-vllm bench serve --model Qwen3-reranker --backend vllm-rerank --dataset-name random-rerank --tokenizer /data/Qwen3-reranker --host 127.0.0.1 --port 8888 --endpoint /v1/rerank
+vllm bench serve --model Qwen3-Reranker-8B --backend vllm-rerank --dataset-name random-rerank --tokenizer /root/.cache/Qwen3-Reranker-8B --host 127.0.0.1 --port 8888 --endpoint /v1/rerank
 ```
