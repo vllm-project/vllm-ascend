@@ -1185,13 +1185,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             dist.all_to_all_single(attn_out_lse_all2all,
                                    attn_out_lse,
                                    group=self.dcp_group)
-            attn_out_lse_all2all = attn_out_lse_all2all.permute([2, 0, 1])
-            if self.pcp_size > 1:
-                attn_out_lse = attn_out_lse_all2all.contiguous()
+            attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
 
         if self.pcp_size > 1:
             # AllGather out&lse within CP group
-            attn_out_lse = get_pcp_group().all_gather(attn_out_lse, dim=0)
+            attn_out_lse = get_pcp_group().all_gather(attn_out_lse.contiguous(), dim=0)
 
         return attn_out_lse
 
