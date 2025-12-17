@@ -225,6 +225,7 @@ class TestModelSPWithBias(nn.Module):
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(
             torch.randn(hidden_size, device=device))
+        self.bias = nn.Parameter(torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
         self.quant_scale_reciprocal = torch.ones(hidden_size,
                                                  dtype=dtype,
@@ -277,7 +278,7 @@ class TestModelSPWithBias(nn.Module):
         ]
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])

@@ -73,7 +73,7 @@ class TestAscendW8A8LinearMethod(TestBase):
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_with_x_not_int8(self, mock_npu_quant_matmul,
-                                   mock_quant_per_tensor,
+                                   mock_quantize,
                                    mock_get_forward_context):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
