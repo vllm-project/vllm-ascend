@@ -113,11 +113,9 @@ def test_sp_for_qwen3_moe() -> None:
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
-                    compilation_config={
-                        "pass_config": {
-                            "enable_sequence_parallelism": True
-                        }
-                    },
+                    compilation_config={"pass_config": {
+                        "enable_sp": True
+                    }},
                     enable_expert_parallel=True,
                     enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
