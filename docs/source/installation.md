@@ -12,8 +12,8 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | >= 8.3.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.7.1             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.7.1.post1             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.7.1                         | Required for torch-npu and vllm           |
 
 There are two installation methods:
@@ -132,7 +132,7 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 **[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using torch-npu dev version:
 
 ```bash
-# For torch-npu dev version or x86 machine
+# For torch-npu post version or x86 machine
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ```
 
@@ -175,7 +175,7 @@ vllm-ascend will build custom operators by default. If you don't want to build i
 :::
 
 ```{note}
-If you are building from v0.7.3-dev and intend to use sleep mode feature, you should set `COMPILE_CUSTOM_KERNELS=1` manually.
+If you want to use sleep mode feature, you should set `COMPILE_CUSTOM_KERNELS=1` manually.
 To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your g++ and gcc locations before compiling.
 ```
@@ -244,7 +244,7 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # Create an LLM.
-llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 
 # Generate texts from the prompts.
 outputs = llm.generate(prompts, sampling_params)
@@ -265,21 +265,6 @@ python example.py
 The output will be like:
 
 ```bash
-INFO 02-18 08:49:58 __init__.py:28] Available plugins for group vllm.platform_plugins:
-INFO 02-18 08:49:58 __init__.py:30] name=ascend, value=vllm_ascend:register
-INFO 02-18 08:49:58 __init__.py:32] all available plugins for group vllm.platform_plugins will be loaded.
-INFO 02-18 08:49:58 __init__.py:34] set environment variable VLLM_PLUGINS to control which plugins to load.
-INFO 02-18 08:49:58 __init__.py:42] plugin ascend loaded.
-INFO 02-18 08:49:58 __init__.py:174] Platform plugin ascend is activated
-INFO 02-18 08:50:12 config.py:526] This model supports multiple tasks: {'embed', 'classify', 'generate', 'score', 'reward'}. Defaulting to 'generate'.
-INFO 02-18 08:50:12 llm_engine.py:232] Initializing a V0 LLM engine (v0.7.1) with config: model='./Qwen2.5-0.5B-Instruct', speculative_config=None, tokenizer='./Qwen2.5-0.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=npu, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=./Qwen2.5-0.5B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=False,
-Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.86it/s]
-Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.85it/s]
-INFO 02-18 08:50:24 executor_base.py:108] # CPU blocks: 35064, # CPU blocks: 2730
-INFO 02-18 08:50:24 executor_base.py:113] Maximum concurrency for 32768 tokens per request: 136.97x
-INFO 02-18 08:50:25 llm_engine.py:429] init engine (profile, create kv cache, warmup model) took 3.87 seconds
-Processed prompts: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  8.46it/s, est. speed input: 46.55 toks/s, output: 135.41 toks/s]
 Prompt: 'Hello, my name is', Generated text: " Shinji, a teenage boy from New York City. I'm a computer science"
 Prompt: 'The president of the United States is', Generated text: ' a very important person. When he or she is elected, many people think that'
 Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
