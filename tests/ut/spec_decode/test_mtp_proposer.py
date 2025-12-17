@@ -65,7 +65,6 @@ class TestMtpProposer:
         runner.max_num_reqs = 256
         runner._use_aclgraph.return_value = False
         runner.reserved_mc2_mask = None
-        runner.in_profile_run = False
         return runner
 
     @patch("vllm_ascend.spec_decode.mtp_proposer.CpuGpuBuffer")
