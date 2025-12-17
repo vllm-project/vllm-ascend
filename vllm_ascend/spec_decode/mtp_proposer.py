@@ -759,7 +759,6 @@ class MtpProposer(Proposer):
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens,
                     is_mtp_model=True):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
