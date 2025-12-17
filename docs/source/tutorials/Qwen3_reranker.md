@@ -41,8 +41,7 @@ Once your server is started, you can send request with follow examples.
 ```python
 import requests
 
-url = "http://<ip>:<port>/v1/rerank"
-MODEL_NAME = "Qwen/Qwen3-Reranker-8B"
+url = "http://<host>:<port>/v1/rerank"
 
 # Please use the query_template and document_template to format the query and
 # document for better reranker results.
@@ -165,20 +164,23 @@ If you run this script successfully, you will see a list of scores printed to th
 Run performance of `Qwen3-Reranker-8B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
-There are three `vllm bench` subcommand:
-
-`latency`: Benchmark the latency of a single batch of requests.
-`serve`: Benchmark the online serving throughput.
-`throughput`: Benchmark offline inference throughput.
-
 Take the `serve` as an example. Run the code as follows. 
 
 ```bash
-vllm bench serve --model Qwen3-Reranker-8B --backend vllm-rerank --dataset-name random-rerank --host 127.0.0.1 --port 8888 --endpoint /v1/rerank  --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen3-Reranker-8B --backend vllm-rerank --dataset-name random-rerank --host 127.0.0.1 --port 8888 --endpoint /v1/rerank --tokenizer /root/.cache/Qwen3-Reranker-8B  --random-input 200  --save-result --result-dir ./
 ```
+
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
 
-*Hardware*: A3-752T, 4 node
-*Deployment*: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4
-*Input/Output*: 64k/3k
-*Performance*: 255tps, TPOT 23ms
+============ Serving Benchmark Result ============
+Successful requests:                     1000       
+Failed requests:                         0       
+Benchmark duration (s):                  6.78      
+Total input tokens:                      108032    
+Request throughput (req/s):              31.11     
+Total Token throughput (tok/s):          15929.35  
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          4422.79   
+Median E2EL (ms):                        4412.58   
+P99 E2EL (ms):                           6294.52   
+==================================================
