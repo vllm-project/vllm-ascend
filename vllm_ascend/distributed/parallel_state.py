@@ -170,11 +170,10 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
             group = []
             for dp_idx in range(global_dp_size):
                 for pcp_idx in range(global_pcp_size):
-                    base = (
-                        dp_idx * global_pp_size * global_pcp_size * global_tp_size
-                        + pp_idx * global_pcp_size * global_tp_size
-                        + pcp_idx * global_tp_size
-                    )
+                    base = (dp_idx * global_pp_size * global_pcp_size *
+                            global_tp_size +
+                            pp_idx * global_pcp_size * global_tp_size +
+                            pcp_idx * global_tp_size)
                     for tp_idx in range(global_tp_size):
                         global_rank = base + tp_idx
                         group.append(global_rank)
