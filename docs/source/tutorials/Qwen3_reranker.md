@@ -41,7 +41,7 @@ Once your server is started, you can send request with follow examples.
 ```python
 import requests
 
-url = "http://<host>:<port>/v1/rerank"
+url = "http://127.0.0.1:8888/v1/rerank"
 
 # Please use the query_template and document_template to format the query and
 # document for better reranker results.
@@ -172,6 +172,7 @@ vllm bench serve --model Qwen3-Reranker-8B --backend vllm-rerank --dataset-name 
 
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
 
+```bash
 ============ Serving Benchmark Result ============
 Successful requests:                     1000
 Failed requests:                         0
@@ -184,3 +185,4 @@ Mean E2EL (ms):                          4422.79
 Median E2EL (ms):                        4412.58
 P99 E2EL (ms):                           6294.52
 ==================================================
+```

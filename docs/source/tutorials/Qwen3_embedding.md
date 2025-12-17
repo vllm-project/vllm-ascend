@@ -36,7 +36,7 @@ vllm serve Qwen/Qwen3-Embedding-8B --task embed --host 127.0.0.1 --port 8888
 Once your server is started, you can query the model with input prompts.
 
 ```bash
-curl http://<host>:<port>/v1/embeddings -H "Content-Type: application/json" -d '{
+curl http://127.0.0.1:8888/v1/embeddings -H "Content-Type: application/json" -d '{
   "input": [
         "The capital of China is Beijing.",
         "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
@@ -102,6 +102,7 @@ vllm bench serve --model Qwen3-Embedding-8B --backend openai-embeddings --datase
 
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
 
+```bash
 ============ Serving Benchmark Result ============
 Successful requests:                     1000
 Failed requests:                         0
@@ -114,3 +115,4 @@ Mean E2EL (ms):                          4422.79
 Median E2EL (ms):                        4412.58
 P99 E2EL (ms):                           6294.52
 ==================================================
+```
