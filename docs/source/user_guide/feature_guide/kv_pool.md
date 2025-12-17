@@ -17,17 +17,63 @@
 
 ## Example of using Mooncake as a KVCache pooling backend
 * Software:
-    * Mooncake：main branch
+    * Check NPU network configuration:
 
-        Installation and Compilation Guide：https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries
+        Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
-        Make sure to build with `-DUSE_ASCEND_DIRECT` to enable ADXL engine.
+        ```bash
+        cat /etc/hccn.conf
+        ```
 
-        An example command for compiling ADXL：
+    * Install Mooncake
 
-        `rm -rf build && mkdir -p build && cd build \ && cmake .. -DCMAKE_INSTALL_PREFIX=/opt/transfer-engine/ -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND_DIRECT=ON -DBUILD_SHARED_LIBS=ON -DBUILD_UNIT_TESTS=OFF \ && make -j \ && make install`
+        Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
+        Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+        First, we need to obtain the Mooncake project. Refer to the following command:
 
-        Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
+        ```shell
+        git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        ```
+
+        (Optional) Replace go install url if the network is poor
+
+        ```shell
+        cd Mooncake
+        sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
+        ```
+
+        Install mpi
+
+        ```shell
+        apt-get install mpich libmpich-dev -y
+        ```
+
+        Install the relevant dependencies. The installation of Go is not required.
+
+        ```shell
+        bash dependencies.sh -y
+        ```
+
+        Compile and install
+
+        ```shell
+        mkdir build
+        cd build
+        cmake .. -DUSE_ASCEND_DIRECT=ON
+        make -j
+        make install
+        ```
+
+        Set environment variables
+
+        **Note:**
+
+        - Adjust the Python path according to your specific Python installation
+        - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
+
+        ```shell
+        export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+        ```
 
 ### Run Mooncake Master
 
@@ -85,9 +131,16 @@ export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
-export ASCEND_BUFFER_POOL=4:8
+
 # ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB.
+export ASCEND_BUFFER_POOL=4:8
+
+# Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
+# The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
+# This ensures that even in the worst-case scenario—where all Decode cards simultaneously attempt to connect to the same Prefill card the connection will not time out.
 export ASCEND_CONNECT_TIMEOUT=10000
+
+# Unit: ms. The timeout for one-sided communication transfer is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039).
 export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
