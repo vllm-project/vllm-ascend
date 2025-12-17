@@ -1126,7 +1126,7 @@ class NPUModelRunner(GPUModelRunner):
                     attn_metadata[layer_name] = attn_metadata_i
 
         # update global cos, sin
-        update_cos_sin(positions)
+        update_cos_sin(self.model, self.vllm_config, positions)
 
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
@@ -2091,7 +2091,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.positions.gpu[:num_tokens_padded]
 
             # update global cos, sin
-            update_cos_sin(positions)
+            update_cos_sin(self.model, self.vllm_config, positions)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None

@@ -42,7 +42,6 @@ from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
 # by different approaches.
 _cos_mla: Optional[torch.Tensor] = None
 _sin_mla: Optional[torch.Tensor] = None
-_cos_sin_cache: Optional[torch.Tensor] = None
 _cos: Optional[torch.Tensor] = None
 _sin: Optional[torch.Tensor] = None
 _cos_slice: Optional[torch.Tensor] = None
@@ -105,29 +104,25 @@ def get_cos_and_sin_mla():
     return _cos_mla, _sin_mla
 
 
-def _record_cos_sin_cache(cos_sin_cache):
-    global _cos_sin_cache
-    if _cos_sin_cache is not None:
-        return
-    _cos_sin_cache = cos_sin_cache
-
-
-def update_cos_sin(positions):
+def update_cos_sin(model, vllm_config, positions):
     global _cos
     global _sin
     global _cos_slice
     global _sin_slice
 
-    if _cos_sin_cache is None or \
-        _cos is None or \
-        _sin is None:
+    if _cos is None or _sin is None or not hasattr(model, "model"):
         return
 
+    model_type = vllm_config.model_config.hf_config.model_type
+    if model_type in ["qwen3_next"]:
+        rope_layer = 3
+    else:
+        rope_layer = 0
+    cos_cache = model.model.layers[rope_layer].self_attn.rotary_emb.cos_cache
+    sin_cache = model.model.layers[rope_layer].self_attn.rotary_emb.sin_cache
     num_tokens = positions.size(0)
-    _cos[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
-        num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
-    _sin[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
-        num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
+    _cos[:, :num_tokens] = cos_cache.index_select(0, positions)
+    _sin[:, :num_tokens] = sin_cache.index_select(0, positions)
     _cos_slice = _cos[:, :num_tokens]
     _sin_slice = _sin[:, :num_tokens]
 
@@ -234,7 +229,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
     ) -> None:
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
-        _record_cos_sin_cache(self.cos_sin_cache)
+        self.cos_cache = self.cos_sin_cache.view(-1, 2, rotary_dim // 2).repeat(1, 1, 2).chunk(2, dim=-2)[0].contiguous()
+        self.sin_cache = self.cos_sin_cache.view(-1, 2, rotary_dim // 2).repeat(1, 1, 2).chunk(2, dim=-2)[1].contiguous()
 
     def forward_oot(
         self,
@@ -276,7 +272,8 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         }
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, scaling_factor, dtype, **extra_kwargs)
-        _record_cos_sin_cache(self.cos_sin_cache)
+        self.cos_cache = self.cos_sin_cache.view(-1, 2, rotary_dim // 2).repeat(1, 1, 2).chunk(2, dim=-2)[0].contiguous()
+        self.sin_cache = self.cos_sin_cache.view(-1, 2, rotary_dim // 2).repeat(1, 1, 2).chunk(2, dim=-2)[1].contiguous()
 
     def forward_oot(
         self,
