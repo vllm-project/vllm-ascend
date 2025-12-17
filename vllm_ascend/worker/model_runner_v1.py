@@ -2108,8 +2108,7 @@ class NPUModelRunner(GPUModelRunner):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            need_dummy_logits = (not is_profile
-                                 and lmhead_tp_enable())
+            need_dummy_logits = (not is_profile and lmhead_tp_enable())
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
                                         dtype=torch.int32)
