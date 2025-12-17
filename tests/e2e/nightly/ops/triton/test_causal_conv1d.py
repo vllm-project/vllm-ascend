@@ -228,3 +228,101 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
 
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
+
+import pytest
+import torch
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu as causal_conv1d_update
+
+
+def causal_conv1d_update_ref(
+    x, conv_state, weight, bias=None, activation=None, cache_seqlens=None
+):
+    """
+    x: (batch, dim) or (batch, dim, seqlen)
+    conv_state: (batch, dim, state_len), where state_len >= width - 1
+    weight: (dim, width)
+    bias: (dim,)
+    cache_seqlens: (batch,), dtype int32.
+        If not None, the conv_state is treated as a circular buffer.
+        The conv_state will be updated by copying x to the
+        conv_state starting at the index
+        @cache_seqlens % state_len before performing the convolution.
+
+    out: (batch, dim) or (batch, dim, seqlen)
+    """
+    if activation not in [None, "silu", "swish"]:
+        raise NotImplementedError("activation must be None, silu, or swish")
+    dtype_in = x.dtype
+    unsqueeze = x.dim() == 2
+    if unsqueeze:
+        x = x.unsqueeze(-1)
+    batch, dim, seqlen = x.shape
+    width = weight.shape[1]
+    state_len = conv_state.shape[-1]
+    assert conv_state.shape == (batch, dim, state_len)
+    assert weight.shape == (dim, width)
+    if cache_seqlens is None:
+        x_new = torch.cat([conv_state, x], dim=-1).to(
+            weight.dtype
+        )  # (batch, dim, state_len + seqlen)
+        conv_state.copy_(x_new[:, :, -state_len:])
+    else:
+        width_idx = torch.arange(
+            -(width - 1), 0, dtype=torch.long, device=x.device
+        ).unsqueeze(0) + cache_seqlens.unsqueeze(1)
+        width_idx = (
+            torch.remainder(width_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
+        )
+        x_new = torch.cat([conv_state.gather(2, width_idx), x], dim=-1).to(weight.dtype)
+        copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(
+            0
+        ) + cache_seqlens.unsqueeze(1)
+        copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
+        conv_state.scatter_(2, copy_idx, x)
+    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[
+        :, :, -seqlen:
+    ]
+    if unsqueeze:
+        out = out.squeeze(-1)
+    return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+
+
+@pytest.mark.parametrize("itype", [torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [False, True])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("seqlen", [1])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize("dim", [2048])
+def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, itype):
+    device = "npu"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+    # set seed
+    # current_platform.seed_everything(0)
+    batch = 2
+    x = torch.randn(batch, dim, seqlen, device=device, dtype=itype)
+    x_ref = x.clone()
+    conv_state = torch.randn(batch, dim, width - 1, device=device, dtype=itype)
+
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
+    conv_state_ref = conv_state.detach().clone()
+    activation = None if not silu_activation else "silu"
+
+    conv_state_indices = torch.arange(batch, dtype=torch.int32, device=device)
+
+    out = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation=activation,
+        conv_state_indices=conv_state_indices,
+    )
+    out_ref = causal_conv1d_update_ref(
+        x_ref, conv_state_ref, weight, bias, activation=activation
+    )
+
+    assert torch.equal(conv_state, conv_state_ref)
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
