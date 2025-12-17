@@ -89,7 +89,7 @@ def npugraph_ex_compile(
                                               tuple,
                                               args=([return_value], ))
         output_node.args = (tuple_node, )
-        fx_graph.recompile()
+        graph.recompile()
 
     import torchair
 
