@@ -26,10 +26,6 @@ enum NnopbaseHcclServerType {
 };
 extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, NnopbaseHcclServerType sType);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 extern aclnnStatus aclnnInnerMatmulAllreduceAddRmsnormGetWorkspaceSize(
     const aclTensor *x1,
     const aclTensor *x2,
@@ -51,6 +47,10 @@ extern aclnnStatus aclnnInnerMatmulAllreduceAddRmsnorm(
     uint64_t workspaceSize,
     aclOpExecutor *executor,
     aclrtStream stream);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 aclnnStatus aclnnMatmulAllreduceAddRmsnormGetWorkspaceSize(
     const aclTensor *x1,

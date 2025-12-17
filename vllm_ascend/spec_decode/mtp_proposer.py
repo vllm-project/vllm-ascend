@@ -293,7 +293,6 @@ class MtpProposer(Proposer):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
-                    in_profile_run=True,
                     num_tokens_across_dp=num_tokens_across_dp,
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
@@ -726,7 +725,6 @@ class MtpProposer(Proposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-        original_aclgraph_runtime_mode = aclgraph_runtime_mode
         if self.use_async_scheduling:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -780,8 +778,8 @@ class MtpProposer(Proposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
-                    if original_aclgraph_runtime_mode == CUDAGraphMode.FULL and \
-                        self.use_async_scheduling and attn_metadata[layer_name].decode is not None:
+                    if self.use_async_scheduling and attn_metadata[
+                            layer_name].decode is not None:
                         for layer_name in self.attn_layer_name:
                             actual_size = len(attn_metadata[layer_name].decode.
                                               actual_seq_lengths_q)

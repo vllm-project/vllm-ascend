@@ -64,7 +64,7 @@ def set_ascend_forward_context(
             get_moe_comm_method
         moe_comm_type = select_moe_comm_method(num_tokens, vllm_config)
         # TODO: remove this after moe_comm_type selection logic is finalized
-        if in_profile_run and is_mtp_model:
+        if is_mtp_model:
             moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
                              == MoECommType.FUSED_ALLTOALL else moe_comm_type)
         forward_context.moe_comm_type = moe_comm_type
@@ -209,37 +209,6 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
-                    device):
-    global _cos
-    global _sin
-    if _cos is not None:
-        return
-    compilation_config = vllm_config.compilation_config
-    model_config = vllm_config.model_config
-    if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
-        _cos = torch.ones(max_num_reqs * decode_token_per_req,
-                          1,
-                          1,
-                          rope_dim,
-                          dtype=dtype,
-                          device=device)
-        _sin = torch.zeros(max_num_reqs * decode_token_per_req,
-                           1,
-                           1,
-                           rope_dim,
-                           dtype=dtype,
-                           device=device)
-    else:
-        _cos = None
-        _sin = None
-
-
-def get_cos_and_sin():
-    return _cos, _sin
-
-
 def select_moe_comm_method(num_tokens: int,
                            vllm_config: VllmConfig) -> Optional[MoECommType]:
     """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
@@ -298,8 +267,6 @@ def select_moe_comm_method(num_tokens: int,
                          if fused_all2all_enable else MoECommType.ALLTOALL)
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
-    moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
-                     == MoECommType.FUSED_ALLTOALL else moe_comm_type)
     # PanguProMoE only supports allgather
     if model_type == "PanguProMoE":
         moe_comm_type = MoECommType.ALLGATHER
