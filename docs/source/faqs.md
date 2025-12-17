@@ -240,3 +240,6 @@ This is often due to system compatibility issues. You can resolve this by using 
 2. Transfer the image archive
 
 Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
+
+### 21. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted".
+When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.

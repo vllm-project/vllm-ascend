@@ -240,23 +240,18 @@ def select_moe_comm_method(num_tokens: int,
     quant_type = getattr(
         vllm_config.model_config.hf_config, 'moe_quantize',
         getattr(vllm_config.model_config.hf_config, 'quantize', None))
-    model_type = vllm_config.model_config.hf_config.model_type
 
     if not vllm_config.parallel_config.enable_expert_parallel:
         moe_comm_type = MoECommType.ALLGATHER
-    elif soc_version in {AscendDeviceType._910B}:
+    elif soc_version in {AscendDeviceType.A2}:
         if (num_tokens <= mc2_tokens_capacity
                 and vllm_config.parallel_config.world_size_across_dp /
                 vllm_config.parallel_config.pipeline_parallel_size >= 16):
             moe_comm_type = MoECommType.MC2
         else:
-            # Currently, w4a8_dynamic does not support allgatherep
-            if quant_type == "w4a8_dynamic":
-                moe_comm_type = MoECommType.ALLTOALL
-            else:
-                moe_comm_type = MoECommType.ALLGATHER
+            moe_comm_type = MoECommType.ALLGATHER
 
-    elif soc_version in {AscendDeviceType._910_93}:
+    elif soc_version in {AscendDeviceType.A3}:
         ascend_config = get_ascend_config()
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
@@ -267,7 +262,4 @@ def select_moe_comm_method(num_tokens: int,
                          if fused_all2all_enable else MoECommType.ALLTOALL)
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
-    # PanguProMoE only supports allgather
-    if model_type == "PanguProMoE":
-        moe_comm_type = MoECommType.ALLGATHER
     return moe_comm_type
