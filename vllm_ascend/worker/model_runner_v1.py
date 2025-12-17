@@ -312,8 +312,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_aclgraph = self._use_aclgraph()
 
-        # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
-        self.in_profile_run = False
         self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
         if self.dynamic_eplb:
             EPLBParamUtils.check_dynamic_eplb(self.ascend_config.dynamic_eplb)
@@ -432,7 +430,7 @@ class NPUModelRunner(GPUModelRunner):
         # To ensure skipping all_reduce across dp group is valid, we need to ensure that
         # moe_comm_method of each rank is MC2 and recomputation would never happen in D
         # nodes. So here we check whether recompute_scheduler_enable is True.
-        return self.is_kv_consumer and not self.in_profile_run and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
+        return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
             potential_max_num_tokens, self.vllm_config) == MoECommType.MC2
 
     def _sync_metadata_across_dp(
@@ -2028,7 +2026,7 @@ class NPUModelRunner(GPUModelRunner):
                                         dtype=np.int32)
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        if not self.in_profile_run and self.dynamic_eplb:
+        if not is_profile and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
         has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
@@ -2110,7 +2108,7 @@ class NPUModelRunner(GPUModelRunner):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            need_dummy_logits = (not self.in_profile_run
+            need_dummy_logits = (not is_profile
                                  and lmhead_tp_enable())
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
@@ -2157,9 +2155,9 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention)
-            if self.in_profile_run and self.dynamic_eplb:
+            if is_profile and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
-            if not self.in_profile_run and self.dynamic_eplb:
+            if not is_profile and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
             return hidden_states, hidden_states
