@@ -1175,6 +1175,7 @@ def _causal_conv1d_update_kernel(
             if KERNEL_WIDTH >= 4:
                 tl.store(base_ptr + 2 * stride_inter_win, col2, mask=mask_w)
 
+
 @triton.jit()
 def _causal_conv1d_update_kernel_no_cache_len_no_mtp(
         x_ptr,
@@ -1201,12 +1202,9 @@ def _causal_conv1d_update_kernel_no_cache_len_no_mtp(
         USE_PAD_SLOT: tl.constexpr):
     pid = tl.program_id(0)
     cat_len: tl.constexpr = state_len + seq_len  # 4
-    sub_state_len: tl.constexpr = state_len - seq_len  # 3
     sub_align_dim: tl.constexpr = DIM_BLOCK // align_val
 
     conv_begin: tl.constexpr = (cat_len - width + 1) - seq_len
-
-
 
     if IS_CONTINUOUS_BATCHING:
         conv_batch_offs = tl.load(conv_state_indices_ptr + pid)
@@ -1305,6 +1303,7 @@ def _causal_conv1d_update_kernel_no_cache_len_no_mtp(
                     (doffs + tl.arange(0, DIM_BLOCK)) * out_len,
                     result,
                 )
+
 
 def causal_conv1d_update_npu(
     x: torch.Tensor,
