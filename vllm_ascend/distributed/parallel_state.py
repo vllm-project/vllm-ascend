@@ -41,6 +41,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
+    global_pcp_size = parallel_config.prefill_context_parallel_size
 
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
@@ -168,16 +169,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         for pp_idx in range(global_pp_size):
             group = []
             for dp_idx in range(global_dp_size):
-                base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
-                for i in range(global_tp_size):
-                    global_rank = base + i
-                    group.append(global_rank)
+                for pcp_idx in range(global_pcp_size):
+                    base = (
+                        dp_idx * global_pp_size * global_pcp_size * global_tp_size
+                        + pp_idx * global_pcp_size * global_tp_size
+                        + pcp_idx * global_tp_size
+                    )
+                    for tp_idx in range(global_tp_size):
+                        global_rank = base + tp_idx
+                        group.append(global_rank)
             group_ranks.append(group)
 
-        return init_model_parallel_group(group_ranks,
-                                         get_world_group().local_rank,
-                                         backend,
-                                         group_name=group_name)
+        return init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name=group_name,
+        )
 
     global _SHARED_WEIGHT
     # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
