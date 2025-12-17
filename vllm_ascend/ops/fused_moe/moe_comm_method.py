@@ -23,6 +23,7 @@ from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
@@ -31,6 +32,8 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2, TokenDispatcherWithMoge)
+from vllm_ascend.utils import (npu_stream_switch,
+                               shared_experts_calculation_stream)
 
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
@@ -58,6 +61,10 @@ class MoECommMethod(ABC):
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
+
+        ascend_config = get_ascend_config()
+        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert and isinstance(
+            self.token_dispatcher, TokenDispatcherWithMC2)
 
     def prepare(
         self,
@@ -128,7 +135,7 @@ class MoECommMethod(ABC):
             expert_map=expert_map,
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
-            shared_experts=shared_experts,
+            shared_experts=None,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=mc2_mask,
@@ -159,13 +166,26 @@ class MoECommMethod(ABC):
                                        need_trans=need_trans,
                                        dynamic_eplb=dynamic_eplb)
 
+        if self.multistream_overlap_shared_expert:
+            shared_experts_calculation_stream().wait_stream(  # type: ignore
+                torch.npu.current_stream())
+        with npu_stream_switch(shared_experts_calculation_stream(),
+                               enabled=self.multistream_overlap_shared_expert):
+            # Use a separate stream to run shared experts.
+            # Note that currently we only support calculations in separate streams with aclgraph.
+            # Communication operations in another stream might cause unknown errors.
+            shared_hidden_states = shared_experts(hidden_states)
+
         final_hidden_states = self.token_dispatcher.token_combine(
             hidden_states=mlp_output, context_metadata=context_metadata)
-
+        # Make sure the default stream waits for the shared experts stream to finish.
+        if self.multistream_overlap_shared_expert:
+            torch.npu.current_stream().wait_stream(
+                shared_experts_calculation_stream())
         if dynamic_eplb:
+            # TODO: compatibility with dynamic_eplb
             return (final_hidden_states, group_list_type, expert_tokens)
-
-        return final_hidden_states
+        return final_hidden_states, shared_hidden_states
 
     @abstractmethod
     def _get_token_dispatcher(self):
@@ -314,4 +334,4 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             max_output_size=65536,
             out=out,
         )
-        return out
+        return out, None
