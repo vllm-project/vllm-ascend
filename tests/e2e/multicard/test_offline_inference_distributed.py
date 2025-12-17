@@ -149,10 +149,10 @@ def test_models_distributed_DeepSeek_W4A8ACC(model):
     vllm_answer_list = ([([0], answer) for answer in vllm_ds_w4a8_answers])
 
     check_outputs_equal(
-        outputs_0_lst = vllm_answer_list,
-        outputs_1_lst = vllm_quant_outputs_list,
-        name_0 = "vllm_quant_outputs",
-        name_1 = "vllm_answer_outputs"
+        outputs_0_lst=vllm_answer_list,
+        outputs_1_lst=vllm_quant_outputs_list,
+        name_0="vllm_quant_outputs",
+        name_1="vllm_answer_outputs"
     )
 
 
