@@ -24,7 +24,9 @@ ARG SOC_VERSION="ascend910_9391"
 COPY . /vllm-workspace/vllm-ascend/
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
-ENV SOC_VERSION=$SOC_VERSION
+ENV SOC_VERSION=$SOC_VERSION \
+    TASK_QUEUE_ENABLE=1 \
+    OMP_NUM_THREADS=1
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
