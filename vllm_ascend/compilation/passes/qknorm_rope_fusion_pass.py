@@ -23,8 +23,7 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass,
                                              PatternPrettyPrinter)
 from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
-from vllm.config import (VllmConfig, get_current_vllm_config,
-                         get_layers_from_vllm_config)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 
 
 class QKNormRopeFusionPattern:

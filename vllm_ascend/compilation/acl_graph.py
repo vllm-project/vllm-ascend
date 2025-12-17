@@ -296,7 +296,8 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
             event.record(update_stream)
 
 
-def update_attn_params(update_stream, forward_context, runtime_shape, vllm_config):
+def update_attn_params(update_stream, forward_context, runtime_shape,
+                       vllm_config):
     if using_paged_attention(runtime_shape, vllm_config):
         _update_attn_pa_params(update_stream, forward_context, runtime_shape)
     else:

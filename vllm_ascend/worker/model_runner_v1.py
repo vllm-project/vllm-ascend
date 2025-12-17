@@ -1165,7 +1165,8 @@ class NPUModelRunner(GPUModelRunner):
                                                maybe_padded_num_tokens)
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens, self.vllm_config)
+                                       maybe_padded_num_tokens,
+                                       self.vllm_config)
 
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
