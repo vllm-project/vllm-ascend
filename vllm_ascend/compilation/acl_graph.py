@@ -341,8 +341,8 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 block_table = forward_context.attn_metadata[
                     key].decode.block_table
                 # TODO: This is a hack and should be fixed in the future.
-                # if speculative_config.disable_padded_drafter_batch:
-                #     block_table = block_table[:len(actual_seq_lengths)]
+                if speculative_config.disable_padded_drafter_batch:
+                    block_table = block_table[:len(actual_seq_lengths)]
                 seq_lens_list = seq_lens_list + [0] * (
                     len(actual_seq_lengths) - len(seq_lens_list))
             else:
