@@ -23,8 +23,10 @@ import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorHandshakeMetadata, KVConnectorMetadata,
+    KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size, get_pp_group,
@@ -42,13 +44,6 @@ from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import prefill_context_parallel_enable
 
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-# isort: on
-
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
@@ -64,6 +59,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     te_rpc_port: int
     kv_caches_base_addr: list[int]
     num_blocks: int
+    local_ip: str = ""
 
 
 @dataclass
@@ -75,6 +71,7 @@ class ReqMeta:
     remote_engine_id: str
     remote_pcp_size: int
     remote_dcp_size: int
+    remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
 
 
 @dataclass
@@ -685,6 +682,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             remote_pcp_size=kv_transfer_params.get("remote_pcp_size", 1),
             remote_dcp_size=kv_transfer_params.get("remote_dcp_size", 1),
+            remote_multi_nodes_meta_mapping=kv_transfer_params.get(
+                "remote_multi_nodes_meta_mapping", {}),
         )
 
 
@@ -772,6 +771,30 @@ class MooncakeConnector(KVConnectorBase_V1):
         """MooncakeConnector does not save explicitly."""
         pass
 
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        assert self.connector_worker is not None
+        return self.connector_worker.xfer_handshake_metadata
+
+    def set_xfer_handshake_metadata(
+            self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata(metadata)
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -804,6 +827,9 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
         self._reqs_need_send: dict[str, float] = {}
+
+        # master-slave meta information for cross-nodes
+        self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -928,7 +954,22 @@ class MooncakeConnectorScheduler:
             remote_pcp_size=self.pcp_size,
             remote_dcp_size=self.dcp_size,
             last_token_id=request.output_token_ids[-1],
+            remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
         )
+
+    def set_xfer_handshake_metadata(
+            self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        for local_rank, rank_metadata in metadata.items():
+            self.multi_nodes_meta_mapping[str(local_rank)] = {
+                "host": rank_metadata.local_ip,
+                "engine_id": rank_metadata.engine_id,
+            }
 
 
 class MooncakeConnectorWorker:
@@ -956,13 +997,12 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
+        self.pcp_size = get_pcp_group().world_size
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size
                     > 1), "pp and pcp cannot open in same time"
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
@@ -988,6 +1028,9 @@ class MooncakeConnectorWorker:
         # Background thread for sending or receiving KV caches.
         self.kv_send_thread: Optional[KVCacheSendingThread] = None
         self.kv_recv_thread: Optional[KVCacheRecvingThread] = None
+
+        # Handshake metadata of this worker
+        self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
 
         # kv_transfer variables
         self.vllm_config = vllm_config
@@ -1118,7 +1161,9 @@ class MooncakeConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             kv_caches_base_addr=kv_caches_base_addr,
             num_blocks=self.num_blocks,
+            local_ip=get_ip(),
         )
+        self.xfer_handshake_metadata = metadata
 
         ready_event = threading.Event()
         if self.kv_role == 'kv_producer':
@@ -1266,13 +1311,18 @@ class MooncakeConnectorWorker:
                         continue
                     for i in range(self.tp_num_need_pulls):
                         assert self.kv_recv_thread is not None
+                        remote_host, remote_engine_id = self._get_remote_host_info_by_port(
+                            meta.remote_port,
+                            remote_handshake_port_list[pcp_dcp_rank][i],
+                            meta.remote_host, meta.remote_engine_id,
+                            meta.remote_multi_nodes_meta_mapping)
                         self.kv_recv_thread.add_request(
                             request_id=req_id,
                             local_block_ids=local_block_ids_list[pcp_dcp_rank],
                             remote_block_ids=remote_block_ids_list[
                                 pcp_dcp_rank],
-                            remote_engine_id=meta.remote_engine_id,
-                            remote_host=meta.remote_host,
+                            remote_engine_id=remote_engine_id,
+                            remote_host=remote_host,
                             remote_handshake_port=remote_handshake_port_list[
                                 pcp_dcp_rank][i],
                             offset=i,
@@ -1287,12 +1337,16 @@ class MooncakeConnectorWorker:
                                               for x in choosen_rank_list]
                 for i in range(self.tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
+                    remote_host, remote_engine_id = self._get_remote_host_info_by_port(
+                        meta.remote_port, remote_handshake_port_list[i][0],
+                        meta.remote_host, meta.remote_engine_id,
+                        meta.remote_multi_nodes_meta_mapping)
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
                         local_block_ids=meta.local_block_ids,
                         remote_block_ids=meta.remote_block_ids,
-                        remote_engine_id=meta.remote_engine_id,
-                        remote_host=meta.remote_host,
+                        remote_engine_id=remote_engine_id,
+                        remote_host=remote_host,
                         remote_handshake_port=remote_handshake_port_list[i][0],
                         offset=i,
                         tp_num_need_pulls=self.tp_num_need_pulls,
@@ -1306,6 +1360,18 @@ class MooncakeConnectorWorker:
                         req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
+
+    def _get_remote_host_info_by_port(self, base_port: int,
+                                      remote_handshake_port: int,
+                                      remote_host: str, remote_engine_id: str,
+                                      remote_multi_nodes_meta_mapping: dict):
+        rank = str(remote_handshake_port - base_port)
+        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(
+                rank, None) is None:
+            return remote_host, remote_engine_id
+        info = remote_multi_nodes_meta_mapping[rank]
+        return info.get("host", remote_host), info.get("engine_id",
+                                                       remote_engine_id)
 
     def _prefill_get_remote_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_ranks_for_req(req_id), [])
