@@ -1130,7 +1130,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         B_total, H_total, D_plus_1 = attn_out_lse.shape
         S = B_total // self.pcp_size
         H = H_total // self.dcp_size
-        D = self.head_size
+        D = self.kv_lora_rank
         assert D_plus_1 == D + 1
         # [PCP, S, DCP, H, D+1]
         x = attn_out_lse.view(self.pcp_size, S, self.dcp_size, H, D_plus_1)
@@ -1149,8 +1149,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         out_list = out_flat.unbind(0)  # [S*H, D]
         lse_list = lse_flat.unbind(0)  # [S*H]
         attn_out, _ = torch_npu.npu_attention_update(out_list, lse_list, 0)
-        attn_out = attn_out.view(-1, attn_out_lse[0].shape[1],
-                                 self.kv_lora_rank)
+        print(attn_out.shape)
+        attn_out = attn_out.view(-1, H, D)
         return attn_out
 
     def _out_lse_reshape(self, attn_out: torch.Tensor,
