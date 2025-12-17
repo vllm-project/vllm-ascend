@@ -132,6 +132,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    "VLLM_ASCEND_ENABLE_FIA_BNSD":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FIA_BNSD", '0')))
 }
 
 # end-env-vars-definition
