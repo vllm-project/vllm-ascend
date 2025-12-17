@@ -353,9 +353,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
-        if flashcomm2_o_shared_enabled():
-            post_process_after_loading_for_shard_weight_series(
-                get_flashcomm2_o_shard_layer())
+        if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
+            flashcomm2_oshard_manager.post_process_after_loading()
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,

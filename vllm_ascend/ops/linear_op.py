@@ -405,7 +405,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
-        if flashcomm2_o_shared_enabled():
+        if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
             flashcomm2_oshard_manager.register_layer(self.layer,
                                                      self.vllm_config,
                                                      prefetch_step=1)
@@ -504,15 +504,16 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        if enable_sp():
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                input_, True)
 
         # Trigger async broadcast before matmul to overlap communication.
-        if flashcomm2_o_shared_enabled():
-            flashcomm2_oshard_manager.trigger_broadcast_for_layer(
-                self.layer.prefix, self.vllm_config)
+        flashcomm2_oshard_manager.trigger_broadcast_for_layer(
+            self.layer.prefix, self.vllm_config)
 
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
-        if self.gather_output:
+        if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
             output = self.comm_group.all_gather(output_parallel)
         else:
@@ -705,6 +706,9 @@ def _get_column_parallel_op(
     if "gate_up_proj" in prefix and mlp_tp_enable(
     ) and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
+    if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
+        if any(p in prefix for p in ("qkv_proj", "conv1d", "query_key_value")):
+            return Flashcomm2OshardQKVParallelOp(layer)
     if enable_sp():
         if "shared_expert" in prefix:
             return None
@@ -715,10 +719,6 @@ def _get_column_parallel_op(
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
         ]
-        if flashcomm2_enable() and flashcomm2_o_shared_enabled():
-            if any(p in prefix
-                   for p in ("qkv_proj", "conv1d", "query_key_value")):
-                return Flashcomm2OshardQKVParallelOp(layer)
         for a_prefix in sp_column_prefix:
             if a_prefix in prefix:
                 return SequenceColumnParallelOp(layer)

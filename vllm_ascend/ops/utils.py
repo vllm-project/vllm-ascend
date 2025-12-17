@@ -2,7 +2,8 @@ from typing import Any, Dict, Optional
 
 from vllm.model_executor.models.utils import extract_layer_index
 
-from vllm_ascend.distributed.parallel_state import get_shared_weight_group
+from vllm_ascend.distributed.parallel_state import (
+    flashcomm2_enable, flashcomm2_o_shared_enabled, get_shared_weight_group)
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
@@ -27,6 +28,9 @@ class Flashcomm2OShardManager:
 
     def __init__(self):
         self._shard_layers: Dict[int, Any] = {}
+
+    def flashcomm2_oshard_enable(self):
+        return flashcomm2_enable() and flashcomm2_o_shared_enabled()
 
     def register_layer(self,
                        layer: Any,
@@ -94,10 +98,10 @@ class Flashcomm2OShardManager:
 
         This should be called once after the model weights have been fully loaded.
         """
-        # Iterate through all registered layers to perform post_process_after_loading
-        for layer_idx in sorted(self._shard_layers.keys()):
-            layer = self._shard_layers[layer_idx]
-            post_process_after_loading_for_shared_weight_series(layer)
+        if self._shard_layers:
+            # Pick any layer (e.g., the first one) to trigger the shard post-processing
+            any_layer = next(iter(self._shard_layers.values()))
+            post_process_after_loading_for_shared_weight_series(any_layer)
 
 
 flashcomm2_oshard_manager = Flashcomm2OShardManager()
