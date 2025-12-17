@@ -257,18 +257,6 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
-# ** File: worker/patch_qwen3_next.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
-#    Why:
-#       The model cannot directly accommodate these custom operators.
-#    How：
-#       Add a branch in Qwen3NextGatedDeltaNet.forward to adapt to fused_qkvzba_split_reshape_cat.
-#    Related PR (if no, explain why):
-#       The model in VLLM can run, but now the performance is better.
-#    Future Plan:
-#       Remove this patch when vLLM support these operators.
-#
 # ** 13. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.rejection_sampler`
@@ -284,4 +272,16 @@
 #       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
+#
+# ** 14.File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
+#    Why:
+#       The Qwen3Next GatedDeltaNet forward cannot directly add custom operators.
+#    How：
+#       Add a branch in Qwen3NextGatedDeltaNet.forward to adapt to fused_qkvzba_split_reshape_cat.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30863
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
 #
