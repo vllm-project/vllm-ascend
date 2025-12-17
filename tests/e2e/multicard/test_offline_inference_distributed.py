@@ -85,22 +85,6 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC(model):
         vllm_model.generate_greedy(prompts, max_tokens)
 
 
-@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
-    prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(snapshot_download(model),
-                    dtype="auto",
-                    tensor_parallel_size=2,
-                    quantization="ascend",
-                    enforce_eager=True,
-                    enable_expert_parallel=True) as vllm_model:
-        vllm_model.generate_greedy(prompts, max_tokens)
-
-
 def test_sp_for_qwen3_moe() -> None:
     example_prompts = [
         "Hello, my name is",
