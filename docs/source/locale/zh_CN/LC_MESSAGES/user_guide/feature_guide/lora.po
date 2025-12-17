@@ -4,55 +4,109 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../user_guide/feature_guide/lora.md:1
+# =================================
+# LoRA 适配器指南
+#: ../../source/user_guide/feature_guide/lora.md:1
 msgid "LoRA Adapters Guide"
 msgstr "LoRA 适配器指南"
 
-#: ../../user_guide/feature_guide/lora.md:3
+#: ../../source/user_guide/feature_guide/lora.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/lora.md:4
 msgid ""
-"Like vLLM, vllm-ascend supports LoRA as well. The usage and more details can"
-" be found in [vLLM official "
+"Like vLLM, vllm-ascend supports LoRA as well. The usage and more details "
+"can be found in [vLLM official "
 "document](https://docs.vllm.ai/en/latest/features/lora.html)."
 msgstr ""
 "与 vLLM 类似，vllm-ascend 也支持 LoRA。用法及更多详情可参见 [vLLM "
 "官方文档](https://docs.vllm.ai/en/latest/features/lora.html)。"
 
-#: ../../user_guide/feature_guide/lora.md:5
+#: ../../source/user_guide/feature_guide/lora.md:6
 msgid ""
-"You can also refer to "
-"[this](https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-"
-"text-only-language-models) to find which models support LoRA in vLLM."
+"You can refer to [Supported "
+"Models](https://docs.vllm.ai/en/latest/models/supported_models.html#list-"
+"of-text-only-language-models) to find which models support LoRA in vLLM."
 msgstr ""
-"你也可以参考[这个链接](https://docs.vllm.ai/en/latest/models/supported_models.html#list-"
-"of-text-only-language-models)来查找哪些模型在 vLLM 中支持 LoRA。"
+"你也可以参考 [Supported "
+"Models](https://docs.vllm.ai/en/latest/models/supported_models.html#list-"
+"of-text-only-language-models) 来查找哪些模型在 vLLM 中支持 LoRA。"
 
-#: ../../user_guide/feature_guide/lora.md:7
-msgid "Tips"
-msgstr "提示"
-
-#: ../../user_guide/feature_guide/lora.md:8
+#: ../../source/user_guide/feature_guide/lora.md:8
 msgid ""
-"If you fail to run vllm-ascend with LoRA, you may follow [this "
-"instruction](https://vllm-"
-"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html#fallback-"
-"to-eager-mode) to disable graph mode and try again."
+"You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode "
+"Guide](./graph_mode.md) for a better LoRA performance."
 msgstr ""
-"如果你在使用 LoRA 运行 vllm-ascend 时失败，可以按照[此说明](https://vllm-"
-"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html#fallback-"
-"to-eager-mode)禁用图模式后再重试。"
+"现在可以在 ACLGraph 模式下运行 LoRA。请参阅 [Graph Mode Guide](./graph_mode.md) 以获得更好的 "
+"LoRA 性能。"
+
+#: ../../source/user_guide/feature_guide/lora.md:10
+msgid "Example"
+msgstr "示例"
+
+#: ../../source/user_guide/feature_guide/lora.md:11
+msgid ""
+"We provide a simple LoRA example here, which enables the ACLGraph mode by"
+" default."
+msgstr "这里提供一个简单的 LoRA 示例，默认启用 ACLGraph 模式。"
+
+#: ../../source/user_guide/feature_guide/lora.md:19
+msgid "Custom LoRA Operators"
+msgstr "自定义 LoRA 操作"
+
+#: ../../source/user_guide/feature_guide/lora.md:21
+msgid ""
+"We have implemented LoRA-related AscendC operators, such as bgmv_shrink, "
+"bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "
+"\"csrc/kernels\" directory of [vllm-ascend repo](https://github.com/vllm-"
+"project/vllm-ascend.git)."
+msgstr ""
+"我们已经实现了与 LoRA 相关的 AscendC 操作，例如 bgmv_shrink、bgmv_expand、sgmv_shrink 和 "
+"sgmv_expand。你可以在 [vllm-ascend 仓库](https://github.com/vllm-project/vllm-"
+"ascend.git) 的 \"csrc/kernels\" 目录下找到它们。"
+
+#: ../../source/user_guide/feature_guide/lora.md:23
+msgid ""
+"When you install vllm and vllm-ascend, those operators mentioned above "
+"will be compiled and installed automatically. If you do not want to use "
+"AscendC operators when you run vllm-ascend, you should set "
+"`COMPILE_CUSTOM_KERNELS=0` and reinstall vllm-ascend. To require more "
+"instructions about installation and compilation, you can refer to "
+"[installation guide](../../installation.md)."
+msgstr ""
+"当你安装 vllm 和 vllm-ascend 时，上述操作会自动编译并安装。如果你在运行 vllm-ascend 时不想使用 AscendC "
+"操作，应设置 `COMPILE_CUSTOM_KERNELS=0` 并重新安装 vllm-ascend。有关安装和编译的更多说明，请参阅 "
+"[installation guide](../../installation.md)。"
+
+#~ msgid "Tips"
+#~ msgstr "提示"
+
+#~ msgid ""
+#~ "If you fail to run vllm-ascend "
+#~ "with LoRA, you may follow [this "
+#~ "instruction](https://vllm-"
+#~ "ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html"
+#~ "#fallback-to-eager-mode) to disable "
+#~ "graph mode and try again."
+#~ msgstr ""
+#~ "如果你在使用 LoRA 运行 vllm-ascend 时失败，可以按照 "
+#~ "[此说明](https://vllm-"
+#~ "ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html"
+#~ "#fallback-to-eager-mode) 禁用图模式后再重试。"
+

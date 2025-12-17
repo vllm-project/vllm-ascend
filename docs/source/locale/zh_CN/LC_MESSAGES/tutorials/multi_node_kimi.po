@@ -1,0 +1,86 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
+"PO-Revision-Date: 2025-04-15 15:00+0800\n"
+"Last-Translator: vllm-ascend team <>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/multi_node_kimi.md:1
+msgid "Multi-Node-DP (Kimi-K2)"
+msgstr "多节点数据并行（Kimi-K2）"
+
+#: ../../source/tutorials/multi_node_kimi.md:3
+msgid "Verify Multi-Node Communication Environment"
+msgstr "验证多节点通信环境"
+
+#: ../../source/tutorials/multi_node_kimi.md:5
+msgid ""
+"Refer to [multi_node.md](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-"
+"process)."
+msgstr ""
+"请参考 [multi_node.md](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-"
+"process)。"
+
+#: ../../source/tutorials/multi_node_kimi.md:7
+msgid "Run with Docker"
+msgstr "使用 Docker 运行"
+
+#: ../../source/tutorials/multi_node_kimi.md:8
+msgid ""
+"Assume you have two Atlas 800 A3 (64G*16)  or four A2 nodes, and want to "
+"deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multiple "
+"nodes."
+msgstr ""
+"假设你拥有两个 Atlas 800 A3 (64G*16) 或四个 A2 节点，并希望跨多个节点部"
+"署 `Kimi-K2-Instruct-W8A8` 量化模型。"
+
+#: ../../source/tutorials/multi_node_kimi.md:50
+msgid "Run the following scripts on two nodes respectively."
+msgstr "请分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/multi_node_kimi.md:53
+msgid ""
+"Before launching the inference server, ensure the following environment "
+"variables are set for multi-node communication."
+msgstr ""
+"在启动推理服务器之前，请确保已设置以下用于多节点通信的环境变量。"
+
+#: ../../source/tutorials/multi_node_kimi.md:56
+msgid "**Node 0**"
+msgstr "**节点 0**"
+
+#: ../../source/tutorials/multi_node_kimi.md:99
+msgid "**Node 1**"
+msgstr "**节点 1**"
+
+#: ../../source/tutorials/multi_node_kimi.md:144
+msgid ""
+"The deployment view looks like: ![alt "
+"text](../assets/multi_node_dp_kimi.png)"
+msgstr ""
+"部署视图如下所示：![替代文本](../assets/multi_node_dp_kimi.png)"
+
+#: ../../source/tutorials/multi_node_kimi.md:144
+msgid "alt text"
+msgstr "替代文本"
+
+#: ../../source/tutorials/multi_node_kimi.md:147
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以通过输入提示词来查询模型："
