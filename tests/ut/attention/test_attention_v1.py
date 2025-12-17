@@ -275,19 +275,19 @@ class TestAscendAttentionBackendImpl(TestBase):
                                      mock_npu_reshape_and_cache,
                                      mock_paged_attention):
         """Test forward pass in DecodeOnly state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(4, 8 * 64)
+        key = torch.randn(4, 8 * 64)
+        value = torch.randn(4, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty_like(query)
 
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
-        metadata.seq_lens = torch.tensor([10])
+        metadata.seq_lens = torch.tensor([4])
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        metadata.num_decodes = 10
+        metadata.num_actual_tokens = 4
+        metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
+        metadata.num_decodes = 4
         metadata.num_prefills = 0
         layer = self.layer_no_quant
 
@@ -297,7 +297,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    metadata, output)
 
         mock_paged_attention.assert_called_once()
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (4, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu.npu_fused_infer_attention_score')
