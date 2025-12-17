@@ -268,12 +268,14 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
 
+    @patch('vllm_ascend.attention.utils.using_paged_attention')
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     def test_forward_paged_attention(self, mock_get_forward_context,
                                      mock_npu_reshape_and_cache,
-                                     mock_paged_attention):
+                                     mock_paged_attention,
+                                     mock_using_paged_attention):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(4, 8 * 64)
         key = torch.randn(4, 8 * 64)
@@ -290,6 +292,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_decodes = 4
         metadata.num_prefills = 0
         layer = self.layer_no_quant
+        mock_using_paged_attention.return_value = True
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 

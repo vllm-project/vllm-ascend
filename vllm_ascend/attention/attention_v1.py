@@ -526,7 +526,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
-            actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            actual_seq_lengths_kv = attn_metadata.query_start_loc_list
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.query_lens.shape[0]
@@ -545,7 +545,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_block, block_size, -1)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
-        # chunked_prefill.
+        # chunked prefill.
         else:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
             key = self.key_cache.view(  # type: ignore
@@ -592,8 +592,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
-            return self.full_graph_fia(query, key, value, attn_metadata,
-                                       output)
+            attn_output, num_tokens = self.full_graph_fia(
+                query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
         if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and self.sliding_window is not None
                 and attn_metadata.seq_lens.shape[0] == query.size(0)):
