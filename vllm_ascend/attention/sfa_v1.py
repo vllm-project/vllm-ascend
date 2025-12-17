@@ -16,12 +16,12 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
@@ -187,7 +187,7 @@ class AscendSFAMetadataBuilder:
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        cos, sin = get_cos_and_sin()
+        cos, sin = get_cos_and_sin_mla()
 
         assert self.cos_cache is not None and self.sin_cache is not None
         new_cos = self.cos_cache[input_positions][:, None, None]
