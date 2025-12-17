@@ -209,37 +209,6 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
-                    device):
-    global _cos
-    global _sin
-    if _cos is not None:
-        return
-    compilation_config = vllm_config.compilation_config
-    model_config = vllm_config.model_config
-    if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
-        _cos = torch.ones(max_num_reqs * decode_token_per_req,
-                          1,
-                          1,
-                          rope_dim,
-                          dtype=dtype,
-                          device=device)
-        _sin = torch.zeros(max_num_reqs * decode_token_per_req,
-                           1,
-                           1,
-                           rope_dim,
-                           dtype=dtype,
-                           device=device)
-    else:
-        _cos = None
-        _sin = None
-
-
-def get_cos_and_sin():
-    return _cos, _sin
-
-
 def select_moe_comm_method(num_tokens: int,
                            vllm_config: VllmConfig) -> Optional[MoECommType]:
     """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
@@ -275,7 +244,7 @@ def select_moe_comm_method(num_tokens: int,
 
     if not vllm_config.parallel_config.enable_expert_parallel:
         moe_comm_type = MoECommType.ALLGATHER
-    elif soc_version in {AscendDeviceType._910B}:
+    elif soc_version in {AscendDeviceType.A2}:
         if (num_tokens <= mc2_tokens_capacity
                 and vllm_config.parallel_config.world_size_across_dp /
                 vllm_config.parallel_config.pipeline_parallel_size >= 16):
@@ -287,7 +256,7 @@ def select_moe_comm_method(num_tokens: int,
             else:
                 moe_comm_type = MoECommType.ALLGATHER
 
-    elif soc_version in {AscendDeviceType._910_93}:
+    elif soc_version in {AscendDeviceType.A3}:
         ascend_config = get_ascend_config()
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
