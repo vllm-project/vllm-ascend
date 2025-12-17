@@ -31,7 +31,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -374,7 +376,17 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_model()
 
     def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
-        return None
+        """Get KV connector metadata from this worker if available."""
+        if not has_kv_transfer_group():
+            return None
+
+        connector = get_kv_transfer_group()
+
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
+        if (metadata := connector.get_handshake_metadata()) is None:
+            return None
+        return {self.rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
