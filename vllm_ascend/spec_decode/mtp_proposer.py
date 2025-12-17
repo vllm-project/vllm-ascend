@@ -28,8 +28,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.ascend_forward_context import (MoECommType,
-                                                set_ascend_forward_context)
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -242,11 +241,6 @@ class MtpProposer(Proposer):
             # NOTE: we need to set aclgraph_runtime_mode to None in both dummy_run
             # and _propose.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
-        # TODO: remove this after moe_comm_type selection logic is finalized
-        moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
-                         == MoECommType.FUSED_ALLTOALL else moe_comm_type)
-
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
@@ -300,8 +294,6 @@ class MtpProposer(Proposer):
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    moe_comm_type=moe_comm_type,
-                    in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
@@ -720,11 +712,6 @@ class MtpProposer(Proposer):
          with_prefill) = self.runner._sync_metadata_across_dp(
              num_input_tokens, self.runner.with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
-        # TODO: remove this after moe_comm_type selection logic is finalized
-        moe_comm_type = (MoECommType.ALLTOALL if moe_comm_type
-                         == MoECommType.FUSED_ALLTOALL else moe_comm_type)
-
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
             max_query_len = common_attn_metadata.max_query_len
@@ -738,7 +725,6 @@ class MtpProposer(Proposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-        original_aclgraph_runtime_mode = aclgraph_runtime_mode
         if self.use_async_scheduling:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -771,7 +757,6 @@ class MtpProposer(Proposer):
                     num_tokens=num_input_tokens,
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     in_profile_run=self.runner.in_profile_run,
@@ -793,8 +778,8 @@ class MtpProposer(Proposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
-                    if original_aclgraph_runtime_mode == CUDAGraphMode.FULL and \
-                        self.use_async_scheduling and attn_metadata[layer_name].decode is not None:
+                    if self.use_async_scheduling and attn_metadata[
+                            layer_name].decode is not None:
                         for layer_name in self.attn_layer_name:
                             actual_size = len(attn_metadata[layer_name].decode.
                                               actual_seq_lengths_q)
