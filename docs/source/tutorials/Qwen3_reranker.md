@@ -164,7 +164,7 @@ If you run this script successfully, you will see a list of scores printed to th
 Run performance of `Qwen3-Reranker-8B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
-Take the `serve` as an example. Run the code as follows. 
+Take the `serve` as an example. Run the code as follows.
 
 ```bash
 vllm bench serve --model Qwen3-Reranker-8B --backend vllm-rerank --dataset-name random-rerank --host 127.0.0.1 --port 8888 --endpoint /v1/rerank --tokenizer /root/.cache/Qwen3-Reranker-8B  --random-input 200  --save-result --result-dir ./
@@ -173,14 +173,14 @@ vllm bench serve --model Qwen3-Reranker-8B --backend vllm-rerank --dataset-name 
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
 
 ============ Serving Benchmark Result ============
-Successful requests:                     1000       
-Failed requests:                         0       
-Benchmark duration (s):                  6.78      
-Total input tokens:                      108032    
-Request throughput (req/s):              31.11     
-Total Token throughput (tok/s):          15929.35  
+Successful requests:                     1000
+Failed requests:                         0
+Benchmark duration (s):                  6.78
+Total input tokens:                      108032
+Request throughput (req/s):              31.11
+Total Token throughput (tok/s):          15929.35
 ----------------End-to-end Latency----------------
-Mean E2EL (ms):                          4422.79   
-Median E2EL (ms):                        4412.58   
-P99 E2EL (ms):                           6294.52   
+Mean E2EL (ms):                          4422.79
+Median E2EL (ms):                        4412.58
+P99 E2EL (ms):                           6294.52
 ==================================================
