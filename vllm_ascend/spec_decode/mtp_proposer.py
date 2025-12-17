@@ -780,17 +780,6 @@ class MtpProposer(Proposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
-                    if self.use_async_scheduling and attn_metadata[
-                            layer_name].decode is not None:
-                        for layer_name in self.attn_layer_name:
-                            actual_size = len(attn_metadata[layer_name].decode.
-                                              actual_seq_lengths_q)
-
-                            attn_metadata[layer_name].decode.seq_lens_list = \
-                                attn_metadata[layer_name].decode.seq_lens_list[:actual_size]
-                            attn_metadata[layer_name].decode.block_table = \
-                                attn_metadata[layer_name].decode.block_table[:actual_size]
-
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
                                                hidden_states=hidden_states)

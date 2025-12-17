@@ -1016,17 +1016,14 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = num_input_tokens // self.uniform_decode_query_len
                 pad_size = num_reqs_padded - num_reqs
                 if pad_size > 0:
-                    last_query_loc = self.query_start_loc.gpu[num_reqs]
+                    last_query_loc = self.query_start_loc.np[num_reqs]
 
-                    steps = torch.arange(1,
-                                         pad_size + 1,
-                                         device=self.device,
-                                         dtype=self.query_start_loc.gpu.dtype)
-                    fill_values = last_query_loc + (
-                        steps * self.uniform_decode_query_len)
+                    self.query_start_loc.np[
+                        num_reqs + 1:num_reqs_padded + 1] = self.arange_np[
+                            1:pad_size +
+                            1] * self.uniform_decode_query_len + last_query_loc
+                    self.query_start_loc.copy_to_gpu(num_reqs_padded + 1)
 
-                    self.query_start_loc.gpu[num_reqs + 1:num_reqs_padded +
-                                             1] = fill_values
                 # So we are trying to simulate the behavior of GPUModelRunner's
                 # prepare_inputs for uniform decode mode by padding query_start_loc
                 num_reqs = num_reqs_padded
