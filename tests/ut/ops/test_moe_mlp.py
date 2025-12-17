@@ -1,4 +1,5 @@
 import unittest
+from typing import ClassVar
 
 import torch
 
@@ -6,6 +7,7 @@ from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list
 
 
 class TestCumsumGroupList(unittest.TestCase):
+    glist_dict: ClassVar[dict[int, torch.Tensor]]
 
     @classmethod
     def setUpClass(cls):
@@ -21,18 +23,16 @@ class TestCumsumGroupList(unittest.TestCase):
     def test_cumsum_group_list_supported_conversion(self):
         for src_list_type, dst_list_type in self.support_combine:
             with self.subTest(src=src_list_type, dst=dst_list_type):
-                result = cumsum_group_list(
-                    TestCumsumGroupList.glist_dict[src_list_type],
-                    src_list_type,
-                    dst_list_type,
-                    expert_num=4)
+                result = cumsum_group_list(self.glist_dict[src_list_type],
+                                           src_list_type,
+                                           dst_list_type,
+                                           expert_num=4)
                 self.assertTrue(
-                    torch.equal(result,
-                                TestCumsumGroupList.glist_dict[dst_list_type]))
+                    torch.equal(result, self.glist_dict[dst_list_type]))
 
     def test_cumsum_group_list_invalid_type_valueerror(self):
         with self.assertRaises(ValueError) as excinfo:
-            cumsum_group_list(TestCumsumGroupList.glist_dict[0], 4, 0)
+            cumsum_group_list(self.glist_dict[0], 4, 0)
         self.assertIn("group_list_type should be in [0, 1, 2], but received",
                       str(excinfo.exception))
 
@@ -41,8 +41,8 @@ class TestCumsumGroupList(unittest.TestCase):
         for src_list_type, dst_list_type in self.unsupport_combine:
             with self.subTest(src=src_list_type, dst=dst_list_type):
                 with self.assertRaises(NotImplementedError) as excinfo:
-                    cumsum_group_list(TestCumsumGroupList.glist_dict[0],
-                                      src_list_type, dst_list_type)
+                    cumsum_group_list(self.glist_dict[0], src_list_type,
+                                      dst_list_type)
                 self.assertIn("This feature is under development.",
                               str(excinfo.exception))
 
