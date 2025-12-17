@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+import torch
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 

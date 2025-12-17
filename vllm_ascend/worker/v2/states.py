@@ -2,6 +2,7 @@ from contextlib import contextmanager
 
 import torch
 from vllm.v1.worker.gpu.states import RequestState, UvaBuffer
+from vllm.v1.utils import CpuGpuBuffer
 
 
 class AscendRequestState(RequestState):
@@ -27,6 +28,8 @@ class AscendRequestState(RequestState):
                 device,
                 pin_memory,
             )
+        # because we will override these attribute, delete these attribute to
+        # make sure it's collected by python gc immediately.
         del self.prefill_token_ids
         # vllm gpu_model_runner_v2 deprecate the seqs_lens_cpu attribute,
         # because they think most attention backends do not need it.
@@ -40,7 +43,7 @@ class AscendRequestState(RequestState):
         )
         # NOTE(Ronald1995): Ascend NPUs do not support UVA yet,
         # so we use CpuGpuBuffer to allocate prefill_token_ids buffer.
-        self.prefill_token_ids = self._make_buffer(  # type: ignore
+        self.prefill_token_ids: CpuGpuBuffer = self._make_buffer(  # type: ignore
             (self.max_num_reqs, self.max_model_len),
             dtype=torch.int32)
 

@@ -3,20 +3,17 @@
 from collections.abc import Sequence
 from typing import Any
 
-import torch
 import numpy as np
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import KVCacheConfig
+import torch
 from vllm.config import VllmConfig
 from vllm.config.model import ModelDType
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 
-from vllm_ascend.attention.utils import (
-    AscendCommonAttentionMetadata,
-    AscendPrefillContextParallelMetadata,
-)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         AscendPrefillContextParallelMetadata)
 
 _ATTENTION_MASK_BUILDER = None
 
@@ -55,7 +52,7 @@ def build_attn_metadata(
     | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
-    # TODO(Ronald1995): opitimize AscendCommonAttentionMetadata.
+    # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     max_query_len = int(query_start_loc_cpu.max())
 
     attn_metadata: dict[str, Any] = {}

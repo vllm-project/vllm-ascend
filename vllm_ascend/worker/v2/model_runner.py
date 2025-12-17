@@ -5,8 +5,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
-from vllm.v1.core.sched.output import SchedulerOutput, GrammarOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
 from vllm.v1.worker.gpu.input_batch import (InputBatch,
                                             combine_sampled_and_draft_tokens,
@@ -14,13 +13,12 @@ from vllm.v1.worker.gpu.input_batch import (InputBatch,
                                             prepare_prefill_inputs)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_metadata,
-    build_attn_state,
-    make_attention_mask,
-)
+from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
+                                              build_attn_state,
+                                              make_attention_mask)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -42,7 +40,10 @@ class NPUModelRunner(GPUModelRunner):
         del self.input_buffers
 
         # NPU specific initializations can be added below.
-        self.cudagraph_manager = AclGraphManager(vllm_config, device)
+        self.cudagraph_manager: AclGraphManager = AclGraphManager(
+            vllm_config,
+            device,
+        )
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
         self.req_states: AscendRequestState = AscendRequestState(
@@ -96,7 +97,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_after_padding: int,
     ) -> InputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
-        npu attention bakcends need seq_lens_cpu to work.
+        npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
         num_tokens = scheduler_output.total_num_scheduled_tokens
@@ -308,6 +309,8 @@ class NPUModelRunner(GPUModelRunner):
             # when doing speculative decoding with async_scheduling,
             # we need to copy num_rejected_tokens back to cpu.
             default_stream = torch.cuda.current_stream()
+            assert self.num_rejected_token_stream is not None
+            assert self.num_rejectd_tokens_cpu is not None
             with torch.npu.stream(self.num_rejected_token_stream):
                 self.num_rejected_token_stream.wait_stream(default_stream)
                 self.num_rejectd_tokens_cpu.copy_(
