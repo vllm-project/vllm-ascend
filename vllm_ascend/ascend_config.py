@@ -17,6 +17,7 @@ from typing import Optional
 from uuid import uuid4
 
 from vllm.logger import logger
+from vllm.triton_utils import HAS_TRITON
 
 
 def check_kv_extra_config(vllm_config):
@@ -153,6 +154,13 @@ class AscendConfig:
             raise NotImplementedError(
                 "This feature is still in the experiment and will be supported soon."
             )
+        # We find that _npu_paged_attention still performs better than
+        # npu_fused_infer_attention_score in some cases. We allow to execute
+        # _npu_paged_attention in this cases. This should be removed once
+        # npu_fused_infer_attention_score performs better on all scenarios.
+        self.pa_shape_list = additional_config.get("pa_shape_list",
+                                                   [1, 2, 3, 4])
+
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
                                               False):
@@ -224,7 +232,10 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, fuse_norm_quant: bool = True, **kwargs):
+    def __init__(self,
+                 fuse_norm_quant: bool = True,
+                 fuse_qknorm_rope: bool = False,
+                 **kwargs):
         """
         Initialize the configuration.
         
@@ -232,11 +243,12 @@ class AscendCompilationConfig:
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
-                
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        # Add more compilation related configs here as needed
+        self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
 
 
 class XliteGraphConfig:

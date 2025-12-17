@@ -33,3 +33,4 @@ torch-npu==2.8.0
 transformers<=4.57.1
 
 arctic-inference==0.1.1
+fastapi<0.124.0
