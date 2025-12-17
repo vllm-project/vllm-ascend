@@ -121,6 +121,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_reqs = common_attn_metadata.num_reqs
         reqs_start = self.num_decodes  # prefill_start
 
+        #cp独有的一段代码
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
@@ -163,14 +164,19 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             self.device, non_blocking=True)
         chunked_context_metadata.seq_tot = padded_local_chunk_seq_lens.sum(
             dim=1).tolist()
-        chunked_context_metadata.padded_chunk_seq_lens_npu = padded_local_chunk_seq_lens.npu(),
-        chunked_context_metadata.padded_local_chunk_seq_lens = padded_local_chunk_seq_lens.tolist()
+        chunked_context_metadata.padded_chunk_seq_lens_npu = padded_local_chunk_seq_lens.npu(
+        ),
+        chunked_context_metadata.padded_local_chunk_seq_lens = padded_local_chunk_seq_lens.tolist(
+        )
         if local_context_lens_allranks is not None:
-            chunked_context_metadata.local_context_lens_allranks = local_context_lens_allranks.tolist()
+            chunked_context_metadata.local_context_lens_allranks = local_context_lens_allranks.tolist(
+            )
         chunked_context_metadata.padded_local_cu_seq_lens = \
-            padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True)
-        chunked_context_metadata.cu_seq_lens_lst = self.cu_seq_lens_cpu.tolist()
+        padded_local_cu_chunk_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True)
+        chunked_context_metadata.cu_seq_lens_lst = self.cu_seq_lens_cpu.tolist(
+        )
         chunked_context_metadata.chunk_size = padded_local_max_context_chunk_across_ranks
+        # cp独有的一段代码
 
     def set_prefill_block_table(
         self,
