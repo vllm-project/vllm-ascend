@@ -99,7 +99,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
 
     @patch('torch.ops._C_ascend')
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')

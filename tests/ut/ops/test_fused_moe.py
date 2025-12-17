@@ -127,7 +127,7 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
-        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._910_93), \
+        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3), \
         patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context',
                 return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher',
@@ -323,7 +323,7 @@ class TestUnifiedApplyMLP(TestBase):
 
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_dynamic_quant')
     @patch('torch_npu.npu_dequant_swiglu_quant')
@@ -386,7 +386,7 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.dtype, torch.bfloat16)
 
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')

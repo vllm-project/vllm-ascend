@@ -99,7 +99,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.enable_dispatch_v2 = hasattr(torch_npu,
                                           "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = (
-            get_ascend_device_type() == AscendDeviceType._910_93)
+            get_ascend_device_type() == AscendDeviceType.A3)
 
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly

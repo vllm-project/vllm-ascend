@@ -135,23 +135,22 @@ else:
 def gen_build_info():
     soc_version = envs.SOC_VERSION
 
-    # TODO(zzzzwwjj): Add A5 case
     soc_to_device = {
-        "910b": "_910B",
-        "910c": "_910_93",
+        "910b": "A2",
+        "910c": "A3",
         "310p": "_310P",
-        "ascend910b1": "_910B",
-        "ascend910b2": "_910B",
-        "ascend910b2c": "_910B",
-        "ascend910b3": "_910B",
-        "ascend910b4": "_910B",
-        "ascend910b4-1": "_910B",
-        "ascend910_9391": "_910_93",
-        "ascend910_9381": "_910_93",
-        "ascend910_9372": "_910_93",
-        "ascend910_9392": "_910_93",
-        "ascend910_9382": "_910_93",
-        "ascend910_9362": "_910_93",
+        "ascend910b1": "A2",
+        "ascend910b2": "A2",
+        "ascend910b2c": "A2",
+        "ascend910b3": "A2",
+        "ascend910b4": "A2",
+        "ascend910b4-1": "A2",
+        "ascend910_9391": "A3",
+        "ascend910_9381": "A3",
+        "ascend910_9372": "A3",
+        "ascend910_9392": "A3",
+        "ascend910_9382": "A3",
+        "ascend910_9362": "A3",
         "ascend310p1": "_310P",
         "ascend310p3": "_310P",
         "ascend310p5": "_310P",
@@ -160,7 +159,7 @@ def gen_build_info():
         "ascend310p3vir02": "_310P",
         "ascend310p3vir04": "_310P",
         "ascend310p3vir08": "_310P",
-        "ascend910_9579": "_910_95",
+        "ascend910_9579": "A5",
     }
 
     assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
