@@ -19,7 +19,7 @@ def using_paged_attention(runtime_shape: int) -> bool:
     vllm_config = get_current_vllm_config()
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType._910_95:
+    if get_ascend_device_type() == AscendDeviceType.A3:
         return False
     from vllm.config.compilation import CUDAGraphMode
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
