@@ -1,9 +1,6 @@
 # Single-NPU (Qwen3 8B W4A8)
 
 ## Run Docker Container
-:::{note}
-w4a8 quantization feature is supported by v0.9.1rc2 and later.
-:::
 
 ```{code-block} bash
    :substitutions:

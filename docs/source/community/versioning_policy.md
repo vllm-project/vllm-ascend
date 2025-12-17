@@ -22,6 +22,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
 |-------------|--------------|------------------|-------------|--------------------|--------------|
+| v0.11.0     | v0.11.0           | >= 3.9 , < 3.12 | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
 | v0.12.0rc1  | v0.12.0      | >= 3.10, < 3.12  | 8.3.RC2     | 2.8.0  / 2.8.0            |              |
 | v0.11.0rc3  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1.post1            |              |
 | v0.11.0rc2  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1            |              |
@@ -48,6 +49,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2025.12.16 | v0.11.0 Final release, v0.11.0            |
 | 2025.12.13 | Release candidates, v0.12.0rc1            |
 | 2025.12.03 | Release candidates, v0.11.0rc3            |
 | 2025.11.21 | Release candidates, v0.11.0rc2            |
