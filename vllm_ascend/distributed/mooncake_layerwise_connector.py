@@ -742,7 +742,6 @@ class MooncakeLayerwiseConnectorWorker:
                 deque)
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
-        self.local_remote_block_port_mapping = None
         self.num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
@@ -966,7 +965,7 @@ class MooncakeLayerwiseConnectorWorker:
             
             return cp_group_meta
 
-        def get_local_remote_block_port_mapping():
+        def get_local_remote_block_port_mappings():
             p_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, 
                                                      self.dcp_size, self.side_channel_port)
             d_node_cp_group_meta = get_cp_group_meta(self._decode_tp_size, meta.remote_pcp_size, 
@@ -992,17 +991,15 @@ class MooncakeLayerwiseConnectorWorker:
                                 if p_idx % len(d_cp_group) == d_idx:
                                     d_port_remote_list.append(d_port)
                             local_remote_block_port_mappings[p_port].append(d_port_remote_list)
-            local_remote_block_port_mapping = local_remote_block_port_mappings[self.handshake_port]
 
             logger.info(
                 "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
                 "local_remote_block_port_mappings is:: %s. ", p_node_cp_group_meta,
                 d_node_cp_group_meta, local_remote_block_port_mappings)
 
-            return local_remote_block_port_mapping
+            return local_remote_block_port_mappings
 
-        if self.local_remote_block_port_mapping is None:
-            self.local_remote_block_port_mapping = get_local_remote_block_port_mapping()
+        local_remote_block_port_mappings = get_local_remote_block_port_mappings()
 
         
         local_cp_size = self.pcp_size * self.dcp_size
@@ -1030,15 +1027,13 @@ class MooncakeLayerwiseConnectorWorker:
         if final_block_idx is not None:
             final_block_num = local_block_nums.pop(final_block_idx)
             local_block_nums.append(final_block_num)
-            final_block_mapping = self.local_remote_block_port_mapping.pop(final_block_idx)
-            self.local_remote_block_port_mapping.append(final_block_mapping)
 
         remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = [], [], []
         remote_block_offset = 0
-        cp_size = self.pcp_size * self.dcp_size
-        for idx in range(cp_size):
+        local_remote_block_port_mapping = local_remote_block_port_mappings[self.handshake_port]
+        for idx in range(len(local_remote_block_port_mapping[0])):
             mapping_list = []
-            for mapping in self.local_remote_block_port_mapping:
+            for mapping in local_remote_block_port_mapping:
                 mapping_list.append(mapping[idx])
             remote_handshake_port_list.append(mapping_list)
 
@@ -1046,6 +1041,7 @@ class MooncakeLayerwiseConnectorWorker:
         # such as: local_block_ids_list[[1],[2],[5],[6]], remote_block_ids_list[[1],[1],[1],[1]],
         # remote_handshake_port_list[[30000],[30001],[30004],[30005]]
         # D rank will get remote block 1 in port 30004 and save it in local block 5
+        cp_size = self.pcp_size * self.dcp_size
         for local_kv_id in range(cp_size):
             num_blocks_to_push = local_block_nums[local_kv_id]
             local_block_ids_list.append(
