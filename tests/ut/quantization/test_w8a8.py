@@ -347,7 +347,7 @@ class TestAscendC8KVCacheMethod(TestBase):
             self.assertEqual(param.shape, expected_shape)
 
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     def test_process_weights_after_loading_not_310p(self, mock_soc_version):
         key_data = torch.ones(4 * 64)
         value_data = torch.ones(4 * 64) * 2
