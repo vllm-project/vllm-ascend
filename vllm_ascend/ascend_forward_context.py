@@ -209,37 +209,6 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
-                    device):
-    global _cos
-    global _sin
-    if _cos is not None:
-        return
-    compilation_config = vllm_config.compilation_config
-    model_config = vllm_config.model_config
-    if model_config.use_mla and compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
-        _cos = torch.ones(max_num_reqs * decode_token_per_req,
-                          1,
-                          1,
-                          rope_dim,
-                          dtype=dtype,
-                          device=device)
-        _sin = torch.zeros(max_num_reqs * decode_token_per_req,
-                           1,
-                           1,
-                           rope_dim,
-                           dtype=dtype,
-                           device=device)
-    else:
-        _cos = None
-        _sin = None
-
-
-def get_cos_and_sin():
-    return _cos, _sin
-
-
 def select_moe_comm_method(num_tokens: int,
                            vllm_config: VllmConfig) -> Optional[MoECommType]:
     """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all

@@ -16,7 +16,6 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
@@ -29,6 +28,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, reach_layer_for_shared_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
@@ -286,7 +286,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
-            cos, sin = get_cos_and_sin()
+            cos, sin = get_cos_and_sin_mla()
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc_cpu[1:num_decodes +
                                                        1].tolist()
