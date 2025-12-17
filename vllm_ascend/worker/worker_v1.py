@@ -31,7 +31,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -88,7 +90,7 @@ class NPUWorker(WorkerBase):
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType._910_95:
+        if get_ascend_device_type() != AscendDeviceType.A5:
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
@@ -358,7 +360,7 @@ class NPUWorker(WorkerBase):
             self.model_runner.capture_model()
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType._910_95:
+        if get_ascend_device_type() != AscendDeviceType.A5:
             self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -374,7 +376,17 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_model()
 
     def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
-        return None
+        """Get KV connector metadata from this worker if available."""
+        if not has_kv_transfer_group():
+            return None
+
+        connector = get_kv_transfer_group()
+
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
+        if (metadata := connector.get_handshake_metadata()) is None:
+            return None
+        return {self.rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

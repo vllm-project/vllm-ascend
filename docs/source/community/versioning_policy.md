@@ -20,32 +20,37 @@ For example:
 
 The table below is the release compatibility matrix for vLLM Ascend release.
 
-| vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
-|-------------|--------------|------------------|-------------|--------------------|--------------|
-| v0.12.0rc1  | v0.12.0      | >= 3.10, < 3.12  | 8.3.RC2     | 2.8.0  / 2.8.0            |              |
-| v0.11.0rc3  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1.post1            |              |
-| v0.11.0rc2  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC2     | 2.7.1 / 2.7.1            |              |
-| v0.11.0rc1  | v0.11.0      | >= 3.9, < 3.12   | 8.3.RC1     | 2.7.1 / 2.7.1            |              |
-| v0.11.0rc0  | v0.11.0rc3      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
-| v0.10.2rc1  | v0.10.2      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
-| v0.10.1rc1  | v0.10.1/v0.10.1.1 | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
-| v0.10.0rc1  | v0.10.0      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
-| v0.9.2rc1   | v0.9.2       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250619      |              |
-| v0.9.1      | v0.9.1       | >= 3.9, < 3.12   | 8.2.RC1     | 2.5.1 / 2.5.1.post1 |              |
-| v0.9.1rc3   | v0.9.1       | >= 3.9, < 3.12   | 8.2.RC1     | 2.5.1 / 2.5.1.post1 |              |
-| v0.9.1rc2   | v0.9.1       | >= 3.9, < 3.12   | 8.2.RC1     | 2.5.1 / 2.5.1.post1|              |
-| v0.9.1rc1   | v0.9.1       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250528      |              |
-| v0.9.0rc2   | v0.9.0       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
-| v0.9.0rc1   | v0.9.0       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
-| v0.8.5rc1   | v0.8.5.post1 | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
-| v0.8.4rc2   | v0.8.4       | >= 3.9, < 3.12   | 8.0.0       | 2.5.1 / 2.5.1      |              |
-| v0.7.3.post1| v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
-| v0.7.3      | v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
+| vLLM Ascend | vLLM              | Python          | Stable CANN |         PyTorch/torch_npu       |
+|-------------|-------------------|-----------------|-------------|---------------------------------|
+| v0.11.0     | v0.11.0           | >= 3.9 , < 3.12 | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
+| v0.12.0rc1  | v0.12.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |
+| v0.11.0rc3  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
+| v0.11.0rc2  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1                   |
+| v0.11.0rc1  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC1     | 2.7.1 / 2.7.1                   |
+| v0.11.0rc0  | v0.11.0rc3        | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |
+| v0.10.2rc1  | v0.10.2           | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |
+| v0.10.1rc1  | v0.10.1/v0.10.1.1 | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |
+| v0.10.0rc1  | v0.10.0           | >= 3.9, < 3.12  | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724       |
+| v0.9.2rc1   | v0.9.2            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250619 |
+| v0.9.1      | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             |
+| v0.9.1rc3   | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             |
+| v0.9.1rc2   | v0.9.1            | >= 3.9, < 3.12  | 8.2.RC1     | 2.5.1 / 2.5.1.post1             |
+| v0.9.1rc1   | v0.9.1            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250528 |
+| v0.9.0rc2   | v0.9.0            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |
+| v0.9.0rc1   | v0.9.0            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |
+| v0.8.5rc1   | v0.8.5.post1      | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |
+| v0.8.4rc2   | v0.8.4            | >= 3.9, < 3.12  | 8.0.0       | 2.5.1 / 2.5.1                   |
+| v0.7.3.post1| v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |
+| v0.7.3      | v0.7.3            | >= 3.9, < 3.12  | 8.1.RC1     | 2.5.1 / 2.5.1                   |
+
+:::{note}
+If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/project/mindie-turbo) as well.
+:::
 
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | 97f2f160fda2805f9149b0e44da76b5d3b1f7c7e,  v0.12.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
+|     main    | releases/v0.13.0,  v0.12.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
 
 ## Release cadence
 
@@ -53,6 +58,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2025.12.16 | v0.11.0 Final release, v0.11.0            |
 | 2025.12.13 | Release candidates, v0.12.0rc1            |
 | 2025.12.03 | Release candidates, v0.11.0rc3            |
 | 2025.11.21 | Release candidates, v0.11.0rc2            |
@@ -60,7 +66,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 | 2025.09.30 | Release candidates, v0.11.0rc0            |
 | 2025.09.16 | Release candidates, v0.10.2rc1            |
 | 2025.09.04 | Release candidates, v0.10.1rc1            |
-| 2025.09.03 | v0.9.1 Final release                      |
+| 2025.09.03 | v0.9.1 Final release, v0.9.1              |
 | 2025.08.22 | Release candidates, v0.9.1rc3             |
 | 2025.08.07 | Release candidates, v0.10.0rc1            |
 | 2025.08.04 | Release candidates, v0.9.1rc2             |
@@ -68,8 +74,8 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 | 2025.06.22 | Release candidates, v0.9.1rc1             |
 | 2025.06.10 | Release candidates, v0.9.0rc2             |
 | 2025.06.09 | Release candidates, v0.9.0rc1             |
-| 2025.05.29 | v0.7.x post release, v0.7.3.post1         |
-| 2025.05.08 | v0.7.x Final release, v0.7.3              |
+| 2025.05.29 | v0.7.3 post release, v0.7.3.post1         |
+| 2025.05.08 | v0.7.3 Final release, v0.7.3              |
 | 2025.05.06 | Release candidates, v0.8.5rc1             |
 | 2025.04.28 | Release candidates, v0.8.4rc2             |
 | 2025.04.18 | Release candidates, v0.8.4rc1             |
