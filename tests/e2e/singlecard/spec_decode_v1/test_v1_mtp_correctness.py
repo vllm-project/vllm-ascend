@@ -88,87 +88,8 @@ def mtp_correctness(sampling_config: SamplingParams,
     del spec_llm
 
 
-# def test_mtp1_correctness_eager(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config, model_name, 1, enforce_eager=True)
-
-
-# def test_mtp2_correctness_eager(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config, model_name, 2, enforce_eager=True)
-
-
-# def test_mtp1_correctness_piecewise_graph(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config, model_name, 1)
-
-
-# def test_mtp2_correctness_piecewise_graph(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config, model_name, 2)
-
-
-# def test_mtp1_correctness_full_graph(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
-
-
 def test_mtp2_correctness_full_graph(
     sampling_config: SamplingParams,
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
-
-
-# def test_mtp1_correctness_eager_with_pad(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config,
-#                     model_name,
-#                     1,
-#                     enforce_eager=True,
-#                     disable_padded_drafter_batch=False)
-
-
-# def test_mtp2_correctness_eager_with_pad(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config,
-#                     model_name,
-#                     2,
-#                     enforce_eager=True,
-#                     disable_padded_drafter_batch=False)
-
-
-# @pytest.mark.skip("TODO(xyx): Revert me when mtp aclgraph is fixed")
-# def test_mtp1_correctness_piecewise_graph_with_pad(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config,
-#                     model_name,
-#                     1,
-#                     disable_padded_drafter_batch=False)
-
-
-# @pytest.mark.skip("TODO(xyx): Revert me when mtp aclgraph is fixed")
-# def test_mtp2_correctness_piecewise_graph_with_pad(
-#     sampling_config: SamplingParams,
-#     model_name: str,
-# ):
-#     mtp_correctness(sampling_config,
-#                     model_name,
-#                     2,
-#                     disable_padded_drafter_batch=False)
