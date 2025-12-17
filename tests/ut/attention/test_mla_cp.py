@@ -559,26 +559,69 @@ class TestAscendMLAImpl(TestBase):
     def test_compute_prefill_context_with_dcp_pcp(self, mock_ring, mock_load,
                                                   mock_dcp, mock_pcp):
 
-        def make_all_gather(ws):
+        def mock_all_gather(ws):
             return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-        mock_dcp.all_gather = MagicMock(side_effect=make_all_gather(2))
-        mock_pcp.all_gather = MagicMock(side_effect=make_all_gather(2))
-        NUM_BLOCKS, BLOCK_SIZE = 100, 128  # fixed
-        USED_BLOCKS = 10
+        mock_dcp.all_gather = MagicMock(side_effect=mock_all_gather(2))
+        mock_pcp.all_gather = MagicMock(side_effect=mock_all_gather(2))
+
+        def mock_ring_attn(q_nope, q_rope, k_nope, k_rope, value, mask, seqlen,
+                           head_num, kv_head_num, pre_out, prev_lse, qk_scale,
+                           kernel_type, mask_type, input_layout, calc_type,
+                           output, softmax_lse):
+            return torch.randn(q_rope.shape[0], value.shape[1], value.shape[2])
+
+        mock_ring.side_effect = mock_ring_attn
+
+        def mock_kv_b_proj(kv_c_normed):
+            return (torch.randn(kv_c_normed.shape[0],
+                                self.impl.num_heads,
+                                self.impl.v_head_dim +
+                                self.impl.qk_nope_head_dim,
+                                dtype=torch.float16), )
+
+        def mock_reorg_kvcache(allgatered_kv_c_normed: torch.Tensor,
+                               allgatered_k_pe: torch.Tensor,
+                               padded_local_chunk_seq_lens_lst: list[int],
+                               local_context_lens_allranks: list[list[int]],
+                               sum_seq_len: int, max_seq_len: int,
+                               chunk_size: int, chunk_idx: int, toks: int):
+            return torch.randn(sum_seq_len, allgatered_kv_c_normed.shape[1],
+                               allgatered_kv_c_normed.shape[2]), torch.randn(
+                                   sum_seq_len, allgatered_k_pe.shape[1],
+                                   allgatered_k_pe.shape[2])
+
+        # mock proj
+        self.impl.kv_b_proj.side_effect = mock_kv_b_proj
+        NUM_BLOCKS, BLOCK_SIZE = 10, 32  # fixed
+        USED_BLOCKS = 3
         # pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens, num_computed_tokens_of_pcp_dcp
         test_cases = [
-            (2, 2, [138], [512], 1, 0, 1, 1, [[[128, 128], [128, 128]]]),
-            (1, 2, [138], [512], 1, 0, 1, 1, [[[256, 256]]]),
-            (2, 1, [138], [512], 1, 0, 1, 1, [[[256], [256]]]),
-            (2, 2, [138, 114], [512,
-                                512], 2, 0, 2, 1, [[[128, 128], [128, 128]],
-                                                   [[128, 128], [128, 128]]]),
+            (2, 2, [4], [128], 1, 0, 1, 1, [[[32, 32], [32, 32]]]),
+            (1, 2, [4], [128], 1, 0, 1, 1, [[[64, 64]]]),
+            (2, 1, [4], [128], 1, 0, 1, 1, [[[64], [64]]]),
+            (2, 2, [4, 7], [128, 128], 2, 0, 2, 1, [[[32, 32], [32, 32]],
+                                                    [[32, 32], [32, 32]]]),
         ]
+        # kv cache tensor
+        kv_cache_0 = torch.randn(NUM_BLOCKS,
+                                 BLOCK_SIZE,
+                                 self.impl.num_heads,
+                                 self.impl.kv_lora_rank,
+                                 dtype=torch.float16)
+        kv_cache_1 = torch.randn(NUM_BLOCKS,
+                                 BLOCK_SIZE,
+                                 self.impl.num_heads,
+                                 self.impl.v_head_dim,
+                                 dtype=torch.float16)
+        kv_cache = [kv_cache_0, kv_cache_1]
         max_model_len = 4096
         max_num_seqs = 25
+        # create chunk context
+        chunked_prefill_workspace_size = min(
+            max(8 * max_model_len, 4 * max_num_seqs * BLOCK_SIZE), 128 * 1024)
         self.impl.prefill_mask = torch.triu(
-            torch.ones(512, 512, dtype=torch.float16), 1)
+            torch.ones(10, 10, dtype=torch.float16), 1)
         for test_case in test_cases:
             pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens_of_pcp_dcp = test_case
             assert len(nums_tokens_per_rank) == len(nums_all_rank_context)
@@ -589,7 +632,6 @@ class TestAscendMLAImpl(TestBase):
                                              (pcp_size * dcp_size))
             self.impl.dcp_size = dcp_size
             self.impl.pcp_size = pcp_size
-
             # create input
             query = torch.randn(sum(nums_tokens_per_rank),
                                 self.impl.num_heads,
@@ -597,18 +639,6 @@ class TestAscendMLAImpl(TestBase):
                                 dtype=torch.float16)
             q_nope = query[..., :self.impl.qk_nope_head_dim]
             q_pe = query[..., self.impl.qk_nope_head_dim:]
-            # kv cache tensor
-            kv_cache_0 = torch.randn(NUM_BLOCKS,
-                                     BLOCK_SIZE,
-                                     self.impl.num_heads,
-                                     self.impl.kv_lora_rank,
-                                     dtype=torch.float16)
-            kv_cache_1 = torch.randn(NUM_BLOCKS,
-                                     BLOCK_SIZE,
-                                     self.impl.num_heads,
-                                     self.impl.v_head_dim,
-                                     dtype=torch.float16)
-            kv_cache = [kv_cache_0, kv_cache_1]
             prefix_out = torch.randn(sum(nums_tokens_per_rank),
                                      self.impl.num_heads,
                                      self.impl.v_head_dim,
@@ -616,21 +646,6 @@ class TestAscendMLAImpl(TestBase):
             prefix_lse = torch.randn(sum(nums_tokens_per_rank),
                                      self.impl.num_heads,
                                      dtype=torch.float16)
-            # mock proj
-            self.impl.kv_b_proj.MagicMock()
-
-            def mock_kv_b_proj(kv_c_normed):
-                return (torch.randn(kv_c_normed.shape[0],
-                                    self.impl.num_heads,
-                                    self.impl.v_head_dim +
-                                    self.impl.qk_nope_head_dim,
-                                    dtype=torch.float16), )
-
-            self.impl.kv_b_proj.side_effect = mock_kv_b_proj
-            # create chunk context
-            chunked_prefill_workspace_size = min(
-                max(8 * max_model_len, 4 * max_num_seqs * BLOCK_SIZE),
-                128 * 1024)
             chunk_ctx = get_chunk_metadata(
                 pcp_size,
                 dcp_size,
@@ -650,25 +665,13 @@ class TestAscendMLAImpl(TestBase):
             prefill_meta.chunked_context = chunk_ctx
             meta.prefill = prefill_meta
 
-            def mock_reorg_kvcache(
-                    allgatered_kv_c_normed: torch.Tensor,
-                    allgatered_k_pe: torch.Tensor,
-                    padded_local_chunk_seq_lens_lst: list[int],
-                    local_context_lens_allranks: list[list[int]],
-                    sum_seq_len: int, max_seq_len: int, chunk_size: int,
-                    chunk_idx: int, toks: int):
-                return torch.randn(
-                    sum_seq_len, allgatered_kv_c_normed.shape[1],
-                    allgatered_kv_c_normed.shape[2]), torch.randn(
-                        sum_seq_len, allgatered_k_pe.shape[1],
-                        allgatered_k_pe.shape[2])
-
             with patch.object(self.impl, '_reorg_kvcache') as mock_reorg:
                 mock_reorg.side_effect = mock_reorg_kvcache
 
                 out, lse = self.impl._compute_prefill_context(
                     q_nope, q_pe, kv_cache, self.impl.qk_rope_head_dim, meta,
                     prefix_out, prefix_lse)
+
             iters = len(chunk_ctx.seq_tot)
             self.impl.dcp_size = 1
             self.impl.pcp_size = 1
@@ -693,12 +696,11 @@ class TestAscendMLAImpl(TestBase):
         max_model_len = 4096
         max_num_seqs = 25
         test_cases = [
-            (2, 2, [138], [512], 1, 0, 1, 1, [[[128, 128], [128, 128]]]),
-            (1, 2, [138], [512], 1, 0, 1, 1, [[[256, 256]]]),
-            (2, 1, [138], [512], 1, 0, 1, 1, [[[256], [256]]]),
-            (2, 2, [138, 114], [512,
-                                512], 2, 0, 2, 1, [[[128, 128], [128, 128]],
-                                                   [[128, 128], [128, 128]]]),
+            (2, 2, [4], [128], 1, 0, 1, 1, [[[32, 32], [32, 32]]]),
+            (1, 2, [4], [128], 1, 0, 1, 1, [[[64, 64]]]),
+            (2, 1, [4], [128], 1, 0, 1, 1, [[[64], [64]]]),
+            (2, 2, [4, 7], [128, 128], 2, 0, 2, 1, [[[32, 32], [32, 32]],
+                                                    [[32, 32], [32, 32]]]),
         ]
         for test_case in test_cases:
             pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens_of_pcp_dcp = test_case
@@ -829,8 +831,8 @@ class TestAscendMLAImpl(TestBase):
                                value.shape[-1])
 
         mock_npu_ring_mla.side_effect = mock_npu_ring_mla_effect
-        test_cases = [([140], 2, 2), ([140], 2, 1), ([140], 1, 2),
-                      ([140], 2, 2), ([140, 180], 2, 2)]
+        test_cases = [([8], 2, 2), ([8], 2, 1), ([8], 1, 2), ([8], 2, 2),
+                      ([8, 12], 2, 2)]
         for test_case in test_cases:
             scheduled_tokens, pcp_size, dcp_size = test_case
             nums_tokens_per_rank = []
@@ -989,14 +991,21 @@ class TestAscendMLAImpl(TestBase):
         self.impl._compute_prefill_context = MagicMock()
         self.impl._compute_prefill_context.side_effect = mock_compute_prefill_context
         mock_npu_ring_mla.side_effect = mock_npu_ring_mla_effect
-
-        block_num = 11686
-        block_size = 128
-
-        test_cases = [([140], 2, 2), ([140], 2, 1), ([140], 1, 2),
-                      ([140], 2, 2), ([140, 180], 2, 2)]
+        block_num = 10
+        block_size = 32
+        kv_c_and_k_pe_cache = (torch.randn(block_num,
+                                           block_size,
+                                           1,
+                                           self.impl.q_lora_rank,
+                                           dtype=torch.float16),
+                               torch.randn(block_num,
+                                           block_size,
+                                           1,
+                                           self.impl.qk_rope_head_dim,
+                                           dtype=torch.float16))
+        test_cases = [([8], 2, 2), ([8], 2, 1), ([8], 1, 2), ([8], 2, 2),
+                      ([8, 16], 2, 2)]
         for test_case in test_cases:
-            print(f"start {test_case}")
             scheduled_tokens, pcp_size, dcp_size = test_case
             nums_tokens_per_rank = []
             for num_tokens in scheduled_tokens:
@@ -1026,17 +1035,6 @@ class TestAscendMLAImpl(TestBase):
                                 self.impl.num_heads,
                                 self.impl.v_head_dim,
                                 dtype=torch.float16)
-            kv_c_and_k_pe_cache = (torch.randn(block_num,
-                                               block_size,
-                                               1,
-                                               self.impl.q_lora_rank,
-                                               dtype=torch.float16),
-                                   torch.randn(block_num,
-                                               block_size,
-                                               1,
-                                               self.impl.qk_rope_head_dim,
-                                               dtype=torch.float16))
-
             # only test one rank
             for rank in range(pcp_size):
                 q_head_idx, q_tail_idx, kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx, kv_with_q_tail_nomask_idx, \
@@ -1060,7 +1058,7 @@ class TestAscendMLAImpl(TestBase):
                 attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens = kv_with_q_head_nomask_seqlens
                 attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens = kv_with_q_tail_nomask_seqlens
                 attn_metadata.prefill.pcp_metadata.pcp_prefill_mask = torch.triu(
-                    torch.ones(512, 512, dtype=torch.float16), 1)
+                    torch.ones(10, 10, dtype=torch.float16), 1)
 
                 output = self.impl._forward_prefill_cp(q_nope, q_pe, k_nope,
                                                        k_pe, value,
