@@ -674,10 +674,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
 
 class AscendDeviceType(Enum):
-    _910B = 0  # A2
-    _910_93 = 1  # A3
+    A2 = 0
+    A3 = 1
     _310P = 2
-    _910_95 = 3  # A5
+    A5 = 3
 
 
 _ascend_device_type = None
@@ -696,13 +696,13 @@ def check_ascend_device_type():
 
     soc_version = torch_npu.npu.get_soc_version()
     if 220 <= soc_version <= 225:
-        cur_device_type = AscendDeviceType._910B
+        cur_device_type = AscendDeviceType.A2
     elif 250 <= soc_version <= 255:
-        cur_device_type = AscendDeviceType._910_93
+        cur_device_type = AscendDeviceType.A3
     elif 200 <= soc_version <= 205:
         cur_device_type = AscendDeviceType._310P
     elif soc_version == 260:
-        cur_device_type = AscendDeviceType._910_95
+        cur_device_type = AscendDeviceType.A5
     else:
         raise RuntimeError(f"Can not support soc_version: {soc_version}.")
 
