@@ -555,7 +555,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "calc_type": "calc_type_ring",
         }
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_mtp_model:
+        if forward_context.is_draft_model:
             graph_params = get_mtp_graph_params()
         else:
             graph_params = get_graph_params()

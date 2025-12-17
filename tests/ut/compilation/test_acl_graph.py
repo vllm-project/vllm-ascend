@@ -783,7 +783,7 @@ class TestPCPDCPGraphParams(TestBase):
                                      decode=decode)
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_mtp_model = False
+        forward_context.is_draft_model = False
 
         num_heads = 256
         scale = 0.1
@@ -836,7 +836,7 @@ class TestPCPDCPGraphParams(TestBase):
                                   decode_meta=decode)
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_mtp_model = False
+        forward_context.is_draft_model = False
 
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
