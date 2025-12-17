@@ -24,6 +24,7 @@ import vllm.config
 from vllm.compilation.fx_utils import OpOverload
 from vllm.config import ModelConfig, VllmConfig
 
+import vllm_ascend.ops.register_custom_ops  # noqa
 from tests.e2e.singlecard.compile.backend import TestBackend
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
     AddRMSNormQuantFusionPass
@@ -35,14 +36,15 @@ class TestModelWithoutBias(nn.Module):
         AddRMSNorm → Quantization (without bias)
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, device="npu"):
+    def __init__(self, hidden_size: int, eps: float = 1e-6, dtype: torch.dtype, device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(
             torch.randn(hidden_size, device=device))
-        self.quant_scale = torch.tensor([1.0], device=device)
-        self.quant_offset = torch.tensor([0.0], device=device)
+        self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
         """
@@ -56,10 +58,10 @@ class TestModelWithoutBias(nn.Module):
         norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
             x, residual, self.rms_norm_weight, self.eps)
 
-        quantized_output = torch_npu.npu_quantize(norm_output,
-                                                  self.quant_scale,
-                                                  self.quant_offset,
-                                                  torch.qint8, -1, False)
+        quantized_output = torch.ops.vllm.quantize(norm_output,
+                                                   self.quant_scale,
+                                                   self.quant_scale_reciprocal,
+                                                   self.quant_offset)
 
         return quantized_output, new_residual
 
@@ -67,7 +69,7 @@ class TestModelWithoutBias(nn.Module):
         """Return the list of expected operators BEFORE fusion."""
         return [
             torch.ops.npu.npu_add_rms_norm.default,
-            torch.ops.npu.npu_quantize.default
+            torch.ops.vllm.quantize.default
         ]
 
     def ops_in_model_after(self) -> List[OpOverload]:
@@ -88,8 +90,9 @@ class TestModelWithBias(nn.Module):
         self.rms_norm_weight = nn.Parameter(
             torch.randn(hidden_size, device=device))
         self.bias = nn.Parameter(torch.randn(hidden_size, device=device))
-        self.quant_scale = torch.tensor([1.0], device=device)
-        self.quant_offset = torch.tensor([0.0], device=device)
+        self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
 
     def forward(self, x):
         """
@@ -107,10 +110,10 @@ class TestModelWithBias(nn.Module):
         # Add bias
         norm_output_with_bias = norm_output + self.bias
 
-        quantized_output = torch_npu.npu_quantize(norm_output_with_bias,
-                                                  self.quant_scale,
-                                                  self.quant_offset,
-                                                  torch.qint8, -1, False)
+        quantized_output = torch.ops.vllm.quantize(norm_output,
+                                                   self.quant_scale,
+                                                   self.quant_scale_reciprocal,
+                                                   self.quant_offset)
 
         return quantized_output, new_residual
 
@@ -119,12 +122,125 @@ class TestModelWithBias(nn.Module):
         return [
             torch.ops.npu.npu_add_rms_norm.default,
             torch.ops.aten.add.Tensor,  # Add bias operation
-            torch.ops.npu.npu_quantize.default
+            torch.ops.vllm.quantize.default
         ]
 
     def ops_in_model_after(self) -> List[OpOverload]:
         """Return the list of expected operators AFTER successful fusion."""
         return [torch.ops.npu.npu_add_rms_norm_quant.default]
+
+
+class TestModelSPWithoutBias(nn.Module):
+    """
+    A minimal test model that simulates the pattern:
+        AddRMSNorm → maybe_allgather → Quantization (without bias)
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6, dtype: torch.dtype, device="npu"):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.rms_norm_weight = nn.Parameter(
+            torch.randn(hidden_size, device=device))
+        self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
+
+    def forward(self, x):
+        """
+        Forward pass:
+          1. Perform npu_add_rms_norm
+          2. Perform a fake maybe_all_gather_and_maybe_unpad
+          3. Quantize the normalized output to int8
+        Returns both quantized output and updated residual.
+        """
+        residual = torch.zeros_like(x)
+
+        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
+            x, residual, self.rms_norm_weight, self.eps)
+
+        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
+
+        quantized_output = torch.ops.vllm.quantize(norm_output,
+                                                   self.quant_scale,
+                                                   self.quant_scale_reciprocal,
+                                                   self.quant_offset)
+
+        return quantized_output, new_residual
+
+    def ops_in_model_before(self) -> List[OpOverload]:
+        """Return the list of expected operators BEFORE fusion."""
+        return [
+            torch.ops.npu.npu_add_rms_norm.default,
+            torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default,
+            torch.ops.vllm.quantize.default
+        ]
+
+    def ops_in_model_after(self) -> List[OpOverload]:
+        """Return the list of expected operators AFTER successful fusion."""
+        return [
+            torch.ops.npu.npu_add_rms_norm_quant.default,
+            torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default
+        ]
+
+
+class TestModelWithBias(nn.Module):
+    """
+    A minimal test model that simulates the pattern:
+        AddRMSNorm → Add bias → maybe_allgather → Quantization (without bias)
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6, dtype: torch.dtype, device="npu"):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.rms_norm_weight = nn.Parameter(
+            torch.randn(hidden_size, device=device))
+        self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
+        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
+
+    def forward(self, x):
+        """
+        Forward pass:
+          1. Perform npu_add_rms_norm
+          2. Add bias
+          3. Perform a fake maybe_all_gather_and_maybe_unpad
+          4. Quantize the normalized output to int8
+        Returns both quantized output and updated residual.
+        """
+        residual = torch.zeros_like(x)
+
+        norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
+            x, residual, self.rms_norm_weight, self.eps)
+        
+        # Add bias
+        norm_output_with_bias = norm_output + self.bias
+
+        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
+
+        quantized_output = torch.ops.vllm.quantize(norm_output,
+                                                   self.quant_scale,
+                                                   self.quant_scale_reciprocal,
+                                                   self.quant_offset)
+
+        return quantized_output, new_residual
+
+    def ops_in_model_before(self) -> List[OpOverload]:
+        """Return the list of expected operators BEFORE fusion."""
+        return [
+            torch.ops.npu.npu_add_rms_norm.default,
+            torch.ops.aten.add.Tensor,  # Add bias operation
+            torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default,
+            torch.ops.vllm.quantize.default
+        ]
+
+    def ops_in_model_after(self) -> List[OpOverload]:
+        """Return the list of expected operators AFTER successful fusion."""
+        return [
+            torch.ops.npu.npu_add_rms_norm_quant.default,
+            torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default
+        ]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
