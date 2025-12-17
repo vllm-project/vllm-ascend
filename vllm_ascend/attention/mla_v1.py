@@ -22,7 +22,6 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
@@ -32,6 +31,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,

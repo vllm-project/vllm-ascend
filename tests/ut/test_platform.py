@@ -490,7 +490,7 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            #use_sfa=False,
+            use_sparse=False,
             use_mla=True,
         )
         self.assertEqual(result,
@@ -503,7 +503,7 @@ class TestNPUPlatform(TestBase):
             dtype="float16",
             kv_cache_dtype="float16",
             block_size=64,
-            #use_sfa=False,
+            use_sparse=False,
             use_mla=False,
         )
         self.assertEqual(
