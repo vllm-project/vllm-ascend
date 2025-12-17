@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.envs as env_ascend
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          using_paged_attention)
@@ -557,6 +558,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            # If the TI-matching switch is set to ON
+            # We use fusion attention instead of npu_fused_infer_attention_score.
+            if env_ascend.TRAIN_INFER_MATCHING:
+                num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+                query = query[:num_tokens]
+                n_head = self.num_heads
+                shape_order = "TND"
+                scale = self.scale
+                mask = attn_metadata.attn_mask
+                if mask is not None:
+                    mask = mask.to(torch.uint8)
+                attn_output = torch_npu.npu_fusion_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    head_num=n_head,
+                    input_layout=shape_order,
+                    pse=None,
+                    padding_mask=None,
+                    atten_mask=mask,
+                    scale=scale,
+                    inner_precise=0,
+                    sparse_mode=1,
+                    actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+                )[0]
+                attn_output = attn_output.view(num_tokens, self.num_heads,
+                                               self.head_size)
+                output[:num_tokens] = attn_output[:num_tokens]
+                assert output is not None, "Attention out is None!"
+                return output
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.query_lens.shape[0]
