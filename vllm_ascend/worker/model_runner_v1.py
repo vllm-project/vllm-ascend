@@ -402,7 +402,6 @@ class NPUModelRunner(GPUModelRunner):
         self.reorder_batch_threshold: int | None = None
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
-        self.kv_connector_output: KVConnectorOutput | None = None
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
