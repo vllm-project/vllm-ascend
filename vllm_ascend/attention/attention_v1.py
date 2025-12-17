@@ -640,7 +640,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if get_ascend_device_type() == AscendDeviceType._910_95:
+        if get_ascend_device_type() == AscendDeviceType.A5:
             return self._forward_decode_only_ascend91095(
                 query, attn_metadata, output)
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
@@ -729,7 +729,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
-            if get_ascend_device_type() == AscendDeviceType._910_95:
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                # TODO: Once eagle running to here, it may has error because of the 0 dim of slot_mapping.
+                # Should check if the 0 dim of slot_mapping must equal to the 0 dim of key.
+                # If it's necessary, the slots should be sliced.
                 torch_npu.npu_scatter_pa_kv_cache(
                     key=key[:attn_metadata.num_actual_tokens],
                     value=value[:attn_metadata.num_actual_tokens].contiguous(),
@@ -742,7 +745,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     value=value[:attn_metadata.num_actual_tokens],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=slots)
+                    slot_indices=slots[:attn_metadata.num_actual_tokens])
         return key, value
 
     def forward_impl(
