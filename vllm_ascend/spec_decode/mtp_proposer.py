@@ -44,6 +44,8 @@ PADDING_SLOT_ID = -1
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "PanguUltraMoEForCausalLM":
+    ("vllm.model_executor.models.openpangu_mtp", "OpenPanguMTP"),
     "DeepseekV32ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "Qwen3NextForCausalLM":
