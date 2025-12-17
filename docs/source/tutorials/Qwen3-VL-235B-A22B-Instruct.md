@@ -178,7 +178,6 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instrust \
 --gpu-memory-utilization 0.9 \
 ```
 The parameters are explained as follows:
-- `--data-parallel-size` 1 and `--tensor-parallel-size` 8 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
