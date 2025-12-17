@@ -454,7 +454,10 @@ class AscendMLAMetadataBuilder:
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         query_lens = query_seq_lens_cpu[:num_reqs]
-        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        # just clone seq_lens_cpu to avoid data competetion,
+        # it's important for async_scheduling with spec decoding,
+        # or it will make acceptance rate go down.
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].clone()
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
         prefill_metadata = None

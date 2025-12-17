@@ -290,7 +290,10 @@ class AscendAttentionMetadataBuilder:
 
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        # just clone seq_lens_cpu to avoid data competetion,
+        # it's important for async_scheduling with spec decoding,
+        # or it will make acceptance rate go down.
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].clone()
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
