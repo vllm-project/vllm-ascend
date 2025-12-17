@@ -36,15 +36,23 @@ class TestModelWithoutBias(nn.Module):
         AddRMSNorm → Quantization (without bias)
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, dtype: torch.dtype, device="npu"):
+    def __init__(self,
+                 hidden_size: int,
+                 dtype: torch.dtype,
+                 eps: float = 1e-6,
+                 device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(
             torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size,
+                                                 dtype=dtype,
+                                                 device=device)
+        self.quant_offset = torch.zeros(hidden_size,
+                                        dtype=dtype,
+                                        device=device)
 
     def forward(self, x):
         """
@@ -83,7 +91,11 @@ class TestModelWithBias(nn.Module):
         AddRMSNorm → Add Bias → Quantization (with bias)
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, device="npu"):
+    def __init__(self,
+                 hidden_size: int,
+                 dtype: torch.dtype,
+                 eps: float = 1e-6,
+                 device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -91,8 +103,12 @@ class TestModelWithBias(nn.Module):
             torch.randn(hidden_size, device=device))
         self.bias = nn.Parameter(torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size,
+                                                 dtype=dtype,
+                                                 device=device)
+        self.quant_offset = torch.zeros(hidden_size,
+                                        dtype=dtype,
+                                        device=device)
 
     def forward(self, x):
         """
@@ -110,7 +126,7 @@ class TestModelWithBias(nn.Module):
         # Add bias
         norm_output_with_bias = norm_output + self.bias
 
-        quantized_output = torch.ops.vllm.quantize(norm_output,
+        quantized_output = torch.ops.vllm.quantize(norm_output_with_bias,
                                                    self.quant_scale,
                                                    self.quant_scale_reciprocal,
                                                    self.quant_offset)
@@ -136,15 +152,23 @@ class TestModelSPWithoutBias(nn.Module):
         AddRMSNorm → maybe_allgather → Quantization (without bias)
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, dtype: torch.dtype, device="npu"):
+    def __init__(self,
+                 hidden_size: int,
+                 dtype: torch.dtype,
+                 eps: float = 1e-6,
+                 device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(
             torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size,
+                                                 dtype=dtype,
+                                                 device=device)
+        self.quant_offset = torch.zeros(hidden_size,
+                                        dtype=dtype,
+                                        device=device)
 
     def forward(self, x):
         """
@@ -159,7 +183,8 @@ class TestModelSPWithoutBias(nn.Module):
         norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
             x, residual, self.rms_norm_weight, self.eps)
 
-        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
+        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            norm_output, True)
 
         quantized_output = torch.ops.vllm.quantize(norm_output,
                                                    self.quant_scale,
@@ -184,21 +209,29 @@ class TestModelSPWithoutBias(nn.Module):
         ]
 
 
-class TestModelWithBias(nn.Module):
+class TestModelSPWithBias(nn.Module):
     """
     A minimal test model that simulates the pattern:
         AddRMSNorm → Add bias → maybe_allgather → Quantization (without bias)
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, dtype: torch.dtype, device="npu"):
+    def __init__(self,
+                 hidden_size: int,
+                 dtype: torch.dtype,
+                 eps: float = 1e-6,
+                 device="npu"):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.rms_norm_weight = nn.Parameter(
             torch.randn(hidden_size, device=device))
         self.quant_scale = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_scale_reciprocal = torch.ones(hidden_size, dtype=dtype, device=device)
-        self.quant_offset = torch.zeros(hidden_size, dtype=dtype, device=device)
+        self.quant_scale_reciprocal = torch.ones(hidden_size,
+                                                 dtype=dtype,
+                                                 device=device)
+        self.quant_offset = torch.zeros(hidden_size,
+                                        dtype=dtype,
+                                        device=device)
 
     def forward(self, x):
         """
@@ -213,13 +246,14 @@ class TestModelWithBias(nn.Module):
 
         norm_output, _, new_residual = torch_npu.npu_add_rms_norm(
             x, residual, self.rms_norm_weight, self.eps)
-        
+
         # Add bias
         norm_output_with_bias = norm_output + self.bias
 
-        norm_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(norm_output, True)
+        norm_output_with_bias = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            norm_output_with_bias, True)
 
-        quantized_output = torch.ops.vllm.quantize(norm_output,
+        quantized_output = torch.ops.vllm.quantize(norm_output_with_bias,
                                                    self.quant_scale,
                                                    self.quant_scale_reciprocal,
                                                    self.quant_offset)
@@ -248,8 +282,15 @@ class TestModelWithBias(nn.Module):
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("use_bias", [False, True])
-def test_rmsnorm_quant_fusion(dtype: torch.dtype, hidden_size: int,
-                              num_tokens: int, eps: float, use_bias: bool):
+@pytest.mark.parametrize("sp_enable", [False, True])
+def test_rmsnorm_quant_fusion(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    eps: float,
+    use_bias: bool,
+    sp_enable: bool,
+):
     """
     End-to-end test for AddRMSNorm+Quantize fusion.
     Compares: Operator presence/absence before and after graph transformation
@@ -263,9 +304,27 @@ def test_rmsnorm_quant_fusion(dtype: torch.dtype, hidden_size: int,
         backend = TestBackend(
             custom_passes=[AddRMSNormQuantFusionPass(vllm_config=vllm_config)])
         if use_bias:
-            model = TestModelWithBias(hidden_size, eps, device="npu")
+            if sp_enable:
+                model = TestModelSPWithBias(hidden_size,
+                                            dtype,
+                                            eps,
+                                            device="npu")
+            else:
+                model = TestModelWithBias(hidden_size,
+                                          dtype,
+                                          eps,
+                                          device="npu")
         else:
-            model = TestModelWithoutBias(hidden_size, eps, device="npu")
+            if sp_enable:
+                model = TestModelSPWithoutBias(hidden_size,
+                                               dtype,
+                                               eps,
+                                               device="npu")
+            else:
+                model = TestModelWithoutBias(hidden_size,
+                                             dtype,
+                                             eps,
+                                             device="npu")
         model = model.to("npu")
 
         x = torch.rand(num_tokens,

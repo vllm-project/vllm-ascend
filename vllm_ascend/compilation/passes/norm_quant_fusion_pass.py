@@ -41,7 +41,10 @@ class AddRMSNormQuantPattern:
         scale = torch.ones(4, device="npu", dtype=self.dtype)
         scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
         offset = torch.zeros(4, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
+        return [
+            rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal,
+            offset
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -55,7 +58,9 @@ class AddRMSNormQuantPattern:
                                                     rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
+            quantized_output = torch.ops.vllm.quantize(out0, scale,
+                                                       scale_reciprocal,
+                                                       offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -64,13 +69,12 @@ class AddRMSNormQuantPattern:
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input,
-                residual,
-                rms_norm_weight,
-                scale,
-                offset,
-                epsilon=self.eps)
+            output = torch.ops.npu.npu_add_rms_norm_quant(rms_norm_input,
+                                                          residual,
+                                                          rms_norm_weight,
+                                                          scale,
+                                                          offset,
+                                                          epsilon=self.eps)
             quantized_output = output[0]
             out1 = output[2]
             return quantized_output, out1
@@ -97,7 +101,11 @@ class AddRMSNormQuantPatternWithBias:
         scale = torch.ones(4, device="npu", dtype=self.dtype)
         scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
         offset = torch.zeros(4, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset, rmsnorm_bias]
+        return [
+            rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal,
+            offset, rmsnorm_bias
+        ]
+
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -112,7 +120,9 @@ class AddRMSNormQuantPatternWithBias:
             out0 = output[0]
             out1 = output[2]
             out0 = out0 + bias
-            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
+            quantized_output = torch.ops.vllm.quantize(out0, scale,
+                                                       scale_reciprocal,
+                                                       offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -122,14 +132,13 @@ class AddRMSNormQuantPatternWithBias:
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input,
-                residual,
-                rms_norm_weight,
-                scale,
-                offset,
-                epsilon=self.eps,
-                beta=bias)
+            output = torch.ops.npu.npu_add_rms_norm_quant(rms_norm_input,
+                                                          residual,
+                                                          rms_norm_weight,
+                                                          scale,
+                                                          offset,
+                                                          epsilon=self.eps,
+                                                          beta=bias)
             quantized_output = output[0]
             out1 = output[2]
             return quantized_output, out1
@@ -155,7 +164,10 @@ class AddRMSNormQuantSPPattern:
         scale = torch.ones(4, device="npu", dtype=self.dtype)
         scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
         offset = torch.zeros(4, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset]
+        return [
+            rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal,
+            offset
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -170,7 +182,9 @@ class AddRMSNormQuantSPPattern:
             out0 = output[0]
             out1 = output[2]
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
+            quantized_output = torch.ops.vllm.quantize(out0, scale,
+                                                       scale_reciprocal,
+                                                       offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -179,13 +193,12 @@ class AddRMSNormQuantSPPattern:
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input,
-                residual,
-                rms_norm_weight,
-                scale,
-                offset,
-                epsilon=self.eps)
+            output = torch.ops.npu.npu_add_rms_norm_quant(rms_norm_input,
+                                                          residual,
+                                                          rms_norm_weight,
+                                                          scale,
+                                                          offset,
+                                                          epsilon=self.eps)
             quantized_output = output[0]
             out1 = output[2]
             quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -214,7 +227,10 @@ class AddRMSNormQuantSPPatternWithBias:
         scale = torch.ones(4, device="npu", dtype=self.dtype)
         scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
         offset = torch.zeros(4, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal, offset, rmsnorm_bias]
+        return [
+            rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal,
+            offset, rmsnorm_bias
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -231,7 +247,9 @@ class AddRMSNormQuantSPPatternWithBias:
             out1 = output[2]
             out0 = out0 + bias
             out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-            quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
+            quantized_output = torch.ops.vllm.quantize(out0, scale,
+                                                       scale_reciprocal,
+                                                       offset)
             return quantized_output, out1
 
         def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
@@ -241,14 +259,13 @@ class AddRMSNormQuantSPPatternWithBias:
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input,
-                residual,
-                rms_norm_weight,
-                scale,
-                offset,
-                epsilon=self.eps,
-                beta=bias)
+            output = torch.ops.npu.npu_add_rms_norm_quant(rms_norm_input,
+                                                          residual,
+                                                          rms_norm_weight,
+                                                          scale,
+                                                          offset,
+                                                          epsilon=self.eps,
+                                                          beta=bias)
             quantized_output = output[0]
             out1 = output[2]
             quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(

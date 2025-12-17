@@ -282,20 +282,18 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
     return output
 
 
-def _quantize_impl(in_tensor: torch.Tensor,
-                    input_scale: torch.Tensor,
-                    input_scale_reciprocal: torch.Tensor,
-                    input_offset: torch.Tensor) -> torch.Tensor:
-    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal, input_offset,
-                                  torch.qint8, -1, False)
+def _quantize_impl(in_tensor: torch.Tensor, input_scale: torch.Tensor,
+                   input_scale_reciprocal: torch.Tensor,
+                   input_offset: torch.Tensor) -> torch.Tensor:
+    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
+                                  input_offset, torch.qint8, -1, False)
 
 
-def _quantize_impl_fake(in_tensor: torch.Tensor,
-                    input_scale: torch.Tensor,
-                    input_scale_reciprocal: torch.Tensor,
-                    input_offset: torch.Tensor) -> torch.Tensor:
-    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal, input_offset,
-                                  torch.qint8, -1, False)
+def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
+                        input_scale_reciprocal: torch.Tensor,
+                        input_offset: torch.Tensor) -> torch.Tensor:
+    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
+                                  input_offset, torch.qint8, -1, False)
 
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
