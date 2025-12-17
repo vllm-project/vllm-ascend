@@ -904,20 +904,16 @@ class MooncakeLayerwiseConnectorWorker:
         self,
         req_id: str,
         meta: ReqMeta,
-    ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+    ) -> tuple[list[list[int]], list[list[int]]]:
         """
         In cp/dcp scenario, kv_cache may be split, so we need to pull multiple blocks from multiple remote P node.
         Use this function to calculate remote port and remote block number of each remote P node that we need to pull.
         """
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
-            choosen_rank_list = self._get_remote_tp_rank(req_id)
-            remote_handshake_port_list = [[
-                x + meta.remote_port for x in choosen_rank_list
-            ]]
             local_block_ids_list, remote_block_ids_list = [
                 meta.local_block_ids
             ], [meta.remote_block_ids]
-            return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+            return local_block_ids_list, remote_block_ids_list
 
         ## TODO: add context_parallel_parameters_check
         
@@ -1028,19 +1024,8 @@ class MooncakeLayerwiseConnectorWorker:
             final_block_num = local_block_nums.pop(final_block_idx)
             local_block_nums.append(final_block_num)
 
-        remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = [], [], []
+        local_block_ids_list, remote_block_ids_list = [], []
         remote_block_offset = 0
-        local_remote_block_port_mapping = local_remote_block_port_mappings[self.handshake_port]
-        for idx in range(len(local_remote_block_port_mapping[0])):
-            mapping_list = []
-            for mapping in local_remote_block_port_mapping:
-                mapping_list.append(mapping[idx])
-            remote_handshake_port_list.append(mapping_list)
-
-        # the local_block_ids_list and remote_block_ids_list are related with remote_handshake_port_list
-        # such as: local_block_ids_list[[1],[2],[5],[6]], remote_block_ids_list[[1],[1],[1],[1]],
-        # remote_handshake_port_list[[30000],[30001],[30004],[30005]]
-        # D rank will get remote block 1 in port 30004 and save it in local block 5
         cp_size = self.pcp_size * self.dcp_size
         for local_kv_id in range(cp_size):
             num_blocks_to_push = local_block_nums[local_kv_id]
@@ -1051,7 +1036,7 @@ class MooncakeLayerwiseConnectorWorker:
                 num_blocks_to_push])
             remote_block_offset += num_blocks_to_push
 
-        return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+        return local_block_ids_list, remote_block_ids_list
 
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Start loading KV blocks from remote engine."""
@@ -1159,7 +1144,7 @@ class MooncakeLayerwiseConnectorWorker:
                     f"Add request {req_id} to kv send layer thread. {req_meta_update=}"
                 )
                 assert self.kv_send_layer_thread is not None
-                remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
+                local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
                 req_id, req_meta_update)
                 for pcp_dcp_rank in range(len(local_block_ids_list)):
                     req_meta_for_queue = copy.copy(req_meta_update)
