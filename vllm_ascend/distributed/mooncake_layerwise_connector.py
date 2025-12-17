@@ -1161,7 +1161,7 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_send_layer_thread is not None
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
                 req_id, req_meta_update)
-                for pcp_dcp_rank in range(len(remote_handshake_port_list)):
+                for pcp_dcp_rank in range(len(local_block_ids_list)):
                     req_meta_for_queue = copy.copy(req_meta_update)
                     req_meta_for_queue.local_block_ids = local_block_ids_list[pcp_dcp_rank]
                     req_meta_for_queue.remote_block_ids = remote_block_ids_list[pcp_dcp_rank]
