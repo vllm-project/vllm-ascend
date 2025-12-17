@@ -1,8 +1,8 @@
 from contextlib import contextmanager
 
 import torch
-from vllm.v1.worker.gpu.states import RequestState, UvaBuffer
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.states import RequestState, UvaBuffer
 
 
 class AscendRequestState(RequestState):

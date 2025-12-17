@@ -236,8 +236,8 @@ class NPUWorker(WorkerBase):
             logger.error(
                 "npu model runner v2 is in developing, it can't work well for now."
             )
-            from vllm_ascend.worker.v2.model_runner import (NPUModelRunner as
-                                                            NPUModelRunnerV2)
+            from vllm_ascend.worker.v2.model_runner import \
+                NPUModelRunner as NPUModelRunnerV2
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
