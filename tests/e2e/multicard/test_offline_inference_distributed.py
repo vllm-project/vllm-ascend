@@ -107,7 +107,7 @@ def test_sp_for_qwen3_moe() -> None:
 
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "2048"})
 def test_models_distributed_DeepSeek_W4A8ACC(model):
     prompts = [
         "Hello, my name is", "The president of the United States is",
@@ -121,7 +121,6 @@ def test_models_distributed_DeepSeek_W4A8ACC(model):
                     dtype="auto",
                     tensor_parallel_size=2,
                     quantization="ascend",
-                    enforce_eager=True,
                     enable_expert_parallel=True) as vllm_model:
         vllm_quant_outputs = vllm_model.model.generate(prompts,
                                                        sampling_params)
