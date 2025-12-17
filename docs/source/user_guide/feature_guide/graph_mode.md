@@ -14,7 +14,6 @@ There are two kinds for graph mode supported by vLLM Ascend:
 - **ACLGraph**: This is the default graph mode supported by vLLM Ascend.
 - **TorchAirGraph**: This is the GE graph mode. In v0.11.0, only DeepSeek series models are supported.
 
-
 :::{note}
 ACLGraph improves the performance of all the models by default, TorchAirGraph will be dropped in next version, and v0.11.0 will be the last stable version that support TorchAirGraph.
 :::
