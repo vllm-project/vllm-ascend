@@ -48,7 +48,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # If not set, we will query chip info through `npu-smi`.
     # Please make sure that the version is correct.
     "SOC_VERSION":
-    lambda: os.getenv("SOC_VERSION", None),
+    lambda: os.getenv("SOC_VERSION", "ascend910b1"),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),

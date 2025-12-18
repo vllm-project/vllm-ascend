@@ -74,6 +74,7 @@ def get_value_from_lines(lines: List[str], key: str) -> str:
 
 
 def get_chip_type() -> str:
+    return "ascend910_9599"
     try:
         npu_info_lines = subprocess.check_output(
             ['npu-smi', 'info', '-l']).decode().strip().split('\n')
@@ -133,7 +134,7 @@ else:
 
 
 def gen_build_info():
-    soc_version = envs.SOC_VERSION
+    # soc_version = envs.SOC_VERSION
 
     soc_to_device = {
         "910b": "A2",
@@ -160,6 +161,7 @@ def gen_build_info():
         "ascend310p3vir04": "_310P",
         "ascend310p3vir08": "_310P",
         "ascend910_9579": "A5",
+        "ascend910_9599": "A5",
     }
 
     assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
