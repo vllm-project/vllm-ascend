@@ -28,8 +28,8 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from tests.e2e.singlecard.compile.backend import TestBackend
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import \
     AddRMSNormQuantFusionPass
 
@@ -305,22 +305,21 @@ def test_rmsnorm_quant_fusion(
 
     vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
 
-    update_environment_variables(
-        {
-            "RANK": "0",
-            "LOCAL_RANK": "0",
-            "WORLD_SIZE": "1",
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12345",
-        }
-    )
+    update_environment_variables({
+        "RANK": "0",
+        "LOCAL_RANK": "0",
+        "WORLD_SIZE": "1",
+        "MASTER_ADDR": "localhost",
+        "MASTER_PORT": "12345",
+    })
     init_distributed_environment()
     ensure_model_parallel_initialized(1, 1)
 
     with vllm.config.set_current_vllm_config(vllm_config):
         with set_ascend_forward_context(None, vllm_config):
-            backend = TestBackend(
-                custom_passes=[AddRMSNormQuantFusionPass(vllm_config=vllm_config)])
+            backend = TestBackend(custom_passes=[
+                AddRMSNormQuantFusionPass(vllm_config=vllm_config)
+            ])
             if use_bias:
                 if sp_enable:
                     model = TestModelSPWithBias(hidden_size,
@@ -329,27 +328,27 @@ def test_rmsnorm_quant_fusion(
                                                 device="npu")
                 else:
                     model = TestModelWithBias(hidden_size,
-                                            dtype,
-                                            eps,
-                                            device="npu")
+                                              dtype,
+                                              eps,
+                                              device="npu")
             else:
                 if sp_enable:
                     model = TestModelSPWithoutBias(hidden_size,
-                                                dtype,
-                                                eps,
-                                                device="npu")
+                                                   dtype,
+                                                   eps,
+                                                   device="npu")
                 else:
                     model = TestModelWithoutBias(hidden_size,
-                                                dtype,
-                                                eps,
-                                                device="npu")
+                                                 dtype,
+                                                 eps,
+                                                 device="npu")
             model = model.to("npu")
 
             x = torch.rand(num_tokens,
-                        hidden_size,
-                        device="npu",
-                        dtype=dtype,
-                        requires_grad=False)
+                           hidden_size,
+                           device="npu",
+                           dtype=dtype,
+                           requires_grad=False)
 
             result_unfused = model(x)
             print("Unfused result:", [t.shape for t in result_unfused])
@@ -358,5 +357,6 @@ def test_rmsnorm_quant_fusion(
             print("Fused result:", [t.shape for t in result_fused])
 
             print("=== Checking operator fusion ===")
-            backend.check_before_ops(model.ops_in_model_before(), fully_replaced=not sp_enable)
+            backend.check_before_ops(model.ops_in_model_before(),
+                                     fully_replaced=not sp_enable)
             backend.check_after_ops(model.ops_in_model_after())
