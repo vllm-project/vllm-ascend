@@ -1,4 +1,35 @@
 # Release Notes
+## v0.11.0 - 2025.12.16
+We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the official release for v0.11.0. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev) to get started. We'll consider to release post version in the future if needed. This release note will only contain the important change and note from v0.11.0rc3.
+
+### Highlights
+- Improved the performance for deepseek 3/3.1. [#3995](https://github.com/vllm-project/vllm-ascend/pull/3995)
+- Fixed the accuracy bug for qwen3-vl. [#4811](https://github.com/vllm-project/vllm-ascend/pull/4811)
+- Improved the performance of sample. [#4153](https://github.com/vllm-project/vllm-ascend/pull/4153)
+- Eagle3 is back now. [#4721](https://github.com/vllm-project/vllm-ascend/pull/4721)
+
+### Other
+- Improved the performance for kimi-k2.  [#4555](https://github.com/vllm-project/vllm-ascend/pull/4555)
+- Fixed a quantization bug for deepseek3.2-exp. [#4797](https://github.com/vllm-project/vllm-ascend/pull/4797)
+- Fixed qwen3-vl-moe bug under high concurrency. [#4658](https://github.com/vllm-project/vllm-ascend/pull/4658)
+- Fixed an accuracy bug for Prefill Decode disaggregation case. [#4437](https://github.com/vllm-project/vllm-ascend/pull/4437)
+- Fixed some bugs for EPLB [#4576](https://github.com/vllm-project/vllm-ascend/pull/4576) [#4777](https://github.com/vllm-project/vllm-ascend/pull/4777)
+- Fixed the version incompatibility issue for openEuler docker image. [#4745](https://github.com/vllm-project/vllm-ascend/pull/4745)
+
+### Deprecation announcement
+- LLMdatadist connector has been deprecated, it'll be removed in v0.12.0rc1
+- Torchair graph has been deprecated, it'll be removed in v0.12.0rc1
+- Ascend scheduler has been deprecated, it'll be removed in v0.12.0rc1
+
+### Upgrade notice
+- torch-npu is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
+- CANN is upgraded to 8.3.rc2.
+
+### Known Issues
+- Qwen3-Next doesn't support expert parallel and MTP features in this release. And it'll be oom if the input is too long. We'll improve it in the next release
+- Deepseek 3.2 only work with torchair graph mode in this release. We'll make it work with aclgraph mode in the next release.
+- Qwen2-audio doesn't work by default. Temporary solution is to set `--gpu-memory-utilization` to a suitable value, such as 0.8.
+- CPU bind feature doesn't work if more than one vLLM instance is running on the same node.
 
 ## v0.12.0rc1 - 2025.12.13
 
