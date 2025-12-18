@@ -460,6 +460,29 @@ def rejection_random_sample_pytorch(
     vocab_size,
     IS_NGRAM=False,
 ):
+    """
+    This function implements the Speculative Decoding rejection sampling step.
+    Instead of looping through each request and each token (which causes high 
+    overhead), it uses a fully vectorized approach:
+    
+    1.  **Index Mapping**: Converts the flattened 1D token arrays into a 2D 
+        [batch_size, max_draft_len] grid using 'cu_num_draft_tokens' to handle 
+        variable-length sequences in the batch.
+    2.  **Parallel Validation**: Calculates the acceptance condition 
+        (target_prob / draft_prob >= uniform_sample) for ALL draft tokens 
+        simultaneously across the entire batch.
+    3.  **Short-circuit Simulation**: In the loop version, once a token is rejected, 
+        subsequent tokens are ignored. Here, we simulate this by finding the 
+        'first_reject_pos' using argmax on the rejection mask and creating a 
+        'should_skip' mask for all indices after the first failure.
+    4.  **Token Selection**: Uses 'torch.where' to select:
+        - Draft tokens (if accepted)
+        - Recovered tokens (at the point of first rejection)
+        - Bonus tokens (if all tokens in a sequence were accepted)
+    5.  **Masking**: Ensures operations only apply to non-greedy requests and 
+        within valid sequence lengths.
+    """
+
     batch_size = output_token_ids.shape[0]
     device = output_token_ids.device
 
@@ -569,7 +592,20 @@ def expand_pytorch(
     replace_to,
     MAX_NUM_TOKENS,
 ):
-    # no loop optimization version
+    """
+    This function broadcasts batch-level values (input_ptr) to token-level 
+    positions (output_ptr) based on cumulative token offsets. It acts like 
+    a "scatter" or "repeat_interleave" operation but with custom logic:
+    
+    1.  **Range Broadcasting**: It creates a boolean matrix 'in_range' of size 
+        [num_tokens, batch_size] that identifies which batch index each token 
+        belongs to by checking if the token index falls between cu_start and cu_end.
+    2.  **Conditional Replacement**: Before expansion, it replaces specific values 
+        (e.g., padding or special markers) in the input to prepare the data.
+    3.  **Matrix-based Mapping**: It uses 'torch.einsum' to perform a weighted 
+        sum that effectively "picks" the correct batch value for every token position 
+        simultaneously, avoiding a Python loop over the batch.
+    """
     device = cu_num_tokens_ptr.device
     batch_size = input_ptr.shape[0]
     num_tokens = output_ptr.shape[0]
@@ -610,6 +646,24 @@ def sample_recovered_tokens_pytorch(
     vocab_size,
     IS_NGRAM=False,
 ):
+    """
+    When a draft token is rejected, we must sample a "recovered" token from 
+    a modified distribution. This function calculates that distribution across 
+    the entire flattened batch.
+    
+    1.  **Token-to-Batch Mapping**: Using the cumulative draft token counts, it 
+        determines which request in the batch each token belongs to. This is 
+        necessary because 'q' (normalization factor) is stored per-request.
+    2.  **Probability Adjustment**: 
+        - If N-GRAM: It zeroes out the draft token's probability in the target.
+        - If Probabilistic: It calculates max(0, target_probs - draft_probs) 
+          as per the standard speculative decoding algorithm.
+    3.  **Normalization & Sampling**: It divides the adjusted probabilities 
+        by the normalization distribution 'q'. To remain vectorized, it 
+        broadcasts 'q' from [batch_size, vocab] to [num_tokens, vocab].
+    4.  **Argmax Selection**: It selects the best recovery token for every 
+        position in one pass using torch.argmax.
+    """
     device = output_token_ids.device
     num_tokens = output_token_ids.shape[0]
 
