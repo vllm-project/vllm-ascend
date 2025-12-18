@@ -661,17 +661,14 @@ def rejection_greedy_sample_triton(
         num_tokens1 = tl.get_element(num_draft_tokens, (pos, ))
         rejected = False
         start_idx1 = tl.get_element(start_idx, (pos, ))
-        is_greedy_mask1 = tl.get_element(is_greedy_mask, (pos,))
+        is_greedy_mask1 = tl.get_element(is_greedy_mask, (pos, ))
         position = block_idx * BLOCK_SIZE + pos
         for i in range(num_tokens1):
             if not rejected:
-                draft_token_id = tl.load(draft_token_ids_ptr + start_idx1 +
-                                            i)
-                target_argmax_id = tl.load(target_argmax_ptr + start_idx1 +
-                                            i)
+                draft_token_id = tl.load(draft_token_ids_ptr + start_idx1 + i)
+                target_argmax_id = tl.load(target_argmax_ptr + start_idx1 + i)
                 tl.store(
-                    output_token_ids_ptr + position * (max_spec_len + 1) +
-                    i,
+                    output_token_ids_ptr + position * (max_spec_len + 1) + i,
                     target_argmax_id,
                 )
                 if draft_token_id != target_argmax_id:
