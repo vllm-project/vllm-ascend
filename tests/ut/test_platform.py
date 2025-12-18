@@ -445,7 +445,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(
             vllm_config.parallel_config.worker_cls,
-            "vllm_ascend.worker.worker_v1.NPUWorker",
+            "vllm_ascend.worker.worker.NPUWorker",
         )
 
         test_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()

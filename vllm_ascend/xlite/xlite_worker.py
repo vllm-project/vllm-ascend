@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from vllm_ascend.worker.worker_v1 import NPUWorker
+from vllm_ascend.worker.worker import NPUWorker
 from vllm_ascend.xlite.xlite_model_runner import XliteModelRunner
 
 
