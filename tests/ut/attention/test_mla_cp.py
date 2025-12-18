@@ -1049,7 +1049,7 @@ class TestAscendMLAImpl(TestBase):
                     [chunk_seqlens, chunk_seqlens], dtype=torch.int32)
                 attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens = kv_with_q_head_nomask_seqlens
                 attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens = kv_with_q_tail_nomask_seqlens
-                attn_metadata.prefill.pcp_metadata.pcp_prefill_mask = torch.triu(
+                attn_metadata.attn_mask = torch.triu(
                     torch.ones(10, 10, dtype=torch.float16), 1)
 
                 output = self.impl._forward_prefill_cp(q_nope, q_pe, k_nope,

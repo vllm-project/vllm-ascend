@@ -167,7 +167,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 tail_attn_nomask_seqlens=long_seq_metadata.
                 tail_attn_nomask_seqlens,
                 q_full_idx=long_seq_metadata.q_full_idx,
-                pcp_prefill_mask=long_seq_metadata.pcp_prefill_mask,
                 pcp_allgather_restore_idx=long_seq_metadata.
                 pcp_allgather_restore_idx)
 
@@ -378,7 +377,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                     seq_lens=seq_lens,
                     seq_lens_list=seq_lens_list,
                     max_seq_lens=max_seq_lens,
-                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    attn_mask=common_attn_metadata.attn_mask,
                     actual_seq_lengths_q=actual_seq_lengths_q,
                     sin=sin,
                     cos=cos,
@@ -398,7 +397,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                     seq_lens=seq_lens,
                     seq_lens_list=seq_lens_list,
                     max_seq_lens=max_seq_lens,
-                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    attn_mask=common_attn_metadata.attn_mask,
                     actual_seq_lengths_q=actual_seq_lengths_q,
                     sin=sin[:num_decode_tokens, ...],
                     cos=cos[:num_decode_tokens, ...],
@@ -916,7 +915,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
-        mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
+        mask = attn_metadata.attn_mask
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
