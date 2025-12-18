@@ -566,8 +566,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 and isinstance(self.layer.quant_method.quant_method,
                                AscendW8A8LinearMethod)):
             if x.dtype != torch.int8:
-                x_quant = quant_per_tensor(
-                    x, self.layer.aclnn_input_scale_reciprocal,
+                x_quant = torch.ops.vllm.quantize(
+                    x,
+                    self.layer.aclnn_input_scale,
+                    self.layer.aclnn_input_scale_reciprocal,
                     self.layer.aclnn_input_offset)
             else:
                 x_quant = x

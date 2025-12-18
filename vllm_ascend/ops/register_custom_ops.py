@@ -282,6 +282,12 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
     return output
 
 
+# TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
+# is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
+# aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
+# pass input_scale and input_scale_reciprocal at the same time to avoid redundant
+# reciprocal caculation in fussion pass. We shall remove this once
+# aclnnAddRmsNormQuantV2 supports div_moe=False.
 def _quantize_impl(in_tensor: torch.Tensor, input_scale: torch.Tensor,
                    input_scale_reciprocal: torch.Tensor,
                    input_offset: torch.Tensor) -> torch.Tensor:
