@@ -30,17 +30,16 @@ from vllm_ascend.utils import vllm_version_is
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = [
-    "vllm-ascend/Qwen3-30B-A3B-W8A8",
-    "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]
 
 SETTINGS = {
-    "vllm-ascend/Qwen3-30B-A3B-W8A8":{
+    "vllm-ascend/Qwen3-30B-A3B-W8A8": {
         "TP": 8,
         "PCP": 1,
         "DCP": 2
     },
-    "deepseek-ai/DeepSeek-V2-Lite-Chat":{
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": {
         "TP": 2,
         "PCP": 2,
         "DCP": 2
@@ -97,15 +96,15 @@ INPUT_PROMPTS = [
 @pytest.mark.parametrize("max_tokens", [50])
 def test_models_prefix_cache_with_cp_basic(model: str,
                                            max_tokens: int) -> None:
-    with VllmRunner(model,
-                    max_model_len=2048,
-                    enforce_eager=True,
-                    max_num_batched_tokens=128,
-                    gpu_memory_utilization=0.7,
-                    tensor_parallel_size=SETTINGS[model]['TP'],
-                    prefill_context_parallel_size=SETTINGS[model]['PCP'],
-                    decode_context_parallel_size=SETTINGS[model]['DCP']
-                    ) as vllm_model:
+    with VllmRunner(
+            model,
+            max_model_len=2048,
+            enforce_eager=True,
+            max_num_batched_tokens=128,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=SETTINGS[model]['TP'],
+            prefill_context_parallel_size=SETTINGS[model]['PCP'],
+            decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
         vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
 
@@ -115,15 +114,15 @@ def test_models_prefix_cache_with_cp_basic(model: str,
 @pytest.mark.parametrize("max_tokens", [50])
 def test_models_prefix_cache_with_cp_piece_wise(model: str,
                                                 max_tokens: int) -> None:
-    with VllmRunner(model,
-                    max_model_len=2048,
-                    enforce_eager=False,
-                    max_num_batched_tokens=128,
-                    gpu_memory_utilization=0.7,
-                    tensor_parallel_size=SETTINGS[model]['TP'],
-                    prefill_context_parallel_size=SETTINGS[model]['PCP'],
-                    decode_context_parallel_size=SETTINGS[model]['DCP']
-                    ) as vllm_model:
+    with VllmRunner(
+            model,
+            max_model_len=2048,
+            enforce_eager=False,
+            max_num_batched_tokens=128,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=SETTINGS[model]['TP'],
+            prefill_context_parallel_size=SETTINGS[model]['PCP'],
+            decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
         vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
 
@@ -142,7 +141,7 @@ def test_models_prefix_cache_with_cp_full_graph(model: str,
                     prefill_context_parallel_size=SETTINGS[model]['PCP'],
                     decode_context_parallel_size=SETTINGS[model]['DCP'],
                     compilation_config={
-                        "cudagraph_capture_sizes":[4, 8, 24, 48, 60],
-                        "cudagraph_mode":"FULL"
+                        "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
+                        "cudagraph_mode": "FULL"
                     }) as vllm_model:
         vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
