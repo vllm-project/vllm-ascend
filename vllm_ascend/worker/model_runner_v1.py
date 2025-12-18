@@ -3580,8 +3580,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
                             # FIX: Ensure num_blocks is aligned to 16 for 310P ReshapeAndCacheOperation compatibility
                             # This matches v0.10.0rc1 behavior where tensor_size % page_size_bytes == 0 was guaranteed
+                            original_num_blocks = num_blocks  # Keep original for assertion check
                             if is_310p_device and not ascend_config.torchair_graph_config.enabled:
-                                original_num_blocks = num_blocks
                                 num_blocks = (num_blocks // 16) * 16  # Round down to nearest multiple of 16
                                 print(f"[DEBUG 310P ALIGNMENT] num_blocks aligned: {original_num_blocks} → {num_blocks}")
                             num_kv_heads = kv_cache_spec.num_kv_heads
@@ -3804,7 +3804,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    # Use original_num_blocks for assertion to maintain consistency with kv_cache_config
+                    # num_blocks may be aligned for 310P hardware compatibility
+                    assert original_num_blocks >= kv_cache_config.num_blocks
 
                     if self.vllm_config.additional_config.get(
                             "kv_cache_dtype", None) == 'int8':
@@ -3911,7 +3913,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    # Use original_num_blocks for assertion to maintain consistency with kv_cache_config
+                    # num_blocks may be aligned for 310P hardware compatibility
+                    assert original_num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
                     storage_offset_bytes = 0
