@@ -27,7 +27,7 @@ class QwenMoeAdaptor(VllmEplbAdaptor):
 
     @staticmethod
     def model_register(model, model_config):
-        super().model_register(model)
+        VllmEplbAdaptor.model_register(model)
         config = model_config.hf_config
         model.num_dense_layers = 0
         model.num_moe_layers = config.num_hidden_layers

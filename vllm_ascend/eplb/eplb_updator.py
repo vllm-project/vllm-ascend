@@ -22,11 +22,10 @@ import vllm.envs as envs
 from vllm.logger import logger
 
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
+from vllm_ascend.eplb.core.eplb_utils import (EPLBParamUtils,
+                                              moe_load_async_stream)
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.eplb.core.eplb_utils import moe_load_async_stream
 from vllm_ascend.utils import npu_stream_switch
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
 
 class EplbUpdator:

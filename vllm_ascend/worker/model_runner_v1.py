@@ -2203,7 +2203,8 @@ class NPUModelRunner(GPUModelRunner):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
-            self.eplb_adaptor = self.eplb_adaptor_cls(self.model)
+            self.eplb_adaptor = EplbAdaptorFactory.get_eplb_adapator(
+                vllm_config=self.vllm_config)(self.model)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
@@ -2214,8 +2215,6 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                self.eplb_adaptor_cls = EplbAdaptorFactory.get_eplb_adapator(
-                    vllm_config=self.vllm_config)
                 VllmEplbAdaptor.model_register(self.model)
             if get_ascend_device_type() == AscendDeviceType._310P:
                 from vllm.model_executor.layers.linear import (
