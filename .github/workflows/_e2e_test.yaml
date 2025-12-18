@@ -202,7 +202,9 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_weight_load.py
-
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_chunked_prefill_cp.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_prefix_caching_cp.py
+          
   e2e-4-cards:
     name: multicard-4
     needs: [e2e, e2e-2-cards]
