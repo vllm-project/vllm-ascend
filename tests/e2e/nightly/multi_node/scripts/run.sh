@@ -131,7 +131,7 @@ upgrade_vllm_ascend_scr() {
     # This results in the nightly test code not being the latest version.
     cd "$WORKSPACE/vllm-ascend"
     git pull origin main
-    
+    pip install -e .
 }
 
 run_tests_with_log() {
