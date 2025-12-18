@@ -28,7 +28,7 @@ ENV SOC_VERSION=$SOC_VERSION \
     
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev && \
+    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
@@ -60,5 +60,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
+
+RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 
 CMD ["/bin/bash"]

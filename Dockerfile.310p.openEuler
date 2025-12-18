@@ -25,7 +25,7 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel jemalloc && \
     rm -rf /var/cache/yum
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
@@ -56,5 +56,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
+
+RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 
 CMD ["/bin/bash"]
