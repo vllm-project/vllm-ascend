@@ -43,8 +43,7 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.FUSED_ALLTOALL] = FusedAlltoAllCommImpl(
-        moe_config)
+    _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
 
 
 class MoECommMethod(ABC):
@@ -241,30 +240,27 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
-class FusedAlltoAllCommImpl(MoECommMethod):
+class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
-    2. `npu_grouped_matmul` is available.
-
-    This implementation uses all-to-all communication to exchange tokens
-    between data parallel ranks before and after the MLP computation. It should
-    have better performance than AllGatherCommImpl when DP size > 1.
+    2. `npu_moe_distribute_dispatch` and `npu_moe_distribute_combine` are available.
+    3. `enable_expert_parallel=False` is not supported.
+    
+    This implementation uses the MC2 communication method, which is optimized for
+    Communication and Computation parallelism on Ascend devices.
     """
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithAll2AllV(
-            top_k=self.moe_config.experts_per_token,
-            num_experts=self.moe_config.num_experts,
-            num_local_experts=self.moe_config.num_local_experts)
+        return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAll2All(self.moe_config)
+        return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def fused_experts(
             self,
             hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
+            w1: torch.Tensor | list[torch.Tensor],
+            w2: torch.Tensor | list[torch.Tensor],
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
             activation: str = "silu",
@@ -274,8 +270,8 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             use_int4_w4a16: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[torch.Tensor] = None,
-            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale: Optional[list[torch.Tensor]] = None,
+            w2_scale: Optional[list[torch.Tensor]] = None,
             w1_scale_bias: torch.Tensor = None,
             w2_scale_bias: torch.Tensor = None,
             w1_offset: Optional[torch.Tensor] = None,
@@ -291,6 +287,9 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
             pertoken_scale: Optional[torch.Tensor] = None):
+        assert not (
+            w1_scale is None or w2_scale is None
+        ), "w1_scale and w2_scale cannot be None for the Op `dispatch_ffn_combine`."
         out = torch.empty_like(hidden_states)
 
         torch.ops._C_ascend.dispatch_ffn_combine(
