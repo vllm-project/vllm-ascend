@@ -21,7 +21,7 @@ import math
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
@@ -189,7 +189,6 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
-    kv_connector_output: KVConnectorOutput | None
     attn_metadata: dict[str, Any]
     positions: torch.Tensor
 
@@ -1009,22 +1008,20 @@ class NPUModelRunner(GPUModelRunner):
 
             # TODO: We should make this official ASAP. Also note that if we pad here,
             # the builders won’t need to add any extra padding.
+            max_decode_tokens = self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
             if self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                uniform_decode and num_input_tokens <= self.cudagraph_batch_sizes[-1]:
+                uniform_decode and self.uniform_decode_query_len <= num_input_tokens <= max_decode_tokens:
                 num_reqs_padded = num_input_tokens // self.uniform_decode_query_len
                 pad_size = num_reqs_padded - num_reqs
                 if pad_size > 0:
-                    last_query_loc = self.query_start_loc.gpu[num_reqs]
+                    last_query_loc = self.query_start_loc.np[num_reqs]
 
-                    steps = torch.arange(1,
-                                         pad_size + 1,
-                                         device=self.device,
-                                         dtype=self.query_start_loc.gpu.dtype)
-                    fill_values = last_query_loc + (
-                        steps * self.uniform_decode_query_len)
+                    self.query_start_loc.np[
+                        num_reqs + 1:num_reqs_padded + 1] = self.arange_np[
+                            1:pad_size +
+                            1] * self.uniform_decode_query_len + last_query_loc
+                    self.query_start_loc.copy_to_gpu(num_reqs_padded + 1)
 
-                    self.query_start_loc.gpu[num_reqs + 1:num_reqs_padded +
-                                             1] = fill_values
                 # So we are trying to simulate the behavior of GPUModelRunner's
                 # prepare_inputs for uniform decode mode by padding query_start_loc
                 num_reqs = num_reqs_padded
@@ -1453,6 +1450,7 @@ class NPUModelRunner(GPUModelRunner):
                 # For mid-pipeline stages, return the hidden states.
                 if not broadcast_pp_output:
                     hidden_states.kv_connector_output = kv_connector_output
+                    self.kv_connector_output = kv_connector_output
                     if need_dump:
                         assert self.debugger is not None
                         self.debugger.stop()
@@ -1499,19 +1497,32 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states,
                 sample_hidden_states,
                 aux_hidden_states,
-                kv_connector_output,
                 attn_metadata,
                 positions,
             )
+            self.kv_connector_output = kv_connector_output
         return None
 
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
+
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
-            return None  # noqa
+            if not kv_connector_output:
+                return None  # noqa
+            # In case of PP with kv transfer, we need to pass through the
+            # kv_connector_output
+            if kv_connector_output.is_empty():
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
+
         need_dump = self.dump_enable and self.debugger is not None
         # Unpack ephemeral state.
         (
@@ -1520,8 +1531,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             hidden_states,
             sample_hidden_states,
-            aux_hidden_states,  # noqa
-            kv_connector_output,
+            aux_hidden_states,
             attn_metadata,
             positions,
         ) = self.execute_model_state
@@ -3076,7 +3086,7 @@ class NPUModelRunner(GPUModelRunner):
             (2 * self.pcp_size)).astype(np.int32) * (2 * self.pcp_size)
         num_padded_scheduled_tokens[:num_decode_reqs] = (
             tokens[:num_decode_reqs] * self.pcp_size)
-        self.num_pcp_pads = num_padded_scheduled_tokens - tokens
+        self.num_pcp_pads = torch.tensor(num_padded_scheduled_tokens - tokens)
         cu_padded_tokens, pcp_padded_arange = \
             self._get_cumsum_and_arange(num_padded_scheduled_tokens)
         unpad_mask = torch.from_numpy(
