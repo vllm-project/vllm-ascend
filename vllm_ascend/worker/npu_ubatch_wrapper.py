@@ -91,8 +91,10 @@ class UBatchWrapper:
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.npu.Stream(device=device)
-        # Two ubatch threads plus the main thread
-        self.ready_barrier = threading.Barrier(3)
+        # Ubatch threads plus the main thread
+        self.ready_barrier = threading.Barrier(
+            self.vllm_config.parallel_config.num_ubatches + 1
+        )
 
         self.aclgraphs: dict[int, ACLGraphMetaData] = {}
 
@@ -275,9 +277,7 @@ class UBatchWrapper:
             forward_context.cudagraph_runtime_mode = aclgraph_runtime_mode
             forward_context.batch_descriptor = batch_descriptor
             forward_context.afd_metadata = afd_metadata
-            forward_contexts.append(
-                forward_context
-                    )
+            forward_contexts.append(forward_context)
 
         ubatch_ctxs = make_ubatch_contexts(
             num_micro_batches=len(ubatch_slices),
