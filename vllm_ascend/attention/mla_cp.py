@@ -1166,7 +1166,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_output: torch.Tensor,
         softmax_lse: torch.Tensor,
         decode_meta: AscendMLADecodeMetadata,
-    ) -> List[torch.Tensor]:
+    ) -> torch.Tensor:
         out_mask = decode_meta.batch_seq_mask[:, None,
                                               None].expand_as(attn_output)
         attn_output = torch.where(out_mask, 0, attn_output)
