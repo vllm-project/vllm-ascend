@@ -21,7 +21,7 @@ import math
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
@@ -189,7 +189,6 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
-    kv_connector_output: KVConnectorOutput | None
     attn_metadata: dict[str, Any]
     positions: torch.Tensor
 
@@ -312,8 +311,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_aclgraph = self._use_aclgraph()
 
-        # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
-        self.in_profile_run = False
         self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
         if self.dynamic_eplb:
             EPLBParamUtils.check_dynamic_eplb(self.ascend_config.dynamic_eplb)
@@ -432,7 +429,7 @@ class NPUModelRunner(GPUModelRunner):
         # To ensure skipping all_reduce across dp group is valid, we need to ensure that
         # moe_comm_method of each rank is MC2 and recomputation would never happen in D
         # nodes. So here we check whether recompute_scheduler_enable is True.
-        return self.is_kv_consumer and not self.in_profile_run and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
+        return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
             potential_max_num_tokens, self.vllm_config) == MoECommType.MC2
 
     def _sync_metadata_across_dp(
@@ -1016,17 +1013,14 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = num_input_tokens // self.uniform_decode_query_len
                 pad_size = num_reqs_padded - num_reqs
                 if pad_size > 0:
-                    last_query_loc = self.query_start_loc.gpu[num_reqs]
+                    last_query_loc = self.query_start_loc.np[num_reqs]
 
-                    steps = torch.arange(1,
-                                         pad_size + 1,
-                                         device=self.device,
-                                         dtype=self.query_start_loc.gpu.dtype)
-                    fill_values = last_query_loc + (
-                        steps * self.uniform_decode_query_len)
+                    self.query_start_loc.np[
+                        num_reqs + 1:num_reqs_padded + 1] = self.arange_np[
+                            1:pad_size +
+                            1] * self.uniform_decode_query_len + last_query_loc
+                    self.query_start_loc.copy_to_gpu(num_reqs_padded + 1)
 
-                    self.query_start_loc.gpu[num_reqs + 1:num_reqs_padded +
-                                             1] = fill_values
                 # So we are trying to simulate the behavior of GPUModelRunner's
                 # prepare_inputs for uniform decode mode by padding query_start_loc
                 num_reqs = num_reqs_padded
@@ -1455,6 +1449,7 @@ class NPUModelRunner(GPUModelRunner):
                 # For mid-pipeline stages, return the hidden states.
                 if not broadcast_pp_output:
                     hidden_states.kv_connector_output = kv_connector_output
+                    self.kv_connector_output = kv_connector_output
                     if need_dump:
                         assert self.debugger is not None
                         self.debugger.stop()
@@ -1501,19 +1496,32 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states,
                 sample_hidden_states,
                 aux_hidden_states,
-                kv_connector_output,
                 attn_metadata,
                 positions,
             )
+            self.kv_connector_output = kv_connector_output
         return None
 
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
+
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
-            return None  # noqa
+            if not kv_connector_output:
+                return None  # noqa
+            # In case of PP with kv transfer, we need to pass through the
+            # kv_connector_output
+            if kv_connector_output.is_empty():
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
+
         need_dump = self.dump_enable and self.debugger is not None
         # Unpack ephemeral state.
         (
@@ -1522,8 +1530,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             hidden_states,
             sample_hidden_states,
-            aux_hidden_states,  # noqa
-            kv_connector_output,
+            aux_hidden_states,
             attn_metadata,
             positions,
         ) = self.execute_model_state
@@ -2028,7 +2035,7 @@ class NPUModelRunner(GPUModelRunner):
                                         dtype=np.int32)
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        if not self.in_profile_run and self.dynamic_eplb:
+        if not is_profile and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
         has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
@@ -2110,8 +2117,7 @@ class NPUModelRunner(GPUModelRunner):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            need_dummy_logits = (not self.in_profile_run
-                                 and lmhead_tp_enable())
+            need_dummy_logits = (not is_profile and lmhead_tp_enable())
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
             dummy_indices = torch.zeros(max_num_reqs_across_dp,
                                         dtype=torch.int32)
@@ -2157,9 +2163,9 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention)
-            if self.in_profile_run and self.dynamic_eplb:
+            if is_profile and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
-            if not self.in_profile_run and self.dynamic_eplb:
+            if not is_profile and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
             return hidden_states, hidden_states
