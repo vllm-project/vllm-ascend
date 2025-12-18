@@ -21,11 +21,15 @@
 Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
 """
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -59,6 +63,8 @@ def test_pcp_dcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -98,6 +104,8 @@ def test_pcp_dcp_full_graph():
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
