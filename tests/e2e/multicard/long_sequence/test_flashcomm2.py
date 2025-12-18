@@ -24,7 +24,6 @@ Run `pytest tests/e2e/multicard/test_flashcomm2.py`.
 import os
 
 import pytest
-
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
