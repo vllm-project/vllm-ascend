@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_config,
                                get_ascend_device_type)
@@ -64,45 +65,19 @@ class AscendPrefillContextParallelMetadata:
 
 
 @dataclass
-class AscendCommonAttentionMetadata:
+class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
-    For many of the tensors we keep both GPU and CPU versions.
+    For many of the tensors we keep both NPU and CPU versions.
     """
 
-    query_start_loc: torch.Tensor
-    query_start_loc_cpu: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
-
-    seq_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
-
-    seq_lens: torch.Tensor
-    """same to seq_lens_cpu, for compatibility with some new attn metadata
-    (such as GDN)."""
-
-    num_computed_tokens_cpu: torch.Tensor
-    """(batch_size,), the number of computed tokens for each request"""
-
-    num_reqs: int
-    """Number of requests"""
-    num_actual_tokens: int
-    """Total number of tokens in batch"""
-
-    max_query_len: int
-    """Max token number of request in batch"""
-
-    decode_token_per_req: int
+    decode_token_per_req: int = 1
     """decode token number per request"""
 
-    block_table_tensor: torch.Tensor
-
-    slot_mapping: torch.Tensor
-
-    actual_seq_lengths_q: list[int]
+    actual_seq_lengths_q: list[int] = None
+    """actual seq lengths, for example: [1, 3, 4]"""
 
     positions: torch.Tensor = None
 
@@ -111,8 +86,6 @@ class AscendCommonAttentionMetadata:
     spec_attn_mask: torch.Tensor = None
 
     attn_state: Any = None
-
-    is_only_prefill: bool = False
 
     graph_pad_size: int = -1
 
@@ -145,7 +118,6 @@ class AscendCommonAttentionMetadata:
             attn_mask=self.attn_mask,
             spec_attn_mask=self.spec_attn_mask,
             attn_state=self.attn_state,
-            is_only_prefill=self.is_only_prefill,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,
             prefill_context_parallel_metadata=self.

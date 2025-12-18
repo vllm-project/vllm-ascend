@@ -1044,7 +1044,6 @@ class NPUModelRunner(GPUModelRunner):
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
-                is_only_prefill=bool(np.all(num_valid_tokens != 1)),
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
                 prefill_context_parallel_metadata=long_seq_metadata,

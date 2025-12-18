@@ -383,12 +383,11 @@ class EagleProposer(Proposer):
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange_cpu[:batch_size + 1]
-        attn_metadata.query_start_loc_list = attn_metadata.query_start_loc[
-            1:].tolist()
         attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
         attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
 
-        attn_metadata.actual_seq_lengths_q = [1 + i for i in range(batch_size)]
+        attn_metadata.actual_seq_lengths_q = attn_metadata.query_start_loc[
+            1:].tolist()
         attn_metadata.seq_lens_list = attn_metadata.seq_lens.tolist()
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(
