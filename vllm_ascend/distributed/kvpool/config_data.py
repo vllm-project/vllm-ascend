@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -87,12 +88,14 @@ class LayerPoolKey(PoolKey):
 
 class ChunkedTokenDatabase():
 
-    def __init__(self, metadata: KeyMetadata, block_size: int, use_mla: bool):
+    def __init__(self, metadata: KeyMetadata, block_size: int, use_mla: bool,
+                 partitions: List[int]):
         self.metadata = metadata
         self.block_size = block_size
         self.use_mla = use_mla
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self.partitions = partitions
 
     def _make_key_by_hash(self,
                           chunk_hash: str,
@@ -188,6 +191,24 @@ class ChunkedTokenDatabase():
             else:
                 yield start_idx, end_idx, self._make_key_by_hash(hash_val)
 
+    def adaptor_pp(self, key, addr, size):
+        new_key = []
+        new_addr = []
+        new_size = []
+        pp_rank_pattern = re.compile(r'(@pp_rank:)\d+')
+
+        for i, (addr_list, size_list) in enumerate(zip(addr, size)):
+            start = 0
+            for j, part in enumerate(self.partitions):
+                end = len(addr_list) if j == len(
+                    self.partitions) - 1 else start + part * 2
+                new_str = pp_rank_pattern.sub(rf'\1{j}', key[i], count=1)
+                new_key.append(new_str)
+                new_addr.append(addr_list[start:end])
+                new_size.append(size_list[start:end])
+                start = end
+        return new_key, new_addr, new_size
+
 
 #Parameters related to the connector metadata
 @dataclass
@@ -247,14 +268,11 @@ class RequestTracker:
 
     def update(
         self,
-        new_token_ids: list[int],
         new_block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
-
-        self.token_len = self.token_len + len(new_token_ids)
 
         if len(new_block_ids) == 0:
             new_block_ids = []

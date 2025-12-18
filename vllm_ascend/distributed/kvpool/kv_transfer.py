@@ -1,5 +1,6 @@
 import queue
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -99,7 +100,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
                  block_size: int, tp_rank: int, dcp_size: int, put_step: int,
-                 ready_event: threading.Event):
+                 kv_role: str, ready_event: threading.Event):
         super().__init__(m_store,
                          token_database,
                          block_size,
@@ -108,6 +109,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
                          ready_event,
                          name="KVCacheSendingThread")
         self.put_step = put_step
+        self.kv_role = kv_role
+        self.stored_requests = defaultdict[str, int](int)
+
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            self.stored_requests[req_id] += 1
+
+    def delete_finished_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                del self.stored_requests[req_id]
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
@@ -154,13 +166,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             req_id,
         )
 
-        addrs = []
-        sizes = []
-        for index, start in enumerate(starts):
-            addr, size, _ = self.token_database.prepare_value(
-                start, ends[index], block_ids)
-            addrs.append(addr)
-            sizes.append(size)
         if keys:
             """
             Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
@@ -168,12 +173,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
             You can manually build the master branch of the project at https://gitcode.com/cann/hixl
             to resolve this issue before the 8.5.RC1 release.
             """
+            addrs = []
+            sizes = []
+            for index, start in enumerate(starts):
+                addr, size, _ = self.token_database.prepare_value(
+                    start, ends[index], block_ids)
+                addrs.append(addr)
+                sizes.append(size)
+
+            if self.kv_role == "kv_consumer":
+                # D节点重组key addr list适配prefill并行策略
+                # TODO: D节点适配prefill qga tp逻辑
+                keys, addrs, sizes = self.token_database.adaptor_pp(
+                    keys, addrs, sizes)
+
             if current_event is not None:
                 current_event.synchronize()
             self.m_store.put(keys, addrs, sizes)
 
-        if is_last_chunk:
-            self.set_finished_request(req_id)
+        with self.done_task_lock:
+            self.stored_requests[req_id] -= 1
         self.request_queue.task_done()
 
 
