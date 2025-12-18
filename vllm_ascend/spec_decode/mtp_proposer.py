@@ -301,7 +301,7 @@ class MtpProposer(Proposer):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     is_mtp_model=True,
-                    is_profile_run=is_profile):
+                    in_profile_run=is_profile):
                 if self.enable_shared_expert_dp:
                     positions = positions.unsqueeze(-1)
                     positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
