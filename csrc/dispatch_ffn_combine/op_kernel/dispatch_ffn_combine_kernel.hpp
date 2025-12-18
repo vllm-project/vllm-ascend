@@ -735,7 +735,7 @@ private:
         BlockEpilogue2 blockEpilogue(resource, epilogueParams);
 
         
-        int32_t syncLoopIdx = -1;
+        int32_t syncLoopIdx = 0;
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             GemmCoord inGroupProblemShape{currentExpertM, n2, k2}; // M N K
@@ -744,12 +744,6 @@ private:
             uint32_t startLoopIdx = ((aicCoreIdx < startCoreIdx) ? (aicCoreIdx + aicCoreNum) : aicCoreIdx) - startCoreIdx;
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += aicCoreNum) {
-                // syncLoopIdx ++;
-                // if (syncLoopIdx >= 104){
-                //     syncLoopIdx = 0;
-                // }
-                syncLoopIdx = groupIdx;
-                int32_t flag_id = 3 + syncLoopIdx / 8;
 
                 GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
                 GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
@@ -765,7 +759,10 @@ private:
                     m_offset += (m_rows / 2) * m0;
                 }
                 if (loopIdx == startLoopIdx) {
-                    AscendC::CrossCoreWaitFlag<0x2>(flag_id);
+                    for (;syncLoopIdx <= groupIdx; syncLoopIdx++) {
+                        int32_t flag_id = 3 + syncLoopIdx / 8;
+                        AscendC::CrossCoreWaitFlag<0x2>(flag_id);
+                    }
                 }
                 
 
