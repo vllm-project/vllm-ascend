@@ -35,9 +35,9 @@ MODELS = [
 
 SETTINGS = {
     "vllm-ascend/Qwen3-30B-A3B-W8A8": {
-        "TP": 8,
-        "PCP": 1,
-        "DCP": 2
+        "TP": 2,
+        "PCP": 2,
+        "DCP": 1
     },
     "deepseek-ai/DeepSeek-V2-Lite-Chat": {
         "TP": 2,
