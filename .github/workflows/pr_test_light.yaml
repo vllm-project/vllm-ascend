@@ -159,7 +159,7 @@ jobs:
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
-    uses: ./.github/workflows/_e2e_test.yaml
+    uses: ./.github/workflows/nightly_test_a2.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
