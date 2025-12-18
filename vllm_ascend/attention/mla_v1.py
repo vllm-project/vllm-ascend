@@ -39,6 +39,7 @@ from vllm_ascend.ops.shared_weight_layer import (
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
+                               AscendDeviceType, get_ascend_device_type
                                flashcomm2_o_shared_enabled, is_enable_nz,
                                weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -990,16 +991,25 @@ class AscendMLAImpl(MLAAttentionImpl):
                                rope_dim,
                                dtype=q_nope.dtype,
                                device=q_nope.device)
-
-            torch_npu.atb.npu_paged_cache_load(
-                cache_kv_c,
-                cache_k_pe,
-                prefill_metadata.block_table,
-                context_seq_len_npu,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
+            if get_ascend_device_type() == AscendDeviceType._910_95:
+                torch_npu.npu_gather_pa_kv_cache(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_offset=prefill_metadata.chunked_context.starts[i])
+                    key=kv_c_normed,
+                    value=k_pe,
+            else:
+                torch_npu.atb.npu_paged_cache_load(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
 
             kv_c_normed = kv_c_normed.squeeze()
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -1009,25 +1019,41 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
             mask = attn_metadata.attn_mask
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_pe,
-                k_nope=k_nope,
-                k_rope=k_pe,
-                value=v,
-                mask=mask,
-                seqlen=seq_len,
-                head_num=self.num_heads,
-                kv_head_num=self.num_heads,
-                pre_out=prefix_output,
-                prev_lse=prefix_lse,
-                qk_scale=self.scale,
-                kernel_type="kernel_type_high_precision",
-                mask_type="no_mask",
-                input_layout="type_bsnd",
-                calc_type="calc_type_default",
-                output=prefix_output,
-                softmax_lse=prefix_lse)
+            if get_ascend_device_type() == AscendDeviceType._910_95:
+                prefix_output, prefix_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                    query=q_nope,
+                    key=k_nope,
+                    value=v,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    actual_seq_qlen=seq_len,
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_heads,
+                    input_layout="BSND",
+                    softmax_scale=self.scale,
+                    inner_precise=0,
+                    return_softmax_lse=True)
+                prefix_lse, prefix_output = torch_npu.npu_attention_update(prefix_lse, prefix_output, update_type=1)
+            else:
+                torch_npu.atb.npu_ring_mla(
+                    q_nope=q_nope,
+                    q_rope=q_pe,
+                    k_nope=k_nope,
+                    k_rope=k_pe,
+                    value=v,
+                    mask=mask,
+                    seqlen=seq_len,
+                    head_num=self.num_heads,
+                    kv_head_num=self.num_heads,
+                    pre_out=prefix_output,
+                    prev_lse=prefix_lse,
+                    qk_scale=self.scale,
+                    kernel_type="kernel_type_high_precision",
+                    mask_type="no_mask",
+                    input_layout="type_bsnd",
+                    calc_type="calc_type_default",
+                    output=prefix_output,
+                    softmax_lse=prefix_lse)
         return prefix_output, prefix_lse
 
     def _forward_prefill(
@@ -1052,24 +1078,40 @@ class AscendMLAImpl(MLAAttentionImpl):
                                num_tokens,
                                dtype=torch.float32,
                                device=q_nope.device)
-        torch_npu.atb.npu_ring_mla(q_nope=q_nope,
-                                   q_rope=q_pe,
-                                   k_nope=k_nope,
-                                   k_rope=k_pe,
-                                   value=value,
-                                   mask=attn_metadata.attn_mask,
-                                   seqlen=attn_metadata.prefill.query_lens,
-                                   head_num=self.num_heads,
-                                   kv_head_num=self.num_heads,
-                                   pre_out=None,
-                                   prev_lse=None,
-                                   qk_scale=self.scale,
-                                   kernel_type="kernel_type_high_precision",
-                                   mask_type="mask_type_triu",
-                                   input_layout="type_bsnd",
-                                   calc_type="calc_type_first_ring",
-                                   output=attn_output,
-                                   softmax_lse=attn_lse)
+        if get_ascend_device_type() == AscendDeviceType._910_95:
+            attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                    query=q_nope,
+                    key=k_nope,
+                    value=value,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    atten_mask=self.prefill_mask.to(torch.bool),
+                    actual_seq_qlen=attn_metadata.prefill.query_lens.cumsum(0),
+                    actual_seq_kvlen=attn_metadata.prefill.query_lens.cumsum(0),
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_heads,
+                    input_layout="TND",
+                    softmax_scale=self.scale,
+                    return_softmax_lse=True)
+        else:
+            torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                    q_rope=q_pe,
+                                    k_nope=k_nope,
+                                    k_rope=k_pe,
+                                    value=value,
+                                    mask=attn_metadata.attn_mask,
+                                    seqlen=attn_metadata.prefill.query_lens,
+                                    head_num=self.num_heads,
+                                    kv_head_num=self.num_heads,
+                                    pre_out=None,
+                                    prev_lse=None,
+                                    qk_scale=self.scale,
+                                    kernel_type="kernel_type_high_precision",
+                                    mask_type="mask_type_triu",
+                                    input_layout="type_bsnd",
+                                    calc_type="calc_type_first_ring",
+                                    output=attn_output,
+                                    softmax_lse=attn_lse)
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim,
             attn_metadata, attn_output, attn_lse)
