@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, List, Optional
 
@@ -72,7 +72,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     For many of the tensors we keep both NPU and CPU versions.
     """
-    actual_seq_lengths_q: Optional[list[int]] = None
+    actual_seq_lengths_q: list[int] = field(default_factory=list)
     """actual seq lengths, for example: [1, 3, 4]"""
 
     decode_token_per_req: int = 1
