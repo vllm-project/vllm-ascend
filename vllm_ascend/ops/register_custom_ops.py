@@ -130,8 +130,9 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
 
         with torch.npu.stream(prefetch_stream):
             mlp_gate_up_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE
-            torch_npu.npu_prefetch(model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight, \
-                                x_dependency, mlp_gate_up_prefetch_size)
+            torch_npu.npu_prefetch(
+                model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight,
+                x_dependency, mlp_gate_up_prefetch_size)
     return
 
 
@@ -185,8 +186,9 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
 
     with torch.npu.stream(prefetch_stream):
         mlp_down_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE
-        torch_npu.npu_prefetch(model_instance.model.layers[layer_idx].mlp.down_proj.weight, \
-                            x_dependency, mlp_down_prefetch_size)
+        torch_npu.npu_prefetch(
+            model_instance.model.layers[layer_idx].mlp.down_proj.weight,
+            x_dependency, mlp_down_prefetch_size)
     forward_context.layer_idx += 1
     return
 
@@ -250,7 +252,7 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
     if moe_comm_type in {
-            MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL
+            MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2
     } or forward_context.sp_enabled:
         return final_hidden_states
     else:
