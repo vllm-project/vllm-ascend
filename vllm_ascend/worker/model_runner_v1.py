@@ -3906,6 +3906,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                     num_blocks = raw_tensor.numel(
                     ) // kv_cache_spec.page_size_bytes
 
+                    # FIX: For MambaSpec branch, also ensure 16 alignment for 310P
+                    original_num_blocks = num_blocks  # Keep original for assertion check
+                    if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                        num_blocks = (num_blocks // 16) * 16  # Round down to nearest multiple of 16
+                        print(f"[DEBUG 310P ALIGNMENT MAMBA] num_blocks aligned: {original_num_blocks} → {num_blocks}")
+
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
                     # KVCacheManager may allocate.
