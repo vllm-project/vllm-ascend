@@ -1,11 +1,14 @@
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.utils import extract_layer_index
+
+from vllm_ascend.distributed.parallel_state import get_shared_weight_group
+from vllm_ascend.utils import get_current_model_config
 
 
 def dispose_tensor(x: torch.Tensor):
@@ -246,7 +249,19 @@ def reach_layer_for_shared_weight_series(layer: LinearBase):
     ext.series.reach_layer(ext.layer_idx)
 
 
-def is_hidden_layer(vllm_config, layer: LinearBase) -> bool:
-    num_hidden_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
+def is_hidden_layer(layer: LinearBase) -> bool:
+    num_hidden_layers = get_current_model_config().hf_config.num_hidden_layers
     layer_idx = extract_layer_index(layer.prefix)
     return layer_idx < num_hidden_layers
+
+
+def register_all_layers_to_shared_weight_series(
+    layer_sharding: List[LinearBase], ):
+    for curr_layer in layer_sharding:
+        if is_hidden_layer(curr_layer):
+            register_layer_to_shared_weight_series(
+                series_name=str(curr_layer),
+                group=get_shared_weight_group(),
+                layer=curr_layer,
+                prefetch_step=1,
+            )

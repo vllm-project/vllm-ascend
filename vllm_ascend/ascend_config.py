@@ -51,7 +51,7 @@ class AscendConfig:
             "weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(
             weight_prefetch_config)
-
+        self.layer_sharding = additional_config.get("layer_sharding", None)
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
@@ -111,7 +111,7 @@ class AscendConfig:
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
-        self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)

@@ -8,8 +8,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
                                              init_model_parallel_group)
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import (enable_sp, flashcomm2_enable,
-                               flashcomm2_o_shared_enabled)
+from vllm_ascend.utils import flashcomm2_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -37,7 +36,6 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    vllm_config = get_current_vllm_config()
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
@@ -148,28 +146,6 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
-    def _create_shared_weight_group(group_name: str) -> GroupCoordinator:
-        #This communication domain is used for asynchronous broadcasting, so we will create a new communication group to avoid interference
-        group_ranks = []
-        for pp_idx in range(global_pp_size):
-            group = []
-            for dp_idx in range(global_dp_size):
-                base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
-                for i in range(global_tp_size):
-                    global_rank = base + i
-                    group.append(global_rank)
-            group_ranks.append(group)
-
-        return init_model_parallel_group(group_ranks,
-                                         get_world_group().local_rank,
-                                         backend,
-                                         group_name=group_name)
-
-    global _SHARED_WEIGHT
-    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
-    is_ds_v32 = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-    if enable_sp() and is_ds_v32 and _SHARED_WEIGHT is None:
-        _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config(
@@ -179,7 +155,6 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         global_pp_size = get_pp_group().world_size
         num_fc2_oproj_tensor_parallel_groups: int = (global_tp_size //
                                                      flashcomm2_otp_size)
-
         global _FLASHCOMM2_OTP
         global _FLASHCOMM2_ODP
 
@@ -223,11 +198,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 group_name="flashcomm2_odp")
 
         # Create shared weight group for flashcomm2 oproj
-        if flashcomm2_o_shared_enabled():
-            assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
-            if _SHARED_WEIGHT is None:
-                _SHARED_WEIGHT = _create_shared_weight_group(
-                    "flashcomm2_o_shared")
+        if get_ascend_config().layer_sharding is not None:
+            global _SHARED_WEIGHT
+            group_ranks = []
+            for pp_idx in range(global_pp_size):
+                group = []
+                for dp_idx in range(global_dp_size):
+                    base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
+                    for i in range(global_tp_size):
+                        global_rank = base + i
+                        group.append(global_rank)
+                group_ranks.append(group)
+
+            _SHARED_WEIGHT = init_model_parallel_group(
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name="shared_weight")
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X
