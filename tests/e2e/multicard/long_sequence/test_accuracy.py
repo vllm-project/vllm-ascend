@@ -17,11 +17,10 @@
 """
 Compare the outputs of vLLM with and without context parallel.
 
-Run `pytest tests/compile/test_accuracy.py`.
+Run `pytest tests/e2e/multicard/long_sequence/test_accuracy.py`.
 """
 
 import pytest
-from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
@@ -45,7 +44,6 @@ def test_output_between_tp_and_cp(
         "The president of the United States is", "The capital of France is"
     ]
 
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
         with VllmRunner(
                 model,
@@ -55,10 +53,10 @@ def test_output_between_tp_and_cp(
                 max_model_len=1024,
                 enable_expert_parallel=True,
                 enforce_eager=True,
-                # quantization="ascend",
+                quantization="ascend",
         ) as runner:
-            vllm_context_parallel_outputs = runner.model.generate(
-                prompts, sampling_params)
+            vllm_context_parallel_outputs = runner.generate_greedy(
+                prompts, max_tokens)
 
         with VllmRunner(
                 model,
@@ -66,20 +64,21 @@ def test_output_between_tp_and_cp(
                 max_model_len=1024,
                 enable_expert_parallel=True,
                 enforce_eager=True,
-                # quantization="ascend",
+                quantization="ascend",
         ) as runner:
-            vllm_eager_outputs = runner.model.generate(prompts,
-                                                       sampling_params)
+            vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
     else:
-        with VllmRunner(
-                model,
-                tensor_parallel_size=1,
-                prefill_context_parallel_size=2,
-                max_model_len=1024,
-                enforce_eager=True,
-        ) as runner:
-            vllm_context_parallel_outputs = runner.model.generate(
-                prompts, sampling_params)
+        with VllmRunner(model,
+                        tensor_parallel_size=1,
+                        prefill_context_parallel_size=2,
+                        max_model_len=1024,
+                        enforce_eager=False,
+                        compilation_config={
+                            "cudagraph_mode": "FULL_DECODE_ONLY",
+                            "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
+                        }) as runner:
+            vllm_context_parallel_outputs = runner.generate_greedy(
+                prompts, max_tokens)
 
         with VllmRunner(
                 model,
@@ -88,21 +87,11 @@ def test_output_between_tp_and_cp(
                 max_model_len=1024,
                 enforce_eager=True,
         ) as runner:
-            vllm_eager_outputs = runner.model.generate(prompts,
-                                                       sampling_params)
-    vllm_context_parallel_outputs_list = []
-    for output in vllm_context_parallel_outputs:
-        vllm_context_parallel_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
-
-    vllm_eager_outputs_list = []
-    for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
 
     check_outputs_equal(
-        outputs_0_lst=vllm_eager_outputs_list,
-        outputs_1_lst=vllm_context_parallel_outputs_list,
+        outputs_0_lst=vllm_eager_outputs,
+        outputs_1_lst=vllm_context_parallel_outputs,
         name_0="vllm_eager_outputs",
         name_1="vllm_context_parallel_outputs",
     )
