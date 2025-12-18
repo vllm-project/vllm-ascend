@@ -620,8 +620,10 @@ class TestAscendMLAImpl(TestBase):
             torch.ones(10, 10, dtype=torch.float16), 1)
         for test_case in test_cases:
             pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens_of_pcp_dcp = test_case
-            mock_dcp.all_gather = MagicMock(side_effect=mock_all_gather(dcp_size))
-            mock_pcp.all_gather = MagicMock(side_effect=mock_all_gather(pcp_size))
+            mock_dcp.all_gather = MagicMock(
+                side_effect=mock_all_gather(dcp_size))
+            mock_pcp.all_gather = MagicMock(
+                side_effect=mock_all_gather(pcp_size))
             assert len(nums_tokens_per_rank) == len(nums_all_rank_context)
             nums_context_per_rank = []
             for num_all_rank_context in nums_all_rank_context:
@@ -930,15 +932,14 @@ class TestAscendMLAImpl(TestBase):
             def mock_all_gather(ws):
                 return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-            mock_pcp.all_gather = MagicMock(side_effect=mock_all_gather(self.impl.pcp_size))
+            mock_pcp.all_gather = MagicMock(
+                side_effect=mock_all_gather(self.impl.pcp_size))
 
             result = self.impl._process_attn_out_lse(attn_output, softmax_lse,
                                                      decode_meta)
             # [PCP * S, DCP * H, D + 1]
             self.assertIsInstance(result, torch.Tensor)
-            assert result.shape == (B * self.impl.pcp_size,
-                                    H,
-                                    D + 1)
+            assert result.shape == (B * self.impl.pcp_size, H, D + 1)
             self.impl.dcp_size = 1
             self.impl.pcp_size = 1
 

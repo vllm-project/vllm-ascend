@@ -1,4 +1,4 @@
-from typing import ClassVar, List, Optional, Tuple, TypeVar
+from typing import ClassVar, Optional, Tuple, TypeVar
 
 import numpy as np
 import torch
@@ -1189,7 +1189,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         if self.pcp_size > 1:
             # AllGather out&lse within CP group
-            attn_out_lse = get_pcp_group().all_gather(attn_out_lse.contiguous(), dim=0)
+            attn_out_lse = get_pcp_group().all_gather(
+                attn_out_lse.contiguous(), dim=0)
 
         return attn_out_lse
 
