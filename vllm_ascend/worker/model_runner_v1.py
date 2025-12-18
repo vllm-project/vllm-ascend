@@ -112,7 +112,6 @@ from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
@@ -253,6 +252,7 @@ class NPUModelRunner(GPUModelRunner):
             and self.model_config.is_mm_prefix_lm)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
+        self.use_aux_hidden_state_outputs = False
         self._set_up_drafter()
 
         # kv role
@@ -385,6 +385,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
+                if self.speculative_config.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = (
+                        self.drafter.eagle3_use_aux_hidden_state)
                 self.rejection_sampler = RejectionSampler(self.sampler)
             self.actual_seq_lengths_q = list(
                 range(self.decode_token_per_req, self.max_num_tokens + 1,
@@ -1417,7 +1420,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output)
 
             aux_hidden_states = None
-            if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
+            if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
 
         kv_connector_output = KVConnectorOutput(
@@ -1929,7 +1932,7 @@ class NPUModelRunner(GPUModelRunner):
                     update_attn_params(self.update_stream, forward_context,
                                        num_tokens, self.vllm_config)
 
-        if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
+        if self.use_aux_hidden_state_outputs:
             hidden_states, _ = hidden_states
         else:
             hidden_states = hidden_states
@@ -2196,7 +2199,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
-                if self.drafter.name == SpecDcodeType.EAGLE3:
+                if self.use_aux_hidden_state_outputs:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
 
