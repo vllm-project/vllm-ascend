@@ -23,8 +23,7 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass,
                                              PatternPrettyPrinter)
 from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
-from vllm.config import (VllmConfig, get_current_vllm_config,
-                         get_layers_from_vllm_config)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 
 
 class QKNormRopeFusionPattern:
@@ -42,7 +41,6 @@ class QKNormRopeFusionPattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        vllm_config = get_current_vllm_config()
         self.device = vllm_config.device_config.device if vllm_config.device_config else None
 
     def get_inputs(self):
