@@ -86,7 +86,18 @@ class AttentionMaskBuilder:
         dtype: torch.dtype = None,
         device: torch.device = None,
     ) -> torch.Tensor:
-        return self.chunked_prefill_attn_mask
+        # FIXED: 310P-specific routing to fix SelfAttentionOperation compatibility
+        # 310P devices need float16 mask to match SelfAttentionOperation expectations
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+
+        if get_ascend_device_type() == AscendDeviceType._310P:
+            # For 310P: Use get_attn_mask to get proper float16 format mask
+            target_device = device or self.device or torch.device('npu')
+            target_dtype = dtype or torch.float16
+            return self.get_attn_mask(2048, target_dtype, target_device)
+        else:
+            # For other devices: Keep original int8 mask logic
+            return self.chunked_prefill_attn_mask
 
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:
