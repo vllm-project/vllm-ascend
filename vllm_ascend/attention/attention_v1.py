@@ -549,13 +549,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 slots = attn_metadata.slot_mapping
                 num_actual_tokens = attn_metadata.num_actual_tokens
 
-                # Apply 310P alignment before reshape_and_cache (like v0.10.0rc1)
-                aligned_key = aligned_16(key[:num_actual_tokens])
-                aligned_value = aligned_16(value[:num_actual_tokens])
-
+                # Stage 1: KV cache storage using original tensors (like v0.10.0rc1:319-324)
                 torch_npu._npu_reshape_and_cache(
-                    key=aligned_key,
-                    value=aligned_value,
+                    key=key[:num_actual_tokens],
+                    value=value[:num_actual_tokens],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots)
