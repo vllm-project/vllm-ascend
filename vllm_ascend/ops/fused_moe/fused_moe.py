@@ -175,7 +175,7 @@ class AscendFusedMoE(FusedMoE):
         self.global_redundant_expert_num = self.ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         # flashcommon3 gate stream
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.multistream_overlap_gate = self.ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
