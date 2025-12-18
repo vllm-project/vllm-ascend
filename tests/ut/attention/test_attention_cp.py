@@ -117,7 +117,8 @@ class TestAscendAttentionCPImpl(TestBase):
     def test_forward_decode_pcp_dcp(self, mock_get_forward_context,
                                     mock_all_to_all_single, mock_all_gather,
                                     mock_npu_fused_infer_attention_score,
-                                    mock_dcp, mock_get_dcp_group, mock_pcp, mock_pcp_group):
+                                    mock_dcp, mock_get_dcp_group, mock_pcp,
+                                    mock_pcp_group):
 
         def mock_all_gather_func(tensor, dim):
             return torch.cat([tensor, tensor], dim=dim)
@@ -145,9 +146,10 @@ class TestAscendAttentionCPImpl(TestBase):
         self.impl.value_cache = torch.randn(100, 128, 1, 128)
 
         def mock_npu_attention_update(attn_out_lse_list):
-            mock_output = torch.randn(attn_out_lse_list.shape[0] // mock_pcp.world_size,
-                                      attn_out_lse_list.shape[1] // mock_dcp.world_size,
-                                      attn_out_lse_list.shape[2] - 1)
+            mock_output = torch.randn(
+                attn_out_lse_list.shape[0] // mock_pcp.world_size,
+                attn_out_lse_list.shape[1] // mock_dcp.world_size,
+                attn_out_lse_list.shape[2] - 1)
             return mock_output
 
         self.impl._npu_attention_update = MagicMock()
@@ -158,11 +160,11 @@ class TestAscendAttentionCPImpl(TestBase):
         mock_all_to_all_single.side_effect = lambda output, input, *args, **kwargs: output.copy_(
             input)
 
-        def mock_all_gather_func(tensor_list, tensor, group=None):
+        def mock_all_gather_func1(tensor_list, tensor, group=None):
             tensor_list[0] = tensor
             tensor_list[1] = tensor.clone()
 
-        mock_all_gather.side_effect = mock_all_gather_func
+        mock_all_gather.side_effect = mock_all_gather_func1
 
         def mock_npu_fused_infer_attention_score_func(query, k_nope, value,
                                                       **common_kwargs):
@@ -783,7 +785,8 @@ class TestUpdateNpuAttnOutLse(TestBase):
     )
     def test_update_chunk_attn_out_lse_pcp_greater_than_1_only(
             self, mock_update_out_and_lse, mock_all_gather,
-            mock_all_to_all_single, mock_split, mock_stack, mock_cat, mock_pcp, mock_get_pcp_group):
+            mock_all_to_all_single, mock_split, mock_stack, mock_cat, mock_pcp,
+            mock_get_pcp_group):
         # Mock input data
         prefix_chunk_output = torch.randn(2, 4, 8)
         prefix_chunk_lse = torch.randn(2, 4, 1)

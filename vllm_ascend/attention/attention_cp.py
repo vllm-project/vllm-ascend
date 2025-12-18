@@ -445,15 +445,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
         x = x.view(-1, S, H, D_plus_1)
         # Split out lse
+        # [N, S, H, D], [N, S, H, 1]
         out_flat, lse_flat = torch.split(x, [D, 1],
-                                         dim=-1)  # [N, S, H, D], [N, S, H, 1]
-        #    out: [N, S, H, D] -> [N, S*H, D]
-        #    lse: [N, S, H, 1] -> [N, S*H]
-        out_flat = out_flat.flatten(1, 2)  # [N, S*H, D]
-        lse_flat = lse_flat.squeeze(-1).flatten(1)  # [N, S*H]
+                                         dim=-1)
+        # out: [N, S, H, D] -> [N, S*H, D]
+        # lse: [N, S, H, 1] -> [N, S*H]
+        out_flat = out_flat.flatten(1, 2)
+        lse_flat = lse_flat.squeeze(-1).flatten(1)
         #  unbind to list
-        out_list = out_flat.unbind(0)  # [S*H, D]
-        lse_list = lse_flat.unbind(0)  # [S*H]
+        # [S*H, D]
+        out_list = out_flat.unbind(0)
+        # [S*H]
+        lse_list = lse_flat.unbind(0)
 
         attn_out, attn_lse = torch_npu.npu_attention_update(
             lse_list, out_list, update_type)
@@ -566,7 +569,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         if self.pcp_size > 1:
             # AllGather out&lse within CP group
-            attn_out_lse = get_pcp_group().all_gather(attn_out_lse.contiguous(), dim=0)
+            attn_out_lse = get_pcp_group().all_gather(
+                attn_out_lse.contiguous(), dim=0)
 
         attn_out = self._npu_attention_update(attn_out_lse)
         return attn_out
@@ -725,12 +729,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             dist.all_to_all_single(attn_out_lse_all2all,
                                    chunk_attn_out_lse,
                                    group=self.dcp_group)
-            chunk_attn_out_lse = attn_out_lse_all2all.permute([2, 0,1])
+            chunk_attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
 
         if self.pcp_size > 1:
             # AllGather out&lse within CP group
-            chunk_attn_out_lse = get_pcp_group().all_gather(chunk_attn_out_lse.contiguous(),
-                                                            dim=0)
+            chunk_attn_out_lse = get_pcp_group().all_gather(
+                chunk_attn_out_lse.contiguous(), dim=0)
 
         B_total, H_total, D_plus_1 = chunk_attn_out_lse.shape
         S = B_total // self.pcp_size
@@ -745,8 +749,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
         x = x.view(-1, S, H, D_plus_1)
         # Split out lse
+        # [N, S, H, D], [N, S, H, 1]
         attn_out_allgather, attn_lse_allgather = torch.split(
-            x, [D, 1], dim=-1)  # [N, S, H, D], [N, S, H, 1]
+            x, [D, 1], dim=-1)
 
         prefix_output, prefix_lse = self._update_out_and_lse(
             attn_out_allgather, attn_lse_allgather)
