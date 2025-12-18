@@ -27,7 +27,8 @@ class SuffixDecodingProposer(VllmSuffixDecodingProposer, Proposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
-                  dummy_compute_logits=lambda hidden_states: None):
+                  dummy_compute_logits=lambda hidden_states: None,
+                  is_profile=False):
         pass
 
     def generate_token_ids(self,
