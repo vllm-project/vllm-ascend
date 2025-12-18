@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
