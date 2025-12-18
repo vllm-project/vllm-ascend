@@ -64,13 +64,13 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     def test_init_ascend_config_enable_npugraph_ex(self):
-        with self.assertRaises(NotImplementedError):
-            test_vllm_config = VllmConfig()
-            test_vllm_config.additional_config = {
-                "enable_npugraph_ex": True,
-                "refresh": True,
-            }
-            init_ascend_config(test_vllm_config)
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "enable_npugraph_ex": True,
+            "refresh": True,
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.enable_npugraph_ex)
 
     @_clean_up_ascend_config
     def test_get_ascend_config(self):
