@@ -35,8 +35,8 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
-from vllm_ascend.eplb.core.eplb_utils import moe_load_async_stream
+from vllm_ascend.eplb.core.eplb_utils import (determine_default_log2phy_map,
+                                              moe_load_async_stream)
 from vllm_ascend.flash_common3_context import (get_flash_common3_context,
                                                set_flash_common3_context)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
