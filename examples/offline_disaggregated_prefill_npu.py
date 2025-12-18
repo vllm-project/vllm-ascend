@@ -50,7 +50,7 @@ def run_prefill(prefill_done, process_close):
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
     ktc = KVTransferConfig(
-        kv_connector="MooncakeConnector",
+        kv_connector="MooncakeConnectorV1",
         kv_role="kv_producer",
         kv_port="30000",
         engine_id="0",
@@ -102,7 +102,7 @@ def run_decode(prefill_done):
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
     ktc = KVTransferConfig(
-        kv_connector="MooncakeConnector",
+        kv_connector="MooncakeConnectorV1",
         kv_role="kv_consumer",
         kv_port="30100",
         engine_id="1",
