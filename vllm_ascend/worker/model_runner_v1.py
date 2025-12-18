@@ -3577,6 +3577,13 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                             # Fix: Use page_size_bytes instead of block_size for correct calculation
                             page_size_bytes = kv_cache_spec.page_size_bytes
                             num_blocks = kv_cache_tensor.size // page_size_bytes
+
+                            # FIX: Ensure num_blocks is aligned to 16 for 310P ReshapeAndCacheOperation compatibility
+                            # This matches v0.10.0rc1 behavior where tensor_size % page_size_bytes == 0 was guaranteed
+                            if is_310p_device and not ascend_config.torchair_graph_config.enabled:
+                                original_num_blocks = num_blocks
+                                num_blocks = (num_blocks // 16) * 16  # Round down to nearest multiple of 16
+                                print(f"[DEBUG 310P ALIGNMENT] num_blocks aligned: {original_num_blocks} → {num_blocks}")
                             num_kv_heads = kv_cache_spec.num_kv_heads
                             head_size = kv_cache_spec.head_size
                             dtype = kv_cache_spec.dtype
