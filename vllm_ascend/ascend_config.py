@@ -150,10 +150,6 @@ class AscendConfig:
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
-        if self.enable_npugraph_ex:
-            raise NotImplementedError(
-                "This feature is still in the experiment and will be supported soon."
-            )
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
