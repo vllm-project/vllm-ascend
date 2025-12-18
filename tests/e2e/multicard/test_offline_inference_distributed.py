@@ -108,7 +108,7 @@ def test_sp_for_qwen3_moe() -> None:
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "2048"})
-def test_models_distributed_DeepSeek_W4A8ACC(model):
+def test_deepseek_w4a8_accuracy(model):
     prompts = [
         "Hello, my name is", "The president of the United States is",
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs"
