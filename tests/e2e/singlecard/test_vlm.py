@@ -40,12 +40,11 @@ def test_multimodal_vl(vl_config):
     images = [image] * len(img_questions)
     prompts = vl_config["prompt_fn"](img_questions)
 
-    with VllmRunner(
-            vl_config["model"],
-            mm_processor_kwargs=vl_config["mm_processor_kwargs"],
-            enforce_eager=False,
-    ) as vllm_model:
-
+    with VllmRunner(vl_config["model"],
+                    mm_processor_kwargs=vl_config["mm_processor_kwargs"],
+                    enforce_eager=False,
+                    max_model_len=8192,
+                    limit_mm_per_prompt={"image": 1}) as vllm_model:
         outputs = vllm_model.generate_greedy(
             prompts=prompts,
             images=images,
