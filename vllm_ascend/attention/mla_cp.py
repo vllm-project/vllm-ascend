@@ -1127,6 +1127,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
     def _npu_attention_update(self,
                               attn_out_lse: torch.Tensor) -> torch.Tensor:
+        # [PCP * S, DCP * H, D+1]
         B_total, H_total, D_plus_1 = attn_out_lse.shape
         S = B_total // self.pcp_size
         H = H_total // self.dcp_size
@@ -1144,12 +1145,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
         #    out: [N, S, H, D] -> [N, S*H, D]
         #    lse: [N, S, H, 1] -> [N, S*H]
         out_flat = out_flat.flatten(1, 2)  # [N, S*H, D]
-        lse_flat = lse_flat.squeeze(-1).flatten(1)  # [N, S*H]
+        lse_flat = lse_flat.flatten(1, -1)  # [N, S*H]
         #  unbind to list
         out_list = out_flat.unbind(0)  # [S*H, D]
         lse_list = lse_flat.unbind(0)  # [S*H]
-        attn_out, _ = torch_npu.npu_attention_update(out_list, lse_list, 0)
-        print(attn_out.shape)
+        attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
         attn_out = attn_out.view(-1, H, D)
         return attn_out
 
