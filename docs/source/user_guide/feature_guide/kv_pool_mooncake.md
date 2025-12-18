@@ -12,43 +12,44 @@
 * Mooncake Compilation and Installation:
   
   * Check NPU network configuration:
-    
+  
     Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
-    
+  
     ```bash
     cat /etc/hccn.conf
     ```
+
   * Install Mooncake
-    
+  
     Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
     Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
     First, we need to obtain the Mooncake project. Refer to the following command:
-    
+  
     ```shell
     git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
     ```
-    
+  
     (Optional) Replace go install url if the network is poor
-    
+  
     ```shell
     cd Mooncake
     sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
     ```
-    
+  
     Install mpi
-    
+  
     ```shell
     apt-get install mpich libmpich-dev -y
     ```
-    
+  
     Install the relevant dependencies. The installation of Go is not required.
-    
+  
     ```shell
     bash dependencies.sh -y
     ```
-    
+  
     Compile and install
-    
+  
     ```shell
     mkdir build
     cd build
@@ -56,20 +57,20 @@
     make -j
     make install
     ```
-    
+  
     Set environment variables
-    
+  
     **Note:**
-    
+  
     - Adjust the Python path according to your specific Python installation
     - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
-    
+  
     ```shell
     export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
     ```
-    
+  
     copy the .so files to the `/usr/local/lib64` directory after compilation
-    
+  
     ```shell
     cp build/mooncake-common/src/libmooncake_common.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake/
     cp build/mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake/
@@ -102,7 +103,6 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 }
 ```
 
-**local_hostname**: Configured as the IP address of the current master node.
 **metadata_server**: Configured as **P2PHANDSHAKE**.
 **protocol:** Configured for Ascend to use Mooncake's HCCL communication.
 **device_name**: ""
