@@ -541,8 +541,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if get_ascend_device_type() == AscendDeviceType._310P:
             # Fallback for 310P: Use flash attention implementation from v0.10.0rc1
+            # First, handle KV cache storage like v0.10.0rc1
+            key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
+
+            # Then call flash attention fallback
             return self._forward_prefill_310p_fallback(
-                query, key, value, kv_cache, attn_metadata, output
+                query, key, value, attn_metadata, output
             )
 
         # Get workspace from cache or calculate it if not present.
@@ -763,7 +767,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                    output)
         return output
 
-    def _forward_prefill_310p_fallback(self, query, key, value, kv_cache, attn_metadata, output):
+    def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
         """
         310P fallback implementation using flash attention from v0.10.0rc1
         This restores the working attention logic for 310P devices
