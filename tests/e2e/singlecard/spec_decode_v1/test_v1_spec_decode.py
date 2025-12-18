@@ -145,7 +145,9 @@ def test_eagle_correctness(
 
     sampling_params = SamplingParams(
         max_tokens=300,
-        temperature=0.0,
+        temperature=0.8,
+        top_p=0.7,
+        top_k=4,
         ignore_eos=False,
     )
 
