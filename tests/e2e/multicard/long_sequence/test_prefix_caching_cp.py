@@ -22,12 +22,11 @@ Run `pytest tests/e2e/multicard/long_sequence/test_prefix_caching_cp.py`
 """
 
 import os
+
 import pytest
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import vllm_version_is
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = [
     "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
@@ -100,6 +99,7 @@ def test_models_prefix_cache_with_cp_basic(model: str,
             model,
             max_model_len=2048,
             enforce_eager=True,
+            trust_remote_code=True,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=SETTINGS[model]['TP'],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
@@ -117,6 +117,7 @@ def test_models_prefix_cache_with_cp_piece_wise(model: str,
             model,
             max_model_len=2048,
             enforce_eager=False,
+            trust_remote_code=True,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=SETTINGS[model]['TP'],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
@@ -133,6 +134,7 @@ def test_models_prefix_cache_with_cp_full_graph(model: str,
     with VllmRunner(model,
                     max_model_len=2048,
                     enforce_eager=False,
+                    trust_remote_code=True,
                     gpu_memory_utilization=0.7,
                     tensor_parallel_size=SETTINGS[model]['TP'],
                     prefill_context_parallel_size=SETTINGS[model]['PCP'],
