@@ -22,6 +22,7 @@ import torch
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
@@ -289,19 +290,25 @@ class FusedMC2CommImpl(MoECommMethod):
             pertoken_scale: Optional[torch.Tensor] = None):
         assert not (
             w1_scale is None or w2_scale is None
-        ), "w1_scale and w2_scale cannot be None for the Op `dispatch_ffn_combine`."
+        ), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         out = torch.empty_like(hidden_states)
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
-            x=hidden_states,
-            weight1=w1,
-            weight2=w2,
-            expert_idx=topk_ids,
-            scale1=w1_scale,
-            scale2=w2_scale,
-            probs=topk_weights.to(torch.float32),
-            group=self.token_dispatcher.moe_all_to_all_group_name,
-            max_output_size=65536,
-            out=out,
-        )
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            torch.ops._C_ascend.dispatch_ffn_combine(
+                x=hidden_states,
+                weight1=w1[0],
+                weight2=w2[0],
+                expert_idx=topk_ids,
+                scale1=w1_scale[0],
+                scale2=w2_scale[0],
+                probs=topk_weights.to(torch.float32),
+                group=self.token_dispatcher.moe_all_to_all_group_name,
+                max_output_size=65536,
+                out=out,
+            )
+        elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+            raise NotImplementedError()
+        else:
+            raise ValueError(
+                f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
         return out

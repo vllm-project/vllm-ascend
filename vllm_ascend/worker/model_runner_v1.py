@@ -430,7 +430,8 @@ class NPUModelRunner(GPUModelRunner):
         # moe_comm_method of each rank is MC2 and recomputation would never happen in D
         # nodes. So here we check whether recompute_scheduler_enable is True.
         return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
-            potential_max_num_tokens, self.vllm_config) == MoECommType.MC2
+            potential_max_num_tokens,
+            self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
@@ -1057,7 +1058,7 @@ class NPUModelRunner(GPUModelRunner):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs+1] - \
+                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs + 1] - \
                     self.query_start_loc_pcp_full.cpu[:num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
@@ -2200,7 +2201,7 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and \
-            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) == MoECommType.MC2:
+            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             self._dummy_run(mc2_tokens_capacity,
                             with_prefill=True,
                             is_profile=True)

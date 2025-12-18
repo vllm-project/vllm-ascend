@@ -253,13 +253,13 @@ def select_moe_comm_method(num_tokens: int,
         ascend_config = get_ascend_config()
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        fused_mc2_enable = quant_type == "w8a8_dynamic" and get_ep_group(
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and get_ep_group(
         ).world_size <= 16 and (not dynamic_eplb) and (not is_mtp_model)
-        if fused_mc2_enable:
-            moe_comm_type = MoECommType.FUSED_MC2
+        if num_tokens <= mc2_tokens_capacity:
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.MC2
         else:
-            moe_comm_type = (MoECommType.MC2 if num_tokens
-                             <= mc2_tokens_capacity else MoECommType.ALLTOALL)
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.ALLTOALL
+
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type
