@@ -21,11 +21,15 @@
 Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
 """
 
+import os
+
 import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import vllm_version_is
+
+os.environ["HCCL_BUFFSIZE"] = "768"
 
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
