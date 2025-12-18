@@ -124,7 +124,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if getattr(self, "q", None) is not None:
+        if hasattr(self, "q") and self.q is not None:
             # Add synchronize to prevent synchronize error.
             self.async_event.synchronize()
             return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
