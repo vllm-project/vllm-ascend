@@ -32,6 +32,8 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2)
 
+from vllm_ascend.quantization.quant_parser import parse_a5_quant_params
+
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
 
@@ -109,7 +111,8 @@ class MoECommMethod(ABC):
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
-            pertoken_scale: Optional[torch.Tensor] = None):
+            pertoken_scale: Optional[torch.Tensor] = None,
+            **kwargs):
         # Check constraints
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16, torch.int8
@@ -117,22 +120,44 @@ class MoECommMethod(ABC):
 
         moe_comm_method = get_forward_context().moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
-
-        results = self.token_dispatcher.token_dispatch(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            expert_map=expert_map,
-            log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
-            shared_experts=shared_experts,
-            quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share,
-            mc2_mask=mc2_mask,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            with_quant=use_int8_w8a8 or use_int4_w4a8,
-            dynamic_eplb=dynamic_eplb,
-            pertoken_scale=pertoken_scale)
+        moe_comm_method = get_forward_context().moe_comm_method
+        use_A5_quant = kwargs.get("use_A5_quant", False)
+        use_fp8_comm = kwargs.get("use_fp8_comm", False)
+        act_quant_type, weight_quant_type, \
+            scale_type, per_token_scale_type, round_mode = parse_a5_quant_params(**kwargs)
+        assert moe_comm_method is not None, "Missing communication context"
+        if isinstance(self.token_dispatcher, TokenDispatcherWithMC2) and use_fp8_comm:
+            results = self.token_dispatcher.token_dispatch_with_A5_quant(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts,
+                quantized_x_for_share=quantized_x_for_share,
+                dynamic_scale_for_share=dynamic_scale_for_share,
+                mc2_mask=self.mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                with_quant=use_fp8_comm,
+                comm_quant_mode=kwargs.get("comm_quant_mode", 2),
+                y_dtype=act_quant_type if use_fp8_comm else None)
+        else:
+            results = self.token_dispatcher.token_dispatch(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts,
+                quantized_x_for_share=quantized_x_for_share,
+                dynamic_scale_for_share=dynamic_scale_for_share,
+                mc2_mask=mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                with_quant=use_int8_w8a8 or use_int4_w4a8,
+                dynamic_eplb=dynamic_eplb,
+                pertoken_scale=pertoken_scale)
 
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
@@ -154,7 +179,17 @@ class MoECommMethod(ABC):
                                        or use_int4_w4a8 or use_int4_w4a16,
                                        fusion=use_int8_w8a8,
                                        need_trans=need_trans,
-                                       dynamic_eplb=dynamic_eplb)
+                                       dynamic_eplb=dynamic_eplb,
+                                       use_A5_quant=use_A5_quant,
+                                       use_fp8_comm=use_fp8_comm,
+                                       act_quant_type=act_quant_type,
+                                       weight_quant_type=weight_quant_type,
+                                       scale_type=scale_type,
+                                       per_token_scale_type=per_token_scale_type,
+                                       round_mode=round_mode,
+                                       use_bf16=(hidden_states.dtype == torch.bfloat16),
+                                       rollback_quant_config=kwargs.get("rollback_quant_config"))
+
 
         final_hidden_states = self.token_dispatcher.token_combine(
             hidden_states=mlp_output, context_metadata=context_metadata)
