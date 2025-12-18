@@ -294,7 +294,7 @@ Before you start, please
             --enforce-eager \
             --no-enable-prefix-caching \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
@@ -369,7 +369,7 @@ Before you start, please
             --enforce-eager \
             --no-enable-prefix-caching \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
@@ -447,7 +447,7 @@ Before you start, please
             --async-scheduling \
             --quantization ascend \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
@@ -525,7 +525,7 @@ Before you start, please
             --no-enable-prefix-caching \
             --quantization ascend \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
