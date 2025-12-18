@@ -107,11 +107,11 @@ msgstr ""
 msgid ""
 "**worker**: The patch code in this directory is for patching the code in "
 "vLLM worker process. It's called by "
-"`vllm_ascend/worker/worker_v1::NPUWorker::__init__` when the vLLM worker "
+"`vllm_ascend/worker/worker::NPUWorker::__init__` when the vLLM worker "
 "process is initialized."
 msgstr ""
 "**worker**：此目录中的补丁代码用于修补 vLLM worker 进程中的代码。在初始化 vLLM worker 进程时，会被 "
-"`vllm_ascend/worker/worker_v1::NPUWorker::__init__` 调用。"
+"`vllm_ascend/worker/worker::NPUWorker::__init__` 调用。"
 
 #: ../../developer_guide/feature_guide/patch.md:37
 msgid ""

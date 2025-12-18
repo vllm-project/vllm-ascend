@@ -289,7 +289,7 @@ class NPUPlatform(Platform):
                 )
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         refresh_block_size(vllm_config)
 
