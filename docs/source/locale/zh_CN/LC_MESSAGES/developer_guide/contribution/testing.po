@@ -77,11 +77,11 @@ msgstr "编写单元测试时需要遵循几个原则："
 #: ../../developer_guide/contribution/testing.md:143
 msgid ""
 "The test file path should be consistent with source file and start with "
-"`test_` prefix, such as: `vllm_ascend/worker/worker_v1.py` --> "
-"`tests/ut/worker/test_worker_v1.py`"
+"`test_` prefix, such as: `vllm_ascend/worker/worker.py` --> "
+"`tests/ut/worker/test_worker.py`"
 msgstr ""
-"测试文件的路径应与源文件保持一致，并以 `test_` 前缀开头，例如：`vllm_ascend/worker/worker_v1.py` --> "
-"`tests/ut/worker/test_worker_v1.py`"
+"测试文件的路径应与源文件保持一致，并以 `test_` 前缀开头，例如：`vllm_ascend/worker/worker.py` --> "
+"`tests/ut/worker/test_worker.py`"
 
 #: ../../developer_guide/contribution/testing.md:144
 msgid ""
