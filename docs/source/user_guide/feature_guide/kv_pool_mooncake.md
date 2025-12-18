@@ -4,26 +4,83 @@
 
 * Software:
   * Python >= 3.9, < 3.12
-  * CANN >= 8.3.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
-  * vLLM：main branch
-  * vLLM-Ascend：main branch
-  * Mooncake：main branch
-
-    Installation and Compilation Guide：https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries
+  * CANN == 8.3.rc2
+  * PyTorch == 2.7.1, torch-npu == 2.7.1.post1
+  * vLLM：v0.11.0
+  * vLLM-Ascend：v0.11.0
+  * Mooncake：0.3.7 post2
+* Mooncake Compilation and Installation:
   
-    Make sure to build with `-DUSE_ASCEND_DIRECT` to enable ADXL engine.
-  
-    An example command for compiling ADXL：
-
-    `rm -rf build && mkdir -p build && cd build \ && cmake .. -DCMAKE_INSTALL_PREFIX=/opt/transfer-engine/ -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND_DIRECT=ON -DBUILD_SHARED_LIBS=ON -DBUILD_UNIT_TESTS=OFF \ && make -j \ && make install`
-
-    Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
+  * Check NPU network configuration:
+    
+    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+    
+    ```bash
+    cat /etc/hccn.conf
+    ```
+  * Install Mooncake
+    
+    Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
+    Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+    First, we need to obtain the Mooncake project. Refer to the following command:
+    
+    ```shell
+    git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+    ```
+    
+    (Optional) Replace go install url if the network is poor
+    
+    ```shell
+    cd Mooncake
+    sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
+    ```
+    
+    Install mpi
+    
+    ```shell
+    apt-get install mpich libmpich-dev -y
+    ```
+    
+    Install the relevant dependencies. The installation of Go is not required.
+    
+    ```shell
+    bash dependencies.sh -y
+    ```
+    
+    Compile and install
+    
+    ```shell
+    mkdir build
+    cd build
+    cmake .. -DUSE_ASCEND_DIRECT=ON
+    make -j
+    make install
+    ```
+    
+    Set environment variables
+    
+    **Note:**
+    
+    - Adjust the Python path according to your specific Python installation
+    - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
+    
+    ```shell
+    export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+    ```
+    
+    copy the .so files to the `/usr/local/lib64` directory after compilation
+    
+    ```shell
+    cp build/mooncake-common/src/libmooncake_common.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake/
+    cp build/mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake/
+    cp build/mooncake-store/src/libmooncake_store.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake/
+    ```
 
 ### KV Pooling Parameter Description
-**kv_connector_extra_config**:Additional Configurable Parameters for Pooling.  
-**mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
-**load_async**:Whether to Enable Asynchronous Loading. The default value is false.  
+
+**kv_connector_extra_config**:Additional Configurable Parameters for Pooling.
+**mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: **Each Instance Requires a Unique Port Configuration.**
+**load_async**:Whether to Enable Asynchronous Loading. The default value is false.
 **register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
 
 ## run mooncake master
@@ -45,13 +102,13 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 }
 ```
 
-**local_hostname**: Configured as the IP address of the current master node.  
-**metadata_server**: Configured as **P2PHANDSHAKE**.  
-**protocol:** Configured for Ascend to use Mooncake's HCCL communication.  
-**device_name**: ""  
-**use_ascend_direct**: Indicator for using ADXL engine.  
-**alloc_in_same_node**: Indicator for preferring local buffer allocation strategy.  
-**master_server_address**: Configured with the IP and port of the master service.  
+**local_hostname**: Configured as the IP address of the current master node.
+**metadata_server**: Configured as **P2PHANDSHAKE**.
+**protocol:** Configured for Ascend to use Mooncake's HCCL communication.
+**device_name**: ""
+**use_ascend_direct**: Indicator for using ADXL engine.
+**alloc_in_same_node**: Indicator for preferring local buffer allocation strategy.
+**master_server_address**: Configured with the IP and port of the master service.
 **global_segment_size**: Expands the kvcache size registered by the PD node to the master.
 
 ### 2. Start mooncake_master
@@ -211,11 +268,11 @@ Change localhost to your actual IP address.
 
 ```
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --host localhost\
+    --host localhost \
     --prefiller-hosts localhost \
     --prefiller-ports 8100 \
-    --decoder-hosts localhost\
-    --decoder-ports 8200 \
+    --decoder-hosts localhost \
+    --decoder-ports 8200
 ```
 
 ### 3. Run Inference
