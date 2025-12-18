@@ -52,7 +52,7 @@ def test_pcp_dcp_flashcomm2():
                     enable_expert_parallel=True,
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
-    
+
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     with VllmRunner(
             model,
