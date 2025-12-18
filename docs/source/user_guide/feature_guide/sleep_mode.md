@@ -36,11 +36,12 @@ The following is a simple example of how to use sleep mode.
 
     import torch
     from vllm import LLM, SamplingParams
-    from vllm.utils import GiB_bytes
+    from vllm.utils.mem_constants import GiB_bytes
 
 
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
     if __name__ == "__main__":
         prompt = "How are you?"
@@ -77,6 +78,7 @@ The following is a simple example of how to use sleep mode.
     export VLLM_SERVER_DEV_MODE="1"
     export VLLM_WORKER_MULTIPROC_METHOD="spawn"
     export VLLM_USE_MODELSCOPE="True"
+    export VLLM_ASCEND_ENABLE_NZ="0"
 
     vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
 

@@ -49,7 +49,7 @@ def test_SiluAndMul_forward(mock_maybe_prefetch_mlp_down_proj,
 
     with patch("vllm_ascend.utils.get_ascend_device_type",
                return_value=AscendDeviceType._310P
-               if is_310p else AscendDeviceType._910_93):
+               if is_310p else AscendDeviceType.A3):
         layer = SiluAndMul()
         out = layer.forward(dummy_tensor)
 

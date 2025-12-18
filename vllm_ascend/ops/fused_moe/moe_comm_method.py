@@ -19,7 +19,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 import torch
-from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -30,7 +29,7 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithMC2, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
-    TokenDispatcherWithMC2, TokenDispatcherWithMoge)
+    TokenDispatcherWithMC2)
 
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
@@ -52,8 +51,6 @@ class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
     def __init__(self, moe_config: FusedMoEConfig):
-        self.model_type = get_current_vllm_config(
-        ).model_config.hf_config.model_type
         self.moe_config = moe_config
 
         self.token_dispatcher = self._get_token_dispatcher()
@@ -198,16 +195,10 @@ class AllGatherCommImpl(MoECommMethod):
     """
 
     def _get_token_dispatcher(self):
-        if self.model_type == "PanguProMoE":
-            return TokenDispatcherWithMoge(
-                top_k=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts)
-        else:
-            return TokenDispatcherWithAllGather(
-                top_k=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts)
+        return TokenDispatcherWithAllGather(
+            top_k=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAllGather(self.moe_config)

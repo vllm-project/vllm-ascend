@@ -20,13 +20,14 @@ from vllm_ascend.distributed.kvpool.config_data import (
 class KVPoolScheduler:
 
     def __init__(self, vllm_config: "VllmConfig", use_layerwise):
-        self.client = LookupKeyClient(vllm_config)
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
+        self.client = LookupKeyClient(
+            vllm_config) if self.kv_role != "kv_consumer" else None
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config,
@@ -74,8 +75,8 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(token_len,
-                                                     request.block_hashes)
+        num_external_hit_tokens = self.client.lookup(  # type: ignore[union-attr]
+            token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -309,8 +310,8 @@ class LookupKeyClient:
         self.socket.close(linger=0)
 
 
-def get_zmq_rpc_path_lookup(
-    vllm_config: Optional["VllmConfig"] = None, ) -> str:
+def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured
     rpc_port = 0
@@ -324,4 +325,4 @@ def get_zmq_rpc_path_lookup(
                 "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
             )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}"
+    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"

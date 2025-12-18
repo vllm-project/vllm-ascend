@@ -26,6 +26,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
@@ -114,6 +115,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.use_aclgraph = (vllm_config.compilation_config.mode
                              == CompilationMode.VLLM_COMPILE
                              and not vllm_config.model_config.enforce_eager)
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
@@ -219,9 +221,14 @@ class AscendW8A8DynamicFusedMoEMethod:
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(
-                topk_ids, 0, global_num_experts - global_redundant_expert_num)
+            random_matrix = torch.rand(topk_ids.size(0),
+                                       global_num_experts -
+                                       global_redundant_expert_num,
+                                       device=topk_ids.device)
+            topk_ids = torch.argsort(
+                random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
+        assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method

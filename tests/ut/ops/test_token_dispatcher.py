@@ -53,7 +53,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         # Mock get_ascend_device_type()
         self.ascend_soc_version_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type",
-            return_value=AscendDeviceType._910_93)
+            return_value=AscendDeviceType.A3)
         self.ascend_soc_version_patch.start()
 
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
@@ -70,7 +70,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertFalse(self.dispatcher.with_quant)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
-        self.assertTrue(self.dispatcher.a3_need_extra_args)
 
     def test_get_dispatch_mc2_kwargs_without_quant(self):
         hidden_states = torch.randn(10, 128)

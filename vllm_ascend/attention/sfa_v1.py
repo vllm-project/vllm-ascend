@@ -21,6 +21,7 @@ from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
@@ -31,7 +32,7 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                _round_up, dispose_layer, enable_sp,
                                is_enable_nz, replace_layer)
-from vllm_ascend.worker.npu_input_batch import InputBatch
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -148,7 +149,7 @@ class AscendSFAMetadataBuilder:
         self.enable_sfa_cp = enable_sp() and \
             hasattr(self.model_config.hf_config, "index_topk")
 
-    def reorder_batch(self, input_batch: "InputBatch",
+    def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
         return False
@@ -186,8 +187,7 @@ class AscendSFAMetadataBuilder:
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        cos = common_attn_metadata.cos
-        sin = common_attn_metadata.sin
+        cos, sin = get_cos_and_sin_mla()
 
         assert self.cos_cache is not None and self.sin_cache is not None
         new_cos = self.cos_cache[input_positions][:, None, None]

@@ -1,0 +1,203 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Performance Test
+# This workflow runs nightly benchmarks for vllm-ascend.
+
+on:
+  schedule:
+    # Run benchmarks at 20:00 and 03:00 Beijing time (UTC+8)
+    - cron: "0 12 * * *"
+    - cron: "0 19 * * *"
+
+  workflow_dispatch:
+    # Allow manual triggering of the workflow
+
+  pull_request:
+    types: [ labeled ]
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only 1 job can runs on static-8-01-cards
+concurrency:
+  group: static-8-01-cards
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'performance-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
+    name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}
+    runs-on: 'linux-arm64-npu-static-8'
+    strategy:
+      matrix:
+        include:
+          - vllm_branch: v0.12.0
+            vllm_ascend_branch: main
+      max-parallel: 1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      volumes:
+        - /usr/local/dcmi:/usr/local/dcmi
+        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        - /usr/local/Ascend/driver/:/usr/local/Ascend/driver/
+        # Use self-host cache speed up pip and model download
+        - /home/action/.cache:/github/home/.cache/
+      options: >-
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+      env:
+        VLLM_USE_MODELSCOPE: True
+        ES_OM_DOMAIN: ${{ secrets.ES_OM_DOMAIN }}
+        ES_OM_AUTHORIZATION: ${{ secrets.ES_OM_AUTHORIZATION }}
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          # keep using tuna's proxy since linux-arm64-npu-static-8 is in another region
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+      - name: Install system dependencies
+        run: |
+          apt-get update -y
+          apt-get -y install git jq wget curl lsof gcc g++ cmake libnuma-dev
+
+      - name: Config git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: ${{  matrix.vllm_branch }}
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -e .
+          pip install -r benchmarks/requirements-bench.txt
+
+      - name: Run current commit benchmarks
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: |
+          # Sometimes we only want to run benchmarks on the current commit
+          # This is useful for debugging or a release benchmark
+          bash benchmarks/scripts/run-performance-benchmarks.sh
+          # Convert the benchmark results to markdown format
+          python3 benchmarks/scripts/convert_json_to_markdown.py
+
+      - name: Generate step summary
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: |
+          cat ./benchmarks/results/benchmark_results.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark artifacts
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: "benchmark-performance-${{ matrix.vllm_branch }}-${{ matrix.vllm_ascend_branch }}-report"
+          path: ./benchmarks/results/benchmark_results.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+      - name: Install elastic_tool
+        if: github.event_name != 'pull_request'
+        run: |
+          pip install escli-tool==0.2.3
+
+      - name: Collect pr info from vllm-project/vllm-ascend
+        if: github.event_name != 'pull_request'
+        run: |
+          # Only get the pull request which may influences performance
+          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' ':!benchmarks/*' > commit_log.txt
+          escli check commit_log.txt
+      
+      - name: Prepare benchmark script in advance
+        if: github.event_name != 'pull_request'
+        # This is for the benchmark iteration, which will change the benchmark scripts while checkouting each commit.
+        # We need ensure the benchmark scripts always available.
+        run: |
+          # Prepare the benchmark script in advance
+          mkdir -p /github/home/benchmarks
+          cp -r benchmarks/* /github/home/benchmarks/
+
+      - name: Run benchmark iteration
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        if: github.event_name != 'pull_request'
+        run: |
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            commit_id=${line%% *}
+            commit_title=${line#* }
+
+            git checkout $commit_id
+            commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
+            commit_time_no_tz=${commit_time::19}
+            pip install -e .
+
+            echo "------------------------"
+            echo "commit_id: $commit_id"
+            echo "commit_title: $commit_title"
+            echo "commit_time: $commit_time_no_tz"
+            echo "vllm branch: ${{ matrix.vllm_branch }}"
+            echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
+            echo "------------------------"
+
+            cd /github/home
+            ERROR_MSG=""
+            if ! bash benchmarks/scripts/run-performance-benchmarks.sh; then
+              ERROR_MSG="Benchmark failed to run"
+            fi
+            # send the result to es
+            escli add --vllm_branch ${{ matrix.vllm_branch }} \
+            --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
+            --commit_id $commit_id \
+            --commit_title "$commit_title" \
+            --created_at "$commit_time_no_tz" \
+            --res_dir ./benchmarks/results \
+            --error "$ERROR_MSG" \
+            rm -rf ./benchmarks/results
+            cd -
+          done < commit_log.txt

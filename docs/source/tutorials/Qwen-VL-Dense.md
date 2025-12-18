@@ -414,7 +414,7 @@ vllm serve Qwen/Qwen2.5-VL-32B-Instruct \
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-Instruct model's max seq len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-Instruct model's max_model_len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
