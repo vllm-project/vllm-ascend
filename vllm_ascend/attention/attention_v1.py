@@ -116,7 +116,7 @@ class AscendAttentionBackend(AttentionBackend):
             value_caches[dst_indices] = value_caches[src_indices]
 
     @staticmethod
-    def get_supported_block_size() -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
 
@@ -204,7 +204,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.device = device
         self.max_num_blocks_per_req = cdiv(
             self.model_config.max_model_len,
-            AscendAttentionBackend.get_supported_block_size()[0])
+            AscendAttentionBackend.get_supported_kernel_block_sizes()[0])
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -252,7 +252,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         block_table = common_attn_metadata.block_table_tensor
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
-        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
+        # NOTE: torch_npu._npu_reshape_and_cache only support slot_mapping with int32 dtype,
+        # but the default dtype of slot_mapping is int64 in vLLM, thus must convert dtype here
+        slot_mapping = common_attn_metadata.slot_mapping[:
+                                                         num_actual_tokens].to(
+                                                             torch.int32)
         attn_mask = common_attn_metadata.attn_mask
         swa_mask = common_attn_metadata.swa_mask
         attn_state = common_attn_metadata.attn_state

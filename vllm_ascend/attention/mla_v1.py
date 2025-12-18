@@ -15,6 +15,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -40,7 +41,6 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND,
                                flashcomm2_o_shared_enabled, maybe_trans_nz,
                                weak_ref_tensors)
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -274,7 +274,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def reorder_batch(self, input_batch: "NPUInputBatch",
+    def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
         # the front and the "prefill" requests are at the using the least amount
