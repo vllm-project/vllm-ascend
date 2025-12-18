@@ -76,7 +76,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     decode_token_per_req: int = 1
     """decode token number per request"""
 
-    actual_seq_lengths_q: list[int] = None
+    actual_seq_lengths_q: list[int] | None = None
     """actual seq lengths, for example: [1, 3, 4]"""
 
     positions: torch.Tensor = None
