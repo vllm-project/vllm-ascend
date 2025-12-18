@@ -89,13 +89,13 @@ def npugraph_ex_compile(
                                               tuple,
                                               args=([return_value], ))
         output_node.args = (tuple_node, )
-        fx_graph.recompile()
+        graph.recompile()
 
     import torchair
 
     # TODO: use a better way to lazy register replacement, instead of import one by one
     # As an example, we directly import here to register replacement.
-    import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
+    # import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
