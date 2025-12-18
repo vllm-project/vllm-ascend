@@ -542,7 +542,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if get_ascend_device_type() == AscendDeviceType._310P:
             # Fallback for 310P: Use flash attention implementation from v0.10.0rc1
             return self._forward_prefill_310p_fallback(
-                query, key, value, attn_metadata, block_size, num_tokens
+                query, key, value, kv_cache, attn_metadata, output
             )
 
         # Get workspace from cache or calculate it if not present.
@@ -763,16 +763,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                    output)
         return output
 
-    def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, block_size, num_tokens):
+    def _forward_prefill_310p_fallback(self, query, key, value, kv_cache, attn_metadata, output):
         """
         310P fallback implementation using flash attention from v0.10.0rc1
         This restores the working attention logic for 310P devices
         """
         from vllm_ascend.utils import aligned_16, ACL_FORMAT_FRACTAL_NZ
 
-        # Create output tensor
-        output = torch.empty(num_tokens, self.num_heads, self.head_size,
-                           dtype=query.dtype, device=query.device)
+        num_tokens = query.shape[0]
 
         # Apply 310P-specific alignments from v0.10.0rc1
         query = aligned_16(query)
@@ -802,4 +800,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
 
         # Return only the actual tokens (truncate padding from aligned_16)
-        return output[:num_tokens].view(num_tokens, self.num_heads * self.head_size)
+        # FIXED: Return same shape as other attention branches for consistency
+        # Other branches expect (num_tokens, num_heads, head_size) shape
+        return output[:num_tokens, :, :]
