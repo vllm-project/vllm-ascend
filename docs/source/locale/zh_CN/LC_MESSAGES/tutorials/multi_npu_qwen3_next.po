@@ -1,0 +1,96 @@
+#: ../../source/tutorials/multi_npu_qwen3_next.md:1
+msgid "Multi-NPU (Qwen3-Next)"
+msgstr "多 NPU（Qwen3-Next）"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:4
+msgid ""
+"The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-"
+"ascend) which is currently experimental. In future versions, there may be"
+" behavioral changes related to stability, accuracy, and performance "
+"improvement."
+msgstr ""
+"Qwen3 Next 使用的是 [Triton Ascend](https://gitee.com/ascend/triton-ascend)，该组件目前仍处于实验阶段。在后续版本中，可能会在稳定性、精度和性能优化方面存在行为变化。"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:7
+msgid "Run vllm-ascend on Multi-NPU with Qwen3 Next"
+msgstr "在多 NPU 环境下运行 vllm-ascend（Qwen3 Next）"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:9
+msgid "Run docker container:"
+msgstr "启动 Docker 容器："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:34
+msgid "Set up environment variables:"
+msgstr "设置环境变量："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:41
+msgid "Install Triton Ascend"
+msgstr "安装 Triton Ascend"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md
+msgid "Linux (AArch64)"
+msgstr "Linux（AArch64）"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:47
+msgid ""
+"The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required "
+"when you run Qwen3 Next, please follow the instructions below to install "
+"it and its dependency."
+msgstr ""
+"在运行 Qwen3 Next 时需要使用 [Triton Ascend](https://gitee.com/ascend/triton-ascend)，请按照以下说明安装该组件及其依赖。"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:49
+msgid "Install the Ascend BiSheng toolkit:"
+msgstr "安装 Ascend BiSheng 工具链："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:58
+msgid "Install Triton Ascend:"
+msgstr "安装 Triton Ascend："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md
+msgid "Linux (x86_64)"
+msgstr "Linux（x86_64）"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:69
+msgid "Coming soon ..."
+msgstr "敬请期待……"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:73
+msgid "Inference on Multi-NPU"
+msgstr "多 NPU 推理"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:75
+msgid "Please make sure you have already executed the command:"
+msgstr "请确保你已经执行过以下命令："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md
+msgid "Online Inference"
+msgstr "在线推理"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:85
+msgid "Run the following script to start the vLLM server on multi-NPU:"
+msgstr "运行以下脚本以在多 NPU 环境下启动 vLLM 服务："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:87
+msgid ""
+"For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size "
+"should be at least 4, and for 32 GB of memory, tensor-parallel-size "
+"should be at least 8."
+msgstr ""
+"对于单卡显存为 64 GB 的 Atlas A2，`tensor-parallel-size` 至少应设置为 4；对于单卡显存为 32 GB 的情况，`tensor-parallel-size` 至少应设置为 8。"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:93
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr "当服务启动后，你可以通过输入提示词来查询模型。"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:112
+msgid "Run the following script to execute offline inference on multi-NPU:"
+msgstr "运行以下脚本以在多 NPU 环境下执行离线推理："
+
+#: ../../source/tutorials/multi_npu_qwen3_next.md:150
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果该脚本成功运行，你将看到如下所示的信息："
