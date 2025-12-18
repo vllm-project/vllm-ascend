@@ -108,7 +108,7 @@ class AscendW8A8LinearMethod:
             try:
                 weight_prefetch_method = get_forward_context(
                 ).weight_prefetch_method
-            except AssertionError:
+            except AttributeError:
                 weight_prefetch_method = None
 
             # prefetch qkvo_proj.weight preprocess
