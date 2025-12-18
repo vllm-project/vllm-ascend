@@ -72,6 +72,16 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     For many of the tensors we keep both NPU and CPU versions.
     """
+    max_query_len: int
+    """Max token number of request in batch"""
+
+    seq_lens_cpu: torch.Tensor = None
+    """(batch_size,), the length of each request including both computed tokens
+        and newly scheduled tokens"""
+
+    num_computed_tokens_cpu: torch.Tensor = None
+    """(batch_size,), the number of computed tokens for each request"""
+
     actual_seq_lengths_q: list[int] = field(default_factory=list)
     """actual seq lengths, for example: [1, 3, 4]"""
 
