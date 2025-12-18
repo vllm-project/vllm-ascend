@@ -22,23 +22,24 @@ Run `pytest tests/e2e/multicard/test_flashcomm2.py`.
 """
 
 import os
+
 import pytest
 
 from vllm import SamplingParams
+
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED"] = "1"
 os.environ["VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE"] = "1"
 
+
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_flashcomm2():
     prompts = [
-        "The capital of France is",
-        "Hello, my name is Tom, I am",
-        "The president of United States is",
-        "AI future is"
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
     ]
     model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
@@ -50,8 +51,7 @@ def test_pcp_dcp_flashcomm2():
                     decode_context_parallel_size=2,
                     max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
-                    block_size=128
-                    ) as runner:
+                    block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
     
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
