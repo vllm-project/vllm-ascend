@@ -282,6 +282,26 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
     return output
 
 
+# TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
+# is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
+# aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
+# pass input_scale and input_scale_reciprocal at the same time to avoid redundant
+# reciprocal calculation in fussion pass. We shall remove this once
+# aclnnAddRmsNormQuantV2 supports div_moe=False.
+def _quantize_impl(in_tensor: torch.Tensor, input_scale: torch.Tensor,
+                   input_scale_reciprocal: torch.Tensor,
+                   input_offset: torch.Tensor) -> torch.Tensor:
+    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
+                                  input_offset, torch.qint8, -1, False)
+
+
+def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
+                        input_scale_reciprocal: torch.Tensor,
+                        input_offset: torch.Tensor) -> torch.Tensor:
+    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
+                                  input_offset, torch.qint8, -1, False)
+
+
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
                           fake_impl=lambda x, residual: x,
@@ -339,5 +359,11 @@ direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
 direct_register_custom_op(op_name="matmul_and_reduce",
                           op_func=_matmul_and_reduce_impl,
                           fake_impl=_matmul_and_reduce_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="quantize",
+                          op_func=_quantize_impl,
+                          fake_impl=_quantize_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
