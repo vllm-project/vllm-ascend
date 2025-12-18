@@ -543,8 +543,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         from vllm_ascend.quantization.quant_config import AscendLinearMethod
-        from vllm_ascend.quantization.w8a8 import (AscendW8A8LinearMethod,
-                                                   quant_per_tensor)
+        from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method,
@@ -567,8 +566,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                AscendW8A8LinearMethod)):
             if x.dtype != torch.int8:
                 x_quant = torch.ops.vllm.quantize(
-                    x,
-                    self.layer.aclnn_input_scale,
+                    x, self.layer.aclnn_input_scale,
                     self.layer.aclnn_input_scale_reciprocal,
                     self.layer.aclnn_input_offset)
             else:
