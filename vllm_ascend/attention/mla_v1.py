@@ -750,7 +750,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         self.layer_sharding_kwargs = []
-        for layer_name in get_ascend_config().layer_sharding:
+        for layer_name in (get_ascend_config().layer_sharding or []):
             if layer_name in kwargs:
                 self.layer_sharding_kwargs.append(kwargs[layer_name])
             else:
@@ -829,7 +829,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-        for layer in self.layer_sharding_kwargs:
+        for layer in (self.layer_sharding_kwargs or []):
             if is_hidden_layer(layer):
                 post_process_after_loading_for_shard_weight_series(layer)
 
@@ -1441,7 +1441,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
 
-        for layer in self.layer_sharding_kwargs:
+        for layer in (self.layer_sharding_kwargs or []):
             if is_hidden_layer(layer):
                 reach_layer_for_shard_weight_series(layer)
 
@@ -1474,7 +1474,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            for layer in self.layer_sharding_kwargs:
+            for layer in (self.layer_sharding_kwargs or []):
                 if is_hidden_layer(layer):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)

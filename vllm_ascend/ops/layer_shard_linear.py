@@ -257,7 +257,7 @@ def is_hidden_layer(layer: LinearBase) -> bool:
 
 def register_all_layers_to_shard_weight_series(
     layer_sharding: List[LinearBase], ):
-    for curr_layer in layer_sharding:
+    for curr_layer in (layer_sharding or []):
         if is_hidden_layer(curr_layer):
             register_layer_to_shard_weight_series(
                 series_name=str(curr_layer),
