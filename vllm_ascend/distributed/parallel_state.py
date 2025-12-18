@@ -24,8 +24,8 @@ _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
 _FC3_QUANT_X: Optional[GroupCoordinator] = None
 
-# shared_weight across rank groups
-_SHARED_WEIGHT: Optional[GroupCoordinator] = None
+# shard_weight across rank groups
+_SHARD_WEIGHT: Optional[GroupCoordinator] = None
 
 _P_TP: Optional[GroupCoordinator] = None
 
@@ -197,9 +197,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 backend,
                 group_name="flashcomm2_odp")
 
-        # Create shared weight group for flashcomm2 oproj
+        # Create shard weight group for flashcomm2 oproj
         if get_ascend_config().layer_sharding is not None:
-            global _SHARED_WEIGHT
+            global _SHARD_WEIGHT
             group_ranks = []
             for pp_idx in range(global_pp_size):
                 group = []
@@ -210,11 +210,11 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                         group.append(global_rank)
                 group_ranks.append(group)
 
-            _SHARED_WEIGHT = init_model_parallel_group(
+            _SHARD_WEIGHT = init_model_parallel_group(
                 group_ranks,
                 get_world_group().local_rank,
                 backend,
-                group_name="shared_weight")
+                group_name="shard_weight")
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X
@@ -267,11 +267,10 @@ def get_flashcomm2_odp_group() -> GroupCoordinator:
     return _FLASHCOMM2_ODP
 
 
-def get_shared_weight_group() -> GroupCoordinator:
-    assert _SHARED_WEIGHT is not None, (
-        "output shared weight parallel group for flashcomm2 is not initialized"
-    )
-    return _SHARED_WEIGHT
+def get_shard_weight_group() -> GroupCoordinator:
+    assert _SHARD_WEIGHT is not None, (
+        "output shard weight parallel group for flashcomm2 is not initialized")
+    return _SHARD_WEIGHT
 
 
 def get_p_tp_group() -> GroupCoordinator:
@@ -328,10 +327,10 @@ def destroy_ascend_model_parallel():
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
 
-    global _SHARED_WEIGHT
-    if _SHARED_WEIGHT:
-        _SHARED_WEIGHT.destroy()
-    _SHARED_WEIGHT = None
+    global _SHARD_WEIGHT
+    if _SHARD_WEIGHT:
+        _SHARD_WEIGHT.destroy()
+    _SHARD_WEIGHT = None
 
     global _FC3_QUANT_X
     if _FC3_QUANT_X:

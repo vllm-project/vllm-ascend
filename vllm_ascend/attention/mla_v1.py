@@ -31,11 +31,11 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
+from vllm_ascend.ops.layer_shard_linear import (
+    is_hidden_layer, post_process_after_loading_for_shard_weight_series,
+    reach_layer_for_shard_weight_series,
+    register_all_layers_to_shard_weight_series)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.shared_weight_layer import (
-    is_hidden_layer, post_process_after_loading_for_shared_weight_series,
-    reach_layer_for_shared_weight_series,
-    register_all_layers_to_shared_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, maybe_trans_nz,
@@ -757,7 +757,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 raise ValueError(
                     f"Layer '{layer_name}' not found in kwargs for layer sharding."
                 )
-        register_all_layers_to_shared_weight_series(self.layer_sharding_kwargs)
+        register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
@@ -831,7 +831,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         for layer in self.layer_sharding_kwargs:
             if is_hidden_layer(layer):
-                post_process_after_loading_for_shared_weight_series(layer)
+                post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
@@ -1443,7 +1443,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         for layer in self.layer_sharding_kwargs:
             if is_hidden_layer(layer):
-                reach_layer_for_shared_weight_series(layer)
+                reach_layer_for_shard_weight_series(layer)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
@@ -1476,7 +1476,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Profiling run.
             for layer in self.layer_sharding_kwargs:
                 if is_hidden_layer(layer):
-                    reach_layer_for_shared_weight_series(layer)
+                    reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
         forward_context = get_forward_context()
