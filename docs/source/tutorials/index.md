@@ -11,6 +11,7 @@ Qwen3-30B-A3B.md
 Qwen3-235B-A22B.md
 Qwen3-Coder-30B-A3B
 Qwen3_embedding
+Qwen3_reranker
 Qwen3-8B-W4A8
 Qwen3-32B-W4A4
 Qwen3-Next
