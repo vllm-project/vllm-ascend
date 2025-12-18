@@ -506,7 +506,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def _forward_prefill(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
-                         output: torch.Tensor):
+                         output: torch.Tensor, **kwargs):
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
@@ -541,10 +541,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if get_ascend_device_type() == AscendDeviceType._310P:
             # Fallback for 310P: Use flash attention implementation from v0.10.0rc1
-            # First, handle KV cache storage like v0.10.0rc1
-            key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
-
-            # Then call flash attention fallback
+            # Handle KV cache first, then use fallback
+            kv_cache = kwargs.get('kv_cache', None)
+            if kv_cache is not None and len(kv_cache) > 1:
+                if self.key_cache is None:
+                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                slots = attn_metadata.slot_mapping
+                num_actual_tokens = attn_metadata.num_actual_tokens
+                torch_npu._npu_reshape_and_cache(
+                    key=key[:num_actual_tokens],
+                    value=value[:num_actual_tokens],
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_indices=slots)
             return self._forward_prefill_310p_fallback(
                 query, key, value, attn_metadata, output
             )
@@ -710,7 +719,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                    output)
             else:
                 output = self._forward_prefill(query, key, value,
-                                               attn_metadata, output)
+                                               attn_metadata, output, kv_cache=kv_cache)
         else:
             attn_output, num_tokens = self.full_graph_attention(
                 query, key, value, attn_metadata, output)
