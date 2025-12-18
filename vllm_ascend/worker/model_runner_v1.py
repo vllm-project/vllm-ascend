@@ -3793,9 +3793,14 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         # For 310P 4D tensors, we need to calculate num_blocks from the actual shape
                         # Shape is [num_blocks, compressed_features, block_size, align_dim]
                         num_blocks = raw_k_tensor.shape[0]  # First dimension is num_blocks
+                        # Save original num_blocks for assertion check (this should be kv_cache_config.num_blocks)
+                        original_num_blocks = kv_cache_config.num_blocks
                         print(f"[DEBUG 310P NUM_BLOCKS] Using shape-based calculation: num_blocks={num_blocks}")
+                        print(f"[DEBUG 310P NUM_BLOCKS] Original num_blocks from config: {original_num_blocks}")
                     else:
                         num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
+                        # For non-310P devices, original_num_blocks is the same as num_blocks
+                        original_num_blocks = num_blocks
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
