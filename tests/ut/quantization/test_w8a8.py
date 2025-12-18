@@ -70,10 +70,9 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(params['weight_offset'].shape, (10, 1))
 
     @patch("vllm_ascend.quantization.w8a8.get_forward_context")
-    @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
+    @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul,
-                                   mock_quant_per_tensor,
+    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize,
                                    mock_get_forward_context):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
@@ -88,10 +87,10 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         x = torch.randn(32, 128)
         bias = torch.randn(256)
-        mock_quant_per_tensor.return_value = torch.randint(-128,
-                                                           127,
-                                                           x.shape,
-                                                           dtype=torch.int8)
+        mock_quantize.return_value = torch.randint(-128,
+                                                   127,
+                                                   x.shape,
+                                                   dtype=torch.int8)
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
