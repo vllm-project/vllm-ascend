@@ -114,10 +114,10 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable, vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
+                               enable_sp, get_ascend_device_type, is_moe_model,
+                               lmhead_tp_enable, maybe_trans_nz,
+                               vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -137,9 +137,6 @@ torch.npu.config.allow_internal_format = True
 
 if get_ascend_device_type() == AscendDeviceType._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
-else:
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
 
 
 @dataclass
@@ -2225,16 +2222,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                from vllm.model_executor.layers.linear import (
-                    MergedColumnParallelLinear, QKVParallelLinear,
-                    RowParallelLinear)
-                for module in self.model.modules():
-                    if isinstance(module,
-                                  (MergedColumnParallelLinear,
-                                   QKVParallelLinear, RowParallelLinear)):
-                        module.weight.data = self._convert_torch_format(
-                            module.weight.data)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
@@ -2254,13 +2241,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
-
-    def _convert_torch_format(self, tensor):
-        if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
-                and not is_enable_nz():
-            return tensor
-        tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
-        return tensor
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2534,9 +2514,10 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    v_cache = self._convert_torch_format(v_cache)
+                    if get_ascend_device_type() == AscendDeviceType._310P:
+                        k_cache = maybe_trans_nz(k_cache)
+                        v_cache = maybe_trans_nz(v_cache)
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
                                              kv_cache_spec.block_size, 1, 128)
