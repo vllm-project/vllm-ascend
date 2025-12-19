@@ -19,6 +19,9 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+import vllm_ascend.patch.platform.patch_core # noqa
+import vllm_ascend.patch.platform.patch_config # noqa
+import vllm_ascend.patch.platform.patch_scheduler # noqa
 from vllm_ascend.utils import vllm_version_is
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
