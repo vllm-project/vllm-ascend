@@ -692,6 +692,7 @@ class MtpProposer(Proposer):
 
         assert self.runner is not None
 
+        # Note(qcs): We may need to refactor these check logics.
         if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
