@@ -716,8 +716,7 @@ class EagleProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=new_seq_lens_cpu.max().item()
-        )
+            max_seq_len=new_seq_lens_cpu.max().item())
         return spec_common_attn_metadata, token_indices
 
     def prepare_inputs_padded(

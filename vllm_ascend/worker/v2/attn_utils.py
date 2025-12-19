@@ -81,8 +81,7 @@ def build_attn_metadata(
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,
-            max_seq_len=max_seq_len
-        )
+            max_seq_len=max_seq_len)
 
         attn_metadata_builder = attn_metadata_builders[i]
         metadata = attn_metadata_builder.build(

@@ -174,8 +174,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_input_tokens=num_actual_tokens,
             prefill_context_parallel_metadata=self.
             prefill_context_parallel_metadata,
-            max_seq_len=self.max_seq_len
-        )
+            max_seq_len=self.max_seq_len)
 
 
 def filter_chunked_req_indices(

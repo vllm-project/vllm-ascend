@@ -35,10 +35,10 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendMetadata)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         filter_chunked_req_indices,
-                                         split_decodes_and_prefills,
                                          AscendMetadataForDecode,
-                                         AscendMetadataForPrefill)
+                                         AscendMetadataForPrefill,
+                                         filter_chunked_req_indices,
+                                         split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors

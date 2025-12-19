@@ -271,8 +271,7 @@ class MtpProposer(Proposer):
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
-                    max_seq_len=self.runner.seq_lens.cpu.max().item()
-                )
+                    max_seq_len=self.runner.seq_lens.cpu.max().item())
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
                 attn_metadata_mtp = builder.build_for_graph_capture(
@@ -591,8 +590,7 @@ class MtpProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=new_seq_lens_cpu.max().item()
-        )
+            max_seq_len=new_seq_lens_cpu.max().item())
         return spec_common_attn_metadata, token_indices
 
     def _propose(

@@ -34,8 +34,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         enable_cp, split_decodes_and_prefills,
-                                         using_paged_attention, AscendMetadataForPrefill, AscendMetadataForDecode)
+                                         AscendMetadataForDecode,
+                                         AscendMetadataForPrefill, enable_cp,
+                                         split_decodes_and_prefills,
+                                         using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
