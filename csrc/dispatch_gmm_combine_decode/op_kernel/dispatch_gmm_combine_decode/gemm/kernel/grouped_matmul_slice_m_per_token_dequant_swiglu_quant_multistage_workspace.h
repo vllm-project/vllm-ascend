@@ -353,7 +353,7 @@ __aicore__ inline static void CalQuantRow(const uint32_t column, uint32_t &row)
     row = row < MAX_QUANT_ROW_ONCE ? row : MAX_QUANT_ROW_ONCE;
 }
 
-template <typename XType_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, uint32_t WORKSPACE_STAGES_,
+template <uint32_t EXEC_FLAG, typename XType_, class BlockMmad_, class BlockEpilogue_, class BlockScheduler_, uint32_t WORKSPACE_STAGES_,
           class ElementGroupList_>
 class GroupedMatmulSliceMPerTokenDequantSwigluQuantMultiStageWorkspace
 {
@@ -411,6 +411,7 @@ public:
         GM_ADDR gmX;
         GM_ADDR debugGm;
         GM_ADDR gmexpertIds;
+        GM_ADDR gmXActiveMask;
 
         GM_ADDR gmExpandIdx;
         GM_ADDR gmEpSendCount;
@@ -438,7 +439,7 @@ public:
                LayoutScale const &layoutScale_, GM_ADDR ptrPerTokenScale_,
                LayoutPerTokenScale const &layoutPerTokenScale_, GM_ADDR ptrOutput_, LayoutOutput const &layoutOutput_,
                GM_ADDR ptrDequantScale_, LayoutDequantScale const &layoutDequantScale_, GM_ADDR ptrWorkspace_,
-               GM_ADDR gmX_, GM_ADDR debugGm_, GM_ADDR gmexpertIds_, GM_ADDR gmExpandIdx_, GM_ADDR gmEpSendCount_,
+               GM_ADDR gmX_, GM_ADDR debugGm_, GM_ADDR gmexpertIds_, GM_ADDR gmExpandIdx_, GM_ADDR gmEpSendCount_, GM_ADDR gmXActiveMask_,
                GM_ADDR gmResvered_, GM_ADDR gmOutputRecvCount_, uint32_t epRankSize_, uint32_t epRankId_,
                uint32_t moeExpertNum_, uint32_t moeExpertNumPerRank_, uint32_t sharedExpertNum_,
                uint32_t sharedExpertRankNum_, uint32_t quantMode_, uint32_t globalBs_, uint32_t bs_, uint32_t topK_,
@@ -465,6 +466,7 @@ public:
               gmExpandIdx(gmExpandIdx_),
               gmEpSendCount(gmEpSendCount_),
               gmOutputRecvCount(gmOutputRecvCount_),
+              gmXActiveMask(gmXActiveMask_), 
               gmResvered(gmResvered_),
               epRankSize(epRankSize_),
               epRankId(epRankId_),
@@ -635,6 +637,39 @@ public:
         AscendC::SyncAll<false>();
     }
 
+    CATLASS_DEVICE 
+    void TokenActiveMaskCal(GM_ADDR gmXActiveMask, int64_t ubOffset)
+    {
+        int64_t subUbOffset = ubOffset;
+        AscendC::LocalTensor<bool> maskInputTensor = (resource.ubBuf.template
+                                                            GetBufferByByte<bool>(subUbOffset));
+        AscendC::LocalTensor<int8_t> maskInputInt8Tensor = maskInputTensor.template ReinterpretCast<int8_t>();
+        subUbOffset += CEIL_UP(axisBS * sizeof(bool));
+        AscendC::LocalTensor<half> maskTmpTensor = (resource.ubBuf.template
+                                                            GetBufferByByte<half>(subUbOffset));
+        subUbOffset += CEIL_UP(axisBS * sizeof(half));
+        AscendC::LocalTensor<half> sumOutTensor = (resource.ubBuf.template
+                                                            GetBufferByByte<half>(subUbOffset));
+        subUbOffset += CEIL_UP(SUM_TMP_TENSOR_SIZE);
+
+        AscendC::GlobalTensor<bool> xActiveMaskGMTensor;
+        xActiveMaskGMTensor.SetGlobalBuffer((__gm__ bool *)gmXActiveMask);
+        uint32_t axisBsAlignSize = CEIL_UP(axisBS * sizeof(bool));
+
+        AscendC::DataCopyExtParams maskParams = {1U, static_cast<uint32_t>(axisBS * sizeof(bool)), 0U, 0U, 0U};
+        AscendC::DataCopyPadExtParams<bool> maskCopyPadParams{false, 0U, 0U, 0U};
+        AscendC::DataCopyPad(maskInputTensor, xActiveMaskGMTensor, maskParams, maskCopyPadParams);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+        AscendC::Cast(maskTmpTensor, maskInputInt8Tensor, AscendC::RoundMode::CAST_NONE, axisBS);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SumParams params{1, axisBsAlignSize, axisBS};
+        AscendC::Sum(sumOutTensor, maskTmpTensor, params);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
+        activeMaskBsCnt = static_cast<int32_t>(sumOutTensor.GetValue(0));
+    }
+
     CATLASS_DEVICE
     void CalExpandxIdx(int32_t dstExpertId, uint32_t tokenIndex, int32_t &curExpertCnt, int64_t ubOffset)
     {
@@ -778,8 +813,8 @@ public:
     void SendToShareExprt(GM_ADDR gmX, GM_ADDR gmX1, GM_ADDR gmX1Scale)
     {
         uint32_t newAivId = sendCoreIdx - sendToMoeAivNum;
-        uint32_t sendTokenNum = axisBS / sendToShareAivNum;
-        uint32_t remainderTokenNum = axisBS % sendToShareAivNum;
+        uint32_t sendTokenNum = activeMaskBsCnt / sendToShareAivNum;
+        uint32_t remainderTokenNum = activeMaskBsCnt % sendToShareAivNum;
         uint32_t startTokenId = sendTokenNum * newAivId;
         if (newAivId < remainderTokenNum) {
             sendTokenNum += 1;
@@ -788,7 +823,7 @@ public:
             startTokenId += remainderTokenNum;
         }
         uint32_t endTokenId = startTokenId + sendTokenNum;
-        if (startTokenId >= axisBS) {
+        if (startTokenId >= activeMaskBsCnt) {
             return;
         }
 
@@ -962,10 +997,13 @@ public:
     }
 
     CATLASS_DEVICE void
-    SendCoreFunc(GM_ADDR gmX, GM_ADDR gmExpertIds, GM_ADDR gmX1, GM_ADDR gmX1Scale, GM_ADDR gmExpandIdx)
+    SendCoreFunc(GM_ADDR gmX, GM_ADDR gmExpertIds, GM_ADDR gmX1, GM_ADDR gmX1Scale, GM_ADDR gmExpandIdx, GM_ADDR gmXActiveMask)
     {
         ubOffset = 0;
-        expertIdsCnt = axisBS * axisK;
+        if constexpr (EXEC_FLAG & EXEC_FLAG_X_ACTIVE_MASK) {
+            TokenActiveMaskCal(gmXActiveMask, ubOffset);
+        }
+        expertIdsCnt = activeMaskBsCnt * axisK;
 
         AscendC::GlobalTensor<int32_t> expertIdsGMTensor_;
         expertIdsGMTensor_.SetGlobalBuffer((__gm__ int32_t *)gmExpertIds);
@@ -1372,6 +1410,7 @@ public:
         hCommuSize = hOutSize + scaleParamPad;
         axisHCommu = hCommuSize / sizeof(int8_t);
         axisBS = params.bs;
+        activeMaskBsCnt = axisBS;
         axisK = params.topK;
         uint32_t maxAxisBs = params.globalBs / epRankSize;
 
@@ -1489,7 +1528,7 @@ public:
         AivInitState();
         if (isSendCore) {
             SendCoreFunc((GM_ADDR)params.gmX, (GM_ADDR)params.gmexpertIds, (GM_ADDR)params.ptrA,
-                        (GM_ADDR)params.ptrPerTokenScale, (GM_ADDR)params.gmExpandIdx);
+                        (GM_ADDR)params.ptrPerTokenScale, (GM_ADDR)params.gmExpandIdx, (GM_ADDR)params.gmXActiveMask);
         }
         if (isRecvCore) {
             RecvCoreFunc((GM_ADDR)params.ptrA, (GM_ADDR)params.ptrPerTokenScale, (GM_ADDR)params.gmEpSendCount,
@@ -1596,6 +1635,7 @@ private:
     uint32_t hCommuSize{0};
     uint32_t axisHCommu{0};
     uint32_t axisBS{0};
+    uint32_t activeMaskBsCnt{0};
     uint32_t axisK{0};
     uint32_t totalTokenCount{0};
     uint32_t expertIdsCnt{0};
