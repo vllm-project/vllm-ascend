@@ -15,14 +15,14 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
-                                          AscendMLAImpl, AscendMLAMetadata,
-                                          AscendMLAMetadataBuilder,
-                                          AscendMLAPrefillMetadata,
-                                          AscendPCPMetadata,
-                                          ChunkedContextMetadata,
-                                          DecodeMLAPreprocessResult,
-                                          PrefillMLAPreprocessResult)
+# isort: off
+from vllm_ascend.attention.mla_v1 import (
+    AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata,
+    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata, AscendPCPMetadata,
+    ChunkedContextMetadata, DecodeMLAPreprocessResult,
+    PrefillMLAPreprocessResult)
+#isort: on
+
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          wait_for_kv_layer_from_connector)
