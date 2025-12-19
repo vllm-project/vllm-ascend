@@ -16,8 +16,9 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image_build_and_push.yml'
+      - '.github/workflows/pr_tag_image_build_and_push.yaml'
       - 'Dockerfile*'
+      - '.github/workflows/_pr_image_build.yml'
       - 'vllm_ascend/**'
       - 'setup.py'
       - 'pyproject.toml'
@@ -25,7 +26,7 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
-    types: [ labeled ]
+    types: [ labeled, synchronize ]
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
     branches:
@@ -79,5 +80,6 @@ jobs:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
+      should_push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
