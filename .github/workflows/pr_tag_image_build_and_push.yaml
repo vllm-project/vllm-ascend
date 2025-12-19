@@ -9,7 +9,7 @@
 # 3. tags push trigger image publish
 #   - is for final release image
 #   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
-name: Image
+name: Image Build and Push
 on:
   pull_request:
     branches:
@@ -55,7 +55,7 @@ concurrency:
 jobs:
   image_build:
     if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
-    name: image build and push
+    name: Image Build and Push
     strategy:
       matrix:
         build_meta:

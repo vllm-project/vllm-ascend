@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Lint
+name: PR Create
 
 on:
   # The PR updated when PR opened and push new commits
