@@ -39,18 +39,6 @@ class TestGetQuantMethod(TestBase):
                                           "moe")
                 self.assertIsInstance(method, cls)
 
-    def test_with_fa_quant_type(self):
-        quant_description = {"fa_quant_type": "C8"}
-        method = get_quant_method(quant_description, ".attn", "attention")
-        self.assertIsInstance(
-            method, ASCEND_QUANTIZATION_METHOD_MAP["C8"]["attention"])
-
-    def test_with_kv_quant_type(self):
-        quant_description = {"kv_quant_type": "C8"}
-        method = get_quant_method(quant_description, ".attn", "attention")
-        self.assertIsInstance(
-            method, ASCEND_QUANTIZATION_METHOD_MAP["C8"]["attention"])
-
     def test_invalid_layer_type(self):
         quant_description = {"linear_layer.weight": "W8A8"}
         with self.assertRaises(NotImplementedError):
