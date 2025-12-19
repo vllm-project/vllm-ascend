@@ -97,11 +97,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download digests
+      - name: Download arm64 digests
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ inputs.suffix }}-*
+          pattern: digests-${{ inputs.suffix }}-arm64
+          merge-multiple: true
+
+      - name: Download amd64 digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ inputs.suffix }}-amd64
           merge-multiple: true
 
       - name: Prepare suffix
