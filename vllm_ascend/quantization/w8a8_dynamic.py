@@ -14,7 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+        split_q_head_nomask_idx_tensor_list: Optional[list[
+            torch.Tensor]] = None
+        split_q_tail_nomask_idx_tensor_list: Optional[list[
+            torch.Tensor]] = None
+        head_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
+        tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
                 split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list= [], []
                 head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
                 if self.vllm_config.model_config.use_mla:
