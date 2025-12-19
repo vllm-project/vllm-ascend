@@ -18,7 +18,7 @@ def torch_cuda_wrapper():
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
-        torch.cuda.CUDAGraph = torch.npu.NpuGraph
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
         torch.cuda.graph = torch.npu.graph
         yield
     finally:
