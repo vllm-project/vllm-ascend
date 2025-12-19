@@ -61,7 +61,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | Qwen2-VL                       | ✅            |                                                                      |||||||||||||||||||
 | Qwen2.5-VL                     | ✅            |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ |||| ✅ | ✅ | ✅ | 30k || [Qwen-VL-Dense](../../tutorials/Qwen-VL-Dense.md) |
 | Qwen3-VL                       | ✅            |                                                                      ||A2/A3|||||||✅|||||✅|✅||| [Qwen-VL-Dense](../../tutorials/Qwen-VL-Dense.md) |
-| Qwen3-VL-MOE                   | ✅            |                                                                      |||||||||||||||||||
+| Qwen3-VL-MOE                   | ✅            |                                                                      | ✅ |A2/A3||✅|✅|||✅|✅|✅|✅|✅|✅|✅|✅|256k||[Qwen3-VL-235B-A22B-Instruct](../../tutorials/Qwen3-VL-235B-A22B-Instruct.md)|
 | Qwen2.5-Omni                   | ✅            ||||||||||||||||||| [Qwen2.5-Omni](../../tutorials/Qwen2.5-Omni.md) |
 | QVQ                            | ✅            |                                                                      |||||||||||||||||||
 | Qwen2-Audio                    | ✅            |                                                                      |||||||||||||||||||
