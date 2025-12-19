@@ -271,8 +271,8 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
              attn_output, softmax_lse) = param
 
             seq_lens = forward_context.attn_metadata[key].seq_lens_list
-            query_start_loc = forward_context.attn_metadata[
-                key].query_start_loc_list
+            actual_seq_lengths_q = forward_context.attn_metadata[
+                key].actual_seq_lengths_q
             torch.npu.graph_task_update_begin(update_stream, handle)
             torch_npu.npu_fused_infer_attention_score.out(
                 query=query,
@@ -282,7 +282,7 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
                 atten_mask=attn_mask,
                 input_layout="TND",
                 block_size=block_size,
-                actual_seq_lengths=query_start_loc,
+                actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=seq_lens,
                 num_key_value_heads=num_kv_heads,
                 num_heads=num_heads,
