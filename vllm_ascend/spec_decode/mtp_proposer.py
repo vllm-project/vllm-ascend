@@ -44,6 +44,8 @@ PADDING_SLOT_ID = -1
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "PanguUltraMoEForCausalLM":
+    ("vllm.model_executor.models.openpangu_mtp", "OpenPanguMTP"),
     "DeepseekV32ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "Qwen3NextForCausalLM":
@@ -227,7 +229,8 @@ class MtpProposer(Proposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
-                  dummy_compute_logits=lambda hidden_states: None) -> None:
+                  dummy_compute_logits=lambda hidden_states: None,
+                  is_profile=False) -> None:
 
         (
             num_tokens,
@@ -297,7 +300,8 @@ class MtpProposer(Proposer):
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    is_mtp_model=True):
+                    is_mtp_model=True,
+                    in_profile_run=is_profile):
                 if self.enable_shared_expert_dp:
                     positions = positions.unsqueeze(-1)
                     positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
@@ -759,7 +763,6 @@ class MtpProposer(Proposer):
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens,
                     is_mtp_model=True):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
@@ -778,16 +781,17 @@ class MtpProposer(Proposer):
                         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
                             hidden_states)
 
-                    if self.use_async_scheduling and attn_metadata[
-                            layer_name].decode is not None:
-                        for layer_name in self.attn_layer_name:
-                            actual_size = len(attn_metadata[layer_name].decode.
-                                              actual_seq_lengths_q)
+                    for layer_name in self.attn_layer_name:
+                        decode_metadata = getattr(attn_metadata[layer_name],
+                                                  "decode", None)
+                        if self.use_async_scheduling and decode_metadata is not None:
+                            actual_size = len(
+                                decode_metadata.actual_seq_lengths_q)
 
-                            attn_metadata[layer_name].decode.seq_lens_list = \
-                                attn_metadata[layer_name].decode.seq_lens_list[:actual_size]
-                            attn_metadata[layer_name].decode.block_table = \
-                                attn_metadata[layer_name].decode.block_table[:actual_size]
+                            decode_metadata.seq_lens_list = \
+                                decode_metadata.seq_lens_list[:actual_size]
+                            decode_metadata.block_table = \
+                                decode_metadata.block_table[:actual_size]
 
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
