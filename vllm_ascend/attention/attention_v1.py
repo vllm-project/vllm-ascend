@@ -666,6 +666,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             
 
             if get_ascend_device_type() == AscendDeviceType._310P:
+                # DEBUG: Log block_tables info for 310P debugging
+                print(f"[DEBUG 310P BLOCK_TABLES] shape={attn_metadata.block_tables.shape}")
+                print(f"[DEBUG 310P BLOCK_TABLES] dtype={attn_metadata.block_tables.dtype}")
+                print(f"[DEBUG 310P BLOCK_TABLES] device={attn_metadata.block_tables.device}")
+                print(f"[DEBUG 310P CONTEXT] batch_size={batch_size}, query.shape={query.shape}")
+                print(f"[DEBUG 310P CONTEXT] seq_lens={attn_metadata.seq_lens}")
+
                 # Fallback for 310P: Use paged attention instead of fused attention
                 torch_npu._npu_paged_attention(
                     query=query,
@@ -695,6 +702,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
+            # DEBUG: Also log for non-sliding_window case
+            if get_ascend_device_type() == AscendDeviceType._310P:
+                print(f"[DEBUG 310P BLOCK_TABLES ELSE] shape={attn_metadata.block_tables.shape}")
+                print(f"[DEBUG 310P BLOCK_TABLES ELSE] query.shape={query.shape}")
+                print(f"[DEBUG 310P BLOCK_TABLES ELSE] seq_lens={attn_metadata.seq_lens}")
+
             torch_npu._npu_paged_attention(
                 query=query,
                 key_cache=self.key_cache,

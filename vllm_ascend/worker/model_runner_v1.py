@@ -1922,6 +1922,20 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                          num_actual_tokens_pcp_padded] = pcp_padded_slot_mapping
                     slot_mapping = slot_mapping_for_pcp
 
+            # FIXED: 310P-specific block_table_tensor fix to match old version shape
+            from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+            if get_ascend_device_type() == AscendDeviceType._310P:
+                # Ensure 310P block_table_tensor has proper shape like old version
+                # Old version: block_table[:num_reqs, :self.runner.max_num_blocks_per_req] -> [256, 1000]
+                # New version default: blk_table_tensor[:num_reqs] -> [2, 1000] (insufficient rows)
+                print(f"[DEBUG 310P PRE_FIX] blk_table_tensor original shape: {blk_table_tensor.shape}")
+                print(f"[DEBUG 310P PRE_FIX] num_reqs: {num_reqs}, max_num_blocks_per_req: {self.max_num_blocks_per_req}")
+
+                # Fix shape for 310P to match old version behavior
+                if blk_table_tensor.shape[0] < self.max_num_blocks_per_req:
+                    blk_table_tensor = blk_table_tensor[:num_reqs, :self.max_num_blocks_per_req]
+                    print(f"[DEBUG 310P PRE_FIX] blk_table_tensor fixed shape: {blk_table_tensor.shape}")
+
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
@@ -1932,7 +1946,6 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 num_actual_tokens=slot_mapping_size,
                 num_input_tokens=num_input_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
-                # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
                 slot_mapping=slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
