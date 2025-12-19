@@ -30,8 +30,9 @@ extern aclnnStatus aclnnInnerDispatchGmmCombineDecodeGetWorkspaceSize(
     const aclTensor *gmm1PermutedWeightScale,
     const aclTensor *gmm2Weight,
     const aclTensor *gmm2WeightScale,
+    const aclTensor *expertScales,
     const aclTensor *expertSmoothScalesOptional,
-    const aclTensor *expertScalesOptional,
+    const aclTensor *xActiveMaskOptional,
     char *groupEp,
     int64_t epRankSize,
     int64_t epRankId,
@@ -57,8 +58,9 @@ aclnnStatus aclnnDispatchGmmCombineDecodeGetWorkspaceSize(
     const aclTensor *gmm1PermutedWeightScale,
     const aclTensor *gmm2Weight,
     const aclTensor *gmm2WeightScale,
+    const aclTensor *expertScales,
     const aclTensor *expertSmoothScalesOptional,
-    const aclTensor *expertScalesOptional,
+    const aclTensor *xActiveMaskOptional,
     char *groupEp,
     int64_t epRankSize,
     int64_t epRankId,
@@ -73,7 +75,7 @@ aclnnStatus aclnnDispatchGmmCombineDecodeGetWorkspaceSize(
     aclOpExecutor **executor)
 {
     return aclnnInnerDispatchGmmCombineDecodeGetWorkspaceSize(x, expertIds, gmm1PermutedWeight, gmm1PermutedWeightScale,
-        gmm2Weight, gmm2WeightScale, expertSmoothScalesOptional, expertScalesOptional, groupEp, epRankSize,
+        gmm2Weight, gmm2WeightScale, expertScales, expertSmoothScalesOptional, xActiveMaskOptional, groupEp, epRankSize,
         epRankId, moeExpertNum, shareExpertNum, shareExpertRankNum, quantMode, globalBs,
         output, epRecvCount, workspaceSize, executor);
 }
