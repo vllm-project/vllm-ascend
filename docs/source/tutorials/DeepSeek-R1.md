@@ -113,6 +113,13 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
+**Notice:**
+The parameters are explained as follows:
+- Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
+- For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+
 ::::
 ::::{tab-item} DeepSeek-R1-W8A8 A2 series
 
