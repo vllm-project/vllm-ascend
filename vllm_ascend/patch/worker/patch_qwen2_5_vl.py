@@ -179,3 +179,4 @@ class AscendQwen2_5_VLForConditionalGeneration(nn.Module):
 # NOTE: This will be removed after MMEncoderAttention has been extract as a CustomOp in vllm.
 Qwen2VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
 Qwen2_5_VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
+
