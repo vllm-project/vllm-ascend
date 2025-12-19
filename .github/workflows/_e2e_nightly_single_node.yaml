@@ -57,6 +57,9 @@ jobs:
     timeout-minutes: 600
     container:
       image: ${{ inputs.image }}
+    env:
+      TRANSFORMERS_OFFLINE: 1
+      VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
