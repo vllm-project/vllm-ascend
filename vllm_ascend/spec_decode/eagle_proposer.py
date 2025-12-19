@@ -194,7 +194,8 @@ class EagleProposer(Proposer):
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
-                  dummy_compute_logits=lambda hidden_states: None):
+                  dummy_compute_logits=lambda hidden_states: None,
+                  is_profile=False):
         # update global cos, sin
         update_cos_sin(self._get_positions(num_tokens))
 

@@ -128,8 +128,9 @@ class AscendW8A8LinearMethod:
             if enable_flashcomm2_quant_comm:
                 quant_input_x = x.contiguous().view(
                     -1, layer.aclnn_input_scale_reciprocal.size(0))
-                quant_x = quant_per_tensor(
+                quant_x = torch.ops.vllm.quantize(
                     quant_input_x,
+                    layer.aclnn_input_scale,
                     layer.aclnn_input_scale_reciprocal,
                     layer.aclnn_input_offset,
                 )
@@ -138,8 +139,9 @@ class AscendW8A8LinearMethod:
                 x = comm_fn(comm_input)
             else:
                 # quant
-                x = quant_per_tensor(
+                x = torch.ops.vllm.quantize(
                     x,
+                    layer.aclnn_input_scale,
                     layer.aclnn_input_scale_reciprocal,
                     layer.aclnn_input_offset,
                 )
