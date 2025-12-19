@@ -512,19 +512,23 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
-        # Make sure the shared experts stream begins after hidden_states are ready.
-        if self.multistream_overlap_shared_expert:
-            shared_experts_calculation_stream().wait_stream(  # type: ignore
-                torch.npu.current_stream())
-        with npu_stream_switch(shared_experts_calculation_stream(),
-                               enabled=self.multistream_overlap_shared_expert):
-            # Use a separate stream to run shared experts.
-            # Note that currently we only support calculations in separate streams with aclgraph.
-            # Communication operations in another stream might cause unknown errors.
-            if self._shared_experts is None:
-                shared_out = None
-            else:
-                shared_out = self._shared_experts(hidden_states)
+        shared_out = None
+        if not self.multistream_overlap_gate:
+            # Make sure the shared experts stream begins after hidden_states are ready.
+            if self.multistream_overlap_shared_expert:
+                shared_experts_calculation_stream().wait_stream(  # type: ignore
+                    torch.npu.current_stream())
+            with npu_stream_switch(shared_experts_calculation_stream(),
+                                   enabled=self.multistream_overlap_shared_expert):
+                # Use a separate stream to run shared experts.
+                # Note that currently we only support calculations in separate streams with aclgraph.
+                # Communication operations in another stream might cause unknown errors.
+                if self._shared_experts is None:
+                    shared_out = None
+                else:
+                    shared_out = self._shared_experts(hidden_states)
+        else:
+            set_flash_common3_context(shared_experts=self._shared_experts)
 
         fused_output = AscendFusedMoE.forward_impl(
             self,
