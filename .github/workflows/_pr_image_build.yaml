@@ -26,7 +26,7 @@ on:
 
 jobs:
   build-push-digest:
-    name: Image Build and Push
+    name: build
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
