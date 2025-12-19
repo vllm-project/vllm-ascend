@@ -155,7 +155,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
@@ -198,7 +198,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30100",
   "engine_id": "1",

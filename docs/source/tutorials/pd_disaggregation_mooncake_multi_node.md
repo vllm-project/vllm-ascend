@@ -504,7 +504,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
@@ -564,7 +564,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30100",
   "engine_id": "1",
@@ -625,7 +625,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
@@ -685,7 +685,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",

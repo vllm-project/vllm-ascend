@@ -132,6 +132,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to anbale fused mc2(dispatch_gmm_combine_decode/dispatch_ffn_combine operator)
+    "VLLM_ASCEND_ENABLE_FUSED_MC2":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
 }
 
 # end-env-vars-definition
