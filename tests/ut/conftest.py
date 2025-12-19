@@ -15,9 +15,15 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import sys
+from unittest.mock import MagicMock
 
 from vllm_ascend.utils import adapt_patch  # noqa E402
 from vllm_ascend.utils import register_ascend_customop
+
+if 'torch_npu._inductor' not in sys.modules:
+    sys.modules['torch_npu._inductor'] = MagicMock()
+sys.modules['torch_npu'].npu.current_device = MagicMock(return_value=0)
 
 adapt_patch()
 adapt_patch(True)
