@@ -697,7 +697,8 @@ class MtpProposer(Proposer):
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-        elif self.use_aclgraph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
+        elif self.use_aclgraph and num_tokens <= self.runner.cudagraph_batch_sizes[
+                -1]:
             # Acl graph mode, add padding to the batch size
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
