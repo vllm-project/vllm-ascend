@@ -235,8 +235,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
             block_tables=block_table,
             query_start_loc=query_start_loc,
-            query_start_loc_list=query_start_loc_cpu[1:].tolist(),
-            query_lens=query_lens,
             seq_lens=seq_lens,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
