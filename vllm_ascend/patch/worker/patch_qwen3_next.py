@@ -31,12 +31,11 @@ from vllm.model_executor.models.qwen3_next import (Qwen3NextGatedDeltaNet,
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import \
     fused_sigmoid_gating_delta_rule_update
-
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 
 
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
