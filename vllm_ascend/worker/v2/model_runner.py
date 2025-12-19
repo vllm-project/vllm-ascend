@@ -19,7 +19,7 @@ from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
                                               build_attn_state,
                                               make_attention_mask)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.states import AscendRequestState
+from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 logger = init_logger(__name__)
@@ -29,7 +29,7 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with torch_cuda_wrapper():
+        with (torch_cuda_wrapper(), uva_wrapper()):
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to

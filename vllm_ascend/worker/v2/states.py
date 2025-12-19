@@ -1,8 +1,9 @@
 from contextlib import contextmanager
 
 import torch
+import vllm
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.states import RequestState, UvaBuffer
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class AscendRequestState(RequestState):
@@ -79,10 +80,9 @@ def uva_wrapper():
             pass
 
     # TODO(Ronald1995): rectify this when NPU support uva.
-    global UvaBuffer
-    ori_class = UvaBuffer
+    ori_class = vllm.v1.worker.gpu.states.UvaBuffer
     try:
-        UvaBuffer = UvaBufferWrapper
+        vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
         yield
     finally:
-        UvaBuffer = ori_class
+        vllm.v1.worker.gpu.states.UvaBuffer = ori_class
