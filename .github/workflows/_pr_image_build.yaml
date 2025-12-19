@@ -166,7 +166,12 @@ jobs:
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
 
           echo "Digests: $DIGESTS"
-          echo "Current tags: $TAGS"
-          docker buildx imagetools create \
-            -t TAGS \
-            $DIGESTS
+          echo "Current tags:"
+          echo "$TAGS"
+
+          for tag in $TAGS; do
+            echo "Creating tag $tag"
+            docker buildx imagetools create \
+              -t "$tag" \
+              $DIGESTS
+          done
