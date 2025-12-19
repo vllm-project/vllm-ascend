@@ -28,6 +28,8 @@ import pytest
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import vllm_version_is
 
+os.environ["HCCL_BUFFSIZE"] = "768"
+
 MODELS = [
     "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]
@@ -97,9 +99,9 @@ def test_models_prefix_cache_with_cp_basic(model: str,
                                            max_tokens: int) -> None:
     with VllmRunner(
             model,
-            max_model_len=2048,
+            max_model_len=4096,
             enforce_eager=True,
-            gpu_memory_utilization=0.7,
+            enable_expert_parallel=True,
             tensor_parallel_size=SETTINGS[model]['TP'],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
@@ -114,9 +116,9 @@ def test_models_prefix_cache_with_cp_piece_wise(model: str,
                                                 max_tokens: int) -> None:
     with VllmRunner(
             model,
-            max_model_len=2048,
+            max_model_len=4096,
             enforce_eager=False,
-            gpu_memory_utilization=0.7,
+            enable_expert_parallel=True,
             tensor_parallel_size=SETTINGS[model]['TP'],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
@@ -130,14 +132,14 @@ def test_models_prefix_cache_with_cp_piece_wise(model: str,
 def test_models_prefix_cache_with_cp_full_graph(model: str,
                                                 max_tokens: int) -> None:
     with VllmRunner(model,
-                    max_model_len=2048,
+                    max_model_len=4096,
                     enforce_eager=False,
-                    gpu_memory_utilization=0.7,
+                    enable_expert_parallel=True,
                     tensor_parallel_size=SETTINGS[model]['TP'],
                     prefill_context_parallel_size=SETTINGS[model]['PCP'],
                     decode_context_parallel_size=SETTINGS[model]['DCP'],
                     compilation_config={
                         "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
-                        "cudagraph_mode": "FULL"
+                        "cudagraph_mode": "FULL_DECODE_ONLY"
                     }) as vllm_model:
         vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
