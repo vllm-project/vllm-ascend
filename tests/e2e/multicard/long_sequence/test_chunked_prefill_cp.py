@@ -22,6 +22,7 @@ Run `pytest tests/e2e/multicard/long_sequence/test_chunked_prefill_cp.py`
 """
 
 import os
+from typing import Any, Dict
 
 import pytest
 
@@ -34,7 +35,7 @@ MODELS = [
     "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]
 
-SETTINGS = {
+SETTINGS: Dict[str, Dict[str, Any]] = {
     "vllm-ascend/Qwen3-30B-A3B-W8A8": {
         "TP": 2,
         "PCP": 2,
