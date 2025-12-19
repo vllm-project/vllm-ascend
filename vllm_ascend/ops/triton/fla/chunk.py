@@ -15,14 +15,24 @@ import torch
 from einops import rearrange
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
+from vllm.forward_context import get_forward_context
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o
+from .chunk_o_update import chunk_fwd_o_update
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .solve_tril import solve_tril
 from .utils import input_guard
 from .wy_fast import recompute_w_u_fwd
+from vllm_ascend.utils import prefill_context_parallel_enable
+
+from .utils import prepare_final_chunk_indices
+
+# isort: off
+if prefill_context_parallel_enable():
+    from vllm.distributed import get_pcp_group, get_tp_group
 
 
 def chunk_gated_delta_rule_fwd(q: torch.Tensor,
@@ -34,6 +44,14 @@ def chunk_gated_delta_rule_fwd(q: torch.Tensor,
                                initial_state: torch.Tensor,
                                output_final_state: bool,
                                cu_seqlens: Optional[torch.LongTensor] = None):
+
+    forward_context = get_forward_context()
+    num_decodes = 0
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is not None and isinstance(attn_metadata, dict):
+        attn_metadata = next(iter(attn_metadata.values()), None)
+    if attn_metadata is not None:
+        num_decodes = attn_metadata.num_decodes
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(k=k,
@@ -50,7 +68,7 @@ def chunk_gated_delta_rule_fwd(q: torch.Tensor,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
     )
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+    h, v_new, final_state, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
         u=u,
@@ -59,6 +77,59 @@ def chunk_gated_delta_rule_fwd(q: torch.Tensor,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
     )
+    # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
+    #     print(">>>>>>>>", k, k.shape)
+    # if get_tp_group().rank_in_group == 1:
+    #     print(">>>>>>>>", k[:, -5:, :, :], k.shape)
+
+    if get_pcp_group().world_size > 1:
+        h_update = chunk_gated_delta_rule_fwd_hupdate(
+            k=k,
+            w=w,
+            u=u,
+            g=g,
+            cu_seqlens=cu_seqlens,
+            num_decodes=num_decodes,
+        )
+        # h_update = h.new_empty(h.shape[0], h.shape[1] + 1, h.shape[2], h.shape[3], h.shape[4])
+        # final_state torch.Size([4, 8, 128, 128])
+        if get_pcp_group().rank_in_group == 0:
+            first_final_state = final_state
+        else:
+            first_final_state = torch.empty_like(final_state)
+        get_pcp_group().broadcast(first_final_state, src=0)
+
+        final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, 64)
+        final_h_update = h_update[:, final_chunk_indices, :, :, :]
+        all_final_h_update = get_pcp_group().all_gather(final_h_update, 0)
+
+        updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
+        updated_state[0, ...] = first_final_state
+        for i in range(1, get_pcp_group().world_size):
+            updated_final_state = final_state + torch.matmul(all_final_h_update[i, ...], updated_state[i - 1, ...])
+            updated_state[i, ...] = updated_final_state
+
+        final_state = updated_state[-1, ...]
+        # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
+        #     print(">>>>>>>>", final_state, final_state.shape)
+
+        if get_pcp_group().rank_in_group == 0:
+            updated_h_state = torch.zeros_like(final_state)
+        else:
+            updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
+
+        h = chunk_fwd_o_update(
+            q=q,
+            v=v_new,
+            h=h,
+            h_update=h_update,
+            updated_h_state=updated_h_state,
+            cu_seqlens=cu_seqlens,
+        )
+    # print()
+    # if get_tp_group().rank_in_group == 1:
+    #     print(">>>>>>>>", final_state, final_state.shape)
+
     o = chunk_fwd_o(
         q=q,
         k=k,
@@ -68,6 +139,13 @@ def chunk_gated_delta_rule_fwd(q: torch.Tensor,
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
+    # if get_pcp_group().rank_in_group == 0 and get_tp_group().rank_in_group == 0:
+    #     print(">>>>>>>>>>>>>>S", torch.isnan(final_state).any())
+    #     print(">>>>>>>>>>>>>>v_new", torch.isnan(v_new).any())
+    #     print(">>>>>>>>>>>>>>h", torch.isnan(h).any())
+    #     print(">>>>>>>>>>>>>>h_update", torch.isnan(h_update).any())
+        # print(">>>>>>>>>>>>>>out", o[0, 1, 0, :])
+
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
     elif SUPPRESS_LEVEL >= 3:
@@ -92,7 +170,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
-
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,

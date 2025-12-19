@@ -37,6 +37,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    h_update,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -71,6 +72,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     b_h1_bv1 = tl.zeros([128, 64], dtype=tl.float32)
     b_h1_bv2 = tl.zeros([128, 64], dtype=tl.float32)
+    # create b_hupd_bv1 and b_hupd_bv2
+    off_hupd_1_top = tl.arange(0, 64)[:, None]
+    off_hupd_2_top = tl.arange(0, 64)[None, :]
+    b_hupd11 = (off_hupd_1_top == off_hupd_2_top).to(tl.float32)
+    b_hupd21 = tl.zeros([64, 64], dtype=tl.float32)
+    b_hupd22 = (off_hupd_1_top == off_hupd_2_top).to(tl.float32)
+    b_hupd12 = tl.zeros([64, 64], dtype=tl.float32)
 
     v_start1 = 0
     v_start2 = 64
@@ -179,6 +187,71 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         b_v_new2 = b_v_new2.to(k.dtype.element_ty)
         b_h1_bv2 += tl.dot(b_k, b_v_new2)
 
+        # # get column-sliced w [BT, 64]
+        # offs_w_upd1 = tl.arange(0, 64)[None, :]
+        # mask_w_upd1 = (offs_t_wv < T) & (offs_w_upd1 < V)
+        # ptr_w_upd1 = w_base + offs_t_wv * stride_w + offs_w_upd1 * 1
+        # b_w_upd1 = tl.load(ptr_w_upd1, mask=mask_w_upd1, other=0.0).to(tl.float32)
+
+        # offs_w_upd2 = 64 + tl.arange(0, 64)[None, :]
+        # mask_w_upd2 = (offs_t_wv < T) & (offs_w_upd2 < V)
+        # ptr_w_upd2 = w_base + offs_t_wv * stride_w + offs_w_upd2 * 1
+        # b_w_upd2 = tl.load(ptr_w_upd2, mask=mask_w_upd2, other=0.0).to(tl.float32)
+
+        # # get row-sliced k [64, T]
+        # p_k_upd1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT),
+        #                         (64, BT), (0, 1))
+        # b_k_upd1 = tl.load(p_k_upd1, boundary_check=(0, 1))
+        # p_k_upd2 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (64, i_t * BT),
+        #                         (64, BT), (0, 1))
+        # b_k_upd2 = tl.load(p_k_upd2, boundary_check=(0, 1))
+
+        # # compute [64, BT] @ [BT, 64]
+        # b_hupd_local_11 = (off_hupd_1_top == off_hupd_2_top).to(tl.float32)
+        # b_hupd_local_11 -= tl.dot(b_k_upd1, b_w_upd1.to(b_k_upd1.dtype))
+        # b_hupd_local_22 = (off_hupd_1_top == off_hupd_2_top).to(tl.float32)
+        # b_hupd_local_22 -= tl.dot(b_k_upd2, b_w_upd2.to(b_k_upd2.dtype))
+        # b_hupd_local_12 = -tl.dot(b_k_upd1, b_w_upd2.to(b_k_upd1.dtype))
+        # b_hupd_local_21 = -tl.dot(b_k_upd2, b_w_upd1.to(b_k_upd1.dtype))
+
+        # b_hupd11 = tl.dot(b_hupd_local_11, b_hupd11)
+        # b_hupd11 += tl.dot(b_hupd_local_12, b_hupd21)
+
+        """
+        # b_hupd21 = tl.dot(b_hupd_local_22, b_hupd21)
+        # b_hupd21 += tl.dot(b_hupd_local_21, b_hupd11)
+
+
+        # b_hupd22 = tl.dot(b_hupd_local_21, b_hupd12) + tl.dot(b_hupd_local_22, b_hupd22)
+        # b_hupd12 = tl.dot(b_hupd_local_11, b_hupd12) + tl.dot(b_hupd_local_12, b_hupd22)
+
+
+        # hupd_base = h_update + (boh + i_t) * H * K * K + i_h * K * K
+        # p_hupd_11 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 0),
+        #                             (64, 64), (1, 0))
+        # tl.store(p_hupd_11,
+        #          b_hupd11.to(p_hupd_11.dtype.element_ty),
+        #          boundary_check=(0, 1))
+        
+        # p_hupd_21 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (64, 0),
+        #                             (64, 64), (1, 0))
+        # tl.store(p_hupd_21,
+        #          b_hupd21.to(p_hupd_21.dtype.element_ty),
+        #          boundary_check=(0, 1))
+        
+        # p_hupd_12 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 64),
+        #                             (64, 64), (1, 0))
+        # tl.store(p_hupd_12,
+        #          b_hupd12.to(p_hupd_12.dtype.element_ty),
+        #          boundary_check=(0, 1))
+        
+        # p_hupd_22 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (64, 64),
+        #                             (64, 64), (1, 0))
+        # tl.store(p_hupd_22,
+        #          b_hupd22.to(p_hupd_22.dtype.element_ty),
+        #          boundary_check=(0, 1))
+        """
+
     # epilogue
     if STORE_FINAL_STATE:
         ht_ptr = ht + i_nh * K * V
@@ -206,7 +279,7 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
     B, T, Hg, K, V = *k.shape, u.shape[-1]
@@ -227,6 +300,7 @@ def chunk_gated_delta_rule_fwd_h(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, K, V)
+    h_update = k.new_empty(B, NT, H, K, K)
     final_state = (k.new_empty(N, H, K, V, dtype=torch.float32)
                    if output_final_state else None)
 
@@ -247,6 +321,7 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        h_update=h_update,
         T=T,
         H=H,
         Hg=Hg,
@@ -256,4 +331,5 @@ def chunk_gated_delta_rule_fwd_h(
         num_warps=4,
         num_stages=2,
     )
-    return h, v_new, final_state
+    # print("cu_seqlens", cu_seqlens)
+    return h, v_new, final_state, h_update

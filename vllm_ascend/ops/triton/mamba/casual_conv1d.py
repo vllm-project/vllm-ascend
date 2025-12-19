@@ -13,7 +13,10 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-
+from vllm.forward_context import get_forward_context
+from vllm_ascend.utils import prefill_context_parallel_enable
+if prefill_context_parallel_enable():
+    from vllm.distributed import get_pcp_group, get_tp_group
 PAD_SLOT_ID = -1
 
 
@@ -40,7 +43,8 @@ def causal_conv1d_ref(
     x = x.to(weight.dtype)
     seqlen = x.shape[-1]
     dim, width = weight.shape
-
+    # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 0:
+    #     print(">>>>>>>>>>>>>initial_states", initial_states)
     if initial_states is None:
         out = F.conv1d(x,
                        weight.unsqueeze(1),
@@ -101,6 +105,14 @@ def causal_conv1d_fn(
             indices 0 and 3
     out: (batch, dim, seqlen)
     """
+    forward_context = get_forward_context()
+    num_decodes = 0
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is not None and isinstance(attn_metadata, dict):
+        attn_metadata = next(iter(attn_metadata.values()), None)
+    if attn_metadata is not None:
+        num_decodes = attn_metadata.num_decodes
+
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
     if x.stride(-1) != 1:
@@ -112,6 +124,15 @@ def causal_conv1d_fn(
     seqlens = query_start_loc[1:] - query_start_loc[:-1]
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
+
+    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], conv_states.shape[-1])
+    # print("query_start_loc", query_start_loc)
+
+    if get_pcp_group().world_size > 1:
+        all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
+        pcp_rank = get_pcp_group().rank_in_group
+        if pcp_rank > 0:
+            conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[pcp_rank - 1, ...]
 
     for i in range(len(seqlens)):
         x_s = splits[i]
@@ -125,11 +146,22 @@ def causal_conv1d_fn(
                 activation=activation,
                 return_final_states=True,
                 final_states_out=conv_states[cache_indices[i]].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]]
-                if has_initial_state[i] else None))
+                initial_states=conv_states[cache_indices[i]]))
+        # if has_initial_state[i] else None
+
+    if get_pcp_group().world_size > 1:
+        conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[-1, ...]
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
     return out_ref_tensor
+
+
+def extract_last_width(x, start_loc, width):
+    end_loc = start_loc[1:]
+    offsets = torch.arange(width, device=x.device)
+    indices = (end_loc.unsqueeze(1) - width + offsets.unsqueeze(0))  # (num_seqs, width)
+
+    return x[:, indices].permute(1, 0, 2)
 
 
 @triton.jit()

@@ -48,6 +48,11 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
                                enable_sp, get_ascend_device_type, is_enable_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
                                shared_experts_calculation_stream)
+from vllm_ascend.utils import prefill_context_parallel_enable
+
+# isort: off
+if prefill_context_parallel_enable():
+    from vllm.distributed import get_pcp_group, get_tp_group
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -386,6 +391,11 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=final_hidden_states,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
+
+        # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
+        #     print(">>>>>>>>after", torch.isnan(final_hidden_states).any(), final_hidden_states.shape)
+        # if get_pcp_group().rank_in_group == 0 and get_tp_group().rank_in_group == 1:
+        #     print(">>>>>>>>after", torch.isnan(final_hidden_states).any(), final_hidden_states.shape)
 
         return final_hidden_states
 

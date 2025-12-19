@@ -45,9 +45,13 @@ class AscendPrefillContextParallelMetadata:
 
     pcp_prefill_mask: torch.Tensor = None
 
+    pcp_unpad_mask: torch.Tensor = None
+
     pcp_fa_query_idx: torch.Tensor = None
 
-    pcp_unpad_mask: torch.Tensor = None
+    pcp_enter_fa_restore_idx: torch.Tensor = None
+
+    pcp_padded_tokens_fla: int = 0
 
 
 @dataclass

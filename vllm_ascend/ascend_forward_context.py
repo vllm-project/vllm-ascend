@@ -71,6 +71,7 @@ def set_ascend_forward_context(
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
         weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
+        max_tokens_across_pcp: int = 0,
         is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -196,6 +197,7 @@ def set_ascend_forward_context(
             max_tokens_across_dp = num_tokens
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
+        forward_context.max_tokens_across_pcp = max_tokens_across_pcp
 
         if num_tokens is not None:
             if num_actual_tokens is None:
