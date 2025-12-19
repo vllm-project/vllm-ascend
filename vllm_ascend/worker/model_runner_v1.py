@@ -1849,28 +1849,52 @@ class NPUModelRunner(GPUModelRunner):
                         [0] + self.actual_seq_lengths_q[:num_reqs],
                         device=self.device,
                         dtype=torch.int32)
-                common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
-                                                                 1],
-                    seq_lens_cpu=self.seq_lens.cpu,
-                    seq_lens=self.seq_lens.gpu[:num_reqs],
-                    num_reqs=num_reqs,
-                    num_actual_tokens=num_tokens,
-                    num_input_tokens=num_tokens,
-                    actual_seq_lengths_q=self.actual_seq_lengths_q,
-                    block_table_tensor=block_table_tensor[:num_reqs],
-                    slot_mapping=slot_mapping.gpu,
-                    num_computed_tokens_cpu=num_computed_tokens_cpu,
-                    positions=self.positions.gpu,
-                    attn_mask=self.attn_mask,
-                    spec_attn_mask=self.spec_attn_mask,
-                    attn_state=self.attn_state,
-                    max_query_len=max_query_len,
-                    decode_token_per_req=self.decode_token_per_req,
-                    prefill_context_parallel_metadata=long_seq_metadata,
-                    max_seq_len=self.seq_lens.cpu.max().item()
-                )
+                if vllm_version_is("0.12.0"):
+                    common_attn_metadata = AscendCommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                        query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
+                                                                     1],
+                        seq_lens_cpu=self.seq_lens.cpu,
+                        seq_lens=self.seq_lens.gpu[:num_reqs],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        num_input_tokens=num_tokens,
+                        actual_seq_lengths_q=self.actual_seq_lengths_q,
+                        block_table_tensor=block_table_tensor[:num_reqs],
+                        slot_mapping=slot_mapping.gpu,
+                        num_computed_tokens_cpu=num_computed_tokens_cpu,
+                        positions=self.positions.gpu,
+                        attn_mask=self.attn_mask,
+                        spec_attn_mask=self.spec_attn_mask,
+                        attn_state=self.attn_state,
+                        max_query_len=max_query_len,
+                        decode_token_per_req=self.decode_token_per_req,
+                        prefill_context_parallel_metadata=long_seq_metadata,
+                        max_seq_len=self.seq_lens.cpu.max().item()
+                    )
+                else:
+                    common_attn_metadata = AscendCommonAttentionMetadata(
+                        query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                        query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
+                                                                      1],
+                        _seq_lens_cpu=self.seq_lens.cpu,
+                        seq_lens=self.seq_lens.gpu[:num_reqs],
+                        num_reqs=num_reqs,
+                        num_actual_tokens=num_tokens,
+                        num_input_tokens=num_tokens,
+                        actual_seq_lengths_q=self.actual_seq_lengths_q,
+                        block_table_tensor=block_table_tensor[:num_reqs],
+                        slot_mapping=slot_mapping.gpu,
+                        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+                        positions=self.positions.gpu,
+                        attn_mask=self.attn_mask,
+                        spec_attn_mask=self.spec_attn_mask,
+                        attn_state=self.attn_state,
+                        max_query_len=max_query_len,
+                        decode_token_per_req=self.decode_token_per_req,
+                        prefill_context_parallel_metadata=long_seq_metadata,
+                        max_seq_len=self.seq_lens.cpu.max().item()
+                    )
                 if self.pcp_size > 1:
                     common_attn_metadata.block_table_tensor = \
                         block_table_tensor[:num_reqs * self.decode_threshold]
