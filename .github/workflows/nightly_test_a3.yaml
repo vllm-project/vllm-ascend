@@ -18,7 +18,7 @@
 # This workflow related to the resources atlas 800 A3
 # **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
 # We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
-name: 'ascend test / nightly-a3'
+name: Nightly-A3
 
 on:
   schedule:
@@ -28,6 +28,7 @@ on:
   pull_request: 
     branches:
       - 'main'
+    types: [ labeled ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -140,6 +141,7 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
+
   custom-ops-tests:
     name: test ops
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
