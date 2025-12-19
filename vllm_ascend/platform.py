@@ -166,10 +166,6 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
-        kv_cache_dtype = vllm_config.additional_config.get(
-            "kv_cache_dtype", None)
-        if kv_cache_dtype is not None:
-            vllm_config.cache_config.cache_dtype = kv_cache_dtype
         elif model_config and hasattr(model_config.hf_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
