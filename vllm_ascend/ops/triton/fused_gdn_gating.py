@@ -1,10 +1,10 @@
 import torch
-
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver 
+import triton.runtime.driver as driver
 
 UNIFIED_BUFFER_SIZE = 1572864
+
 
 # g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 @triton.jit
@@ -27,12 +27,15 @@ def fused_gdn_gating_kernel(
 ):
     i_b, i_s = tl.program_id(0), tl.program_id(1)
     for row_idx in range(0, ROW_ITER):
-        batch_off = i_b * ROW_ITER * BLK_BATCHES + row_idx * BLK_BATCHES + tl.arange(0, BLK_BATCHES)
+        batch_off = i_b * ROW_ITER * BLK_BATCHES + row_idx * BLK_BATCHES + tl.arange(
+            0, BLK_BATCHES)
 
         for col_idx in range(0, COL_ITER):
             head_off = col_idx * BLK_HEADS + tl.arange(0, BLK_HEADS)
 
-            off = batch_off[:, None] * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off[None, :]
+            off = batch_off[:,
+                            None] * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off[
+                                None, :]
             head_mask = head_off < NUM_HEADS
             mask = head_mask[None, :] & (batch_off[:, None] < NUM_BATCHES)
 
@@ -54,6 +57,7 @@ def fused_gdn_gating_kernel(
                      blk_beta_output.to(beta_output.dtype.element_ty),
                      mask=mask)
 
+
 def fused_gdn_gating(
     A_log: torch.Tensor,
     a: torch.Tensor,
@@ -65,7 +69,8 @@ def fused_gdn_gating(
     batch, num_heads = a.shape
     seq_len = 1
 
-    num_cores = driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"]
+    num_cores = driver.active.utils.get_device_properties(
+        torch.npu.current_device())["num_vectorcore"]
 
     BLK_HEADS = 8
     COL_ITER = triton.cdiv(num_heads, BLK_HEADS)
@@ -79,12 +84,16 @@ def fused_gdn_gating(
         FACTOR = 8 * num_heads
         row_per_core = triton.cdiv(batch, num_cores)
         BLK_BATCHES = triton.next_power_of_2(
-            triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) // a.element_size()
-        ) // 2
+            triton.cdiv(UNIFIED_BUFFER_SIZE, FACTOR * BLK_HEADS) //
+            a.element_size()) // 2
         ROW_ITER = triton.cdiv(row_per_core, BLK_BATCHES)
 
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
-    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
+    beta_output = torch.empty(1,
+                              batch,
+                              num_heads,
+                              dtype=b.dtype,
+                              device=b.device)
 
     grid = (progs, seq_len)
     fused_gdn_gating_kernel[grid](
@@ -105,4 +114,3 @@ def fused_gdn_gating(
         ROW_ITER=ROW_ITER,
     )
     return g, beta_output
-
