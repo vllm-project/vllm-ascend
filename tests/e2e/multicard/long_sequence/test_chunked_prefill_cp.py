@@ -28,6 +28,8 @@ import pytest
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import vllm_version_is
 
+os.environ["HCCL_BUFFSIZE"] = "768"
+
 MODELS = [
     "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]
