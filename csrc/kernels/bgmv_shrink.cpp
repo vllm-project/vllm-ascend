@@ -226,7 +226,7 @@ private:
 
 // declare all dtype kernel
 BGMV_SHRINK_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
     BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 #endif
 
@@ -240,8 +240,8 @@ extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
         bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
                                                         inputHiddenDim, maxLoRARank, scale);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
-            bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
+        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
                                                                   inputHiddenDim, maxLoRARank, scale);
         #endif
     } else {
