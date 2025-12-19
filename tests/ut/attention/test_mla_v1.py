@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
@@ -972,16 +973,13 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
-        quant_method = MagicMock()
-        apply = MagicMock()
-        quant_method.apply = apply
+        quant_method = MagicMock(spec=UnquantizedLinearMethod)
         layer.quant_method = quant_method
         shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim +
                                          self.impl.v_head_dim)
         shape_1 = self.impl.kv_lora_rank
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
-        apply.return_value = layer.weight.T
         mock_format_cast.return_value = layer.weight
         self.impl.process_weights_after_loading(torch.bfloat16)
 

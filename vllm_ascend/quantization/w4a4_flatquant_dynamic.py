@@ -86,7 +86,6 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
     input_size = 0
 
     def __init__(self):
-        self.transpose_weight = False
         self.sym = True
 
     @staticmethod
@@ -176,9 +175,8 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         return output
 
     def process_weights_after_loading(self, layer):
+        # NOTE: Currently, w4a4 can't support weight nz
         weight_packed = pack_int4_weights(layer.weight.data)
-        if self.transpose_weight:
-            weight_packed = weight_packed.transpose(0, 1).contiguous()
         layer.register_parameter(
             'weight_packed',
             torch.nn.Parameter(weight_packed, requires_grad=False))
