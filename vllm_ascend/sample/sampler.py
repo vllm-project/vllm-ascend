@@ -5,6 +5,7 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                global_stream, npu_stream_switch)
+from vllm_ascend.ascend_config import get_ascend_config
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -124,7 +125,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if hasattr(self, "q") and self.q is not None:
+        if get_ascend_config().enable_async_exponential == 1:
             # Add synchronize to prevent synchronize error.
             self.async_event.synchronize()
             return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
