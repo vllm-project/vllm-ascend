@@ -149,7 +149,11 @@ class AscendSFAMetadataBuilder:
         self.enable_sfa_cp = enable_sp() and \
             hasattr(self.model_config.hf_config, "index_topk")
 
-        assert not (self.enable_sfa_cp and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY), "Flash comm 1 is not support FULL_DECODE_ONLY right now, please set graphmode to PIECEWISE or disable flash comm 1."
+        assert not (
+            self.enable_sfa_cp
+            and self.vllm_config.compilation_config.cudagraph_mode
+            == CUDAGraphMode.FULL_DECODE_ONLY
+        ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
 
     def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
