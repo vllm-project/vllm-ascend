@@ -976,7 +976,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         return output
 
     def _attention_with_mask_and_nomask(
-                    self,
+        self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         k_nope: torch.Tensor,
