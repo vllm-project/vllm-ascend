@@ -44,50 +44,49 @@ def test_output_between_tp_and_cp(
         "The president of the United States is", "The capital of France is"
     ]
 
+    common_kwargs = {
+        "max_model_len": 1024,
+    }
+
     if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-        with VllmRunner(
-                model,
-                tensor_parallel_size=2,
-                decode_context_parallel_size=2,
-                prefill_context_parallel_size=2,
-                max_model_len=1024,
-                enable_expert_parallel=True,
-                enforce_eager=True,
-                quantization="ascend",
-        ) as runner:
-            vllm_context_parallel_outputs = runner.generate_greedy(
-                prompts, max_tokens)
+        cp_kwargs = {
+            "tensor_parallel_size": 2,
+            "decode_context_parallel_size": 2,
+            "prefill_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enforce_eager": True,
+            "quantization": "ascend",
+        }
+        tp_kwargs = {
+            "tensor_parallel_size": 4,
+            "enable_expert_parallel": True,
+            "enforce_eager": True,
+            "quantization": "ascend",
+        }
 
-        with VllmRunner(
-                model,
-                tensor_parallel_size=4,
-                max_model_len=1024,
-                enable_expert_parallel=True,
-                enforce_eager=True,
-                quantization="ascend",
-        ) as runner:
-            vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
     else:
-        with VllmRunner(model,
-                        tensor_parallel_size=1,
-                        prefill_context_parallel_size=2,
-                        max_model_len=1024,
-                        enforce_eager=False,
-                        compilation_config={
-                            "cudagraph_mode": "FULL_DECODE_ONLY",
-                            "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
-                        }) as runner:
-            vllm_context_parallel_outputs = runner.generate_greedy(
-                prompts, max_tokens)
+        cp_kwargs = {
+            "tensor_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "prefill_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enforce_eager": False,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
+            },
+        }
+        tp_kwargs = {
+            "tensor_parallel_size": 2,
+            "enforce_eager": True,
+        }
 
-        with VllmRunner(
-                model,
-                tensor_parallel_size=2,
-                prefill_context_parallel_size=1,
-                max_model_len=1024,
-                enforce_eager=True,
-        ) as runner:
-            vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
+    with VllmRunner(model, **common_kwargs, **cp_kwargs) as runner:
+        vllm_context_parallel_outputs = runner.generate_greedy(
+            prompts, max_tokens)
+
+    with VllmRunner(model, **common_kwargs, **tp_kwargs) as runner:
+        vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs,
