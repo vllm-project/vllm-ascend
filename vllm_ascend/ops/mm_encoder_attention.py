@@ -36,11 +36,19 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         head_size: int,
         scale: float | None = None,
         num_kv_heads: int | None = None,
-        # This has no effect, it is only here to make it easier to swap
-        # between Attention and MultiHeadAttention
         prefix: str = "",
         multimodal_config: MultiModalConfig | None = None,
     ) -> None:
+        """
+        Args:
+            num_heads: number of attention heads per partition.
+            head_size: hidden_size per attention head.
+            scale: scale factor.
+            num_kv_heads: number of kv heads.
+            prefix: This has no effect, it is only here to make it easier to
+                    swap between Attention and MMEncoderAttention.
+            multimodal_config: configs for multi-modal.
+        """
         super().__init__(
             num_heads=num_heads,
             head_size=head_size,
@@ -62,7 +70,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
-        # q/k/v: [b, s, head, head_dim] -> [b * s, head, head_dim]
+        # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
         enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
@@ -72,7 +80,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         if enable_pad:
             origin_shape = q.shape[-1]
             pad_len = MAX_PAD_SIZE - origin_shape
-            # q/k/v: [b * s, head, head_dim] -> [b * s, head, MAX_PAD_SIZE]
+            # q, k, v: [b * s, head, head_dim] -> [b * s, head, MAX_PAD_SIZE]
             q = F.pad(q, (0, pad_len), mode="constant", value=0)
             k = F.pad(k, (0, pad_len), mode="constant", value=0)
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
@@ -88,7 +96,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             seq_len=cu_seqlens,
             scale_value=self.head_size**-0.5,
             num_heads=self.num_heads,
-            num_kv_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
             out=context_layer,
         )
 
