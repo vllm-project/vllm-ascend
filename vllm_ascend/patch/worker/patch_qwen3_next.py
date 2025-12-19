@@ -219,7 +219,8 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
             is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
             if (is_cuda_graph):
-                g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
+                g, beta = fused_gdn_gating_patch(self.A_log, a, b,
+                                                 self.dt_bias)
             else:
                 g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
