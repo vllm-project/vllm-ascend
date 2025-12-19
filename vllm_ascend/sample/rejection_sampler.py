@@ -83,8 +83,7 @@ def apply_sampling_constraints(
     if get_ascend_device_type(
     ) != AscendDeviceType._310P and top_p is not None and top_k is not None and 1 <= int(
             top_k.max()) <= 1024:
-        return torch_npu.npu_top_k_top_p(logits, top_p.to(torch.bfloat16),
-                                         top_k)
+        return torch_npu.npu_top_k_top_p(logits, top_p.to(logits.dtype), top_k)
     else:
         # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
         # which is slow for large vocab sizes. This may cause performance issues.

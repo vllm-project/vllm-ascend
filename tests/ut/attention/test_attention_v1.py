@@ -31,10 +31,6 @@ class TestAscendAttentionBackend(TestBase):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
-    def test_get_bsh_kv_cache_shape(self):
-        result = AscendAttentionBackend.get_bsh_kv_cache_shape(10, 20, 30, 40)
-        self.assertEqual(result, (2, 10, 20, 30 * 40))
-
     def test_swap_blocks(self):
         src_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]
         dst_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]

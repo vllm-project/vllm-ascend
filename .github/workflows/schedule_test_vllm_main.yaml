@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-name: 'ascend test / vllm main'
+name: vLLM Main Schedule Test
 
 on:
   # Run full e2e tests per 4h

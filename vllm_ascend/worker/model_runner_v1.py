@@ -114,10 +114,10 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable, vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
+                               enable_sp, get_ascend_device_type, is_moe_model,
+                               lmhead_tp_enable, maybe_trans_nz,
+                               vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -137,9 +137,6 @@ torch.npu.config.allow_internal_format = True
 
 if get_ascend_device_type() == AscendDeviceType._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
-else:
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
 
 
 @dataclass
@@ -430,7 +427,8 @@ class NPUModelRunner(GPUModelRunner):
         # moe_comm_method of each rank is MC2 and recomputation would never happen in D
         # nodes. So here we check whether recompute_scheduler_enable is True.
         return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
-            potential_max_num_tokens, self.vllm_config) == MoECommType.MC2
+            potential_max_num_tokens,
+            self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
@@ -1008,8 +1006,9 @@ class NPUModelRunner(GPUModelRunner):
 
             # TODO: We should make this official ASAP. Also note that if we pad here,
             # the builders won’t need to add any extra padding.
+            max_decode_tokens = self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
             if self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                uniform_decode and num_input_tokens <= self.cudagraph_batch_sizes[-1]:
+                uniform_decode and self.uniform_decode_query_len <= num_input_tokens <= max_decode_tokens:
                 num_reqs_padded = num_input_tokens // self.uniform_decode_query_len
                 pad_size = num_reqs_padded - num_reqs
                 if pad_size > 0:
@@ -1043,7 +1042,6 @@ class NPUModelRunner(GPUModelRunner):
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
-                is_only_prefill=bool(np.all(num_valid_tokens != 1)),
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
                 prefill_context_parallel_metadata=long_seq_metadata,
@@ -1057,7 +1055,7 @@ class NPUModelRunner(GPUModelRunner):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs+1] - \
+                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs + 1] - \
                     self.query_start_loc_pcp_full.cpu[:num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
@@ -1164,7 +1162,8 @@ class NPUModelRunner(GPUModelRunner):
                                                maybe_padded_num_tokens)
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens)
+                                       maybe_padded_num_tokens,
+                                       self.vllm_config)
 
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
@@ -1956,7 +1955,7 @@ class NPUModelRunner(GPUModelRunner):
                                                positions.shape[0])
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       num_tokens)
+                                       num_tokens, self.vllm_config)
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
@@ -2162,7 +2161,8 @@ class NPUModelRunner(GPUModelRunner):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention)
+                    in_graph_capturing=not force_attention,
+                    is_profile=is_profile)
             if is_profile and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not is_profile and self.dynamic_eplb:
@@ -2200,7 +2200,7 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and \
-            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) == MoECommType.MC2:
+            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             self._dummy_run(mc2_tokens_capacity,
                             with_prefill=True,
                             is_profile=True)
@@ -2221,16 +2221,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                from vllm.model_executor.layers.linear import (
-                    MergedColumnParallelLinear, QKVParallelLinear,
-                    RowParallelLinear)
-                for module in self.model.modules():
-                    if isinstance(module,
-                                  (MergedColumnParallelLinear,
-                                   QKVParallelLinear, RowParallelLinear)):
-                        module.weight.data = self._convert_torch_format(
-                            module.weight.data)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
@@ -2250,13 +2240,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
-
-    def _convert_torch_format(self, tensor):
-        if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
-                and not is_enable_nz():
-            return tensor
-        tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
-        return tensor
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2500,14 +2483,8 @@ class NPUModelRunner(GPUModelRunner):
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    if self.vllm_config.additional_config.get(
-                            "kv_cache_dtype", None) == 'int8':
-                        kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size)
-                    elif hasattr(attn_backend, "get_supported_block_size"
-                                 ) and self.use_hybrid_blocks:
+                    if hasattr(attn_backend, "get_supported_block_size"
+                               ) and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_block_size()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size
@@ -2536,9 +2513,10 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    v_cache = self._convert_torch_format(v_cache)
+                    if get_ascend_device_type() == AscendDeviceType._310P:
+                        k_cache = maybe_trans_nz(k_cache)
+                        v_cache = maybe_trans_nz(v_cache)
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
                                              kv_cache_spec.block_size, 1, 128)
