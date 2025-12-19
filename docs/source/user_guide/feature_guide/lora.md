@@ -7,6 +7,11 @@ You can refer to [Supported Models](https://docs.vllm.ai/en/latest/models/suppor
 
 You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode Guide](./graph_mode.md) for a better LoRA performance.
 
+Address for downloading models:\
+base model: https://www.modelscope.cn/models/vllm-ascend/Llama-2-7b-hf/files \
+lora model:
+https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-test/files
+
 ## Example
 We provide a simple LoRA example here, which enables the ACLGraph mode by default.
 
@@ -19,5 +24,3 @@ vllm serve meta-llama/Llama-2-7b \
 ## Custom LoRA Operators
 
 We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "csrc/kernels" directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend.git).
-
-When you install vllm and vllm-ascend, those operators mentioned above will be compiled and installed automatically. If you do not want to use AscendC operators when you run vllm-ascend, you should set `COMPILE_CUSTOM_KERNELS=0` and reinstall vllm-ascend. For more instructions about installation and compilation, you can refer to [installation guide](../../installation.md).

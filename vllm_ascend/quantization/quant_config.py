@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -65,6 +66,9 @@ class AscendQuantConfig(QuantizationConfig):
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
                 extra_quant_dict[new_k] = self.quant_description[k]
+            if "weight_packed" in k:
+                new_k = k.replace("weight_packed", "weight")
+                extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:
@@ -96,9 +100,18 @@ class AscendQuantConfig(QuantizationConfig):
                                      user_quant) -> Optional[str]:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
-            if quant_method is None and torch.npu.is_available():
+            if not quant_method and torch.npu.is_available():
                 return ASCEND_QUANTIZATION_METHOD
         return None
+
+    def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
+        # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
+        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
+        if prefix_mapping:
+            hf_to_vllm_mapper = WeightsMapper(
+                orig_to_new_prefix=prefix_mapping)
+            return hf_to_vllm_mapper._map_name(prefix)
+        return prefix
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -107,6 +120,7 @@ class AscendQuantConfig(QuantizationConfig):
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
+        prefix = self.quant_prefix_mapper(model_type, prefix)
         from vllm.attention.layer import Attention
         if prefix.startswith("language_model"):
             prefix = prefix.split('.', 1)[-1]
@@ -119,9 +133,6 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, Attention) and self.quant_description.get(
-                'kv_quant_type') == 'C8':
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
@@ -171,6 +182,16 @@ class AscendQuantConfig(QuantizationConfig):
         return []
 
 
+# key: model_type
+# value: orig_to_new_prefix
+QUANT_MODEL_PREFIX_MAPPINGS = {
+    "qwen3_vl_moe": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
+}
+
 packed_modules_model_mapping = {
     "qwen3_moe": {
         "qkv_proj": [
@@ -197,10 +218,17 @@ packed_modules_model_mapping = {
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
+    "pangu_ultra_moe": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    },
     "kimi_k2": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -215,6 +243,12 @@ packed_modules_model_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    },
+    "pangu_ultra_moe_mtp": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "qwen3_next": {
         "qkv_proj": [
@@ -237,6 +271,19 @@ packed_modules_model_mapping = {
             "gate_proj",
             "up_proj",
         ],
+    },
+    "qwen3_vl_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "glm4_moe": {
         "qkv_proj": [
@@ -439,7 +486,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
         per_group_param = [
             "weight_scale_second", "weight_offset_second", "scale_bias"
-        ]
+        ] + ["weight_scale", "weight_offset"] if hasattr(
+            self.quant_method,
+            "group_size") and self.quant_method.group_size > 0 else []
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)

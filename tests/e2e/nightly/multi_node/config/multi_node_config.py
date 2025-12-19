@@ -113,9 +113,6 @@ class MultiNodeConfig:
             self.decode_start_index: int = decode_host_index[0]
             self.num_prefillers = self.decode_start_index
             self.num_decoders = self.num_nodes - self.num_prefillers
-            if self.disaggregated_prefill.get(
-                    "ranktable_gen_path") is not None:
-                self._gen_ranktable()
 
     def _init_dist_env(self):
         self.envs["HCCL_IF_IP"] = self.cur_ip
@@ -127,9 +124,6 @@ class MultiNodeConfig:
 
         master_ip = self.master_ip
         if self.disaggregated_prefill:
-            self.envs[
-                "DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = self.disaggregated_prefill.get(
-                    "ranktable_path")
             if self.cur_index < self.decode_start_index:
                 # For prefiller nodes, use the default master ip(index==0) as DP master
                 master_ip = self.master_ip
@@ -289,54 +283,3 @@ class MultiNodeConfig:
     @property
     def is_master(self):
         return self.cur_index == 0
-
-    def _gen_ranktable(self):
-        cluster_ip = [nodes.ip for nodes in self.nodes_info]
-        assert len(cluster_ip) > 0
-        nnodes = self.num_nodes
-        node_rank = self.cur_index
-        master_addr = cluster_ip[0]
-        master_port = DISAGGEGATED_PREFILL_PORT
-        assert self.disaggregated_prefill is not None
-        ranktable_gen_path = self.disaggregated_prefill.get(
-            "ranktable_gen_path")
-        ranktable_path = self.disaggregated_prefill.get("ranktable_path")
-        assert ranktable_gen_path is not None and ranktable_path is not None
-        if os.path.exists(str(ranktable_path)):
-            logger.info("ranktable has already generated")
-            return
-
-        local_host = self.cur_ip
-
-        cmd = [
-            "torchrun",
-            "--nproc_per_node",
-            "1",
-            "--nnodes",
-            str(nnodes),
-            "--node_rank",
-            str(node_rank),
-            "--master_addr",
-            master_addr,
-            "--master_port",
-            str(master_port),
-            ranktable_gen_path,
-            "--ranktable-path",
-            str(ranktable_path),
-            "--local-host",
-            local_host,
-            "--prefill-device-cnt",
-            str(self.npu_per_node * self.num_prefillers),
-            "--decode-device-cnt",
-            str(self.npu_per_node * self.num_decoders),
-        ]
-
-        env = os.environ.copy()
-        assert self.nic_name is not None
-        env["GLOO_SOCKET_IFNAME"] = self.nic_name
-
-        logger.info(
-            f"Generating ranktable from command: {' '.join(map(str, cmd))}")
-        subprocess.run(cmd, env=env, check=True)
-        assert os.path.exists(
-            str(ranktable_path)), "failed generate ranktable.json"

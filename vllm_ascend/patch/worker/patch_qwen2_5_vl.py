@@ -20,9 +20,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
-from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VisionAttention, Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLImageInputs, Qwen2_5_VLVideoInputs)
+from vllm.model_executor.models.qwen2_5_vl import (Qwen2_5_VisionAttention,
+                                                   Qwen2_5_VLImageInputs,
+                                                   Qwen2_5_VLVideoInputs)
 from vllm.model_executor.models.qwen2_vl import Qwen2VisionAttention
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 
@@ -169,7 +169,3 @@ class AscendQwen2_5_VLForConditionalGeneration(nn.Module):
 # NOTE: This will be removed after MMEncoderAttention has been extract as a CustomOp in vllm.
 Qwen2VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
 Qwen2_5_VisionAttention.forward = AscendQwen2_5_VisionAttention.forward
-
-# NOTE: These will be removed after https://github.com/vllm-project/vllm/pull/29388 is merged.
-Qwen2_5_VLForConditionalGeneration._process_image_input = AscendQwen2_5_VLForConditionalGeneration._process_image_input
-Qwen2_5_VLForConditionalGeneration._process_video_input = AscendQwen2_5_VLForConditionalGeneration._process_video_input

@@ -6,13 +6,13 @@ Since version 0.9.0rc2, the quantization feature is experimentally supported by 
 
 ## Install ModelSlim
 
-To quantize a model, you should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
+To quantize a model, you should install [ModelSlim](https://gitcode.com/Ascend/msit/tree/master) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
 
 Install ModelSlim:
 
 ```bash
 # The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
-git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit/tree/master
 
 cd msit/msmodelslim
 
@@ -104,22 +104,3 @@ First, make sure you specify `ascend` as the quantization method. Second, check 
 ### 2. How to solve the error "Could not locate the configuration_deepseek.py"?
 
 Please convert DeepSeek series models using `br_release_MindStudio_8.1.RC2_TR5_20260624` ModelSlim, where the missing configuration_deepseek.py error has been fixed.
-
-### 3. What should be considered when converting DeepSeek series models with ModelSlim?
-
-When the MLA portion of the weights used the `W8A8_DYNAMIC` quantization with the torchair graph mode enabled, modify the configuration file in the CANN package to prevent incorrect inference results.
-
-The operation steps are as follows:
-
-1. Search in the CANN package directory, for example:
-find /usr/local/Ascend/ -name fusion_config.json
-
-2. Add `"AddRmsNormDynamicQuantFusionPass":"off",` and `"MultiAddRmsNormDynamicQuantFusionPass":"off",` to the fusion_config.json you find, the location is as follows:
-
-```bash
-{
-    "Switch":{
-        "GraphFusion":{
-            "AddRmsNormDynamicQuantFusionPass":"off",
-            "MultiAddRmsNormDynamicQuantFusionPass":"off",
-```

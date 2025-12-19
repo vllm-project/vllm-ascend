@@ -13,11 +13,16 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 MODEL = "Qwen/Qwen3-0.6B"
+MTP_MODEL = "wemaster/deepseek_mtp_main_random_bf16"
 
 first_prompt = ("The following numbers of the sequence " +
                 ", ".join(str(i) for i in range(10)) + " are:")
-example_prompts = [first_prompt, "In one word, the capital of France is "
-                   ] + [f"Tell me about the number {i}: " for i in range(32)]
+example_prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
 
 default_params = dict(
     temperature=0.0,  # greedy
@@ -42,6 +47,27 @@ def test_without_spec_decoding(monkeypatch: pytest.MonkeyPatch, ):
     ]
 
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
+
+
+def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+    """Test consistency and acceptance rates with some different combos of
+    preemption, executor, async scheduling, prefill chunking,
+    spec decoding model length.
+    """
+
+    spec_config = {
+        "method": "mtp",
+        "num_speculative_tokens": 2,
+    }
+
+    # test_preemption, executor, async_scheduling,
+    # spec_config, test_prefill_chunking
+    test_configs = [
+        (False, "mp", True, spec_config, False),
+        (False, "mp", False, spec_config, False),
+    ]
+
+    run_tests(monkeypatch, MTP_MODEL, test_configs, [{}])
 
 
 @dynamo_config.patch(cache_size_limit=16)

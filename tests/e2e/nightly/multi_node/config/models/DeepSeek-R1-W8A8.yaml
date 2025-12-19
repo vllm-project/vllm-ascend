@@ -17,8 +17,6 @@ disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
   decoder_host_index: [2]
-  ranktable_gen_path: "examples/disaggregated_prefill_v1/gen_ranktable.py"
-  ranktable_path: "/tmp/ranktable.json"
 
 deployment:
   -
@@ -40,16 +38,24 @@ deployment:
           --gpu-memory-utilization 0.9
           --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
-          '{"kv_connector": "LLMDataDistCMgrConnector",
-          "kv_buffer_device": "npu",
+          '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
-          "kv_parallel_size": 1,
-          "kv_port": "20001",
+          "kv_port": "30000",
           "engine_id": "0",
-          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+          "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+          "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
+              }
           }'
           --additional-config
-          '{"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
 
   -
     server_cmd: >
@@ -70,16 +76,24 @@ deployment:
           --gpu-memory-utilization 0.9
           --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
-          '{"kv_connector": "LLMDataDistCMgrConnector",
-          "kv_buffer_device": "npu",
+          '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
-          "kv_parallel_size": 1,
-          "kv_port": "20001",
-          "engine_id": "0",
-          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+          "kv_port": "30100",
+          "engine_id": "1",
+          "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+          "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 32,
+                            "tp_size": 1
+                    }
+              }
           }'
           --additional-config
-          '{"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -101,16 +115,24 @@ deployment:
         --gpu-memory-utilization 0.9
         --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
         --kv-transfer-config
-        '{"kv_connector": "LLMDataDistCMgrConnector",
-        "kv_buffer_device": "npu",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
-        "kv_parallel_size": 1,
-        "kv_port": "20001",
-        "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+        "kv_port": "30200",
+        "engine_id": "2",
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 32,
+                          "tp_size": 1
+                  }
+            }
         }'
         --additional-config
-        '{"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true}'
+        '{"multistream_overlap_shared_expert":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -131,16 +153,24 @@ deployment:
         --gpu-memory-utilization 0.9
         --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
         --kv-transfer-config
-        '{"kv_connector": "LLMDataDistCMgrConnector",
-        "kv_buffer_device": "npu",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
-        "kv_parallel_size": 1,
-        "kv_port": "20001",
-        "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+        "kv_port": "30200",
+        "engine_id": "2",
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 32,
+                          "tp_size": 1
+                  }
+            }
         }'
         --additional-config
-        '{"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true}'
+        '{"multistream_overlap_shared_expert":true}'
 benchmarks:
   perf:
     case_type: performance
