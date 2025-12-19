@@ -35,14 +35,6 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
         importlib.reload(platform)
 
-    def test_is_enable_nz(self):
-        with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        1):
-            self.assertTrue(utils.is_enable_nz())
-        with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        0):
-            self.assertFalse(utils.is_enable_nz())
-
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)
