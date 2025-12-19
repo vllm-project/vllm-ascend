@@ -121,7 +121,7 @@ class AscendCommonAttentionMetadata:
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
 
-    causal:bool = True
+    causal: bool = True
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int,
