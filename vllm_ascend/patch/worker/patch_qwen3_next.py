@@ -38,6 +38,7 @@ from vllm_ascend.ops.triton.fla.sigmoid_gating import \
     fused_sigmoid_gating_delta_rule_update
 
 
+
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
 
     def forward(
