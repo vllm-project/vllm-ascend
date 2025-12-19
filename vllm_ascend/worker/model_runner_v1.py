@@ -430,7 +430,8 @@ class NPUModelRunner(GPUModelRunner):
         # moe_comm_method of each rank is MC2 and recomputation would never happen in D
         # nodes. So here we check whether recompute_scheduler_enable is True.
         return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
-            potential_max_num_tokens, self.vllm_config) == MoECommType.MC2
+            potential_max_num_tokens,
+            self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
@@ -1008,8 +1009,9 @@ class NPUModelRunner(GPUModelRunner):
 
             # TODO: We should make this official ASAP. Also note that if we pad here,
             # the builders won’t need to add any extra padding.
+            max_decode_tokens = self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
             if self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                uniform_decode and num_input_tokens <= self.cudagraph_batch_sizes[-1]:
+                uniform_decode and self.uniform_decode_query_len <= num_input_tokens <= max_decode_tokens:
                 num_reqs_padded = num_input_tokens // self.uniform_decode_query_len
                 pad_size = num_reqs_padded - num_reqs
                 if pad_size > 0:
@@ -1056,7 +1058,7 @@ class NPUModelRunner(GPUModelRunner):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs+1] - \
+                ori_query_lens = self.query_start_loc_pcp_full.cpu[1:num_reqs + 1] - \
                     self.query_start_loc_pcp_full.cpu[:num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
@@ -1163,7 +1165,8 @@ class NPUModelRunner(GPUModelRunner):
                                                maybe_padded_num_tokens)
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens)
+                                       maybe_padded_num_tokens,
+                                       self.vllm_config)
 
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
@@ -1955,7 +1958,7 @@ class NPUModelRunner(GPUModelRunner):
                                                positions.shape[0])
                 else:
                     update_attn_params(self.update_stream, forward_context,
-                                       num_tokens)
+                                       num_tokens, self.vllm_config)
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
@@ -2161,7 +2164,8 @@ class NPUModelRunner(GPUModelRunner):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention)
+                    in_graph_capturing=not force_attention,
+                    is_profile=is_profile)
             if is_profile and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not is_profile and self.dynamic_eplb:
@@ -2199,7 +2203,7 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and \
-            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) == MoECommType.MC2:
+            select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             self._dummy_run(mc2_tokens_capacity,
                             with_prefill=True,
                             is_profile=True)
@@ -2499,14 +2503,8 @@ class NPUModelRunner(GPUModelRunner):
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
 
-                    if self.vllm_config.additional_config.get(
-                            "kv_cache_dtype", None) == 'int8':
-                        kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size)
-                    elif hasattr(attn_backend, "get_supported_block_size"
-                                 ) and self.use_hybrid_blocks:
+                    if hasattr(attn_backend, "get_supported_block_size"
+                               ) and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_block_size()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size

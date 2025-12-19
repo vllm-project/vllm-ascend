@@ -80,15 +80,6 @@ class AscendAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_bsh_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads * head_size)
-
-    @staticmethod
     def swap_blocks(
         src_kv_cache: List[torch.Tensor],
         dst_kv_cache: List[torch.Tensor],
@@ -357,6 +348,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_sharing_target_layer_name: Optional[str],
         **kwargs,
     ) -> None:
+        self.vllm_config = get_current_vllm_config()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -712,7 +704,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         num_tokens = query.shape[0]
         if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-                and using_paged_attention(num_tokens)
+                and using_paged_attention(num_tokens, self.vllm_config)
                 and self.sliding_window is None):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
