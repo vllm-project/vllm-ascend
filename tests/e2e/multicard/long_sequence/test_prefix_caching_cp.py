@@ -38,12 +38,14 @@ SETTINGS = {
     "vllm-ascend/Qwen3-30B-A3B-W8A8": {
         "TP": 2,
         "PCP": 2,
-        "DCP": 1
+        "DCP": 1,
+        "quantization": "ascend",
     },
     "deepseek-ai/DeepSeek-V2-Lite-Chat": {
         "TP": 2,
         "PCP": 2,
-        "DCP": 2
+        "DCP": 2,
+        "quantization": None,
     }
 }
 
@@ -103,6 +105,7 @@ def test_models_prefix_cache_with_cp_basic(model: str,
             enforce_eager=True,
             enable_expert_parallel=True,
             tensor_parallel_size=SETTINGS[model]['TP'],
+            quantization=SETTINGS[model]["quantization"],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
         vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
@@ -120,6 +123,7 @@ def test_models_prefix_cache_with_cp_piece_wise(model: str,
             enforce_eager=False,
             enable_expert_parallel=True,
             tensor_parallel_size=SETTINGS[model]['TP'],
+            quantization=SETTINGS[model]["quantization"],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
         vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
@@ -136,6 +140,7 @@ def test_models_prefix_cache_with_cp_full_graph(model: str,
                     enforce_eager=False,
                     enable_expert_parallel=True,
                     tensor_parallel_size=SETTINGS[model]['TP'],
+                    quantization=SETTINGS[model]["quantization"],
                     prefill_context_parallel_size=SETTINGS[model]['PCP'],
                     decode_context_parallel_size=SETTINGS[model]['DCP'],
                     compilation_config={
