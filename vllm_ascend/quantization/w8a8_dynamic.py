@@ -220,7 +220,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                mix_placement=getattr(layer.ascend_config, "mix_placement", False),
+                mix_placement=getattr(layer.ascend_config, "mix_placement",
+                                      False),
                 num_logical_experts=router_logits.shape[1],
                 global_num_experts=global_num_experts)
         assert topk_ids is not None
