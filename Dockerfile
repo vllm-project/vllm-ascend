@@ -23,7 +23,9 @@ ARG SOC_VERSION="ascend910b1"
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
-ENV SOC_VERSION=$SOC_VERSION
+ENV SOC_VERSION=$SOC_VERSION \
+    TASK_QUEUE_ENABLE=1 \
+    OMP_NUM_THREADS=1
 
 WORKDIR /workspace
 
@@ -31,7 +33,7 @@ COPY . /vllm-workspace/vllm-ascend/
 
 # Install Mooncake dependencies
 RUN apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev && \
+    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
@@ -65,5 +67,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
+
+RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 
 CMD ["/bin/bash"]

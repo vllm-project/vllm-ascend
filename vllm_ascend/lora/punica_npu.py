@@ -255,6 +255,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # Embedding layer only need expand op
         expand_fun: Callable = (self._expand_prefill
                                 if self.is_prefill else self._expand_decode)
+        x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
     def add_lora_linear(self,

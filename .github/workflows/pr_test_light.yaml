@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'ascend test'
+name: E2E-Light
 
 on:
   push:

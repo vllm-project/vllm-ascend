@@ -23,12 +23,13 @@ from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -36,7 +37,7 @@ class AscendW8A8DynamicLinearMethod:
     """
 
     def __init__(self):
-        self.transpose_weight = True
+        pass
 
     @staticmethod
     def get_weight(input_size: int, output_size: int,
@@ -90,12 +91,9 @@ class AscendW8A8DynamicLinearMethod:
         return output
 
     def process_weights_after_loading(self, layer):
-        if self.transpose_weight:
-            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
-        if is_enable_nz():
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -106,8 +104,6 @@ class AscendW8A8DynamicFusedMoEMethod:
     """
 
     def __init__(self):
-        self.transpose_weight = True
-
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -246,15 +242,16 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2 = [layer.w2_weight]
             w2_scale = [layer.w2_weight_scale]
 
-        fused_flag = get_forward_context(
-        ).moe_comm_type == MoECommType.FUSED_ALLTOALL
+        fused_scale_flag = (get_forward_context().moe_comm_type
+                            == MoECommType.FUSED_MC2
+                            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1)
         return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
-            w1=w1[0] if fused_flag else w1,
-            w1_scale=layer.fused_w1_scale if fused_flag else w1_scale,
-            w2=w2[0] if fused_flag else w2,
-            w2_scale=layer.fused_w2_scale if fused_flag else w2_scale,
+            w1=w1,
+            w1_scale=[layer.fused_w1_scale] if fused_scale_flag else w1_scale,
+            w2=w2,
+            w2_scale=[layer.fused_w2_scale] if fused_scale_flag else w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
@@ -268,14 +265,12 @@ class AscendW8A8DynamicFusedMoEMethod:
             mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer):
-        if self.transpose_weight:
-            layer.w13_weight.data = layer.w13_weight.data.transpose(
-                1, 2).contiguous()
-            layer.w2_weight.data = layer.w2_weight.data.transpose(
-                1, 2).contiguous()
-        if is_enable_nz():
-            torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
-            torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
+        layer.w13_weight.data = layer.w13_weight.data.transpose(
+            1, 2).contiguous()
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1,
+                                                              2).contiguous()
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(
