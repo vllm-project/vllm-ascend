@@ -532,9 +532,15 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
 
     def __init__(
         self,
-        is_neox_style: bool = False,
+        enforce_enable: bool = False,
+        is_neox_style: bool = True,
+        enable_fp32_compute: bool = False,
     ) -> None:
-        super().__init__(is_neox_style)
+        super().__init__(
+            enforce_enable=enforce_enable,
+            is_neox_style=is_neox_style,
+            enable_fp32_compute=enable_fp32_compute,
+        )
 
     def forward_oot(
         self,
@@ -544,12 +550,18 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
     ) -> torch.Tensor:
         head_dim = x.shape[-1]
 
+        origin_dtype = x.dtype
+        if self.enable_fp32_compute:
+            x = x.float()
+            cos = cos.float()
+            sin = sin.float()
+
         # cos, sin: [seq_len, head_dim // 2]
         cos = torch.cat((cos, cos), dim=-1)
         sin = torch.cat((sin, sin), dim=-1)
+        # cos, sin: [1, seq_len, 1, head_dim]
         cos = cos.reshape(1, -1, 1, head_dim)
         sin = sin.reshape(1, -1, 1, head_dim)
-        # cos, sin: [1, seq_len, 1, head_dim]
 
         if len(x.shape) == 3:
             # x: [seq_len, num_heads, head_size]
@@ -567,4 +579,6 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
             k = torch_npu.npu_rotary_mul(k, cos, sin)
             output = torch.cat([q, k], dim=0)
 
+        if self.enable_fp32_compute:
+            output = output.to(origin_dtype)
         return output
