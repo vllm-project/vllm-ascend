@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 UNIFIED_BUFFER_SIZE = 1572864
 
@@ -58,7 +58,7 @@ def fused_gdn_gating_kernel(
                      mask=mask)
 
 
-def fused_gdn_gating(
+def fused_gdn_gating_patch(
     A_log: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
@@ -69,8 +69,7 @@ def fused_gdn_gating(
     batch, num_heads = a.shape
     seq_len = 1
 
-    num_cores = driver.active.utils.get_device_properties(
-        torch.npu.current_device())["num_vectorcore"]
+    num_cores = get_vectorcore_num()
 
     BLK_HEADS = 8
     COL_ITER = triton.cdiv(num_heads, BLK_HEADS)

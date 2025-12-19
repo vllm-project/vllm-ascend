@@ -31,6 +31,7 @@ from vllm.model_executor.models.qwen3_next import (Qwen3NextGatedDeltaNet,
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import \
@@ -218,7 +219,11 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec)
 
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
-            g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+            is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            if (is_cuda_graph):
+                g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
+            else:
+                g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             if spec_sequence_masks is not None:
                 if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
