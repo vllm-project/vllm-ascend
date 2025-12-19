@@ -69,7 +69,6 @@ def test_output_between_tp_and_cp(
             "tensor_parallel_size": 1,
             "decode_context_parallel_size": 1,
             "prefill_context_parallel_size": 2,
-            "enable_expert_parallel": True,
             "enforce_eager": False,
             "compilation_config": {
                 "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -81,11 +80,18 @@ def test_output_between_tp_and_cp(
             "enforce_eager": True,
         }
 
-    with VllmRunner(model, **common_kwargs, **cp_kwargs) as runner:
+    cp_full_kwargs = {}
+    cp_full_kwargs.update(common_kwargs)
+    cp_full_kwargs.update(cp_kwargs)
+
+    tp_full_kwargs = {}
+    tp_full_kwargs.update(common_kwargs)
+    tp_full_kwargs.update(tp_kwargs)
+    with VllmRunner(model, **common_kwargs, **cp_full_kwargs) as runner:
         vllm_context_parallel_outputs = runner.generate_greedy(
             prompts, max_tokens)
 
-    with VllmRunner(model, **common_kwargs, **tp_kwargs) as runner:
+    with VllmRunner(model, **common_kwargs, **tp_full_kwargs) as runner:
         vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
 
     check_outputs_equal(
