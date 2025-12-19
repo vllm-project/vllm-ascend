@@ -56,7 +56,7 @@ aisbench_cases = [{
     "max_out_len": 256,
     "batch_size": 128,
     "request_rate": 0,
-    "baseline": 1,
+    "baseline": 2884.2267,
     "threshold": 0.97
 }]
 

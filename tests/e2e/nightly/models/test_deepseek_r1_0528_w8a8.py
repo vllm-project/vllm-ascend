@@ -113,6 +113,8 @@ async def test_models(model: str, mode: str) -> None:
         print(choices)
         if mode in ["single"]:
             return
+        if mode == "aclgraph":
+            aisbench_cases[1]["baseline"] = 478.7924
         # aisbench test
         run_aisbench_cases(model,
                            port,
