@@ -53,6 +53,7 @@ concurrency:
 
 jobs:
   image_build:
+    if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     name: image build and push
     strategy:
       matrix:
