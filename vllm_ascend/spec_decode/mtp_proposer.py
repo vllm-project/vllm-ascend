@@ -271,6 +271,7 @@ class MtpProposer(Proposer):
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
+                    max_seq_len=self.runner.seq_lens.cpu.max().item()
                 )
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -590,6 +591,7 @@ class MtpProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
+            max_seq_len=new_seq_lens_cpu.max().item()
         )
         return spec_common_attn_metadata, token_indices
 
@@ -1122,7 +1124,8 @@ class MtpProposer(Proposer):
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
-            seq_lens=common_attn_metadata.seq_lens)
+            seq_lens=common_attn_metadata.seq_lens,
+            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item())
 
         query_start_loc = common_attn_metadata.query_start_loc[
             1:1 + num_rejected_tokens_gpu.shape[0]]
