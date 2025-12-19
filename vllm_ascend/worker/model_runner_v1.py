@@ -252,7 +252,6 @@ class NPUModelRunner(GPUModelRunner):
             and self.model_config.is_mm_prefix_lm)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
-        self.use_aux_hidden_state_outputs = False
         self._set_up_drafter()
 
         # kv role
@@ -386,6 +385,7 @@ class NPUModelRunner(GPUModelRunner):
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 if self.speculative_config.method == "eagle3":
+                    assert isinstance(self.drafter, EagleProposer)
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state)
                 self.rejection_sampler = RejectionSampler(self.sampler)
