@@ -468,6 +468,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self.shared_expert_stream = None
         self.ascend_config = get_ascend_config()
         self.multistream_overlap_shared_expert = self.ascend_config.multistream_overlap_shared_expert
+        self.multistream_overlap_gate = self.ascend_config.multistream_overlap_gate
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
