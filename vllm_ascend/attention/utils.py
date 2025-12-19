@@ -26,6 +26,13 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
     return runtime_shape in get_ascend_config().pa_shape_list
 
 
+@lru_cache()
+def enable_cp():
+    prefill_config = get_current_vllm_config().parallel_config
+    return prefill_config.prefill_context_parallel_size > 1 \
+                or prefill_config.decode_context_parallel_size > 1
+
+
 @dataclass
 # class AscendCommonLongSequenceMetadata:
 class AscendPrefillContextParallelMetadata:

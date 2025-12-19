@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.registry import (AttentionBackendEnum,
                                               register_backend)
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
@@ -34,7 +34,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills,
+                                         enable_cp, split_decodes_and_prefills,
                                          using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
@@ -52,9 +52,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
-        prefill_config = get_current_vllm_config().parallel_config
-        if (prefill_config.prefill_context_parallel_size > 1
-                or prefill_config.decode_context_parallel_size > 1):
+        if enable_cp():
             from vllm_ascend.attention.attention_cp import \
                 AscendAttentionCPImpl
             return AscendAttentionCPImpl
@@ -62,9 +60,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        prefill_config = get_current_vllm_config().parallel_config
-        if (prefill_config.prefill_context_parallel_size > 1
-                or prefill_config.decode_context_parallel_size > 1):
+        if enable_cp():
             from vllm_ascend.attention.attention_cp import \
                 AscendAttentionCPMetadataBuilder
             return AscendAttentionCPMetadataBuilder

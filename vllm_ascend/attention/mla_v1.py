@@ -24,6 +24,7 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         enable_cp,
                                          maybe_save_kv_layer_to_connector,
                                          split_decodes_and_prefills,
                                          trans_rope_weight, transdata,
@@ -58,8 +59,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        prefill_config = get_current_vllm_config().parallel_config
-        if prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1:
+        if enable_cp():
             from vllm_ascend.attention.mla_cp import AscendMlaCPMetadataBuilder
             return AscendMlaCPMetadataBuilder
         return AscendMLAMetadataBuilder
@@ -71,8 +71,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["MLAAttentionImpl"]:
-        prefill_config = get_current_vllm_config().parallel_config
-        if prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1:
+        if enable_cp():
             from vllm_ascend.attention.mla_cp import AscendMlaCPImpl
             return AscendMlaCPImpl
         return AscendMLAImpl
