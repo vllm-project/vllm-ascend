@@ -23,9 +23,11 @@ from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
@@ -114,6 +116,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.use_aclgraph = (vllm_config.compilation_config.mode
                              == CompilationMode.VLLM_COMPILE
                              and not vllm_config.model_config.enforce_eager)
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
@@ -198,26 +201,38 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts)
-
+        if self.multistream_overlap_gate:
+            fc3_context = get_flash_common3_context()
+            assert fc3_context is not None
+            topk_weights = fc3_context.topk_weights
+            topk_ids = fc3_context.topk_ids
+        else:
+            topk_weights, topk_ids = select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                top_k=top_k,
+                use_grouped_topk=use_grouped_topk,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                global_num_experts=global_num_experts)
+        assert topk_ids is not None
+        assert topk_weights is not None
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(
-                topk_ids, 0, global_num_experts - global_redundant_expert_num)
+            random_matrix = torch.rand(topk_ids.size(0),
+                                       global_num_experts -
+                                       global_redundant_expert_num,
+                                       device=topk_ids.device)
+            topk_ids = torch.argsort(
+                random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
+        assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -232,15 +247,16 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2 = [layer.w2_weight]
             w2_scale = [layer.w2_weight_scale]
 
-        fused_flag = get_forward_context(
-        ).moe_comm_type == MoECommType.FUSED_ALLTOALL
+        fused_scale_flag = (get_forward_context().moe_comm_type
+                            == MoECommType.FUSED_MC2
+                            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1)
         return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
-            w1=w1[0] if fused_flag else w1,
-            w1_scale=layer.fused_w1_scale if fused_flag else w1_scale,
-            w2=w2[0] if fused_flag else w2,
-            w2_scale=layer.fused_w2_scale if fused_flag else w2_scale,
+            w1=w1,
+            w1_scale=[layer.fused_w1_scale] if fused_scale_flag else w1_scale,
+            w2=w2,
+            w2_scale=[layer.fused_w2_scale] if fused_scale_flag else w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
