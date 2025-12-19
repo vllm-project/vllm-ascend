@@ -113,6 +113,12 @@ class AscendMLAPrefillMetadata:
         q_full_idx: torch.Tensor = None
         pcp_prefill_mask: torch.Tensor = None
         pcp_allgather_restore_idx: Optional[list[int]] = None
+        split_q_head_nomask_idx_tensor_list: Optional[list[
+            torch.Tensor]] = None
+        split_q_tail_nomask_idx_tensor_list: Optional[list[
+            torch.Tensor]] = None
+        head_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
+        tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
 
     attn_mask: torch.Tensor
     query_lens: torch.Tensor
