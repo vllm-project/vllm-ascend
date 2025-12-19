@@ -12,6 +12,9 @@ from vllm.forward_context import ForwardContext, get_forward_context
 @dataclass
 # class AscendCommonLongSequenceMetadata:
 class AscendPrefillContextParallelMetadata:
+
+    pcp_use_hybrid_attn: bool
+
     pcp_allgather_restore_idx: torch.Tensor = None
 
     cp_kv_recover_idx_for_chunk: torch.Tensor = None
@@ -41,6 +44,10 @@ class AscendPrefillContextParallelMetadata:
     q_full_idx: torch.Tensor = None
 
     pcp_prefill_mask: torch.Tensor = None
+
+    pcp_fa_query_idx: torch.Tensor = None
+
+    pcp_unpad_mask: torch.Tensor = None
 
 
 @dataclass
