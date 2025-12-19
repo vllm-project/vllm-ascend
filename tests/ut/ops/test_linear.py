@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
@@ -61,21 +62,23 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_dtype = mock.PropertyMock(return_value=torch.float16)
         type(self.layer.weight.data).dtype = mock_dtype
 
-    @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_enable_nz(self, mock_format_cast,
-                                                     mock_is_nz):
-        mock_is_nz.return_value = 1
-        self.method.process_weights_after_loading(self.layer)
-        mock_format_cast.assert_called_once()
-
-    @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
-    @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_disable_nz(self, mock_format_cast,
-                                                      mock_is_nz):
-        mock_is_nz.return_value = 0
+    def test_process_weights_after_loading_with_nz0(self, mock_format_cast):
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_not_called()
+
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_nz1(self, mock_format_cast):
+        self.method.process_weights_after_loading(self.layer)
+        mock_format_cast.assert_not_called()
+
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"})
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_nz2(self, mock_format_cast):
+        self.method.process_weights_after_loading(self.layer)
+        mock_format_cast.assert_called_once()
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
