@@ -153,7 +153,7 @@ class AscendFusedMoE(FusedMoE):
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
-        self.expert_map = None
+        self._expert_map = None
         self.log2phy = None
 
         if self.quant_config is None:
@@ -184,7 +184,7 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe.
-        self.local_num_experts, self.expert_map, _ = determine_expert_map(
+        self.local_num_experts, self._expert_map, _ = determine_expert_map(
             self.ep_size, self.ep_rank, self.global_num_experts)
         # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
         # workaround to bypass a quantization check that fails with float weights.
@@ -200,7 +200,7 @@ class AscendFusedMoE(FusedMoE):
                 self.expert_load_balancer.get_global_redundant_expert_num())
             self.global_num_experts = num_experts + self.global_redundant_expert_num
             try:
-                self.local_num_experts, self.expert_map = (
+                self.local_num_experts, self._expert_map = (
                     self.expert_load_balancer.get_rank_placement_map(
                         self.moe_instance_id, self.ep_rank))
                 self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
@@ -216,16 +216,16 @@ class AscendFusedMoE(FusedMoE):
             if self.dynamic_eplb:
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank).npu()
-        if self.expert_map is not None and isinstance(self.expert_map,
-                                                      torch.Tensor):
+        if self._expert_map is not None and isinstance(self._expert_map,
+                                                       torch.Tensor):
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
                 " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
                 self.global_num_experts,
-                get_compressed_expert_map(self.expert_map))
+                get_compressed_expert_map(self._expert_map))
         local_num_experts = (torch.sum(
-            self.expert_map != -1) if self.expert_map is not None else
+            self._expert_map != -1) if self._expert_map is not None else
                              self.global_num_experts)
         if self.dynamic_eplb:
             self.moe_load = torch.zeros(local_num_experts,
@@ -276,10 +276,16 @@ class AscendFusedMoE(FusedMoE):
             return QuantType.NONE
 
     def update_expert_map(self, new_expert_map):
-        self.expert_map = new_expert_map
+        self._expert_map = new_expert_map
 
-    def get_map(self):
-        return self.expert_map
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return self._expert_map
+
+    @expert_map.setter
+    def expert_map(self, new_expert_map):
+        # TODO(Potabk): Remove this once we drop vllm v0.12.0(This makes backward compatibility with vllm v0.12.0)
+        self._expert_map = new_expert_map
 
     def get_log2phy_map(self):
         return self.log2phy
@@ -527,7 +533,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
             forward_context = get_forward_context()
             moe_comm_type = forward_context.moe_comm_type
-            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
                     and not shared_expert_dp_enabled():
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
         else:

@@ -30,7 +30,7 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
 
     with patch("vllm_ascend.utils.get_ascend_device_type",
                return_value=AscendDeviceType._310P
-               if is_310p else AscendDeviceType._910_93):
+               if is_310p else AscendDeviceType.A3):
         layer = RMSNorm(hidden_size=8, eps=1e-05)
         if residual is not None:
             out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
