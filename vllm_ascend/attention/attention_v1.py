@@ -80,15 +80,6 @@ class AscendAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_bsh_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads * head_size)
-
-    @staticmethod
     def swap_blocks(
         src_kv_cache: List[torch.Tensor],
         dst_kv_cache: List[torch.Tensor],
