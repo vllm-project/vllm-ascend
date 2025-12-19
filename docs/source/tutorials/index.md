@@ -9,6 +9,7 @@ Qwen3-Dense
 Qwen-VL-Dense.md
 Qwen3-30B-A3B.md
 Qwen3-235B-A22B.md
+Qwen3-VL-235B-A22B-Instruct.md
 Qwen3-Coder-30B-A3B
 Qwen3_embedding
 Qwen3_reranker
