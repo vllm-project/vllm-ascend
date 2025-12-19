@@ -40,6 +40,8 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.utils import weak_ref_tensors
 
 
+syx_cnt = 0
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -647,8 +649,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # Fixed: Check device compatibility for decode attention
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
-                0] == query.size(0):
+                0] == query.size(0) and not get_ascend_device_type() == AscendDeviceType._310P:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_size = 128
             query = query.view(batch_size, 1, self.num_heads * self.head_size)
@@ -659,8 +663,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 key = self.key_cache.flatten(2, 3).contiguous()
                 value = self.value_cache.flatten(2, 3).contiguous()
 
-            # Fixed: Check device compatibility for decode attention
-            from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+            
 
             if get_ascend_device_type() == AscendDeviceType._310P:
                 # Fallback for 310P: Use paged attention instead of fused attention
