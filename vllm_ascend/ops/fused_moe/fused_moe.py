@@ -531,16 +531,22 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        # Make sure the default stream waits for the shared experts stream to finish.
-        if self.multistream_overlap_shared_expert:
-            torch.npu.current_stream().wait_stream(
-                shared_experts_calculation_stream())
-        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-        forward_context = get_forward_context()
-        moe_comm_type = forward_context.moe_comm_type
-        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL} \
-            and not shared_expert_dp_enabled() and shared_out is not None:
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
+        if not self.multistream_overlap_gate:
+            # Make sure the default stream waits for the shared experts stream to finish.
+            if self.multistream_overlap_shared_expert:
+                torch.npu.current_stream().wait_stream(
+                    shared_experts_calculation_stream())
+
+            # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+            forward_context = get_forward_context()
+            moe_comm_type = forward_context.moe_comm_type
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL} \
+                    and not shared_expert_dp_enabled() and shared_out is not None:
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
+        else:
+            fc3_context = get_flash_common3_context()
+            assert fc3_context is not None
+            shared_out = fc3_context.shared_out
         if shared_out is None:
             return fused_output
         else:
