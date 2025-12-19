@@ -1,25 +1,26 @@
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, List, Optional
 
 import torch
 import torch.nn.functional as F
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 
-from vllm_ascend.utils import get_ascend_config
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_config,
+                               get_ascend_device_type)
 
 
-@lru_cache
-def using_paged_attention(runtime_shape: int) -> bool:
-    vllm_config = get_current_vllm_config()
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
     if vllm_config.speculative_config is not None:
         return False
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return False
     from vllm.config.compilation import CUDAGraphMode
-    if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
         return False
 
     return runtime_shape in get_ascend_config().pa_shape_list

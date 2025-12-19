@@ -90,7 +90,7 @@ class NPUWorker(WorkerBase):
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType._910_95:
+        if get_ascend_device_type() != AscendDeviceType.A5:
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
@@ -136,6 +136,8 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
+
+        self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
@@ -230,8 +232,17 @@ class NPUWorker(WorkerBase):
         # for more details
         self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+        if self.use_v2_model_runner:
+            logger.error(
+                "npu model runner v2 is in developing, it can't work well for now."
+            )
+            from vllm_ascend.worker.v2.model_runner import \
+                NPUModelRunner as NPUModelRunnerV2
+            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+        else:
+            self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -360,7 +371,7 @@ class NPUWorker(WorkerBase):
             self.model_runner.capture_model()
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType._910_95:
+        if get_ascend_device_type() != AscendDeviceType.A5:
             self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
