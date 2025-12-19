@@ -14,5 +14,8 @@
 
 #define TemplateMC2TypeClass typename ExpandXType, typename ExpandIdxType, bool IsNeedReduceScatter, uint32_t EXEC_FLAG
 #define TemplateMC2TypeFunc ExpandXType, ExpandIdxType, IsNeedReduceScatter, EXEC_FLAG
-
+#define TemplateDispatchTypeClass                                                                          \
+    typename XType, typename ExpandXOutType, bool StaticQuant, bool DynamicQuant, bool IsSmoothScaleExist, \
+        bool IsNeedAllgater, uint32_t EXEC_FLAG
+#define TemplateDispatchTypeFunc XType, ExpandXOutType, StaticQuant, DynamicQuant, IsSmoothScaleExist, IsNeedAllgater, EXEC_FLAG
 #endif  // DISPATCH_GMM_COMBINE_DECODE_BASE_H

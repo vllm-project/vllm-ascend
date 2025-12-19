@@ -70,5 +70,6 @@ constexpr uint32_t GMM2_SWIZZLE_DIRECTION = 0;
 constexpr uint32_t WORKSPACE_STAGES = 4;
 
 constexpr uint32_t EXEC_FLAG_DEEP_FUSE = (1U << 0);
+constexpr uint32_t EXEC_FLAG_X_ACTIVE_MASK = (1U << 2);
 
 #endif  // DISPATCH_GMM_COMBINE_DECODE_TILING_H
