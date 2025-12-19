@@ -446,8 +446,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         x = x.view(-1, S, H, D_plus_1)
         # Split out lse
         # [N, S, H, D], [N, S, H, 1]
-        out_flat, lse_flat = torch.split(x, [D, 1],
-                                         dim=-1)
+        out_flat, lse_flat = torch.split(x, [D, 1], dim=-1)
         # out: [N, S, H, D] -> [N, S*H, D]
         # lse: [N, S, H, 1] -> [N, S*H]
         out_flat = out_flat.flatten(1, 2)
@@ -748,10 +747,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         x = x.permute(0, 2, 1, 3, 4).contiguous()
         # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
         x = x.view(-1, S, H, D_plus_1)
-        # Split out lse
+        # Split out lse.
         # [N, S, H, D], [N, S, H, 1]
-        attn_out_allgather, attn_lse_allgather = torch.split(
-            x, [D, 1], dim=-1)
+        attn_out_allgather, attn_lse_allgather = torch.split(x, [D, 1], dim=-1)
 
         prefix_output, prefix_lse = self._update_out_and_lse(
             attn_out_allgather, attn_lse_allgather)
