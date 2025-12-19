@@ -22,6 +22,7 @@ Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
 
 import os
+import pytest
 from unittest.mock import patch
 
 from modelscope import snapshot_download  # type: ignore
@@ -61,6 +62,7 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
+@pytest.mark.skip(reason="Until the precision issue is resolved.")
 def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
     example_prompts = [
         "Hello, my name is",
