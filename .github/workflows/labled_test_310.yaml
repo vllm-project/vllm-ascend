@@ -15,15 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'e2e test / 310p-test'
+name: 310p Labeled Test
 
 on:
   push:
     tags:
       - 'v*'
-  schedule:
-    # Runs every 6 hours
-    - cron:  '0 */6 * * *'
   pull_request:
     types: [ labeled ]
 
