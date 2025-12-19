@@ -539,10 +539,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
 
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1)
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1)
+            # FIXED: 310P设备不执行key/value重塑，避免格式继承问题
+            # 对齐老版本做法：310P直接使用原始key/value参数
+            if get_ascend_device_type() != AscendDeviceType._310P:
+                key = self.key_cache.view(  # type: ignore
+                    num_block, block_size, -1)
+                value = self.value_cache.view(  # type: ignore
+                    num_block, block_size, -1)
+            else:
+                print(f"[DEBUG FORMAT 310P CHUNKED_PREFILL] 310P: Skipping key/value reshape, using original parameters")
+                # 310P: key和value保持原始传入的参数，不进行重塑
 
             # DEBUG: KV cache重塑后检查格式 - chunked_prefill分支
             print(f"[DEBUG FORMAT AFTER KV_VIEW] chunked_prefill branch:")
