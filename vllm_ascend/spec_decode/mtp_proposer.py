@@ -107,11 +107,6 @@ class MtpProposer(Proposer):
 
         self.use_aclgraph = self.runner._use_aclgraph()
 
-        self.cudagraph_batch_sizes = (list(
-            sorted(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
-                                      if self.use_aclgraph else [])
-
         # persistent buffers for aclgraph graph
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -697,11 +692,11 @@ class MtpProposer(Proposer):
 
         assert self.runner is not None
 
-        if self.runner.use_aclgraph and num_scheduled_tokens <= self.cudagraph_batch_sizes[
+        if self.runner.use_aclgraph and num_scheduled_tokens <= self.runner.cudagraph_batch_sizes[
                 -1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-        elif self.use_aclgraph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        elif self.use_aclgraph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             # Acl graph mode, add padding to the batch size
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
