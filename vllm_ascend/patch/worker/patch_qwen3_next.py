@@ -152,7 +152,6 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
-
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -212,7 +211,6 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             )
         else:
             mixed_qkv_non_spec = None
-
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(
             mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(

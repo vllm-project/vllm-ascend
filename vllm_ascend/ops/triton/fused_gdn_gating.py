@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 UNIFIED_BUFFER_SIZE = 1572864
