@@ -507,8 +507,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def _forward_prefill(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
                          output: torch.Tensor, **kwargs):
-        # FIXED: 在函数内部导入torch_npu以确保可用性
+        # FIXED: 在函数内部导入必要的模块以确保可用性
         import torch_npu
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
