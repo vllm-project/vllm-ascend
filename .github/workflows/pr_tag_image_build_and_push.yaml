@@ -26,7 +26,7 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
-    types: [ labeled, synchronize ]
+    types: [ labeled ]
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
     branches:
