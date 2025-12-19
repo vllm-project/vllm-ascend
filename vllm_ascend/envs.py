@@ -123,7 +123,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
-    # Whether to enable transpose weight and cast format to FRACTAL_NZ.
+    # Whether to enable weight cast format to FRACTAL_NZ.
+    # 0: close nz;
+    # 1: only quant case enable nz;
+    # 2: enable nz as long as possible.
     "VLLM_ASCEND_ENABLE_NZ":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
@@ -132,6 +135,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to anbale fused mc2(dispatch_gmm_combine_decode/dispatch_ffn_combine operator)
+    "VLLM_ASCEND_ENABLE_FUSED_MC2":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
 }
 
 # end-env-vars-definition

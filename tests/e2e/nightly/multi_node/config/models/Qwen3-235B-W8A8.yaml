@@ -33,7 +33,7 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
         --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
         "engine_id": "0",
@@ -68,7 +68,7 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
         --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
         "engine_id": "1",
