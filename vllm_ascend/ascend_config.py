@@ -150,16 +150,11 @@ class AscendConfig:
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
-        if self.enable_npugraph_ex:
-            raise NotImplementedError(
-                "This feature is still in the experiment and will be supported soon."
-            )
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
-        self.pa_shape_list = additional_config.get("pa_shape_list",
-                                                   [1, 2, 3, 4])
+        self.pa_shape_list = additional_config.get("pa_shape_list", [])
 
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",

@@ -21,7 +21,9 @@ ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG="v0.3.7.post2"
 ARG SOC_VERSION="ascend910_9391"
 
-ENV SOC_VERSION=$SOC_VERSION
+ENV SOC_VERSION=$SOC_VERSION \
+    TASK_QUEUE_ENABLE=1 \
+    OMP_NUM_THREADS=1
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
@@ -32,7 +34,7 @@ COPY . /vllm-workspace/vllm-ascend/
 SHELL ["/bin/bash", "-c"]
 
 RUN yum update -y && \
-    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl-devel jemalloc && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     ARCH=$(uname -m) && \
@@ -67,5 +69,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
+
+RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 
 CMD ["/bin/bash"]
