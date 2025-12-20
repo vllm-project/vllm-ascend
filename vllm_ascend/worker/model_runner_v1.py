@@ -211,7 +211,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
         max_buffer_num_tokens = self.max_num_tokens
-        logger.info(f"self.max_num_tokens is {self.max_num_tokens}")
         if self.pcp_size > 1:
             max_buffer_num_tokens = (self.max_num_tokens +
                                      self.max_num_reqs * 2 * self.pcp_size)
@@ -231,6 +230,7 @@ class NPUModelRunner(GPUModelRunner):
                                                dtype=torch.int32)
             self.positions = self._make_buffer(max_buffer_num_tokens,
                                                dtype=torch.int64)
+        self.long_seq_metadata = None
         if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
             self.prefetch_stream = torch.npu.Stream(device=device)
         else:

@@ -33,9 +33,7 @@ from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-# from vllm.distributed.parallel_state import get_pcp_group
 from vllm.utils.math_utils import cdiv
-# from vllm.config import VllmConfig
 from vllm.v1.utils import CpuGpuBuffer
 
 import vllm_ascend.envs as envs_ascend
@@ -1109,7 +1107,6 @@ class PCPManager:
         dcp_rank: int,
         max_buffer_num_tokens: int,
         max_num_reqs: int,
-        # speculative_config,
         device: torch.device,
         vllm_config: VllmConfig,
         pin_memory: bool = False,
