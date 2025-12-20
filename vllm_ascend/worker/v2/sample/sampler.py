@@ -5,6 +5,7 @@ from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties_and_temperature
+from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
 
 class AscendSampler(Sampler):
