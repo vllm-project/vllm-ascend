@@ -32,6 +32,9 @@ class AscendRMSNorm(RMSNorm):
         has_weight: bool = True,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
+        # DEBUG: 追踪RMSNorm初始化
+        print(f"[DEBUG RMSNorm INIT] AscendRMSNorm.__init__ called!")
+        print(f"[DEBUG RMSNorm INIT] hidden_size: {hidden_size}, eps: {eps}, dtype: {dtype}")
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         vllm_config = get_current_vllm_config()
         self.bias = None
