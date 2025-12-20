@@ -81,7 +81,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    if not forward_context.sp_enabled:
+    if not getattr(forward_context, "sp_enabled", False):
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata

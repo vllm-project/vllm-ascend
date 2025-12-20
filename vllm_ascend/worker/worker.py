@@ -233,7 +233,7 @@ class NPUWorker(WorkerBase):
         self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
-            logger.error(
+            logger.warning(
                 "npu model runner v2 is in developing, it can't work well for now."
             )
             from vllm_ascend.worker.v2.model_runner import \
