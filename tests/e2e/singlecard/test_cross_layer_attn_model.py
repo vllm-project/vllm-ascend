@@ -50,7 +50,7 @@ def test_models_with_aclgraph(
             model,
             max_model_len=1024,
             enforce_eager=False,
-            cuda_graph_sizes=[4],
+            cudagraph_capture_sizes=[4],
     ) as vllm_model:
         vllm_aclgraph_outputs = vllm_model.generate_greedy(prompts, max_tokens)
 
