@@ -862,6 +862,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer_name = getattr(layer, 'layer_name', 'unknown_layer')
         print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
 
+        # DEBUG: 验证实际使用的实现类
+        print(f"[IMPLEMENTATION DEBUG NEW] Layer implementation analysis:")
+        print(f"  Layer type: {type(layer).__name__}")
+        print(f"  Layer module: {layer.__class__.__module__}")
+        print(f"  Layer full path: {layer.__class__}")
+
+        # 检查attention相关的类
+        if hasattr(layer, 'self_attn'):
+            print(f"  Self-attention type: {type(layer.self_attn).__name__}")
+            print(f"  Self-attention module: {layer.self_attn.__class__.__module__}")
+            print(f"  Self-attention full path: {layer.self_attn.__class__}")
+
+        # 检查model类的层次结构
+        current_layer = layer
+        model_chain = []
+        for i in range(5):  # 最多向上查找5层
+            if hasattr(current_layer, '__class__'):
+                model_chain.append(f"{current_layer.__class__.__name__}({current_layer.__class__.__module__})")
+            # 尝试获取父对象
+            if hasattr(current_layer, 'model'):
+                current_layer = current_layer.model
+            else:
+                break
+        print(f"  Class chain: {' -> '.join(model_chain)}")
+
         # DEBUG: 跟踪第1层输入时的张量状态（第0层到第1层转换）
         if 'layers.1.' in layer_name:
             print(f"[LAYER TRANSFORM DEBUG NEW] Layer 1 attention input analysis:")
