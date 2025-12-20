@@ -55,7 +55,7 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
-                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               enable_sp, get_ascend_device_type,
                                register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -160,7 +160,7 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        if is_enable_nz():
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
                 "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")

@@ -114,10 +114,9 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               AscendDeviceType, ProfileExecuteDuration,
-                               enable_sp, get_ascend_device_type, is_enable_nz,
-                               is_moe_model, lmhead_tp_enable, vllm_version_is)
+from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
+                               enable_sp, get_ascend_device_type, is_moe_model,
+                               lmhead_tp_enable, maybe_trans_nz)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -137,9 +136,6 @@ torch.npu.config.allow_internal_format = True
 
 if get_ascend_device_type() == AscendDeviceType._310P:
     torch_npu.npu.set_compile_mode(jit_compile=False)
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
-else:
-    ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
 
 
 @dataclass
@@ -246,24 +242,15 @@ class NPUModelRunner(GPUModelRunner):
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
                                   "index_topk")
-        if vllm_version_is('0.12.0'):
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse)
-        else:
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse,
-                use_mm_prefix=self.model_config is not None
-                and self.model_config.is_mm_prefix_lm)
+        self.attn_backend = get_attn_backend(
+            0,
+            self.dtype,
+            None,
+            self.block_size,
+            use_mla=self.model_config.use_mla,
+            use_sparse=self.use_sparse,
+            use_mm_prefix=self.model_config is not None
+            and self.model_config.is_mm_prefix_lm)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
@@ -1045,7 +1032,6 @@ class NPUModelRunner(GPUModelRunner):
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
-                is_only_prefill=bool(np.all(num_valid_tokens != 1)),
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
                 prefill_context_parallel_metadata=long_seq_metadata,
@@ -1881,36 +1867,19 @@ class NPUModelRunner(GPUModelRunner):
                         self.speculative_config.method == "mtp":
                     attn_state = AscendAttentionState.SpecDecoding
 
-                if vllm_version_is("0.12.0"):
-                    common_metadata = CommonAttentionMetadata(
-                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
+                common_metadata = CommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                    query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
                                                                  1],
-                        query_start_loc_cpu=self.query_start_loc.
-                        cpu[:num_reqs + 1],
-                        seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                        seq_lens=self.seq_lens.cpu[:num_reqs],
-                        num_reqs=num_reqs,
-                        num_actual_tokens=num_tokens,
-                        block_table_tensor=block_table_tensor[:num_reqs],
-                        slot_mapping=slot_mapping.gpu,
-                        num_computed_tokens_cpu=num_computed_tokens_cpu,
-                        max_query_len=max_query_len,
-                        max_seq_len=seq_lens)
-                else:
-                    common_metadata = CommonAttentionMetadata(
-                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
-                                                                 1],
-                        query_start_loc_cpu=self.query_start_loc.
-                        cpu[:num_reqs + 1],
-                        _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                        seq_lens=self.seq_lens.cpu[:num_reqs],
-                        num_reqs=num_reqs,
-                        num_actual_tokens=num_tokens,
-                        block_table_tensor=block_table_tensor[:num_reqs],
-                        slot_mapping=slot_mapping.gpu,
-                        _num_computed_tokens_cpu=num_computed_tokens_cpu,
-                        max_query_len=max_query_len,
-                        max_seq_len=seq_lens)
+                    _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                    seq_lens=self.seq_lens.cpu[:num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    block_table_tensor=block_table_tensor[:num_reqs],
+                    slot_mapping=slot_mapping.gpu,
+                    _num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    max_query_len=max_query_len,
+                    max_seq_len=seq_lens)
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
@@ -2225,16 +2194,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
-            if get_ascend_device_type() == AscendDeviceType._310P:
-                from vllm.model_executor.layers.linear import (
-                    MergedColumnParallelLinear, QKVParallelLinear,
-                    RowParallelLinear)
-                for module in self.model.modules():
-                    if isinstance(module,
-                                  (MergedColumnParallelLinear,
-                                   QKVParallelLinear, RowParallelLinear)):
-                        module.weight.data = self._convert_torch_format(
-                            module.weight.data)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
@@ -2254,13 +2213,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
-
-    def _convert_torch_format(self, tensor):
-        if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
-                and not is_enable_nz():
-            return tensor
-        tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
-        return tensor
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2534,9 +2486,10 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.qk_rope_head_dim
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
-                    k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
-                    v_cache = self._convert_torch_format(v_cache)
+                    if get_ascend_device_type() == AscendDeviceType._310P:
+                        k_cache = maybe_trans_nz(k_cache)
+                        v_cache = maybe_trans_nz(v_cache)
                     if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
                                              kv_cache_spec.block_size, 1, 128)
