@@ -568,11 +568,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # DEBUG: 检查张量格式 - 入口点1
         import torch_npu
-        #        print(f"[DEBUG FORMAT ENTRY] _forward_prefill:")
-        #        print(f"[DEBUG FORMAT ENTRY]   query: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
-        #        print(f"[DEBUG FORMAT ENTRY]   key: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-        #        print(f"[DEBUG FORMAT ENTRY]   value: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-        #        print(f"[DEBUG FORMAT ENTRY]   attn_state: {attn_metadata.attn_state}")
+        # DEBUG: 精度检查 - 新版本attention入口处的原始输入
+        print(f"[PRECISION DEBUG FORWARD ENTRY] NEW VERSION _forward_prefill:")
+        print(f"[PRECISION DEBUG FORWARD ENTRY]   query_orig: shape={query.shape}; mean={query.float().mean().item():.6f}; std={query.float().std().item():.6f}")
+        print(f"[PRECISION DEBUG FORWARD ENTRY]   key_orig: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
+        print(f"[PRECISION DEBUG FORWARD ENTRY]   value_orig: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
+        print(f"[PRECISION DEBUG FORWARD ENTRY]   attn_state: {attn_metadata.attn_state}")
 
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
@@ -591,13 +592,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_actual_tokens = attn_metadata.num_actual_tokens
 
                 # DEBUG: reshape_and_cache前检查格式
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]")
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   key_before: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   value_before: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   slots: shape={slots.shape}; format={torch_npu.get_npu_format(slots)}; values={slots}")
-                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   num_actual_tokens: {num_actual_tokens}")
+                # DEBUG: 精度检查 - reshape_and_cache前后的key/value变化
+                print(f"[PRECISION DEBUG BEFORE RESHAPE] NEW VERSION:")
+                print(f"[PRECISION DEBUG BEFORE RESHAPE]   key_before: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
+                print(f"[PRECISION DEBUG BEFORE RESHAPE]   value_before: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
+                print(f"[PRECISION DEBUG BEFORE RESHAPE]   num_actual_tokens: {num_actual_tokens}")
 
                 # Stage 1: KV cache storage using original tensors (like v0.10.0rc1:319-324)
                 torch_npu._npu_reshape_and_cache(
@@ -607,10 +606,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     value_cache=self.value_cache,
                     slot_indices=slots)
 
-                # DEBUG: reshape_and_cache后检查格式
-                # print(f"[DEBUG FORMAT AFTER RESHAPE]")
-                # print(f"[DEBUG FORMAT AFTER RESHAPE]   key_after: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-                # print(f"[DEBUG FORMAT AFTER RESHAPE]   value_after: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+                # DEBUG: 精度检查 - reshape_and_cache后key/value是否被修改
+                print(f"[PRECISION DEBUG AFTER RESHAPE] NEW VERSION:")
+                print(f"[PRECISION DEBUG AFTER RESHAPE]   key_after: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
+                print(f"[PRECISION DEBUG AFTER RESHAPE]   value_after: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
             return self._forward_prefill_310p_fallback(
                 query, key, value, attn_metadata, output
             )
@@ -867,31 +866,30 @@ class AscendAttentionBackendImpl(AttentionImpl):
         310P fallback implementation using flash attention from v0.10.0rc1
         This restores the working attention logic for 310P devices
         """
-        # DEBUG: fallback函数入口检查
+        # DEBUG: 精度检查 - fallback函数入口数值
         import torch_npu
-        #  print(f"[DEBUG FORMAT FALLBACK ENTRY] _forward_prefill_310p_fallback:")
-        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   query_in: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
-        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   key_in: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   value_in: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   output_in: shape={output.shape}; format={torch_npu.get_npu_format(output)}")
+        print(f"[PRECISION DEBUG FALLBACK ENTRY] NEW VERSION:")
+        print(f"[PRECISION DEBUG FALLBACK ENTRY]   query: shape={query.shape}; mean={query.float().mean().item():.6f}; std={query.float().std().item():.6f}")
+        print(f"[PRECISION DEBUG FALLBACK ENTRY]   key: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
+        print(f"[PRECISION DEBUG FALLBACK ENTRY]   value: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
+        print(f"[PRECISION DEBUG FALLBACK ENTRY]   output_before: shape={output.shape}; mean={output.float().mean().item():.6f}")
 
         from vllm_ascend.utils import aligned_16, ACL_FORMAT_FRACTAL_NZ
 
         num_tokens = query.shape[0]
 
         # Apply 310P-specific alignments from v0.10.0rc1
-        # print(f"[DEBUG FORMAT FALLBACK] Applying aligned_16...")
+        print(f"[PRECISION DEBUG ALIGNED_16] Before aligned_16:")
+        print(f"[PRECISION DEBUG ALIGNED_16]   query_orig: shape={query.shape}; mean={query.float().mean().item():.6f}")
         query = aligned_16(query)
-        # print(f"[DEBUG FORMAT FALLBACK]   query after aligned_16: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
+        print(f"[PRECISION DEBUG ALIGNED_16]   query_aligned: shape={query.shape}; mean={query.float().mean().item():.6f}")
 
+        key_orig_mean = key.float().mean().item()
         key = aligned_16(key)
-        # print(f"[DEBUG FORMAT FALLBACK]   key after aligned_16: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+        print(f"[PRECISION DEBUG ALIGNED_16]   key_aligned: shape={key.shape}; mean={key.float().mean().item():.6f}")
 
         value = aligned_16(value)
-        # print(f"[DEBUG FORMAT FALLBACK]   value after aligned_16: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-
         output = aligned_16(output)
-        # print(f"[DEBUG FORMAT FALLBACK]   output after aligned_16: shape={output.shape}; format={torch_npu.get_npu_format(output)}")
 
         # Handle attention mask - format for 310P compatibility
         mask = attn_metadata.attn_mask
@@ -914,7 +912,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             out=output
         )
 
+        # DEBUG: 精度检查 - attention计算后的输出
+        print(f"[PRECISION DEBUG ATTENTION OUTPUT] After torch_npu._npu_flash_attention:")
+        print(f"[PRECISION DEBUG ATTENTION OUTPUT]   output_full: shape={output.shape}; mean={output.float().mean().item():.6f}; std={output.float().std().item():.6f}")
+
         # Return only the actual tokens (truncate padding from aligned_16)
         # FIXED: Return same shape as other attention branches for consistency
         # Other branches expect (num_tokens, num_heads, head_size) shape
-        return output[:num_tokens, :, :]
+        final_output = output[:num_tokens, :, :]
+        print(f"[PRECISION DEBUG ATTENTION OUTPUT]   final_output: shape={final_output.shape}; mean={final_output.float().mean().item():.6f}; std={final_output.float().std().item():.6f}")
+        return final_output
