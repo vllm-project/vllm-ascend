@@ -260,6 +260,12 @@ def select_moe_comm_method(num_tokens: int,
         moe_comm_type = (MoECommType.MC2 if num_tokens <= mc2_tokens_capacity
                          else MoECommType.FUSED_ALLTOALL
                          if fused_all2all_enable else MoECommType.ALLTOALL)
+    elif soc_version in {AscendDeviceType.A5}:
+        # 当前不支持 MC2 规避为All2ALl
+        # if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 8:
+        #     moe_comm_type = MoECommType.MC2
+        # else:
+        moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type
