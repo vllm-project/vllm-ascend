@@ -10,7 +10,6 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 UNIFIED_BUFFER_SIZE = 1572864
 
 
-# g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 @triton.jit
 def fused_gdn_gating_kernel(
     g,
