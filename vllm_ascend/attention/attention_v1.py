@@ -798,6 +798,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         forward_context: ForwardContext = get_forward_context()
+
+        # DEBUG: 输出层名称用于对应新老版本的DEBUG信息
+        layer_name = getattr(self, 'layer_name', 'unknown_layer')
+        print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
         if not forward_context.capturing:
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
@@ -881,15 +885,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Apply 310P-specific alignments from v0.10.0rc1
         print(f"[PRECISION DEBUG ALIGNED_16] Before aligned_16:")
         print(f"[PRECISION DEBUG ALIGNED_16]   query_orig: shape={query.shape}; mean={query.float().mean().item():.6f}")
+        print(f"[PRECISION DEBUG ALIGNED_16]   key_orig: shape={key.shape}; mean={key.float().mean().item():.6f}")
+        print(f"[PRECISION DEBUG ALIGNED_16]   value_orig: shape={value.shape}; mean={value.float().mean().item():.6f}")
+
         query = aligned_16(query)
-        print(f"[PRECISION DEBUG ALIGNED_16]   query_aligned: shape={query.shape}; mean={query.float().mean().item():.6f}")
-
-        key_orig_mean = key.float().mean().item()
         key = aligned_16(key)
-        print(f"[PRECISION DEBUG ALIGNED_16]   key_aligned: shape={key.shape}; mean={key.float().mean().item():.6f}")
-
         value = aligned_16(value)
         output = aligned_16(output)
+
+        print(f"[PRECISION DEBUG ALIGNED_16] After aligned_16:")
+        print(f"[PRECISION DEBUG ALIGNED_16]   query_aligned: shape={query.shape}; mean={query.float().mean().item():.6f}")
+        print(f"[PRECISION DEBUG ALIGNED_16]   key_aligned: shape={key.shape}; mean={key.float().mean().item():.6f}")
+        print(f"[PRECISION DEBUG ALIGNED_16]   value_aligned: shape={value.shape}; mean={value.float().mean().item():.6f}")
 
         # Handle attention mask - format for 310P compatibility
         mask = attn_metadata.attn_mask
