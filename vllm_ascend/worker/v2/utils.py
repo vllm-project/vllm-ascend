@@ -12,6 +12,7 @@ def torch_cuda_wrapper():
     ori_graph_pool_handle = torch.cuda.graph_pool_handle
     ori_cuda_graph_cls = torch.cuda.CUDAGraph
     ori_cuda_graph_func = torch.cuda.graph
+    ori_cuda_synchronize = torch.cuda.synchronize
     try:
         torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
@@ -20,6 +21,7 @@ def torch_cuda_wrapper():
         torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
         torch.cuda.CUDAGraph = torch.npu.NPUGraph
         torch.cuda.graph = torch.npu.graph
+        torch.cuda.synchronize = torch.npu.synchronize
         yield
     finally:
         # revert back torch cuda properties, so it will still raise error
@@ -31,3 +33,4 @@ def torch_cuda_wrapper():
         torch.cuda.graph_pool_handle = ori_graph_pool_handle
         torch.cuda.CUDAGraph = ori_cuda_graph_cls
         torch.cuda.graph = ori_cuda_graph_func
+        torch.cuda.synchronize = ori_cuda_synchronize

@@ -94,6 +94,12 @@ class NPUModelRunner(GPUModelRunner):
                 pin_memory=self.pin_memory,
             )
 
+    @torch.inference_mode()
+    def profile_run(self):
+        """Override the method beacuse thera cuda operation in it."""
+        with torch_cuda_wrapper():
+            super().profile_run()
+
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,

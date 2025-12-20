@@ -38,7 +38,7 @@ def _penalties_and_temperature_kernel(
     # NOTE(Ronald1995): vllm original grammar `use_rep_penalty or
     # use_freq_penalty or use_pres_penalty`,
     # change it to `(use_rep_penalty or use_freq_penalty) or use_pres_penalty`,
-    # because triton-ascend's compiler doesn't support
+    # because triton-ascend's compiler doesn't support chained boolean operator.
     use_penalty = (use_rep_penalty or use_freq_penalty) or use_pres_penalty
     use_temperature = temperature != 1.0
     if not (use_penalty or use_temperature):
@@ -101,6 +101,7 @@ def apply_penalties_and_temperature(
     # in triton-ascend.
     BLOCK_SIZE = 4096
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    # TODO(Ronald1995): Optimize the performance of the kernel in npu.
     _penalties_and_temperature_kernel[(num_reqs, num_blocks)](
         logits,
         logits.stride(0),
