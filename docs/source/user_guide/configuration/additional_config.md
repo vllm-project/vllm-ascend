@@ -42,6 +42,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                                                  |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
 | `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
+| `enable_async_exponential`          | int  | `0`     | Whether to enable async exponential overlap. To enable async exponential, set this config to 1.                                                                |
 
 The details of each configuration option are as follows:
 
