@@ -22,21 +22,12 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
-
-
-class PoolingStates:
-    # NOTE: This should be removed after we drop support of vLLM v0.12.0
-    def __init__(self):
-        # for chunked prefill with ALL pooling
-        self.hidden_states_cache: list[torch.Tensor] = []
-
-    def clean(self):
-        self.hidden_states_cache.clear()
 
 
 class NPUInputBatch(InputBatch):

@@ -274,15 +274,6 @@ class AscendFusedMoE(FusedMoE):
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
 
-    @property
-    def expert_map(self) -> torch.Tensor | None:
-        return self._expert_map
-
-    @expert_map.setter
-    def expert_map(self, new_expert_map):
-        # TODO(Potabk): Remove this once we drop vllm v0.12.0(This makes backward compatibility with vllm v0.12.0)
-        self._expert_map = new_expert_map
-
     def get_log2phy_map(self):
         return self.log2phy
 
