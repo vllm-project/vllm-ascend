@@ -1,3 +1,7 @@
+# Adapt froms https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_next.py
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import torch
 from vllm.triton_utils import tl, triton
 
