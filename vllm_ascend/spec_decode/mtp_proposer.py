@@ -371,9 +371,9 @@ class MtpProposer(Proposer):
         req_scheduled_tokens = scheduler_output.num_scheduled_tokens
         if self.pcp_size > 1:
             long_seq_metadata = self.runner.long_seq_metadata
-            input_ids_pcp_full = self.runner.input_ids_pcp_full
-            query_start_loc_pcp_full = self.runner.query_start_loc_pcp_full
-            query_start_loc_pcp_full_cpu = self.runner.query_start_loc_pcp_full_cpu
+            input_ids_pcp_full = self.runner.pcp_manager.input_ids_pcp_full.gpu
+            query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
+            query_start_loc_pcp_full_cpu = self.runner.pcp_manager.query_start_loc_pcp_full.cpu
             num_reqs = self.runner.input_batch.num_reqs
             ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
                 query_start_loc_pcp_full_cpu[:num_reqs]
@@ -820,8 +820,8 @@ class MtpProposer(Proposer):
             if self.pcp_size > 1:
                 hidden_states = get_pcp_group().all_gather(hidden_states, 0)
                 hidden_states = torch.index_select(
-                    hidden_states, 0, self.runner.
-                    pcp_allgather_restore_idx[:hidden_states.shape[0]])
+                    hidden_states, 0, self.runner.pcp_manager.
+                    pcp_allgather_restore_idx.gpu[:hidden_states.shape[0]])
 
             sample_hidden_states = hidden_states[last_token_indices]
             logits = self.model.compute_logits(sample_hidden_states)

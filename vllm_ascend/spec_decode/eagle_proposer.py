@@ -202,9 +202,9 @@ class EagleProposer(Proposer):
         req_scheduled_tokens = scheduler_output.num_scheduled_tokens
         if self.pcp_size > 1:
             long_seq_metadata = self.runner.long_seq_metadata
-            input_ids_pcp_full = self.runner.input_ids_pcp_full
-            query_start_loc_pcp_full = self.runner.query_start_loc_pcp_full
-            query_start_loc_pcp_full_cpu = self.runner.query_start_loc_pcp_full_cpu
+            input_ids_pcp_full = self.runner.pcp_manager.input_ids_pcp_full.gpu
+            query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
+            query_start_loc_pcp_full_cpu = self.runner.pcp_manager.query_start_loc_pcp_full.cpu
             num_reqs = self.runner.input_batch.num_reqs
             ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
                 query_start_loc_pcp_full_cpu[:num_reqs]
