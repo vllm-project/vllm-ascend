@@ -799,9 +799,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         forward_context: ForwardContext = get_forward_context()
 
-        # DEBUG: 输出层名称用于对应新老版本的DEBUG信息
-        layer_name = getattr(self, 'layer_name', 'unknown_layer')
-        print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
         if not forward_context.capturing:
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
@@ -840,6 +837,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        # DEBUG: 输出层名称用于对应新老版本的DEBUG信息
+        layer_name = getattr(layer, 'layer_name', 'unknown_layer')
+        print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
