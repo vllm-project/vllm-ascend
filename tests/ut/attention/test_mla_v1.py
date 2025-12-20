@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
@@ -13,7 +14,8 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
-                                          AscendMLAPrefillMetadata)
+                                          AscendMLAPrefillMetadata,
+                                          ChunkedContextMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
@@ -82,7 +84,7 @@ class TestAscendMLAPrefillMetadata(TestBase):
         cu_seq_lens_lst = [[0, 2], [2, 4]]
         chunk_size = 2
 
-        chunked_context = AscendMLAPrefillMetadata.ChunkedContextMetadata(
+        chunked_context = ChunkedContextMetadata(
             cu_seq_lens=cu_seq_lens,
             starts=starts,
             seq_tot=seq_tot,
@@ -261,8 +263,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
             self.assertEqual(
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.enable_chunked_prefill)
-            self.assertEqual(builder.dcp_size, mock_dcp.world_size)
-            self.assertEqual(builder.pcp_size, mock_pcp.world_size)
 
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP',
@@ -565,10 +565,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.kv_cache_spec.head_size = 128
         self.kv_cache_spec.num_heads = 32
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    @patch(
-        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
-    )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
@@ -631,10 +627,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    @patch(
-        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
-    )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
@@ -698,10 +690,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    @patch(
-        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
-    )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def test_build_decode_only_metadata(self, mock_get_ascend_config,
                                         mock_dcp_world_size,
@@ -753,10 +741,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    @patch(
-        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
-    )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def test_build_for_graph_capture_decode_only(self, mock_get_ascend_config,
                                                  mock_dcp_world_size,
@@ -809,10 +793,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
-    @patch(
-        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
-    )
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def test_build_for_graph_capture_prefill(self, mock_get_ascend_config,
                                              mock_dcp_world_size,
@@ -972,16 +952,13 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
-        quant_method = MagicMock()
-        apply = MagicMock()
-        quant_method.apply = apply
+        quant_method = MagicMock(spec=UnquantizedLinearMethod)
         layer.quant_method = quant_method
         shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim +
                                          self.impl.v_head_dim)
         shape_1 = self.impl.kv_lora_rank
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
-        apply.return_value = layer.weight.T
         mock_format_cast.return_value = layer.weight
         self.impl.process_weights_after_loading(torch.bfloat16)
 

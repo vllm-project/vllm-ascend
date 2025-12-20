@@ -18,14 +18,14 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata,
-    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata, AscendPCPMetadata,
-    ChunkedContextMetadata, DecodeMLAPreprocessResult,
-    PrefillMLAPreprocessResult)
+    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata, ChunkedContextMetadata,
+    DecodeMLAPreprocessResult, PrefillMLAPreprocessResult)
 #isort: on
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          wait_for_kv_layer_from_connector)
+from vllm_ascend.attention.cp_common import AscendPCPMetadata
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.shared_weight_layer import (
@@ -210,6 +210,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         model: nn.Module,
     ) -> AscendMLAPrefillMetadata:
         prefill_metadata = super().build_prefill_metadata(
+            common_prefix_len, common_attn_metadata, model)
+        prefill_metadata.pcp_metadata = self.build_cp_metadata(
             common_prefix_len, common_attn_metadata, model)
         if self.pcp_size > 1:
             num_decodes_flatten = self.num_decodes * self.decode_threshold
