@@ -863,29 +863,49 @@ class AscendAttentionBackendImpl(AttentionImpl):
         print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
 
         # DEBUG: 验证实际使用的实现类
-        print(f"[IMPLEMENTATION DEBUG NEW] Layer implementation analysis:")
-        print(f"  Layer type: {type(layer).__name__}")
-        print(f"  Layer module: {layer.__class__.__module__}")
-        print(f"  Layer full path: {layer.__class__}")
+        # DEBUG: 检查真正的模型实现 - 向上查找到model层
+        current_obj = layer
+        model_info = []
+        for i in range(10):  # 增加查找深度
+            if hasattr(current_obj, '__class__'):
+                class_name = current_obj.__class__.__name__
+                module_name = current_obj.__class__.__module__
+                model_info.append(f"{class_name}({module_name})")
 
-        # 检查attention相关的类
-        if hasattr(layer, 'self_attn'):
-            print(f"  Self-attention type: {type(layer.self_attn).__name__}")
-            print(f"  Self-attention module: {layer.self_attn.__class__.__module__}")
-            print(f"  Self-attention full path: {layer.self_attn.__class__}")
+                # 检查是否到达了model层
+                if 'ForCausalLM' in class_name or 'Qwen2Model' in class_name or 'CustomQwen2' in class_name:
+                    print(f"[MODEL ROOT DEBUG NEW] Found model at level {i}: {class_name} from {module_name}")
+                    if 'Custom' in class_name:
+                        print(f"  *** CONFIRMED: USING CUSTOM IMPLEMENTATION ***")
+                    else:
+                        print(f"  *** CONFIRMED: USING STANDARD IMPLEMENTATION ***")
+                    break
 
-        # 检查model类的层次结构
-        current_layer = layer
-        model_chain = []
-        for i in range(5):  # 最多向上查找5层
-            if hasattr(current_layer, '__class__'):
-                model_chain.append(f"{current_layer.__class__.__name__}({current_layer.__class__.__module__})")
-            # 尝试获取父对象
-            if hasattr(current_layer, 'model'):
-                current_layer = current_layer.model
+            # 尝试向上查找
+            if hasattr(current_obj, 'model'):
+                current_obj = current_obj.model
+            elif hasattr(current_obj, 'modules'):
+                # 尝试获取第一个包含model的属性
+                found_model = False
+                for attr_name in dir(current_obj):
+                    if 'model' in attr_name.lower() and not attr_name.startswith('_'):
+                        attr_value = getattr(current_obj, attr_name)
+                        if hasattr(attr_value, '__class__'):
+                            current_obj = attr_value
+                            found_model = True
+                            break
+                if not found_model:
+                    break
             else:
                 break
-        print(f"  Class chain: {' -> '.join(model_chain)}")
+
+        print(f"[MODEL HIERARCHY DEBUG NEW] {' -> '.join(model_info)}")
+
+        # 检查当前layer的权重初始化状态
+        if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'qkv_proj'):
+            qkv_weight = layer.self_attn.qkv_proj.weight if hasattr(layer.self_attn.qkv_proj, 'weight') else None
+            if qkv_weight is not None:
+                print(f"[WEIGHT DEBUG NEW] QKV weight stats: shape={qkv_weight.shape}, mean={qkv_weight.float().mean():.6f}, std={qkv_weight.float().std():.6f}")
 
         # DEBUG: 跟踪第1层输入时的张量状态（第0层到第1层转换）
         if 'layers.1.' in layer_name:
