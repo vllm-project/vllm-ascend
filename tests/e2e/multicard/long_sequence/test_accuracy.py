@@ -87,11 +87,11 @@ def test_output_between_tp_and_cp(
     tp_full_kwargs = {}
     tp_full_kwargs.update(common_kwargs)
     tp_full_kwargs.update(tp_kwargs)
-    with VllmRunner(model, **common_kwargs, **cp_full_kwargs) as runner:
+    with VllmRunner(model, **cp_full_kwargs) as runner:
         vllm_context_parallel_outputs = runner.generate_greedy(
             prompts, max_tokens)
 
-    with VllmRunner(model, **common_kwargs, **tp_full_kwargs) as runner:
+    with VllmRunner(model, **tp_full_kwargs) as runner:
         vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
 
     check_outputs_equal(
