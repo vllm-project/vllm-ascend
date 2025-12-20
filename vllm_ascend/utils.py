@@ -677,6 +677,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        print(f"[DEBUG REGISTER] Registering {name}: {op_cls}")
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
