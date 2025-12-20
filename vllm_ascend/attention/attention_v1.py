@@ -699,9 +699,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
             if get_ascend_device_type() == AscendDeviceType._310P:
-                # DEBUG: 310P uses non-sliding window branch (actual path)
-                print(f"[DEBUG 310P BLOCK_TABLES ELSE] shape={attn_metadata.block_tables.shape}")
-                print(f"[DEBUG 310P BLOCK_TABLES ELSE] seq_lens={attn_metadata.seq_lens.shape}")
+                # DEBUG: Detailed 310P paged attention parameter validation
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] ===== DETAILED PARAM CHECK =====")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] query: shape={query.shape}, dtype={query.dtype}, device={query.device}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] key_cache: shape={self.key_cache.shape}, dtype={self.key_cache.dtype}, device={self.key_cache.device}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] value_cache: shape={self.value_cache.shape}, dtype={self.value_cache.dtype}, device={self.value_cache.device}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_kv_heads: {self.num_kv_heads}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_heads: {self.num_heads}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] scale_value: {self.scale}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] block_table: shape={attn_metadata.block_tables.shape}, dtype={attn_metadata.block_tables.dtype}, device={attn_metadata.block_tables.device}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] context_lens: shape={attn_metadata.seq_lens.shape}, dtype={attn_metadata.seq_lens.dtype}, values={attn_metadata.seq_lens}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] output: shape={output.shape}, dtype={output.dtype}, device={output.device}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] ==================================================")
 
             torch_npu._npu_paged_attention(
                 query=query,
