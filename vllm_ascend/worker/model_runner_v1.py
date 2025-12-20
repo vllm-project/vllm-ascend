@@ -73,6 +73,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv, get_dtype_size,
                         is_pin_memory_available)
 from vllm.utils.jsontree import json_map_leaves
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata, AttentionCGSupport,
@@ -1221,7 +1222,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
                int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor], Optional[AFDMetadata], int]:
+               Optional[torch.Tensor], Optional[torch.Tensor], Optional[AFDMetadata], int, UBatchSlices]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1337,7 +1338,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
 
         # allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE or \
         #                     self.afd_config is not None
@@ -1351,10 +1351,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             parallel_config=self.parallel_config,
             allow_microbatching=True,
             allow_dp_padding=allow_dp_padding,
-            num_tokens_padded=num_tokens_padded,
+            num_tokens_padded=maybe_padded_num_tokens,
             uniform_decode=uniform_decode,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
+
+        dp_rank = self.parallel_config.data_parallel_rank
+        if ubatch_slices:
+            assert num_tokens_across_dp is not None
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+        elif num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
 
         self.seq_lens_np[:num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1388,7 +1396,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.with_prefill = with_prefill
         self.num_tokens_across_dp = num_tokens_across_dp
         self._update_graph_pad_size(with_prefill, maybe_padded_num_tokens)
-        # attn_metadata: dict[str, Any] = {}
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1480,7 +1487,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
         else:
             print(f"ubatch_slices is None")
-        use_cascade_attn = False
 
         # Used in the below loop.
         # query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
@@ -1501,6 +1507,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             blk_table_tensor = blk_table.get_device_tensor()
             slot_mapping = blk_table.slot_mapping_cpu[:
                                                       total_num_scheduled_tokens]
+            self.slot_mapping[total_num_scheduled_tokens:num_input_tokens].fill_(PAD_SLOT_ID)
             self.slot_mapping[:total_num_scheduled_tokens].copy_(
                 slot_mapping[:total_num_scheduled_tokens],
                 non_blocking=True,
@@ -1571,13 +1578,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         model=self.get_model(),
                         **extra_attn_metadata_args,
                     )
-                    use_cascade_attn |= getattr(attn_metadata_i, "use_cascade", False)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
-
-        # disable cascade attention when DBO
-        if ubatch_slices is not None:
-            use_cascade_attn = False
 
         if lmhead_tp_enable():
             max_num_reqs_across_dp = maybe_padded_num_tokens if not with_prefill else self.max_num_reqs
@@ -1597,9 +1599,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if (
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
-                and hasattr(self, "cudagraph_batch_sizes")
-                and self.cudagraph_batch_sizes
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
+                and hasattr(self, "aclgraph_batch_sizes")
+                and self.aclgraph_batch_sizes
+                and num_scheduled_tokens <= self.aclgraph_batch_sizes[-1]
         ):
             # Use CUDA graphs.
             # Add padding to the batch size.
@@ -1874,7 +1876,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 and self.afd_config and self.afd_config.is_attention_server):
 
             def pad_to_capture_size(n: int) -> int:
-                for s in self.cudagraph_batch_sizes:
+                for s in self.aclgraph_batch_sizes:
                     if n <= s // self.num_stages:
                         return s // self.num_stages
                 return n
@@ -2039,18 +2041,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              intermediate_tensors, afd_metadata,
              max_query_len, ubatch_slices
              ) = self._prepare_inputs(scheduler_output)
-
-        dp_rank = self.parallel_config.data_parallel_rank
-        if ubatch_slices:
-            assert num_tokens_across_dp is not None
-            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-        elif num_tokens_across_dp is not None:
-            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-        else:
-            num_input_tokens = self._get_num_input_tokens(
-                scheduler_output.total_num_scheduled_tokens
-            )
 
         if self.dynamic_eplb:
             self.eplb_updator.take_update_info_from_eplb_process()
