@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.cp_common import AscendPCPMetadata
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          enable_cp,
                                          maybe_save_kv_layer_to_connector,
@@ -108,7 +109,7 @@ class AscendMLAPrefillMetadata:
     chunked_context: Optional[ChunkedContextMetadata] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    pcp_metadata: any = None
+    pcp_metadata: Optional[AscendPCPMetadata] = None
 
 
 @dataclass
