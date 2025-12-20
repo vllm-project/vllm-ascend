@@ -71,6 +71,8 @@ class BudgetRefiner:
             valid = group[group['cost'] <= slo_limit]
             if not valid.empty:
                 max_row = valid.loc[valid['chunk_size'].idxmax()]
+                assert isinstance(ctx_len, int), "ctx_len must be an integer"
+                assert isinstance(d_num, int), "d_num must be an integer"
                 self.lookup[(ctx_len, d_num)] = int(max_row['chunk_size'])
                 self.context_keys.add(ctx_len)
                 self.dnum_keys.add(d_num)
