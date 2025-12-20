@@ -3349,29 +3349,25 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
 
-        # DEBUG: 输出模型实现信息
-        print(f"[MODEL IMPLEMENTATION DEBUG NEW] Model initialization analysis:")
-        print(f"  Model type: {type(self.model).__name__}")
-        print(f"  Model module: {self.model.__class__.__module__}")
-        print(f"  Model full path: {self.model.__class__}")
+        # DEBUG: 检查第1层的input_layernorm实现 - 关键调试信息
+        print(f"[LAYER_NORM DEBUG NEW] Checking Layer 1 input_layernorm:")
+        if hasattr(self.model, 'layers') and len(self.model.layers) > 1:
+            layer1 = self.model.layers[1]
+            print(f"  Layer 1 type: {type(layer1).__name__}")
+            print(f"  Layer 1 module: {layer1.__class__.__module__}")
 
-        # 检查第一层的实现
-        if hasattr(self.model, 'layers') and len(self.model.layers) > 0:
-            first_layer = self.model.layers[0]
-            print(f"  First layer type: {type(first_layer).__name__}")
-            print(f"  First layer module: {first_layer.__class__.__module__}")
+            if hasattr(layer1, 'input_layernorm'):
+                input_ln = layer1.input_layernorm
+                print(f"  *** Layer 1 input_layernorm type: {type(input_ln).__name__} ***")
+                print(f"  *** Layer 1 input_layernorm module: {input_ln.__class__.__module__} ***")
 
-            if hasattr(first_layer, 'self_attn'):
-                first_attn = first_layer.self_attn
-                print(f"  First layer attention type: {type(first_attn).__name__}")
-                print(f"  First layer attention module: {first_attn.__class__.__module__}")
-
-        # 检查是否包含Custom关键字
-        model_str = str(type(self.model))
-        if 'Custom' in model_str:
-            print(f"  *** DETECTED CUSTOM IMPLEMENTATION ***")
-        else:
-            print(f"  *** USING STANDARD IMPLEMENTATION ***")
+                # 关键检查：是否是AscendRMSNorm
+                if 'Ascend' in type(input_ln).__name__:
+                    print(f"  *** CONFIRMED: LAYER 1 USES AscendRMSNorm! ***")
+                else:
+                    print(f"  *** LAYER 1 USES STANDARD RMSNorm ***")
+            else:
+                print(f"  *** ERROR: Layer 1 has no input_layernorm ***")
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
             if get_ascend_device_type() == AscendDeviceType._310P:
