@@ -520,9 +520,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
             # DEBUG: KV cache重塑前检查格式 - PrefillCacheHit分支
-            print(f"[DEBUG FORMAT BEFORE KV_VIEW] PrefillCacheHit branch:")
-            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
-            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
+            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW] PrefillCacheHit branch:")
+            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
+            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
 
             batch_size = attn_metadata.query_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
@@ -534,15 +534,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
             # DEBUG: KV cache重塑后检查格式 - PrefillCacheHit分支
-            print(f"[DEBUG FORMAT AFTER KV_VIEW] PrefillCacheHit branch:")
-            print(f"[DEBUG FORMAT AFTER KV_VIEW]   key after view: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-            print(f"[DEBUG FORMAT AFTER KV_VIEW]   value after view: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+            #            print(f"[DEBUG FORMAT AFTER KV_VIEW] PrefillCacheHit branch:")
+            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   key after view: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   value after view: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
         # chunked_prefill.
         else:
             # DEBUG: KV cache重塑前检查格式 - chunked_prefill分支
-            print(f"[DEBUG FORMAT BEFORE KV_VIEW] chunked_prefill branch:")
-            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
-            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
+            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW] chunked_prefill branch:")
+            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
+            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
 
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
             # FIXED: 310P设备不执行key/value重塑，避免格式继承问题
@@ -552,14 +552,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_block, block_size, -1)
                 value = self.value_cache.view(  # type: ignore
                     num_block, block_size, -1)
-            else:
-                print(f"[DEBUG FORMAT 310P CHUNKED_PREFILL] 310P: Skipping key/value reshape, using original parameters")
-                # 310P: key和value保持原始传入的参数，不进行重塑
+
+            # print(f"[DEBUG FORMAT 310P CHUNKED_PREFILL] 310P: Skipping key/value reshape, using original parameters")
+            # 310P: key和value保持原始传入的参数，不进行重塑
 
             # DEBUG: KV cache重塑后检查格式 - chunked_prefill分支
-            print(f"[DEBUG FORMAT AFTER KV_VIEW] chunked_prefill branch:")
-            print(f"[DEBUG FORMAT AFTER KV_VIEW]   key after view: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-            print(f"[DEBUG FORMAT AFTER KV_VIEW]   value after view: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+            #            print(f"[DEBUG FORMAT AFTER KV_VIEW] chunked_prefill branch:")
+            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   key after view: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   value after view: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
@@ -568,11 +568,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # DEBUG: 检查张量格式 - 入口点1
         import torch_npu
-        print(f"[DEBUG FORMAT ENTRY] _forward_prefill:")
-        print(f"[DEBUG FORMAT ENTRY]   query: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
-        print(f"[DEBUG FORMAT ENTRY]   key: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-        print(f"[DEBUG FORMAT ENTRY]   value: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-        print(f"[DEBUG FORMAT ENTRY]   attn_state: {attn_metadata.attn_state}")
+        #        print(f"[DEBUG FORMAT ENTRY] _forward_prefill:")
+        #        print(f"[DEBUG FORMAT ENTRY]   query: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
+        #        print(f"[DEBUG FORMAT ENTRY]   key: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+        #        print(f"[DEBUG FORMAT ENTRY]   value: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+        #        print(f"[DEBUG FORMAT ENTRY]   attn_state: {attn_metadata.attn_state}")
 
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
@@ -591,13 +591,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_actual_tokens = attn_metadata.num_actual_tokens
 
                 # DEBUG: reshape_and_cache前检查格式
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]")
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]   key_before: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]   value_before: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]   key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]   value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]   slots: shape={slots.shape}; format={torch_npu.get_npu_format(slots)}; values={slots}")
-                print(f"[DEBUG FORMAT BEFORE RESHAPE]   num_actual_tokens: {num_actual_tokens}")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   key_before: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   value_before: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   slots: shape={slots.shape}; format={torch_npu.get_npu_format(slots)}; values={slots}")
+                # print(f"[DEBUG FORMAT BEFORE RESHAPE]   num_actual_tokens: {num_actual_tokens}")
 
                 # Stage 1: KV cache storage using original tensors (like v0.10.0rc1:319-324)
                 torch_npu._npu_reshape_and_cache(
@@ -608,18 +608,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     slot_indices=slots)
 
                 # DEBUG: reshape_and_cache后检查格式
-                print(f"[DEBUG FORMAT AFTER RESHAPE]")
-                print(f"[DEBUG FORMAT AFTER RESHAPE]   key_after: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-                print(f"[DEBUG FORMAT AFTER RESHAPE]   value_after: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+                # print(f"[DEBUG FORMAT AFTER RESHAPE]")
+                # print(f"[DEBUG FORMAT AFTER RESHAPE]   key_after: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+                # print(f"[DEBUG FORMAT AFTER RESHAPE]   value_after: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
             return self._forward_prefill_310p_fallback(
                 query, key, value, attn_metadata, output
             )
 
         # DEBUG: 非310P路径 - npu_fused_infer_attention_score调用前检查格式
-        print(f"[DEBUG FORMAT NON-310P] Before npu_fused_infer_attention_score:")
-        print(f"[DEBUG FORMAT NON-310P]   query: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
-        print(f"[DEBUG FORMAT NON-310P]   key: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-        print(f"[DEBUG FORMAT NON-310P]   value: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+        #        print(f"[DEBUG FORMAT NON-310P] Before npu_fused_infer_attention_score:")
+        #        print(f"[DEBUG FORMAT NON-310P]   query: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
+        #        print(f"[DEBUG FORMAT NON-310P]   key: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+        #        print(f"[DEBUG FORMAT NON-310P]   value: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
 
         # Get workspace from cache or calculate it if not present.
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
@@ -700,22 +700,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             if get_ascend_device_type() == AscendDeviceType._310P:
                 # FIXED: 310P requires seq_lens to be on NPU device (match old version behavior)
-                print(f"[DEBUG 310P SEQ_LENS_DEVICE] Before fix: device={attn_metadata.seq_lens.device}")
+                # print(f"[DEBUG 310P SEQ_LENS_DEVICE] Before fix: device={attn_metadata.seq_lens.device}")
                 attn_metadata.seq_lens = attn_metadata.seq_lens.to(device=query.device)
-                print(f"[DEBUG 310P SEQ_LENS_DEVICE] After fix: device={attn_metadata.seq_lens.device}")
+                # print(f"[DEBUG 310P SEQ_LENS_DEVICE] After fix: device={attn_metadata.seq_lens.device}")
 
                 # DEBUG: Detailed 310P paged attention parameter validation
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] ===== DETAILED PARAM CHECK =====")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] query: shape={query.shape}, dtype={query.dtype}, device={query.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] key_cache: shape={self.key_cache.shape}, dtype={self.key_cache.dtype}, device={self.key_cache.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] value_cache: shape={self.value_cache.shape}, dtype={self.value_cache.dtype}, device={self.value_cache.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_kv_heads: {self.num_kv_heads}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_heads: {self.num_heads}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] scale_value: {self.scale}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] block_table: shape={attn_metadata.block_tables.shape}, dtype={attn_metadata.block_tables.dtype}, device={attn_metadata.block_tables.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] context_lens: shape={attn_metadata.seq_lens.shape}, dtype={attn_metadata.seq_lens.dtype}, values={attn_metadata.seq_lens}, device={attn_metadata.seq_lens.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] output: shape={output.shape}, dtype={output.dtype}, device={output.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] ==================================================")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] ===== DETAILED PARAM CHECK =====")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] query: shape={query.shape}, dtype={query.dtype}, device={query.device}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] key_cache: shape={self.key_cache.shape}, dtype={self.key_cache.dtype}, device={self.key_cache.device}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] value_cache: shape={self.value_cache.shape}, dtype={self.value_cache.dtype}, device={self.value_cache.device}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_kv_heads: {self.num_kv_heads}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_heads: {self.num_heads}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] scale_value: {self.scale}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] block_table: shape={attn_metadata.block_tables.shape}, dtype={attn_metadata.block_tables.dtype}, device={attn_metadata.block_tables.device}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] context_lens: shape={attn_metadata.seq_lens.shape}, dtype={attn_metadata.seq_lens.dtype}, values={attn_metadata.seq_lens}, device={attn_metadata.seq_lens.device}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] output: shape={output.shape}, dtype={output.dtype}, device={output.device}")
+                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] ==================================================")
 
             torch_npu._npu_paged_attention(
                 query=query,
@@ -869,29 +869,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
         """
         # DEBUG: fallback函数入口检查
         import torch_npu
-        print(f"[DEBUG FORMAT FALLBACK ENTRY] _forward_prefill_310p_fallback:")
-        print(f"[DEBUG FORMAT FALLBACK ENTRY]   query_in: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
-        print(f"[DEBUG FORMAT FALLBACK ENTRY]   key_in: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-        print(f"[DEBUG FORMAT FALLBACK ENTRY]   value_in: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-        print(f"[DEBUG FORMAT FALLBACK ENTRY]   output_in: shape={output.shape}; format={torch_npu.get_npu_format(output)}")
+        #  print(f"[DEBUG FORMAT FALLBACK ENTRY] _forward_prefill_310p_fallback:")
+        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   query_in: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
+        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   key_in: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   value_in: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+        #  print(f"[DEBUG FORMAT FALLBACK ENTRY]   output_in: shape={output.shape}; format={torch_npu.get_npu_format(output)}")
 
         from vllm_ascend.utils import aligned_16, ACL_FORMAT_FRACTAL_NZ
 
         num_tokens = query.shape[0]
 
         # Apply 310P-specific alignments from v0.10.0rc1
-        print(f"[DEBUG FORMAT FALLBACK] Applying aligned_16...")
+        # print(f"[DEBUG FORMAT FALLBACK] Applying aligned_16...")
         query = aligned_16(query)
-        print(f"[DEBUG FORMAT FALLBACK]   query after aligned_16: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
+        # print(f"[DEBUG FORMAT FALLBACK]   query after aligned_16: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
 
         key = aligned_16(key)
-        print(f"[DEBUG FORMAT FALLBACK]   key after aligned_16: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
+        # print(f"[DEBUG FORMAT FALLBACK]   key after aligned_16: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
 
         value = aligned_16(value)
-        print(f"[DEBUG FORMAT FALLBACK]   value after aligned_16: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
+        # print(f"[DEBUG FORMAT FALLBACK]   value after aligned_16: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
 
         output = aligned_16(output)
-        print(f"[DEBUG FORMAT FALLBACK]   output after aligned_16: shape={output.shape}; format={torch_npu.get_npu_format(output)}")
+        # print(f"[DEBUG FORMAT FALLBACK]   output after aligned_16: shape={output.shape}; format={torch_npu.get_npu_format(output)}")
 
         # Handle attention mask - format for 310P compatibility
         mask = attn_metadata.attn_mask
