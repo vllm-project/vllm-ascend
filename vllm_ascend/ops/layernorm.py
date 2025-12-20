@@ -48,7 +48,9 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
+        # DEBUG: 简单检查AscendRMSNorm是否被调用
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        print(f"[DEBUG] AscendRMSNorm.forward_oot called! Device: {get_ascend_device_type()}")
         if residual is not None:
             if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
@@ -104,7 +106,9 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
+        # DEBUG: 简单检查AscendRMSNorm是否被调用
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        print(f"[DEBUG] AscendRMSNorm.forward_oot called! Device: {get_ascend_device_type()}")
         if residual is not None:
             if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
