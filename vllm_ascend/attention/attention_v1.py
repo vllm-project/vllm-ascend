@@ -648,6 +648,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # DEBUG: 精度检查 - DecodeOnly路径的输入
+        print(f"[PRECISION DEBUG DECODE_ONLY ENTRY] NEW VERSION:")
+        print(f"[PRECISION DEBUG DECODE_ONLY ENTRY]   query: shape={query.shape}; mean={query.float().mean().item():.6f}; std={query.float().std().item():.6f}")
+
         # Fixed: Check device compatibility for decode attention
         from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
@@ -726,6 +730,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 context_lens=attn_metadata.seq_lens,
                 out=output)
+
+        # DEBUG: 精度检查 - DecodeOnly路径的输出
+        print(f"[PRECISION DEBUG DECODE_ONLY EXIT] NEW VERSION:")
+        print(f"[PRECISION DEBUG DECODE_ONLY EXIT]   output: shape={output.shape}; mean={output.float().mean().item():.6f}; std={output.float().std().item():.6f}")
+
         return output
 
     def _forward_encode(
