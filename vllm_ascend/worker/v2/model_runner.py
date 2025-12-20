@@ -354,3 +354,8 @@ class NPUModelRunner(GPUModelRunner):
                 req_index]
             self.input_buffers.seq_lens_cpu[
                 i] = num_computed_tokens + num_scheduled_tokens[req_id]
+
+    def eplb_warmup(self):
+        # TODO(Ronald1995): just define the method in case calling error in
+        # worker, implement it in the future.
+        pass
