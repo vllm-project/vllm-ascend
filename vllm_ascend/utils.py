@@ -1365,7 +1365,7 @@ class PCPManager:
                 num_scheduled_tokens * self.pcp_world_size -
                 self.num_pcp_pads_cpu[:num_reqs]) < num_tokens_np
 
-    def get_padded_slot_mapping(self, num_tokens: list,
+    def get_padded_slot_mapping(self, num_tokens: int,
                                 slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
