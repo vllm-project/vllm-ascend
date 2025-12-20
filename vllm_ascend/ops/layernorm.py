@@ -44,6 +44,29 @@ class AscendRMSNorm(RMSNorm):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
                                            requires_grad=False)
 
+        # DEBUG: 检查CustomOp分发机制
+        print(f"[DEBUG RMSNorm INIT] CustomOp enabled: {self.enabled()}")
+        print(f"[DEBUG RMSNorm INIT] Available methods: {[m for m in dir(self) if 'forward' in m]}")
+
+    def forward(self, *args, **kwargs):
+        """通用的forward方法拦截器"""
+        print(f"[DEBUG RMSNorm FORWARD] AscendRMSNorm.forward called!")
+        print(f"[DEBUG RMSNorm FORWARD] Args count: {len(args)}")
+        if args:
+            x = args[0]
+            print(f"[DEBUG RMSNorm FORWARD] Input shape: {x.shape}, dtype: {x.dtype}")
+            print(f"[DEBUG RMSNorm FORWARD] Input stats: mean={x.float().mean():.6f}, std={x.float().std():.6f}")
+
+        # 调用父类的forward方法
+        result = super().forward(*args, **kwargs)
+
+        if isinstance(result, tuple):
+            print(f"[DEBUG RMSNorm FORWARD] Output shapes: {[r.shape if hasattr(r, 'shape') else type(r) for r in result]}")
+        else:
+            print(f"[DEBUG RMSNorm FORWARD] Output shape: {result.shape if hasattr(result, 'shape') else type(result)}")
+
+        return result
+
     def forward_oot(
         self,
         x: torch.Tensor,
