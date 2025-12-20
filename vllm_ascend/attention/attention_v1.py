@@ -862,44 +862,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer_name = getattr(layer, 'layer_name', 'unknown_layer')
         print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
 
-        # DEBUG: 验证实际使用的实现类
-        # DEBUG: 检查真正的模型实现 - 向上查找到model层
-        current_obj = layer
-        model_info = []
-        for i in range(10):  # 增加查找深度
-            if hasattr(current_obj, '__class__'):
-                class_name = current_obj.__class__.__name__
-                module_name = current_obj.__class__.__module__
-                model_info.append(f"{class_name}({module_name})")
-
-                # 检查是否到达了model层
-                if 'ForCausalLM' in class_name or 'Qwen2Model' in class_name or 'CustomQwen2' in class_name:
-                    print(f"[MODEL ROOT DEBUG NEW] Found model at level {i}: {class_name} from {module_name}")
-                    if 'Custom' in class_name:
-                        print(f"  *** CONFIRMED: USING CUSTOM IMPLEMENTATION ***")
-                    else:
-                        print(f"  *** CONFIRMED: USING STANDARD IMPLEMENTATION ***")
-                    break
-
-            # 尝试向上查找
-            if hasattr(current_obj, 'model'):
-                current_obj = current_obj.model
-            elif hasattr(current_obj, 'modules'):
-                # 尝试获取第一个包含model的属性
-                found_model = False
-                for attr_name in dir(current_obj):
-                    if 'model' in attr_name.lower() and not attr_name.startswith('_'):
-                        attr_value = getattr(current_obj, attr_name)
-                        if hasattr(attr_value, '__class__'):
-                            current_obj = attr_value
-                            found_model = True
-                            break
-                if not found_model:
-                    break
-            else:
-                break
-
-        print(f"[MODEL HIERARCHY DEBUG NEW] {' -> '.join(model_info)}")
+        # DEBUG: 简单检查layer norm类型
+        if hasattr(layer, 'input_layernorm'):
+            print(f"[LAYER_NORM CHECK NEW] input_layernorm type: {type(layer.input_layernorm).__name__}")
+        else:
+            print(f"[LAYER_NORM CHECK NEW] No input_layernorm found in layer")
 
         # 检查当前layer的权重初始化状态
         if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'qkv_proj'):
