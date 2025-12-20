@@ -1385,6 +1385,12 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
+        if self.ascend_config.enable_async_exponential != 0:
+            self.sampler.do_async_exponential(
+                b_s=logits_indices.shape[0],
+                head_dim=self.model_config.get_vocab_size(),
+                generators=self.input_batch.sampling_metadata.generators)
+
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with set_ascend_forward_context(
