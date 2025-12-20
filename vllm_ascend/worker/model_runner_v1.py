@@ -1932,9 +1932,11 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 print(f"[DEBUG 310P PRE_FIX] num_reqs: {num_reqs}, max_num_blocks_per_req: {self.max_num_blocks_per_req}")
 
                 # Fix shape for 310P to match old version behavior
-                if blk_table_tensor.shape[0] < self.max_num_blocks_per_req:
-                    blk_table_tensor = blk_table_tensor[:num_reqs, :self.max_num_blocks_per_req]
-                    print(f"[DEBUG 310P PRE_FIX] blk_table_tensor fixed shape: {blk_table_tensor.shape}")
+                # if blk_table_tensor.shape[0] < self.max_num_blocks_per_req:
+                #     blk_table_tensor = blk_table_tensor[:num_reqs, :self.max_num_blocks_per_req]
+                #     print(f"[DEBUG 310P PRE_FIX] blk_table_tensor fixed shape: {blk_table_tensor.shape}")
+            else:
+                block_table_tensor=blk_table_tensor[:num_reqs]
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1946,7 +1948,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 num_actual_tokens=slot_mapping_size,
                 num_input_tokens=num_input_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
-                block_table_tensor=blk_table_tensor[:num_reqs],
+                block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
