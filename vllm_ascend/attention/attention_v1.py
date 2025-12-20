@@ -862,51 +862,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer_name = getattr(layer, 'layer_name', 'unknown_layer')
         print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
 
-        # DEBUG: 检查第0层和第1层的投影权重
-        if "layers.0." in layer_name or "layers.1." in layer_name:
-            print(f"[PRECISION DEBUG WEIGHTS] ANALYZING WEIGHTS FOR {layer_name}:")
+        # DEBUG: 跟踪第1层输入时的张量状态（第0层到第1层转换）
+        if 'layers.1.' in layer_name:
+            print(f"[LAYER TRANSFORM DEBUG NEW] Layer 1 attention input analysis:")
+            print(f"  query: shape={query.shape}, mean={query.float().mean():.6f}, std={query.float().std():.6f}, min={query.float().min():.6f}, max={query.float().max():.6f}")
+            print(f"  key: shape={key.shape}, mean={key.float().mean():.6f}, std={key.float().std():.6f}, min={key.float().min():.6f}, max={key.float().max():.6f}")
+            print(f"  value: shape={value.shape}, mean={value.float().mean():.6f}, std={value.float().std():.6f}, min={value.float().min():.6f}, max={value.float().max():.6f}")
 
-            # 尝试获取投影权重 (假设layer有o_proj, q_proj, k_proj, v_proj等属性)
-            weight_info = {}
-
-            # 检查各种可能的权重属性
-            for attr_name in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
-                if hasattr(layer, attr_name):
-                    proj_layer = getattr(layer, attr_name)
-                    if hasattr(proj_layer, 'weight') and proj_layer.weight is not None:
-                        weight = proj_layer.weight
-                        weight_info[f'{attr_name}_weight'] = {
-                            'shape': weight.shape,
-                            'dtype': weight.dtype,
-                            'mean': weight.float().mean().item(),
-                            'std': weight.float().std().item(),
-                            'min': weight.float().min().item(),
-                            'max': weight.float().max().item(),
-                            'device': weight.device
-                        }
-
-                        # 检查bias
-                        if hasattr(proj_layer, 'bias') and proj_layer.bias is not None:
-                            bias = proj_layer.bias
-                            weight_info[f'{attr_name}_bias'] = {
-                                'shape': bias.shape,
-                                'dtype': bias.dtype,
-                                'mean': bias.float().mean().item(),
-                                'std': bias.float().std().item(),
-                                'min': bias.float().min().item(),
-                                'max': bias.float().max().item(),
-                                'device': bias.device
-                            }
-
-            # 输出权重信息
-            for weight_key, weight_data in weight_info.items():
-                print(f"[PRECISION DEBUG WEIGHTS]   {weight_key}:")
-                print(f"[PRECISION DEBUG WEIGHTS]     shape={weight_data['shape']}")
-                print(f"[PRECISION DEBUG WEIGHTS]     dtype={weight_data['dtype']}")
-                print(f"[PRECISION DEBUG WEIGHTS]     device={weight_data['device']}")
-                print(f"[PRECISION DEBUG WEIGHTS]     mean={weight_data['mean']:.8f}")
-                print(f"[PRECISION DEBUG WEIGHTS]     std={weight_data['std']:.8f}")
-                print(f"[PRECISION DEBUG WEIGHTS]     range=[{weight_data['min']:.8f}, {weight_data['max']:.8f}]")
+            # 检查是否有NaN或Inf
+            print(f"  query has NaN: {torch.isnan(query).any()}, has Inf: {torch.isinf(query).any()}")
+            print(f"  key has NaN: {torch.isnan(key).any()}, has Inf: {torch.isinf(key).any()}")
+            print(f"  value has NaN: {torch.isnan(value).any()}, has Inf: {torch.isinf(value).any()}")
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
