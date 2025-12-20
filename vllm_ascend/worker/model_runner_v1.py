@@ -1925,7 +1925,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             # FIXED: 310P-specific block_table_tensor fix to match old version shape
             from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
             if not get_ascend_device_type() == AscendDeviceType._310P:
-                block_table_tensor=blk_table_tensor[:num_reqs]
+                blk_table_tensor=blk_table_tensor[:num_reqs]
                 # Ensure 310P block_table_tensor has proper shape like old version
                 # Old version: block_table[:num_reqs, :self.runner.max_num_blocks_per_req] -> [256, 1000]
                 # New version default: blk_table_tensor[:num_reqs] -> [2, 1000] (insufficient rows)
@@ -1947,7 +1947,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 num_actual_tokens=slot_mapping_size,
                 num_input_tokens=num_input_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
-                block_table_tensor=block_table_tensor,
+                block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
