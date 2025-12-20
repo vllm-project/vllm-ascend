@@ -18,7 +18,7 @@
 # This workflow related to the resources atlas 800 A3
 # **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
 # We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
-name: 'ascend test / nightly-a3'
+name: Nightly-A3
 
 on:
   schedule:
@@ -28,6 +28,7 @@ on:
   pull_request: 
     branches:
       - 'main'
+    types: [ labeled ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -61,9 +62,10 @@ jobs:
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
             size: 2
-          - name: multi-node-dpsk3.2-exp-2node
-            config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
-            size: 2
+          # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
+          # - name: multi-node-dpsk3.2-exp-2node
+          #   config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
+          #   size: 2
           - name: multi-node-deepseek-r1-w8a8-eplb
             config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
             size: 4
@@ -100,7 +102,7 @@ jobs:
             tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
           - name: deepseek-r1-w8a8-eplb
             os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
+            tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8_eplb.py
           - name: deepseek-r1-w8a8-mtpx
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/features/test_mtpx_deepseek_r1_0528_w8a8.py
@@ -128,16 +130,18 @@ jobs:
           - name: qwen3-235b-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_qwen3_235b_w8a8.py
-          - name: deepseek3_2-exp-w8a8
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
+          # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
+          # - name: deepseek3_2-exp-w8a8
+          #   os: linux-aarch64-a3-16
+          #   tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.12.0
+      vllm: v0.13.0
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
+
   custom-ops-tests:
     name: test ops
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -152,7 +156,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      vllm: v0.12.0
+      vllm: v0.13.0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}

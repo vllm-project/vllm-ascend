@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Build
+name: Release Code and Wheel
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/release_code.yml'
+      - '.github/workflows/pr_tag_release_code_and_wheel.yaml'
       - 'vllm_ascend/**'
       - 'setup.py'
       - 'pyproject.toml'
@@ -70,7 +70,7 @@ jobs:
           ls dist
 
       - name: Archive tar.gz
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: vllm-ascend-src
           path: dist/*
@@ -155,7 +155,7 @@ jobs:
         done
 
     - name: Archive wheel
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: vllm-ascend-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
         path: dist/*

@@ -1,4 +1,4 @@
-name: 'image / nightly / Ubuntu / test'
+name: Nightly Image Build Schedule
 
 on:
   schedule:
@@ -19,7 +19,7 @@ jobs:
       image-tag: ${{ steps.build-image.outputs.image-tag }}
 
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6
 
       - name: Show build target
         run: |

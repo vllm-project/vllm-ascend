@@ -1,12 +1,37 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, List, Optional
 
 import torch
 import torch.nn.functional as F
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_config,
+                               get_ascend_device_type)
+
+
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
+    if vllm_config.speculative_config is not None:
+        return False
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return False
+    from vllm.config.compilation import CUDAGraphMode
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+        return False
+
+    return runtime_shape in get_ascend_config().pa_shape_list
+
+
+@lru_cache(maxsize=1)
+def enable_cp():
+    prefill_config = get_current_vllm_config().parallel_config
+    return prefill_config.prefill_context_parallel_size > 1 \
+                or prefill_config.decode_context_parallel_size > 1
 
 
 @dataclass
@@ -49,7 +74,7 @@ class AscendCommonAttentionMetadata:
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
-    For many of the tensors we keep both GPU and CPU versions.
+    For many of the tensors we keep both NPU and CPU versions.
     """
 
     query_start_loc: torch.Tensor
@@ -92,8 +117,6 @@ class AscendCommonAttentionMetadata:
 
     attn_state: Any = None
 
-    is_only_prefill: bool = False
-
     graph_pad_size: int = -1
 
     # num_input_tokens refers to total number of tokens including
@@ -102,6 +125,37 @@ class AscendCommonAttentionMetadata:
 
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
+
+    causal: bool = True
+
+    # TODO: Remove it when vLLM no longer uses this function.
+    def unpadded(self, num_actual_tokens: int,
+                 num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
+        # This only use to eagle now. It will be use to enforce_eager in future.
+        return AscendCommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
+            num_computed_tokens_cpu=self.
+            num_computed_tokens_cpu[:num_actual_reqs],
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            decode_token_per_req=self.decode_token_per_req,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            causal=self.causal,
+            actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
+            positions=self.positions[:num_actual_tokens],
+            attn_mask=self.attn_mask,
+            spec_attn_mask=self.spec_attn_mask,
+            attn_state=self.attn_state,
+            graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
+            num_input_tokens=num_actual_tokens,
+            prefill_context_parallel_metadata=self.
+            prefill_context_parallel_metadata,
+        )
 
 
 def filter_chunked_req_indices(

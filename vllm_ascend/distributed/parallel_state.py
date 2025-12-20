@@ -96,25 +96,11 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                      backend,
                                      group_name="mc2")
 
-    # Initialize specialized tensor parallel (TP) process groups for fine-grained model parallelism
-    # on Ascend hardware. This enables independent TP configurations for three critical components:
-
-    # 1. ** LM Head **:
-    # The final linear layer that maps hidden states to vocabulary logits.
-    # Controlled by `lmhead_tensor_parallel_size`.
-
-    # 2. ** o_proj **:
-    # The output projection in attention blocks (e.g., in Multi-Head Attention).
-    # Controlled by `oproj_tensor_parallel_size`.
-
-    # 3. ** Embedding **:
-    # The token embedding table at the input and/or output of the model.
-    # Controlled by `embedding_tensor_parallel_size`.
-
-    # 4. ** MLP **:
-    # The feed-forward network layers within transformer blocks.
-    # Controlled by `mlp_tensor_parallel_size`.
-
+    # Initialize fine-grained TP process groups on Ascend for four components:
+    # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
+    # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
+    # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
+    # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
     _group_cache = {}
 
     def _create_or_get_group(group_size: int,
@@ -149,9 +135,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     embedding_tp_size = get_ascend_config(
     ).finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config(
-    ).finegrained_tp_config.embedding_tensor_parallel_size
+    ).finegrained_tp_config.mlp_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
 
     if otp_size > 0:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -182,9 +168,8 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     global _SHARED_WEIGHT
     # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
     is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
-    if enable_sp() and is_ds_v32:
+    if enable_sp() and is_ds_v32 and _SHARED_WEIGHT is None:
         _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
-
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config(
@@ -240,7 +225,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         # Create shared weight group for flashcomm2 oproj
         if flashcomm2_o_shared_enabled():
             assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
-            _SHARED_WEIGHT = _create_shared_weight_group("flashcomm2_o_shared")
+            if _SHARED_WEIGHT is None:
+                _SHARED_WEIGHT = _create_shared_weight_group(
+                    "flashcomm2_o_shared")
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X

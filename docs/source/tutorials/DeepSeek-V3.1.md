@@ -72,7 +72,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /mnt/sfs_turbo/.cache:/root/.cache \
+-v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
@@ -104,14 +104,8 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
-export DISABLE_L2_CACHE=1
 
 vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --host 0.0.0.0 \
@@ -123,7 +117,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 8192 \
+--max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
@@ -131,6 +125,13 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 ```
+
+**Notice:**
+The parameters are explained as follows:
+- Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
+- For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 
 ### Multi-node Deployment
 
@@ -184,7 +185,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
 --max-num-seqs 20 \
---max-model-len 8192 \
+--max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
@@ -240,7 +241,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
 --max-num-seqs 20 \
---max-model-len 8192 \
+--max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
@@ -421,7 +422,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
@@ -500,7 +501,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}' \
   --additional-config '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30100",
   "engine_id": "1",
@@ -579,7 +580,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30200",
   "engine_id": "2",
@@ -658,7 +659,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30300",
   "engine_id": "3",
