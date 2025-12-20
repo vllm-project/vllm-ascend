@@ -610,6 +610,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 print(f"[PRECISION DEBUG AFTER RESHAPE] NEW VERSION:")
                 print(f"[PRECISION DEBUG AFTER RESHAPE]   key_after: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
                 print(f"[PRECISION DEBUG AFTER RESHAPE]   value_after: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
+
             return self._forward_prefill_310p_fallback(
                 query, key, value, attn_metadata, output
             )
@@ -860,6 +861,52 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # DEBUG: 输出层名称用于对应新老版本的DEBUG信息
         layer_name = getattr(layer, 'layer_name', 'unknown_layer')
         print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
+
+        # DEBUG: 检查第0层和第1层的投影权重
+        if "layers.0." in layer_name or "layers.1." in layer_name:
+            print(f"[PRECISION DEBUG WEIGHTS] ANALYZING WEIGHTS FOR {layer_name}:")
+
+            # 尝试获取投影权重 (假设layer有o_proj, q_proj, k_proj, v_proj等属性)
+            weight_info = {}
+
+            # 检查各种可能的权重属性
+            for attr_name in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
+                if hasattr(layer, attr_name):
+                    proj_layer = getattr(layer, attr_name)
+                    if hasattr(proj_layer, 'weight') and proj_layer.weight is not None:
+                        weight = proj_layer.weight
+                        weight_info[f'{attr_name}_weight'] = {
+                            'shape': weight.shape,
+                            'dtype': weight.dtype,
+                            'mean': weight.float().mean().item(),
+                            'std': weight.float().std().item(),
+                            'min': weight.float().min().item(),
+                            'max': weight.float().max().item(),
+                            'device': weight.device
+                        }
+
+                        # 检查bias
+                        if hasattr(proj_layer, 'bias') and proj_layer.bias is not None:
+                            bias = proj_layer.bias
+                            weight_info[f'{attr_name}_bias'] = {
+                                'shape': bias.shape,
+                                'dtype': bias.dtype,
+                                'mean': bias.float().mean().item(),
+                                'std': bias.float().std().item(),
+                                'min': bias.float().min().item(),
+                                'max': bias.float().max().item(),
+                                'device': bias.device
+                            }
+
+            # 输出权重信息
+            for weight_key, weight_data in weight_info.items():
+                print(f"[PRECISION DEBUG WEIGHTS]   {weight_key}:")
+                print(f"[PRECISION DEBUG WEIGHTS]     shape={weight_data['shape']}")
+                print(f"[PRECISION DEBUG WEIGHTS]     dtype={weight_data['dtype']}")
+                print(f"[PRECISION DEBUG WEIGHTS]     device={weight_data['device']}")
+                print(f"[PRECISION DEBUG WEIGHTS]     mean={weight_data['mean']:.8f}")
+                print(f"[PRECISION DEBUG WEIGHTS]     std={weight_data['std']:.8f}")
+                print(f"[PRECISION DEBUG WEIGHTS]     range=[{weight_data['min']:.8f}, {weight_data['max']:.8f}]")
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
