@@ -1341,7 +1341,6 @@ class PCPManager:
             for rank_i in range(self.pcp_world_size)
         ]
         all_positions = np.concatenate(all_positions_lst)
-        logger.info(f"all_positions is {all_positions}")
         self.pcp_allgather_restore_idx.np[:all_positions.shape[0]] = (
             all_positions.argsort())
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
@@ -1370,7 +1369,6 @@ class PCPManager:
                                 slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
-        # print(f"num_actual_tokens_pcp_padded: {self.num_actual_tokens_pcp_padded}")
         pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[:num_tokens *
                                                                self.
                                                                pcp_world_size]
@@ -1510,16 +1508,10 @@ class PCPManager:
                 cp_kv_recover_idx_for_chunk = torch.from_numpy(
                     np.concatenate(self.cp_kv_recover_idx_for_chunk)).to(
                         device=self.device)
-                logger.info(
-                    f"cp_kv_recover_idx_for_chunk is {cp_kv_recover_idx_for_chunk}"
-                )
                 cp_kv_recover_idx_for_chunk.copy_(torch.tensor(
                     np.array(
                         self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
                                                   non_blocking=True)
-                logger.info(
-                    f"cp_kv_recover_idx_for_chunk22222 is {cp_kv_recover_idx_for_chunk}"
-                )
                 self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
                     torch.float32).argsort().to(torch.int32)
 
@@ -1527,7 +1519,7 @@ class PCPManager:
                               attn_mask, input_batch):
         from vllm_ascend.attention.utils import \
             AscendPrefillContextParallelMetadata
-        num_reqs = input_batch.num_reqs or self.query_lens.size(0)
+        num_reqs = input_batch.num_reqs or query_lens.size(0)
         num_decodes = sum(input_batch.num_computed_tokens_cpu[:num_reqs] >=
                           input_batch.num_prompt_tokens[:num_reqs])
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
