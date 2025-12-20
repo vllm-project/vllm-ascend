@@ -197,24 +197,24 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 backend,
                 group_name="flashcomm2_odp")
 
-        # Create shard weight group for flashcomm2 oproj
-        if get_ascend_config().layer_sharding is not None:
-            global _SHARD_WEIGHT
-            group_ranks = []
-            for pp_idx in range(global_pp_size):
-                group = []
-                for dp_idx in range(global_dp_size):
-                    base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
-                    for i in range(global_tp_size):
-                        global_rank = base + i
-                        group.append(global_rank)
-                group_ranks.append(group)
+    # Create shard weight group for flashcomm2 oproj
+    if get_ascend_config().layer_sharding is not None:
+        global _SHARD_WEIGHT
+        group_ranks = []
+        for pp_idx in range(global_pp_size):
+            group = []
+            for dp_idx in range(global_dp_size):
+                base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
+                for i in range(global_tp_size):
+                    global_rank = base + i
+                    group.append(global_rank)
+            group_ranks.append(group)
 
-            _SHARD_WEIGHT = init_model_parallel_group(
-                group_ranks,
-                get_world_group().local_rank,
-                backend,
-                group_name="shard_weight")
+        _SHARD_WEIGHT = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="shard_weight")
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X
