@@ -351,22 +351,16 @@ class NPUPlatform(Platform):
         CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, *args, **kwargs):
-        if "attn_selector_config" in kwargs:
-            use_mla = kwargs["attn_selector_config"].use_mla
-            use_sparse = kwargs["attn_selector_config"].use_sparse
-        else:
-            use_mla = kwargs.get("use_mla",
-                                 args[4] if len(args) >= 5 else None)
-            use_sparse = kwargs.get("use_sparse",
-                                    args[6] if len(args) >= 7 else None)
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(use_mla, use_sparse)]
+
+        return backend_map[(attn_selector_config.use_mla,
+                            attn_selector_config.use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

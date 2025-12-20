@@ -17,15 +17,10 @@
 import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
+import vllm_ascend.patch.platform.patch_ec_connector  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-from vllm_ascend.utils import vllm_version_is
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
         "EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
-
-if vllm_version_is("0.12.0"):
-    import vllm_ascend.patch.platform.patch_ec_connector012  # noqa
-else:
-    import vllm_ascend.patch.platform.patch_ec_connector  # noqa
