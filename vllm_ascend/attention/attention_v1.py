@@ -799,6 +799,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         forward_context: ForwardContext = get_forward_context()
 
+        # DEBUG: 检查代码路径选择
+        print(f"[PRECISION DEBUG PATH] forward_context.capturing: {forward_context.capturing}")
         if not forward_context.capturing:
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
@@ -807,9 +809,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output = self._forward_prefill(query, key, value,
                                                attn_metadata, output, kv_cache=kv_cache)
         else:
+            print(f"[PRECISION DEBUG PATH] Taking full_graph_attention path (capturing mode)")
             attn_output, num_tokens = self.full_graph_attention(
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
+            print(f"[PRECISION DEBUG PATH] full_graph_attention completed, output shape: {output.shape}")
 
         return output
 
