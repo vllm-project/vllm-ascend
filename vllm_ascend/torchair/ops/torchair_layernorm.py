@@ -58,6 +58,21 @@ def torchair_rmsnorm_forward_oot(
     import torch_npu
 
     from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+    # DEBUG: 详细信息追踪精度问题 - TORCHAIR版本
+    print(f"[DEBUG TORCHAIR LAYERNORM] torchair_rmsnorm_forward_oot called!")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Device: {get_ascend_device_type()}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Input x shape: {x.shape}, dtype: {x.dtype}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Input x stats: mean={x.float().mean():.6f}, std={x.float().std():.6f}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Input x min/max: {x.min():.6f}/{x.max():.6f}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Weight shape: {self.weight.shape}, dtype: {self.weight.dtype}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Weight stats: mean={self.weight.float().mean():.6f}, std={self.weight.float().std():.6f}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Variance epsilon: {self.variance_epsilon}")
+
+    if residual is not None:
+        print(f"[DEBUG TORCHAIR LAYERNORM] Residual shape: {residual.shape}, dtype: {residual.dtype}")
+        print(f"[DEBUG TORCHAIR LAYERNORM] Residual stats: mean={residual.float().mean():.6f}, std={residual.float().std():.6f}")
+        print(f"[DEBUG TORCHAIR LAYERNORM] Residual min/max: {residual.min():.6f}/{residual.max():.6f}")
     if residual is not None:
         if get_ascend_device_type() == AscendDeviceType._310P:
             orig_dtype = residual.dtype
@@ -70,9 +85,22 @@ def torchair_rmsnorm_forward_oot(
                 x, residual, self.weight, self.variance_epsilon)
         if self.bias is not None:
             x.add_(self.bias)
+
+        # DEBUG: 输出统计信息
+        print(f"[DEBUG TORCHAIR LAYERNORM] Output x stats: mean={x.float().mean():.6f}, std={x.float().std():.6f}")
+        print(f"[DEBUG TORCHAIR LAYERNORM] Output x min/max: {x.min():.6f}/{x.max():.6f}")
+        if residual is not None:
+            print(f"[DEBUG TORCHAIR LAYERNORM] Output residual stats: mean={residual.float().mean():.6f}, std={residual.float().std():.6f}")
+            print(f"[DEBUG TORCHAIR LAYERNORM] Output residual min/max: {residual.min():.6f}/{residual.max():.6f}")
+
         return x, residual
 
     x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
     if self.bias is not None:
         x.add_(self.bias)
+
+    # DEBUG: 输出统计信息
+    print(f"[DEBUG TORCHAIR LAYERNORM] Output x stats: mean={x.float().mean():.6f}, std={x.float().std():.6f}")
+    print(f"[DEBUG TORCHAIR LAYERNORM] Output x min/max: {x.min():.6f}/{x.max():.6f}")
+
     return x
