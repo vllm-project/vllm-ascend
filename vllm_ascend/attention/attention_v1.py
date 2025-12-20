@@ -802,12 +802,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # DEBUG: 检查代码路径选择
         print(f"[PRECISION DEBUG PATH] forward_context.capturing: {forward_context.capturing}")
         if not forward_context.capturing:
+            print(f"[PRECISION DEBUG PATH] Taking normal execution path")
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                print(f"[PRECISION DEBUG PATH] Taking DecodeOnly path")
                 output = self._forward_decode_only(query, attn_metadata,
                                                    output)
+                print(f"[PRECISION DEBUG PATH] DecodeOnly completed")
             else:
+                print(f"[PRECISION DEBUG PATH] Taking prefill path, attn_state: {attn_metadata.attn_state}")
                 output = self._forward_prefill(query, key, value,
                                                attn_metadata, output, kv_cache=kv_cache)
+                print(f"[PRECISION DEBUG PATH] prefill completed")
         else:
             print(f"[PRECISION DEBUG PATH] Taking full_graph_attention path (capturing mode)")
             attn_output, num_tokens = self.full_graph_attention(
@@ -815,6 +820,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output[:num_tokens] = attn_output[:num_tokens]
             print(f"[PRECISION DEBUG PATH] full_graph_attention completed, output shape: {output.shape}")
 
+        print(f"[PRECISION DEBUG PATH] forward_impl completed, returning output")
         return output
 
     def forward(
@@ -866,8 +872,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
+        print(f"[PRECISION DEBUG PATH] About to call forward_impl")
         output = self.forward_impl(query, key, value, kv_cache, attn_metadata,
                                    output)
+        print(f"[PRECISION DEBUG PATH] forward_impl returned, output shape: {output.shape}")
         return output
 
     def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
