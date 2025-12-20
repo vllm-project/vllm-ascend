@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.attention.selector import AttentionSelectorConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
@@ -484,28 +485,30 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(vllm_config.compilation_config.custom_ops, [])
 
     def test_get_attn_backend_cls_use_v1_and_mla(self):
-        result = self.platform.get_attn_backend_cls(
-            selected_backend="ascend",
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="float16",
-            block_size=64,
-            use_sparse=False,
+        attn_selector_config = AttentionSelectorConfig(
+            dtype=torch.float16,
+            head_size=0,
+            kv_cache_dtype=None,
+            block_size=128,
             use_mla=True,
+            use_sparse=False,
         )
+        result = self.platform.get_attn_backend_cls("ascend",
+                                                    attn_selector_config)
         self.assertEqual(result,
                          "vllm_ascend.attention.mla_v1.AscendMLABackend")
 
     def test_get_attn_backend_cls_use_v1_only(self):
-        result = self.platform.get_attn_backend_cls(
-            selected_backend="ascend",
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="float16",
-            block_size=64,
-            use_sparse=False,
+        attn_selector_config = AttentionSelectorConfig(
+            dtype=torch.float16,
+            head_size=0,
+            kv_cache_dtype=None,
+            block_size=128,
             use_mla=False,
+            use_sparse=False,
         )
+        result = self.platform.get_attn_backend_cls("ascend",
+                                                    attn_selector_config)
         self.assertEqual(
             result,
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
