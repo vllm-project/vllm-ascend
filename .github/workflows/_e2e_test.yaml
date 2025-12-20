@@ -205,7 +205,7 @@ jobs:
 
   e2e-4-cards:
     name: multicard-4
-    needs: [e2e, e2e-2-cards]
+    # needs: [e2e, e2e-2-cards]
     # if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
