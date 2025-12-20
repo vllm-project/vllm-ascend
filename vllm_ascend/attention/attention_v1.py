@@ -699,6 +699,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
             if get_ascend_device_type() == AscendDeviceType._310P:
+                # FIXED: 310P requires seq_lens to be on NPU device (match old version behavior)
+                print(f"[DEBUG 310P SEQ_LENS_DEVICE] Before fix: device={attn_metadata.seq_lens.device}")
+                attn_metadata.seq_lens = attn_metadata.seq_lens.to(device=query.device)
+                print(f"[DEBUG 310P SEQ_LENS_DEVICE] After fix: device={attn_metadata.seq_lens.device}")
+
                 # DEBUG: Detailed 310P paged attention parameter validation
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] ===== DETAILED PARAM CHECK =====")
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] query: shape={query.shape}, dtype={query.dtype}, device={query.device}")
@@ -708,7 +713,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_heads: {self.num_heads}")
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] scale_value: {self.scale}")
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] block_table: shape={attn_metadata.block_tables.shape}, dtype={attn_metadata.block_tables.dtype}, device={attn_metadata.block_tables.device}")
-                print(f"[DEBUG 310P PAGED_ATTENTION PRE] context_lens: shape={attn_metadata.seq_lens.shape}, dtype={attn_metadata.seq_lens.dtype}, values={attn_metadata.seq_lens}")
+                print(f"[DEBUG 310P PAGED_ATTENTION PRE] context_lens: shape={attn_metadata.seq_lens.shape}, dtype={attn_metadata.seq_lens.dtype}, values={attn_metadata.seq_lens}, device={attn_metadata.seq_lens.device}")
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] output: shape={output.shape}, dtype={output.dtype}, device={output.device}")
                 print(f"[DEBUG 310P PAGED_ATTENTION PRE] ==================================================")
 
