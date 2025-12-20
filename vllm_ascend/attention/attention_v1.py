@@ -862,11 +862,40 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer_name = getattr(layer, 'layer_name', 'unknown_layer')
         print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
 
-        # DEBUG: 简单检查layer norm类型
-        if hasattr(layer, 'input_layernorm'):
-            print(f"[LAYER_NORM CHECK NEW] input_layernorm type: {type(layer.input_layernorm).__name__}")
-        else:
-            print(f"[LAYER_NORM CHECK NEW] No input_layernorm found in layer")
+        # DEBUG: 检查当前layer的实际结构
+        print(f"[LAYER STRUCTURE DEBUG NEW] Current layer type: {type(layer).__name__}")
+        layer_attrs = [attr for attr in dir(layer) if not attr.startswith('_')]
+        print(f"[LAYER STRUCTURE DEBUG NEW] Layer attributes: {layer_attrs}")
+
+        # 检查是否有attn属性（这指向真正的Qwen2Attention）
+        if hasattr(layer, 'attn'):
+            print(f"[LAYER STRUCTURE DEBUG NEW] Found attn: {type(layer.attn).__name__}")
+            # 检查Qwen2Attention是否有qkv_proj
+            if hasattr(layer.attn, 'qkv_proj'):
+                print(f"[LAYER STRUCTURE DEBUG NEW] Qwen2Attention has qkv_proj")
+
+        # 尝试找到父级的DecoderLayer
+        current_module = layer
+        for i in range(5):
+            print(f"[LAYER STRUCTURE DEBUG NEW] Level {i}: {type(current_module).__name__}")
+            if hasattr(current_module, 'self_attn'):
+                print(f"[LAYER STRUCTURE DEBUG NEW] Found self_attn at level {i}")
+                decoder_layer = current_module
+                if hasattr(decoder_layer, 'input_layernorm'):
+                    print(f"[LAYER STRUCTURE DEBUG NEW] Found input_layernorm: {type(decoder_layer.input_layernorm).__name__}")
+                    break
+            # 尝试向上查找
+            if hasattr(current_module, '__class__'):
+                for attr_name in ['parent', 'module', 'layer', 'model']:
+                    if hasattr(current_module, attr_name):
+                        parent = getattr(current_module, attr_name)
+                        if hasattr(parent, '__class__') and parent != current_module:
+                            current_module = parent
+                            break
+                else:
+                    break
+            else:
+                break
 
         # 检查当前layer的权重初始化状态
         if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'qkv_proj'):
