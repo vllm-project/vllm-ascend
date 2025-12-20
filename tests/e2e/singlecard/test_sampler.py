@@ -47,3 +47,21 @@ def test_models_prompt_logprobs() -> None:
         runner.generate_greedy_logprobs(example_prompts,
                                         max_tokens=5,
                                         num_logprobs=1)
+
+
+def test_exponential_overlap() -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=1.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner("Qwen/Qwen3-0.6B",
+                    max_model_len=8192,
+                    gpu_memory_utilization=0.7,
+                    additional_config={
+                        "enable_async_exponential": 1,
+                    }) as runner:
+        runner.generate(example_prompts, sampling_params)
