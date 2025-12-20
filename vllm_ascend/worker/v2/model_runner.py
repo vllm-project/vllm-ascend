@@ -21,6 +21,7 @@ from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 
 logger = init_logger(__name__)
 
@@ -37,6 +38,7 @@ class NPUModelRunner(GPUModelRunner):
         del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
+        del self.sampler
 
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
@@ -65,6 +67,8 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
             pin_memory=self.pin_memory,
         )
+        self.sampler = AscendSampler(
+            logprobs_mode=self.model_config.logprobs_mode, )
 
         # actual seq lengths for query (used in attention backends).
         self.actual_seq_lengths_q: list[int] = []
