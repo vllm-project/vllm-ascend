@@ -185,7 +185,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                             odp_group_ranks[odp_group_index].append(
                                 global_rank)
                         otp_group_ranks.append(ranks)
-
+ 
             _FLASHCOMM2_OTP = init_model_parallel_group(
                 otp_group_ranks,
                 get_world_group().local_rank,
@@ -197,24 +197,38 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 backend,
                 group_name="flashcomm2_odp")
 
-    # Create shard weight group for flashcomm2 oproj
-    if get_ascend_config().layer_sharding is not None:
-        global _SHARD_WEIGHT
+    def create_shard_weight_group(module_comm_group: None) -> GroupCoordinator:
+        
+        # Argument module_comm_group: The module specific tensor parallel group.
+        # There are three situations.
+        # 1. If it is None, then the TP_size of the specific module is 1 and is replicated linear layer.
+        # 2. If it is not None, and the module tp_group is same as the global tp_group.
+        # 3. If it is not None, and the module tp_group is different from the global tp_group.(eg. flashcomm2_otp)
         group_ranks = []
-        for pp_idx in range(global_pp_size):
-            group = []
-            for dp_idx in range(global_dp_size):
-                base = (dp_idx * global_pp_size + pp_idx) * global_tp_size
-                for i in range(global_tp_size):
-                    global_rank = base + i
-                    group.append(global_rank)
-            group_ranks.append(group)
+        if module_comm_group is None:
+            # If it is None, then the TP_size of this shard weight is 1.
+            shard_weight_group_ranks = torch.tensor(get_pp_group().ranks).transpose(0,1)
+            group_ranks = [x.tolist() for x in pp_transpose_ranks]
+        else:
+            # combine standard tp group and non-standard tp group to build  shard_weight comm_group
+            pp_transpose_ranks = torch.tensor(get_pp_group().ranks).transpose(0,1)
+            module_tp_tanspose_ranks = torch.tensor(module_comm_group.ranks).transpose(0,1)
+            shard_weight_group_ranks = pp_transpose_ranks.view(pp_transpose_ranks.size(0),module_tp_tanspose_ranks.size(0), -1).unbind(0)
+            group_ranks = [x.tolist() for x in shard_weight_group_ranks]
 
-        _SHARD_WEIGHT = init_model_parallel_group(
+        return init_model_parallel_group(
             group_ranks,
             get_world_group().local_rank,
             backend,
             group_name="shard_weight")
+
+    # Create shard weight group if enabled
+    if get_ascend_config().layer_sharding is not None:
+        global _SHARD_WEIGHT
+        if flashcomm2_enable():
+            _SHARD_WEIGHT = create_shard_weight_group(_FLASHCOMM2_OTP)
+        else:
+            _SHARD_WEIGHT = create_shard_weight_group(get_tp_group())
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X
