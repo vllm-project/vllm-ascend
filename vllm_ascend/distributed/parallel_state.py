@@ -8,7 +8,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
                                              init_model_parallel_group)
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import flashcomm2_enable
+from vllm_ascend.utils import flashcomm2_enable, enable_dsa_cp
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -227,6 +227,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         global _SHARD_WEIGHT
         if flashcomm2_enable():
             _SHARD_WEIGHT = create_shard_weight_group(_FLASHCOMM2_OTP)
+        elif enable_dsa_cp():
+            # For dsa_cp, all shard layers are replicated.
+            _SHARD_WEIGHT = create_shard_weight_group(None)
         else:
             _SHARD_WEIGHT = create_shard_weight_group(get_tp_group())
 
