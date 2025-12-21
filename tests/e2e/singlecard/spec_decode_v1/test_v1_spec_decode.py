@@ -235,8 +235,6 @@ def test_qwen3_vl_eagle_correctness(
     assert matches > int(0.66 * len(ref_outputs))
 
 
-@pytest.mark.skip(
-    "Fix me, suffix decoding now exists some known accuracy issue, skip it")
 def test_suffix_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -273,8 +271,6 @@ def test_suffix_correctness(
     assert matches > int(0.66 * len(ref_outputs))
 
 
-@pytest.mark.skip(
-    "Fix me, suffix decoding now exists some functional issue, skip it")
 def test_suffix_acceptance(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
