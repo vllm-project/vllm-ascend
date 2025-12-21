@@ -291,9 +291,9 @@ class FusedMC2CommImpl(MoECommMethod):
         assert not (
             w1_scale is None or w2_scale is None
         ), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
-        out = torch.empty_like(hidden_states)
 
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            out = torch.empty_like(hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(
                 x=hidden_states,
                 weight1=w1[0],
@@ -307,7 +307,21 @@ class FusedMC2CommImpl(MoECommMethod):
                 out=out,
             )
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-            raise NotImplementedError()
+            assert expert_map is not None, "expert_map cannot be None."
+            out, _ = torch.ops._C_ascend.dispatch_gmm_combine_decode(
+                x=hidden_states,
+                expert_ids=topk_ids,
+                gmm1_permuted_weight=w1[0],
+                gmm1_permuted_weight_scale=w1_scale[0],
+                gmm2_weight=w2[0],
+                gmm2_weight_scale=w2_scale[0],
+                expert_smooth_scales=None,
+                expert_scales=topk_weights.to(torch.float32),
+                group_ep=self.token_dispatcher.moe_all_to_all_group_name,
+                ep_rank_size=self.token_dispatcher.ep_world_size,
+                ep_rank_id=self.token_dispatcher.ep_rank_id,
+                moe_expert_num=len(expert_map),
+                global_bs=self.token_dispatcher.fused_global_bs)
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
