@@ -249,6 +249,11 @@ def reach_layer_for_shard_weight_series(layer: LinearBase):
     ext.series.reach_layer(ext.layer_idx)
 
 
+def wait_layer_for_shard_weight_series(layer: LinearBase):
+    ext = _layer_external_dict[id(layer)]
+    ext.series.wait_weight(ext.layer_idx)
+
+
 def is_hidden_layer(layer: LinearBase) -> bool:
     num_hidden_layers = get_current_model_config().hf_config.num_hidden_layers
     layer_idx = extract_layer_index(layer.prefix)
@@ -259,8 +264,9 @@ def register_all_layers_to_shard_weight_series(
     layer_sharding: List[LinearBase], ):
     for curr_layer in (layer_sharding or []):
         if is_hidden_layer(curr_layer):
+            layer_name = curr_layer.prefix.split('.')[-1]
             register_layer_to_shard_weight_series(
-                series_name=str(curr_layer),
+                series_name=layer_name,
                 group=get_shard_weight_group(),
                 layer=curr_layer,
                 prefetch_step=1,
