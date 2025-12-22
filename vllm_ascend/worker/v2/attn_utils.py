@@ -45,7 +45,6 @@ def build_attn_metadata(
     | None = None,
     spec_attn_mask: torch.Tensor | None = None,
     attn_state: Any | None = None,
-    is_only_prefill: bool = False,
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata
@@ -78,7 +77,6 @@ def build_attn_metadata(
             attn_mask=attn_mask,
             spec_attn_mask=spec_attn_mask,
             attn_state=attn_state,
-            is_only_prefill=is_only_prefill,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,

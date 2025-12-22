@@ -296,3 +296,15 @@
 #      https://github.com/vllm-project/vllm/pull/4881
 #    Future Plan:
 #      Remove this patch after the mix placement feature is natively implemented in the official vllm codebase.
+# ** 15. File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#    Why:
+#       triton ops fused_recurrent_gated_delta_rule and fused_gdn_gating in vLLM perform not good on NPU.
+#    How：
+#       add a new fused triton ops in vLLM with ascend implementation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30860
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
