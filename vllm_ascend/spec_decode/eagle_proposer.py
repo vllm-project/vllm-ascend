@@ -146,7 +146,7 @@ class EagleProposer(Proposer):
                   dummy_compute_logits=lambda hidden_states: None,
                   is_profile=False):
         # update global cos, sin
-        update_cos_sin(self.positions[:num_tokens])
+        update_cos_sin(self.positions[:num_tokens], False)
 
         with set_ascend_forward_context(None,
                                         self.vllm_config,
@@ -344,7 +344,7 @@ class EagleProposer(Proposer):
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
         # update global cos, sin
-        update_cos_sin(self.positions[:num_input_tokens])
+        update_cos_sin(self.positions[:num_input_tokens], False)
 
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
@@ -451,7 +451,7 @@ class EagleProposer(Proposer):
             # Run the model.
 
             # update global cos, sin
-            update_cos_sin(self.positions[:input_batch_size])
+            update_cos_sin(self.positions[:input_batch_size], False)
 
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
