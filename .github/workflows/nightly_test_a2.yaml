@@ -17,7 +17,7 @@
 
 # This workflow related to the resources atlas 800 A2
 # We will not limit the concurrency of jobs on A2
-name: 'ascend test / nightly-a2'
+name: Nightly-A2
 
 on:
   schedule:
@@ -27,7 +27,7 @@ on:
   pull_request: 
     branches:
       - 'main'
-    types: [ labeled, synchronize ]
+    types: [ labeled ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -60,11 +60,34 @@ jobs:
             tests: tests/e2e/nightly/ops
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
-      vllm: v0.12.0
+      vllm: v0.13.0
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+
+  multi-node-tests:
+    name: multi-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: single-node-tests
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-deepseek-dp
+            config_file_path: DeepSeek-R1-W8A8-A2.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a2
+      runner: linux-aarch64-a2-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
 
   single-node-accuracy-tests:
     if: >-
@@ -105,32 +128,8 @@ jobs:
               - Qwen3-VL-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: v0.12.0
+      vllm: v0.13.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11'
       upload: false
-
-
-  multi-node-tests:
-    name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: single-node-tests
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        test_config:
-          - name: multi-node-deepseek-dp
-            config_file_path: DeepSeek-R1-W8A8-A2.yaml
-            size: 2
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a2
-      runner: linux-aarch64-a2-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}

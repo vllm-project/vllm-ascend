@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-name: Performance Test
+name: Performance Schedule Test
 # This workflow runs nightly benchmarks for vllm-ascend.
 
 on:
@@ -51,7 +51,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: v0.12.0
+          - vllm_branch: v0.13.0
             vllm_ascend_branch: main
       max-parallel: 1
     container:
