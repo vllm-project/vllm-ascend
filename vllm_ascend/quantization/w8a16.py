@@ -20,8 +20,8 @@ from typing import Any, Dict, Optional
 import torch
 import torch_npu
 
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
-                               get_ascend_device_type, is_enable_nz)
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               maybe_trans_nz)
 
 
 class AscendW8A16LinearMethod:
@@ -98,8 +98,6 @@ class AscendW8A16LinearMethod:
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        if is_enable_nz():
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
