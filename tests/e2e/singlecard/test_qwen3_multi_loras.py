@@ -55,7 +55,7 @@ def test_multi_loras_with_tp_sync():
         )
 
     vllm_model = VllmRunner(
-        MODEL_PATH,
+        snapshot_download(MODEL_PATH),
         enable_lora=True,
         # dtype="half",
         max_loras=2,  # ensure max_loras < max_cpu_loras
