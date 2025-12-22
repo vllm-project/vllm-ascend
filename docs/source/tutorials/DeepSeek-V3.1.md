@@ -25,7 +25,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ### Model Weight
 - `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1)
 - `DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-w8a8).
-- `DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
+- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
 - `Method of Quantify`: [msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -82,7 +82,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-- Quantized model `DeepSeek-V3.1_w8a8mix_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16).
+- Quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
 Run the following script to execute online inference.
 
@@ -107,7 +107,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --host 0.0.0.0 \
 --port 8015 \
 --data-parallel-size 4 \
@@ -135,7 +135,7 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment
 
-- `DeepSeek-V3.1_w8a8mix_mtp`: require at least 2 Atlas 800 A2 (64G × 8).
+- `DeepSeek-V3.1-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64G × 8).
 
 Run the following scripts on two nodes respectively.
 
@@ -172,7 +172,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --host 0.0.0.0 \
 --port 8004 \
 --data-parallel-size 4 \
@@ -226,7 +226,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --host 0.0.0.0 \
 --port 8004 \
 --headless \
@@ -255,7 +255,7 @@ vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
 We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
 
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
- - `DeepSeek-V3.1_w8a8mix_mtp 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
+ - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -400,7 +400,7 @@ export ASCEND_RT_VISIBLE_DEVICE=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
   --port $2 \
   --data-parallel-size $3 \
@@ -479,7 +479,7 @@ export ASCEND_RT_VISIBLE_DEVICE=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
   --port $2 \
   --data-parallel-size $3 \
@@ -558,7 +558,7 @@ export ASCEND_RT_VISIBLE_DEVICE=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
   --port $2 \
   --data-parallel-size $3 \
@@ -637,7 +637,7 @@ export ASCEND_RT_VISIBLE_DEVICE=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve /weights/DeepSeek-V3.1_w8a8mix_mtp \
+vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --host 0.0.0.0 \
   --port $2 \
   --data-parallel-size $3 \
@@ -772,7 +772,7 @@ Here are two accuracy evaluation methods.
 ### Using AISBench
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `DeepSeek-V3.1_w8a8mix_mtp` in `vllm-ascend:0.11.0rc1` for reference only.
+2. After execution, you can get the result, here is the result of `DeepSeek-V3.1-w8a8-mtp-QuaRot` in `vllm-ascend:0.11.0rc1` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
@@ -790,7 +790,7 @@ Refer to [Using AISBench for performance evaluation](../developer_guide/evaluati
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `DeepSeek-V3.1_w8a8mix_mtp` as an example.
+Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
@@ -802,7 +802,7 @@ There are three `vllm bench` subcommand:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model vllm-ascend/DeepSeek-V3.1_w8a8mix_mtp  --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot  --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
