@@ -440,7 +440,10 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
 
 def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                                    runtime_shape):
-    graph_params = get_graph_params()
+    if forward_context.is_mtp_model:
+        graph_params = get_mtp_graph_params()
+    else:
+        graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
     with torch.npu.stream(update_stream):
