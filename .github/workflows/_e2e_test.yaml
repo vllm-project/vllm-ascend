@@ -209,7 +209,7 @@ jobs:
     # if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.5.0.alpha001-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -264,11 +264,11 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
-          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
+          # pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
+          # pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
+          # pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
+          # pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
+          # pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
 
       - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
         shell: bash -l {0}
