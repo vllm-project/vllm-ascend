@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 from vllm_ascend.utils import adapt_patch  # noqa E402
 from vllm_ascend.utils import register_ascend_customop
 
-# triton
+# triton and torch_npu is not available in the environment, so we need to mock them
 sys.modules['torch_npu'].npu.current_device = MagicMock(return_value=0)
 sys.modules['torch_npu._inductor'] = MagicMock()
 
