@@ -599,6 +599,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     self.vllm_config, self.o_proj):
                 reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
+
+        forward_context = get_forward_context()
+
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
         else:
@@ -606,19 +609,20 @@ class AscendMlaCPImpl(AscendMLAImpl):
         assert attn_metadata.num_decodes is not None and \
                attn_metadata.num_prefills is not None and \
                attn_metadata.num_decode_tokens is not None
+
+        has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
+
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        o_proj_input_shape = (get_forward_context().num_tokens,
+        o_proj_input_shape = (forward_context.num_tokens,
                               self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape,
                                    dtype=hidden_states.dtype,
                                    device=hidden_states.device)
 
         # MLA Preprocess
-        forward_context = get_forward_context()
-        if (self.enable_mlapo and
-            (attn_metadata is None or not forward_context.with_prefill)):
+        if self.enable_mlapo and not has_prefill:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
@@ -676,7 +680,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         del o_proj_input
 
-        has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded

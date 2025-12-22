@@ -476,12 +476,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-    def _v_up_proj(self, x):
-        forward_context = get_forward_context()
+    def _v_up_proj(self, x, has_prefill):
         if x.dtype in [torch.float16, torch.bfloat16] \
                 and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
                 and not self.enable_sfa_cp \
-                and not forward_context.with_prefill:
+                and not has_prefill:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
             res = torch.empty((b, self.num_heads, self.v_head_dim),
@@ -766,7 +765,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
 
-        if self.enable_mlapo and not forward_context.with_prefill:
+        if self.enable_mlapo and not has_prefill:
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
@@ -841,7 +840,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             layout_kv="PA_BSND",
             sparse_mode=3,
         )
-        attn_output = self._v_up_proj(attn_output)
+        attn_output = self._v_up_proj(attn_output, has_prefill)
         maybe_npu_prefetch(inputs=self.o_proj.weight,
                            dependency=attn_output,
                            max_size=MAX_O_PROJ_PREFETCH_SIZE,
