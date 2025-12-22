@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_gather_out_droppad.h
@@ -27,8 +27,9 @@ template <typename T>
 class MoeGatherOutDroppad {
 public:
     __aicore__ inline MoeGatherOutDroppad(){};
-    __aicore__ inline void Init(GM_ADDR inputX, GM_ADDR scale, GM_ADDR expandedRowIdx, GM_ADDR expandedX, GM_ADDR expandedScale, GM_ADDR workspace,
-                                const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe);
+    __aicore__ inline void Init(GM_ADDR inputX, GM_ADDR scale, GM_ADDR expandedRowIdx, GM_ADDR expandedX,
+                                GM_ADDR expandedScale, GM_ADDR workspace, const MoeInitRoutingCustomTilingData *tilingData,
+                                TPipe *tPipe);
     __aicore__ inline void Process();
 
 private:
@@ -65,7 +66,7 @@ private:
     int64_t perLoopCols_;
     int64_t lastLoopCols_;
     int64_t colLoops_;
-    int64_t isInputScale_ = 0;
+    int64_t isInputScale_;
 
     int64_t indicesOffset_;
     int64_t inputOffset_;
@@ -120,12 +121,12 @@ __aicore__ inline void MoeGatherOutDroppad<T>::CopyOut(int64_t progress)
                 LocalTensor<float> scaleLocal = scaleCopyInQueue_.DeQue<float>();
             }
             inputOffset_ = row * cols_ + colsLoop * perLoopCols_;
-            // input row position 
+            // input row position
             LocalTensor<T> inLocal = xCopyInQueue_.AllocTensor<T>();
             DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(colsTileLength_ * sizeof(T)), 0, 0, 0};
             DataCopyPadExtParams<T> dataCopyPadParams{false, 0, 0, 0};
             DataCopyPad(inLocal, inputXGm_[inputOffset_], dataCopyParams, dataCopyPadParams);
-            SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);//whatwhat我不懂
+            SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
             DataCopyExtParams intriParams{1, static_cast<uint32_t>(colsTileLength_ * sizeof(T)), 0, 0, 0};
             while (curLoopRow < currentLoopRows_ && initialRow / k_ == row) {
                 int32_t outIndex = indicesLocal.GetValue(curLoopRow);
@@ -148,9 +149,9 @@ __aicore__ inline void MoeGatherOutDroppad<T>::CopyOut(int64_t progress)
 }
 
 template <typename T>
-__aicore__ inline void MoeGatherOutDroppad<T>::Init(GM_ADDR inputX, GM_ADDR scale, GM_ADDR expandedRowIdx, GM_ADDR expandedX, GM_ADDR expandedScale, 
-                                               GM_ADDR workspace, const MoeInitRoutingCustomTilingData *tilingData,
-                                               TPipe *tPipe)
+__aicore__ inline void MoeGatherOutDroppad<T>::Init(GM_ADDR inputX, GM_ADDR scale, GM_ADDR expandedRowIdx,
+                                                    GM_ADDR expandedX, GM_ADDR expandedScale, GM_ADDR workspace,
+                                                    const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
 {
     pipe_ = tPipe;
     blockIdx_ = GetBlockIdx();
@@ -181,12 +182,13 @@ __aicore__ inline void MoeGatherOutDroppad<T>::Init(GM_ADDR inputX, GM_ADDR scal
     xGscaleGm_.SetGlobalBuffer((__gm__ float *)scale, n_);
     expandedXGm_.SetGlobalBuffer((__gm__ T *)expandedX, n_ * k_ * cols_);
     expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t *)expandedRowIdx +
-                                         blockIdx_ * gatherOutTilingData_->perCoreIndicesElements,
-                                     Align(coreRows_, sizeof(int32_t)));
+                                          blockIdx_ * gatherOutTilingData_->perCoreIndicesElements,
+                                      Align(coreRows_, sizeof(int32_t)));
     expandedScaleGm_.SetGlobalBuffer((__gm__ float *)expandedScale);
 
     pipe_->InitBuffer(xCopyInQueue_, GATHER_OUT_DROPPAD_BUFFER_NUM, AlignBytes(perLoopCols_, sizeof(T)));
-    pipe_->InitBuffer(expandedRowIdxCopyInQueue_, GATHER_OUT_DROPPAD_BUFFER_NUM, AlignBytes(perLoopRows_, sizeof(int32_t)));
+    pipe_->InitBuffer(expandedRowIdxCopyInQueue_, GATHER_OUT_DROPPAD_BUFFER_NUM,
+                      AlignBytes(perLoopRows_, sizeof(int32_t)));
     pipe_->InitBuffer(scaleCopyInQueue_, GATHER_OUT_DROPPAD_BUFFER_NUM, AlignBytes(1, sizeof(float)));
 }
 

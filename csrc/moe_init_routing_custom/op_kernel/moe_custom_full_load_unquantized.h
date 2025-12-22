@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_full_load_unquantized.h
@@ -21,7 +21,7 @@ namespace MoeInitRoutingCustom {
 using namespace AscendC;
 
 template <typename T>
-class MoeCustomFullLoadUnquantized : public MoeCustomFullLoadBase<T>{
+class MoeCustomFullLoadUnquantized : public MoeCustomFullLoadBase<T> {
 public:
     __aicore__ inline MoeCustomFullLoadUnquantized(){};
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX, GM_ADDR expandedRowIdx,
@@ -46,12 +46,12 @@ protected:
 };
 
 template <typename T>
-__aicore__ inline void MoeCustomFullLoadUnquantized<T>::Init(GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX, GM_ADDR expandedRowIdx,
-                                              GM_ADDR expertTokensCountOrCumsum, GM_ADDR expandedScale, GM_ADDR workspace,
-                                              const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
+__aicore__ inline void MoeCustomFullLoadUnquantized<T>::Init(GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX,
+                                                         GM_ADDR expandedRowIdx, GM_ADDR expertTokensCountOrCumsum,
+                                                         GM_ADDR expandedScale, GM_ADDR workspace,
+                                                         const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
 {
-    MoeCustomFullLoadBase<T>::Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, 
-                                workspace, tilingData, tPipe);
+    MoeCustomFullLoadBase<T>::Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, workspace, tilingData, tPipe);
     xGm_.SetGlobalBuffer((__gm__ T *)x);
     if (this->isInputScale_) {
         scaleGm_.SetGlobalBuffer((__gm__ float *)scale);
@@ -60,7 +60,8 @@ __aicore__ inline void MoeCustomFullLoadUnquantized<T>::Init(GM_ADDR x, GM_ADDR 
 
     expandedXGm_.SetGlobalBuffer((__gm__ T *)expandedX);
     int64_t buffSize = this->sortNum_ * sizeof(int32_t);
-    int64_t row_length = (this->curIndexStart_ + this->coreIndicesElements_ - 1) / this->k_ - this->curIndexStart_ / this->k_ + 1; 
+    int64_t row_length =
+        (this->curIndexStart_ + this->coreIndicesElements_ - 1) / this->k_ - this->curIndexStart_ / this->k_ + 1;
 
     if (this->ep_) {
         this->pipe_->InitBuffer(xCopyInQueue_, this->bufferNum_, AlignBytes(this->cols_, sizeof(T)));
@@ -72,7 +73,7 @@ __aicore__ inline void MoeCustomFullLoadUnquantized<T>::Init(GM_ADDR x, GM_ADDR 
 
 template <typename T>
 __aicore__ inline void MoeCustomFullLoadUnquantized<T>::Process()
-{   
+{
     if (this->blockIdx_ < this->needCoreNum_) {
         this->CopyIn();
         this->Compute();
@@ -104,7 +105,7 @@ __aicore__ inline void MoeCustomFullLoadUnquantized<T>::Process()
                 this->CopyOutScale();
             }
         }
-        
+
         this->FreeLocalTensor();
     }
 }
@@ -139,7 +140,7 @@ __aicore__ inline void MoeCustomFullLoadUnquantized<T>::GatherOutX()
     } else {
         LocalTensor<T> xLocal = xCopyInQueue_.AllocTensor<T>();
         DataCopyExtParams dataXCopyParams{static_cast<uint16_t>(this->endXRow_ - this->startXRow_ + 1),
-                                        static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
+                                          static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
         DataCopyPadExtParams<T> dataXCopyPadParams{false, 0, 0, 0};
         DataCopyPad(xLocal, xGm_[this->startXRow_ * this->cols_], dataXCopyParams, dataXCopyPadParams);
         SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
@@ -152,7 +153,8 @@ __aicore__ inline void MoeCustomFullLoadUnquantized<T>::GatherOutX()
             for (; k < this->coreIndicesElements_ && curIndexStart / this->k_ == i; curIndexStart++, k++) {
                 int32_t outIndex = expandedRowIdx.GetValue(curIndexStart);
                 if (outIndex < this->activeNum_) {
-                    DataCopyPad(expandedXGm_[outIndex * this->cols_], xLocal[(i - this->startXRow_) * inFactor], copyParams);
+                    DataCopyPad(expandedXGm_[outIndex * this->cols_], xLocal[(i - this->startXRow_) * inFactor],
+                                copyParams);
                 }
             }
         }

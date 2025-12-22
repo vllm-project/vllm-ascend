@@ -140,4 +140,4 @@ struct MoeInitRoutingCustomCompileInfo {
         platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::ASCEND910B;
   };
 } // namespace optiling
-#endif // AIR_CXX_RUNTIME_V2_OP_IMPL_MOE_INIT_ROUTING_CUSTOM_H
+#endif

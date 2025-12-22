@@ -65,4 +65,4 @@ static ge::graphStatus TilingPrepareForMoeInitRountingCustom(gert::TilingParseCo
 IMPL_OP_OPTILING(MoeInitRoutingCustom)
     .Tiling(TilingForMoeInitRoutingCustom)
     .TilingParse<MoeInitRoutingCustomCompileInfo>(TilingPrepareForMoeInitRountingCustom);
-} // namespace optiling
+}  // namespace optiling
