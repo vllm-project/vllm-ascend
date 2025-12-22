@@ -919,6 +919,9 @@ class NPUModelRunner(GPUModelRunner):
                     total_num_scheduled_tokens,
                     slot_mapping,
                 )
+                blk_table.slot_mapping.gpu[:self.pcp_manager.num_actual_tokens_pcp_padded] = slot_mapping
+
+                
 
             # NOTE: This is a temporary hack, now in GPUModelRunner, this prepare_inputs
             # has been split to multiple parts, and there are 3 parts that is related to this
