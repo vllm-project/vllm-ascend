@@ -38,7 +38,7 @@ jobs:
             runner: ubuntu-22.04-arm
             tag: arm64
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -100,7 +100,7 @@ jobs:
     if: ${{ inputs.should_push }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download arm64 digests
         uses: actions/download-artifact@v4
