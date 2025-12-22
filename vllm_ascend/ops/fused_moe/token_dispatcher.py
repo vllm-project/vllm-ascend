@@ -27,12 +27,16 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                is_hierarchical_communication_enabled)
+from vllm_ascend.worker.ubatching import (dbo_record_current_stream,
+                                          dbo_wait_current_stream_and_yield,
+                                          UBatchEventKey)
 
 
 class MoETokenDispatcher(ABC):
@@ -495,6 +499,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             global_input_tokens_local_experts_indices,
         ) = self._dispatch_preprocess(hidden_states, topk_ids)
 
+        dbo_record_current_stream(event=UBatchEventKey.MOE_DISPATCH)
         dynamic_scale_after_all2all = None
         if self.with_quant:
             permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(
@@ -508,8 +513,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             permutated_local_input_tokens, output_splits, input_splits,
             self.ep_group)
         permute1_ep_all_to_all_handle.wait()
-        permutated_local_input_tokens.untyped_storage().resize_(0)
 
+        permutated_local_input_tokens.untyped_storage().resize_(0)
+        dbo_wait_current_stream_and_yield(event=UBatchEventKey.MOE_DISPATCH)
         # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = self._dispatch_postprocess(
             global_input_tokens, dynamic_scale_after_all2all,
@@ -549,6 +555,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                                                  context_metadata)
 
         # 2. AllToAll
+        dbo_record_current_stream(event=UBatchEventKey.ATTN_PRE)
+
         _, permutated_local_input_tokens, handle = async_all_to_all(
             hidden_states,
             context_metadata["input_splits"],
@@ -556,6 +564,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             self.ep_group,
         )
         handle.wait()
+
         hidden_states.untyped_storage().resize_(0)
 
         # 3. Postprocess using metadata
@@ -622,6 +631,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             axis=0)
 
         global_input_tokens_local_experts_indices = None
+
+        dbo_wait_current_stream_and_yield(event=UBatchEventKey.ATTN_POST,
+                                          wait=False)
         if self.num_local_experts > 1:
             if num_global_tokens_per_local_expert is None:
                 raise ValueError(

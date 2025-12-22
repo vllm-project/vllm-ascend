@@ -21,6 +21,7 @@ from typing import Optional, Tuple
 import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
@@ -172,15 +173,22 @@ def _rope_forward_oot(
         cos, sin = get_cos_and_sin_slice()
         if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
                 -1] == 128 and cos is not None and sin is not None:
+            forward_context = get_forward_context()
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,
                                             self.head_size)
             key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-            # Although this function modifies in-place, please retain the function's return value.
-            # Otherwise, the graph fusion operation may fail.
-            query, key = torch_npu.npu_apply_rotary_pos_emb(
-                query, key, cos, sin)
+
+            # currently, we store the cos/sin cache in forward context for dbo
+            if forward_context.dbo_enabled:
+                query, key = torch_npu.npu_apply_rotary_pos_emb(
+                    query, key, forward_context.cos, forward_context.sin)
+            else:
+                # Although this function modifies in-place, please retain the function's return value.
+                # Otherwise, the graph fusion operation may fail.
+                query, key = torch_npu.npu_apply_rotary_pos_emb(
+                    query, key, cos, sin)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)

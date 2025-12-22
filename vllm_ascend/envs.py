@@ -144,6 +144,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # with W8A8, non-dynamic-eplb. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
+    # Set the ai cube core num for the communication block when enabling dbo
+    "VLLM_ASCEND_DBO_COMM_AIC_NUM":
+    lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIC_NUM", -1)),
+    # Set the ai vector core num for the communication block when enabling dbo,
+    # should greater than 16 for HCCL kernels
+    "VLLM_ASCEND_DBO_COMM_AIV_NUM":
+    lambda: int(os.getenv("VLLM_ASCEND_DBO_COMM_AIV_NUM", -1)),
 }
 
 # end-env-vars-definition
