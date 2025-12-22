@@ -73,7 +73,7 @@ class AscendPrefillContextParallelMetadata:
 
     head_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
 
-    tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None 
+    tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None
 
 
 @dataclass

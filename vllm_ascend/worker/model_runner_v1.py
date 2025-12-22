@@ -3276,7 +3276,7 @@ class NPUModelRunner(GPUModelRunner):
                 split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list= [], []
                 head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
                 if self.vllm_config.model_config.use_mla:
-                    split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list, head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = self._cut(
+                    split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list, head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = self._split_nomask_idx_tensor_list(
                         split_with_q_head_nomask_idx_reqs,
                         split_kv_with_q_tail_nomask_idx_reqs,
                         head_attn_nomask_seqlens, chunk_seqlens)
@@ -3317,7 +3317,7 @@ class NPUModelRunner(GPUModelRunner):
             self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata
 
-    def _cut(self, split_with_q_head_nomask_idx_reqs,
+    def _split_nomask_idx_tensor_list(self, split_with_q_head_nomask_idx_reqs,
              split_kv_with_q_tail_nomask_idx_reqs, head_attn_nomask_seqlens,
              chunk_seqlens):
         split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list= [], []
