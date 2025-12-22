@@ -985,8 +985,10 @@ class NPUModelRunner(GPUModelRunner):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens_cpu = self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs]
-                ori_query_lens = self.pcp_manager.query_lens_pcp_full.gpu[:num_reqs]
+                ori_query_lens_cpu = self.pcp_manager.query_lens_pcp_full.cpu[:
+                                                                              num_reqs]
+                ori_query_lens = self.pcp_manager.query_lens_pcp_full.gpu[:
+                                                                          num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
                 num_decode_reqs = num_reqs - num_prefill_reqs
