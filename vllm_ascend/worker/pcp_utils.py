@@ -104,7 +104,7 @@ class PCPManager:
             self.positions_pcp_full_np = self.positions_pcp_full.numpy()
             self.query_lens_pcp_full = CpuGpuBuffer(self.max_num_reqs,
                                                     dtype=torch.int32,
-                                                    device="cpu",
+                                                    device=device,
                                                     pin_memory=True)
 
     def _get_cumsum_and_arange(
@@ -394,7 +394,7 @@ class PCPManager:
             num_tokens_ori = sum(list(num_scheduled_tokens.values()))
             num_tokens_mtp = \
                 num_tokens_ori + num_reqs * (self.decode_threshold - 2)
-            num_tokens_mtp_pad = num_tokens_mtp * self.pcp_size
+            num_tokens_mtp_pad = num_tokens_mtp * self.pcp_world_size
             req_indices_split = np.array_split(req_indices,
                                                cu_num_tokens)[:num_reqs]
             positions_split = np.array_split(positions_np,

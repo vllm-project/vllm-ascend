@@ -985,12 +985,13 @@ class NPUModelRunner(GPUModelRunner):
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.pcp_manager.query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
-                    self.pcp_manager.query_start_loc_pcp_full_cpu[:num_reqs]
+                ori_query_lens_cpu = self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs]
+                ori_query_lens = self.pcp_manager.query_lens_pcp_full.gpu[:num_reqs]
                 num_prefill_reqs = (ori_query_lens
                                     > self.decode_threshold).sum().item()
                 num_decode_reqs = num_reqs - num_prefill_reqs
-                num_decode_reqs_flatten = num_decode_reqs * self.decode_threshold
+                num_decode_reqs_flatten = \
+                    ori_query_lens_cpu[:num_decode_reqs].sum().item()
                 blk_table_tensor[
                     num_decode_reqs_flatten:num_decode_reqs_flatten +
                     num_prefill_reqs].copy_(
@@ -1001,6 +1002,11 @@ class NPUModelRunner(GPUModelRunner):
                         ori_query_lens[:num_decode_reqs], dim=0))
                 common_attn_metadata.block_table_tensor = \
                     blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
+                if 'pad_size' in locals() and pad_size > 0:
+                    ori_query_lens_cpu[-pad_size:] = \
+                        torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
+                self.long_seq_metadata.max_query_len_pcp_full = \
+                    ori_query_lens_cpu.max().item()
 
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
