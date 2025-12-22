@@ -253,12 +253,24 @@ def select_moe_comm_method(num_tokens: int,
         ascend_config = get_ascend_config()
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and get_ep_group(
-        ).world_size <= 16 and (not dynamic_eplb) and (not is_mtp_model)
+        # TODO: drop dynamic_eplb guard when dispatch_gmm_combine_decode supports tensor list inputs
+        # TODO: add guard for dispatch_gmm_combine_decode when mtp uses float while moe uses w8a8
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and (
+            not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.MC2
+            fused_decode_enable = fused_mc2_enable
+            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                fused_decode_enable = fused_mc2_enable and get_ep_group(
+                ).world_size <= 16 and (not is_mtp_model)
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.ALLTOALL
+            fused_prefill_enable = fused_mc2_enable
+            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                fused_prefill_enable = fused_mc2_enable and get_ep_group(
+                ).world_size <= 16 and (not is_mtp_model)
+            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+                fused_prefill_enable = False
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
