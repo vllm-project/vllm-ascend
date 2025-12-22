@@ -17,21 +17,14 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-import atexit
-import functools
-import math
-import os
-from contextlib import contextmanager, nullcontext
-from enum import Enum
-from threading import Lock
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+from typing import List
 
 import numpy as np
 import torch
+from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
 
-import vllm_ascend.envs as envs_ascend
 
 class PCPManager:
     """
@@ -72,7 +65,8 @@ class PCPManager:
             pin_memory=pin_memory,
         )
         self.pcp_padded_slot_mapping = torch.full(
-            (max_buffer_num_tokens, ), fill_value=-1,
+            (max_buffer_num_tokens, ),
+            fill_value=-1,
             dtype=torch.int32,
             device=device,
         )
@@ -343,6 +337,8 @@ class PCPManager:
         total_num_scheduled_tokens: int,
         num_scheduled_tokens: dict[str, int],
         with_prefill: bool = True,
+        input_batch=None,
+        arange_np=None,
         req_indices=None,
         positions_np=None,
         cu_num_tokens=None,
@@ -354,11 +350,11 @@ class PCPManager:
         """
         total_num_scheduled_tokens_pcp_full = total_num_scheduled_tokens
         num_scheduled_tokens_pcp_full = np.empty(num_reqs, dtype=np.int32)
-        for i, req_id in enumerate(self.input_batch.req_ids):
+        for i, req_id in enumerate(input_batch.req_ids):
             num_scheduled_tokens_pcp_full[i] = num_scheduled_tokens[req_id]
         self.query_lens_pcp_full.cpu[:num_reqs] = torch.from_numpy(
             num_scheduled_tokens_pcp_full)
-        req_indices_pcp_full = np.repeat(self.arange_np[:num_reqs],
+        req_indices_pcp_full = np.repeat(arange_np[:num_reqs],
                                          num_scheduled_tokens_pcp_full)
         cu_num_tokens_pcp_full = np.cumsum(num_scheduled_tokens_pcp_full)
         self.query_start_loc_pcp_full.np[0] = 0
@@ -368,24 +364,24 @@ class PCPManager:
         cumsums_offsets_pcp_full = np.repeat(
             cu_num_tokens_pcp_full - num_scheduled_tokens_pcp_full,
             num_scheduled_tokens_pcp_full)
-        arange_pcp_full = self.arange_np[:
-                                         total_num_scheduled_tokens_pcp_full] - cumsums_offsets_pcp_full
+        arange_pcp_full = arange_np[:total_num_scheduled_tokens_pcp_full] - cumsums_offsets_pcp_full
         positions_pcp_full_np = self.positions_pcp_full_np[:
                                                            total_num_scheduled_tokens_pcp_full]
-        np.add(self.input_batch.num_computed_tokens_cpu[req_indices_pcp_full],
+        np.add(input_batch.num_computed_tokens_cpu[req_indices_pcp_full],
                arange_pcp_full,
                out=positions_pcp_full_np)
         token_indices_pcp_full = (
             positions_pcp_full_np +
-            req_indices_pcp_full * self.input_batch.token_ids_cpu.shape[1])
-        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
+            req_indices_pcp_full * input_batch.token_ids_cpu.shape[1])
+        torch.index_select(input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices_pcp_full),
                            out=self.input_ids_pcp_full.
                            cpu[:total_num_scheduled_tokens_pcp_full])
         self.query_lens_pcp_full.copy_to_gpu()
         self.query_start_loc_pcp_full.copy_to_gpu()
-        self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
+        self.input_ids_pcp_full.copy_to_gpu(
+            total_num_scheduled_tokens_pcp_full)
         self.cu_num_tokens_pcp_full = cu_num_tokens_pcp_full
         # For mtpx, pre-allocate mtp slot_mapping here
         if self.decode_threshold > 2 and not with_prefill:
@@ -409,9 +405,9 @@ class PCPManager:
                               ori_position[-1] + self.decode_threshold - 1))
             req_indices_mtp = np.concatenate(req_indices_split)
             positions_mtp = np.concatenate(positions_split)
-            self.input_batch.block_table.compute_slot_mapping(
+            input_batch.block_table.compute_slot_mapping(
                 req_indices_mtp, positions_mtp)
-            mtp_slot_ori = self.input_batch.block_table.block_tables[
+            mtp_slot_ori = input_batch.block_table.block_tables[
                 0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[::self.pcp_size] = True

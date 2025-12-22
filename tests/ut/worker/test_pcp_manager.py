@@ -37,9 +37,8 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.use_mla = use_mla
     vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
-    vllm_config.speculative_config.num_speculative_tokens=0
+    vllm_config.speculative_config.num_speculative_tokens = 0
 
-    
     pcp_manager = PCPManager(pcp_world_size=pcp_size,
                              pcp_rank=0,
                              dcp_world_size=dcp_size,
@@ -66,13 +65,13 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
             num_prompt_tokens.append(query_lens[i])
             num_tokens.append(query_lens[i])
 
-    input_batch.num_computed_tokens_cpu = torch.tensor(
-        num_computed_tokens)
+    input_batch.num_computed_tokens_cpu = torch.tensor(num_computed_tokens)
     input_batch.num_prompt_tokens = torch.tensor(num_prompt_tokens)
     input_batch.num_tokens = torch.tensor(num_tokens)
 
     query_lens = torch.tensor(query_lens)
-    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens, None, input_batch)
+    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens, None,
+                                               input_batch)
 
     if not expect_not_none:
         assert result is None, f"Expected to return None, but got {type(result)}"
@@ -113,6 +112,7 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
                             assert result.pcp_prefill_mask.shape == (2048,
                                                                      2048)
 
+
 @pytest.mark.parametrize(
     "tokens, num_reqs, num_computed_tokens, num_prompt_tokens, pcp_size, pcp_rank, expected_pcp_tokens",
     [
@@ -133,9 +133,8 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
                                      expected_pcp_tokens):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
-    vllm_config.speculative_config.num_speculative_tokens=0
+    vllm_config.speculative_config.num_speculative_tokens = 0
 
-    
     pcp_manager = PCPManager(pcp_world_size=pcp_size,
                              pcp_rank=0,
                              dcp_world_size=1,
@@ -147,12 +146,12 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
                              pin_memory=False)
     input_batch = MagicMock()
     input_batch.num_reqs = num_reqs
-    input_batch.num_computed_tokens_cpu = np.array(
-        num_computed_tokens, dtype=np.int32)
-    input_batch.num_prompt_tokens = np.array(num_prompt_tokens,
-                                                         dtype=np.int32)
+    input_batch.num_computed_tokens_cpu = np.array(num_computed_tokens,
+                                                   dtype=np.int32)
+    input_batch.num_prompt_tokens = np.array(num_prompt_tokens, dtype=np.int32)
     arange_np = np.arange(10000)
-    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(np.array(tokens), arange_np, num_reqs, 1)
+    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(
+        np.array(tokens), arange_np, num_reqs, 1)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), \
         f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
@@ -200,7 +199,7 @@ def test_get_cp_local_seq_lens(
 ):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
-    vllm_config.speculative_config.num_speculative_tokens=0
+    vllm_config.speculative_config.num_speculative_tokens = 0
     pcp_manager = PCPManager(pcp_world_size=pcp_world_size,
                              pcp_rank=0,
                              dcp_world_size=dcp_world_size,
@@ -210,10 +209,11 @@ def test_get_cp_local_seq_lens(
                              device="cpu",
                              vllm_config=vllm_config,
                              pin_memory=False)
-    ret = pcp_manager._get_cp_local_seq_lens(seq_lens,
-                                                pcp_world_size, dcp_world_size,
-                                                cp_kv_cache_interleave_size)
+    ret = pcp_manager._get_cp_local_seq_lens(seq_lens, pcp_world_size,
+                                             dcp_world_size,
+                                             cp_kv_cache_interleave_size)
     assert torch.equal(ret, target)
+
 
 # yapf: disable
 @pytest.mark.parametrize(
@@ -280,7 +280,7 @@ def test_generate_pcp_mtp_input(
     max_num_tokens = 4096
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
-    vllm_config.speculative_config.num_speculative_tokens=1
+    vllm_config.speculative_config.num_speculative_tokens = 1
     vllm_config.scheduler_config.max_num_seqs = max_num_reqs
     vllm_config.scheduler_config.max_num_batched_tokens = max_model_len
     pcp_manager = PCPManager(pcp_world_size=2,
@@ -308,11 +308,13 @@ def test_generate_pcp_mtp_input(
     # Set input_batch
     input_batch.req_ids = req_ids
     input_batch.num_computed_tokens_cpu[:num_computed_tokens.
-                                                    size] = num_computed_tokens
+                                        size] = num_computed_tokens
     for i, token_ids_tensor in enumerate(token_ids_tensor_list):
         token_ids_cpu_tensor[i][:token_ids_tensor.size(0)] = token_ids_tensor
 
-    pcp_manager.generate_pcp_mtp_input(num_reqs, total_num_scheduled_tokens, num_scheduled_tokens, input_batch, arange_np)
+    pcp_manager.generate_pcp_mtp_input(num_reqs, total_num_scheduled_tokens,
+                                       num_scheduled_tokens, input_batch,
+                                       arange_np)
     assert torch.equal(
         pcp_manager.input_ids_pcp_full.cpu[:total_num_scheduled_tokens],
         target_input_ids_pcp_full)

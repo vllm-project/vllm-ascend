@@ -550,7 +550,8 @@ class NPUModelRunner(GPUModelRunner):
             self.pcp_manager.generate_pcp_mtp_input(
                 num_reqs, total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens, with_prefill,
-                req_indices, positions_np, cu_num_tokens)
+                self.input_batch, self.arange_np, req_indices, positions_np,
+                cu_num_tokens)
 
         if self.pcp_size > 1:
             if not self.vllm_config.model_config.use_mla:
