@@ -313,8 +313,8 @@ def test_generate_pcp_mtp_input(
         token_ids_cpu_tensor[i][:token_ids_tensor.size(0)] = token_ids_tensor
 
     pcp_manager.generate_pcp_mtp_input(num_reqs, total_num_scheduled_tokens,
-                                       num_scheduled_tokens, False, input_batch,
-                                       arange_np)
+                                       num_scheduled_tokens, False,
+                                       input_batch, arange_np)
     assert torch.equal(
         pcp_manager.input_ids_pcp_full.cpu[:total_num_scheduled_tokens],
         target_input_ids_pcp_full)
