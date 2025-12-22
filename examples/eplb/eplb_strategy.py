@@ -1,7 +1,6 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import json
-import logging
 import os
 
 import matplotlib.pyplot as plt  # type: ignore
@@ -10,8 +9,6 @@ import torch
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-logger = logging.getLogger("msit_logger")
 
 
 def save_matrix_to_json(output_path, file_name, deployment):

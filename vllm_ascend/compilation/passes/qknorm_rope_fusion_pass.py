@@ -15,8 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import logging
-
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import (PatternMatcherPass,
@@ -24,6 +22,7 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass,
 from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.logger import logger
 
 
 class QKNormRopeFusionPattern:
@@ -237,7 +236,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
 
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
-            logging.info(
+            logger.debug(
                 "QKNorm and Rope fusion not enabled: unsupported dtype %s",
                 dtype)
             return
@@ -246,14 +245,14 @@ class QKNormRopeFusionPass(VllmInductorPass):
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
             vllm_config, Attention)
         if len(attn_layers) == 0:
-            logging.info(
+            logger.debug(
                 "QKNorm and Rope fusion enabled, but no Attention layers were discovered."
             )
             return
         layer = next(iter(attn_layers.values()))
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
-                logging.debug(
+                logger.debug(
                     "QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128",
                     layer.head_size)
                 continue
@@ -274,13 +273,13 @@ class QKNormRopeFusionPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
-        logging.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
-        logging.debug("Patterns registered for replacement:")
+        logger.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
+        logger.debug("Patterns registered for replacement:")
         pattern_idx = 0
         for pattern_entry in self.pattern_match_passes.patterns.values():
             for p in pattern_entry:
                 p_str = PatternPrettyPrinter.run(p.pattern)
-                logging.debug("Pattern %d: %s", pattern_idx, p_str)
+                logger.debug("Pattern %d: %s", pattern_idx, p_str)
                 pattern_idx += 1
         self.end_and_log()
 
