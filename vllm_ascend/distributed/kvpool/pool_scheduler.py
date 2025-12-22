@@ -3,8 +3,9 @@ from typing import Any, Optional
 import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata
+)
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -14,7 +15,11 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kvpool.config_data import (
-    AscendConnectorMetadata, LoadSpec, ReqMeta, RequestTracker)
+    AscendConnectorMetadata,
+    LoadSpec,
+    ReqMeta,
+    RequestTracker
+)
 
 
 class KVPoolScheduler:
@@ -22,18 +27,32 @@ class KVPoolScheduler:
     def __init__(self, vllm_config: "VllmConfig", use_layerwise):
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_load", False)
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", False)
-        self.client = LookupKeyClient(
-            vllm_config) if self.kv_role != "kv_consumer" else None
+        self.consumer_is_to_load = (
+            vllm_config
+            .kv_transfer_config
+            .kv_connector_extra_config
+            .get("consumer_is_to_load", False)
+        )
+        self.load_async = (
+            vllm_config
+            .kv_transfer_config
+            .kv_connector_extra_config
+            .get("load_async", False)
+        )
+        self.client = (
+            LookupKeyClient(vllm_config)
+            if self.kv_role != "kv_consumer" else None
+        )
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
-        self.pcp_size = getattr(vllm_config.parallel_config,
-                                "prefill_context_parallel_size", 1)
-        self.dcp_size = getattr(vllm_config.parallel_config,
-                                "decode_context_parallel_size", 1)
+        self.pcp_size = getattr(
+            vllm_config.parallel_config,
+            "prefill_context_parallel_size", 1
+        )
+        self.dcp_size = getattr(
+            vllm_config.parallel_config,
+            "decode_context_parallel_size", 1
+        )
 
         self._block_size = vllm_config.cache_config.block_size
         if self.pcp_size > 1:
@@ -44,8 +63,10 @@ class KVPoolScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}
         # Whether to discard partial chunks
         self._discard_partial_chunks = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "discard_partial_chunks", True))
+            vllm_config
+            .kv_transfer_config
+            .get_from_extra_config("discard_partial_chunks", True)
+        )
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
@@ -70,13 +91,16 @@ class KVPoolScheduler:
             return 0, False
 
         if self._discard_partial_chunks:
-            token_len = len(request.prompt_token_ids
-                            ) // self._block_size * self._block_size
+            token_len = (
+                len(request.prompt_token_ids) // self._block_size
+                * self._block_size
+            )
         else:
             token_len = len(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(  # type: ignore[union-attr]
-            token_len, request.block_hashes)
+        num_external_hit_tokens = (
+            self.client.lookup(token_len, request.block_hashes)
+        )
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -84,7 +108,8 @@ class KVPoolScheduler:
         need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
         logger.info(
-            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
+            "Reqid: %s, Total tokens %d, "
+            "kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
             num_external_hit_tokens,
@@ -102,9 +127,11 @@ class KVPoolScheduler:
 
         return need_to_allocate, self.load_async and not self.use_layerwise
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int
+    ):
         """
         Update KVConnector state after temporary buffer alloc.
 
@@ -115,8 +142,10 @@ class KVPoolScheduler:
         if num_external_tokens > 0:
             local_block_ids = blocks.get_block_ids()[0]
 
-        self._unfinished_requests[request.request_id] = (request,
-                                                         local_block_ids)
+        self._unfinished_requests[request.request_id] = (
+            request,
+            local_block_ids
+        )
         self._unfinished_request_ids.add(request.request_id)
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
@@ -139,7 +168,9 @@ class KVPoolScheduler:
         self.load_specs[request.request_id].can_load = True
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self,
+        scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output
@@ -164,14 +195,20 @@ class KVPoolScheduler:
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = (
                 request.num_computed_tokens +
-                scheduler_output.num_scheduled_tokens[request.req_id])
+                scheduler_output.num_scheduled_tokens[request.req_id]
+            )
             request_tracker = RequestTracker.from_new_request(
-                request, num_tokens_to_compute)
+                request, num_tokens_to_compute
+            )
             self._request_trackers[request.req_id] = request_tracker
-            last_chunk_tokens_num = ((len(request.prompt_token_ids) //
-                                      self._block_size * self._block_size)
-                                     if self._discard_partial_chunks else len(
-                                         request.prompt_token_ids))
+            last_chunk_tokens_num = (
+                (
+                    len(request.prompt_token_ids) // self._block_size
+                    * self._block_size
+                )
+                if self._discard_partial_chunks 
+                else len(request.prompt_token_ids)
+            )
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
             req_meta = ReqMeta.from_request_tracker(
@@ -197,23 +234,30 @@ class KVPoolScheduler:
                     request = req_tuple[0]
                     num_current_tokens = request_tracker.token_len
                     new_token_ids = request.all_token_ids[
-                        num_current_tokens:num_current_tokens + num_new_tokens]
+                        num_current_tokens:num_current_tokens + num_new_tokens
+                    ]
                 else:
                     raise ValueError(
                         f"Request {req_id} is not in _unfinished_requests, "
-                        f"but it is scheduled to be cached")
+                        f"but it is scheduled to be cached"
+                    )
                 new_block_ids = cached_reqs.new_block_ids[i]
+                request_tracker.update(new_token_ids, new_block_ids)
                 if not new_block_ids:
                     continue
-                request_tracker.update(new_token_ids, new_block_ids)
+
                 # decode not save
                 if request_tracker.token_len > len(request.prompt_token_ids):
                     continue
 
-                last_chunk_tokens_num = ((len(request.prompt_token_ids) //
-                                          self._block_size * self._block_size)
-                                         if self._discard_partial_chunks else
-                                         len(request.prompt_token_ids))
+                last_chunk_tokens_num = (
+                    (
+                        len(request.prompt_token_ids) // self._block_size
+                        * self._block_size
+                    )
+                    if self._discard_partial_chunks
+                    else len(request.prompt_token_ids)
+                )
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
@@ -230,16 +274,21 @@ class KVPoolScheduler:
         request_ids = [
             req.req_id for req in scheduler_output.scheduled_new_reqs
         ]
-        for request_id, (request,
-                         block_ids) in self._unfinished_requests.items():
-            if request_id not in request_ids and request_id not in cached_reqs.req_ids:
+        for request_id, (request, block_ids) in (
+            self._unfinished_requests.items()
+        ):
+            if (
+                request_id not in request_ids
+                and request_id not in cached_reqs.req_ids
+            ):
                 load_spec = self.load_specs.pop(request_id, None)
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self._block_size
-                        != 0) and (num_tokens_to_compute
-                                   == len(request.prompt_token_ids) - 1):
+                if (
+                    num_tokens_to_compute % self._block_size != 0 and
+                    num_tokens_to_compute == len(request.prompt_token_ids) - 1
+                ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
                     req_id=request_id,
@@ -273,13 +322,17 @@ class KVPoolScheduler:
         """
         if self.kv_role == "kv_consumer":
             return False, None
+        
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
+        
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
-            logger.info("Delaying free of %d blocks for request %s",
-                        len(block_ids), request.request_id)
+            logger.info(
+                "Delaying free of %d blocks for request %s",
+                len(block_ids), request.request_id
+            )
         return delay_free_blocks, None
 
 
@@ -316,13 +369,16 @@ def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
     # Default to 0 if not configured
     rpc_port = 0
     if vllm_config is not None:
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        extra_config = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+        )
         if "lookup_rpc_port" in extra_config:
             rpc_port = extra_config["lookup_rpc_port"]
         elif "mooncake_rpc_port" in extra_config:
             rpc_port = extra_config["mooncake_rpc_port"]
             logger.warning(
-                "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
+                "It is recommended to use the lookup_rpc_port, "
+                "as the mooncake_rpc_port will be removed in the future."
             )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"
