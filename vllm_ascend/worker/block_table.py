@@ -75,7 +75,7 @@ class BlockTable:
             logical_table_size = max_num_blocks_per_req
 
         duplicate_size = 1
-        if self.pcp_world_size > 1:
+        if self.pcp_world_size * self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size,
                                              logical_table_size,
