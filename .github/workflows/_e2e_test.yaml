@@ -91,7 +91,7 @@ jobs:
           # pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           # pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_classify_correctness
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_qwen_pooling_classify_correctness
 
       - name: Run e2e test
         env:
