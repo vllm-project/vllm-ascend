@@ -352,7 +352,6 @@ class PCPManager:
         but mtp need to shift original input_ids before pcp splitting,
         so we record original input_ids here.
         """
-        with_prefill = total_num_scheduled_tokens <= self.decode_threshold *  num_reqs
         total_num_scheduled_tokens_pcp_full = total_num_scheduled_tokens
         num_scheduled_tokens_pcp_full = np.empty(num_reqs, dtype=np.int32)
         for i, req_id in enumerate(self.input_batch.req_ids):
