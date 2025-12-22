@@ -15,13 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import logging
-
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
 
 
 class AddRMSNormQuantPattern:
@@ -288,7 +287,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
 
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
-            logging.info("Quant fusion not enabled: unsupported dtype %s",
+            logger.debug("Quant fusion not enabled: unsupported dtype %s",
                          dtype)
             return
 
@@ -306,7 +305,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
-        logging.debug("Replaced %s patterns", self.matched_count)
+        logger.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
     def is_applicable(self, runtime_shape: int | None = None) -> bool:

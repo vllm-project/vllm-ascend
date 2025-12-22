@@ -1007,7 +1007,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     if not flashcomm2_enable():
         flashcomm2_oproj_shared = False
-        logger.info("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(
