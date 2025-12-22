@@ -3207,7 +3207,8 @@ class NPUModelRunner(GPUModelRunner):
                                 (q_head_chunk_id + 1))))
                     kv_with_q_head_nomask_seqlens.append(chunk_len *
                                                          q_head_chunk_id)
-                    split_with_q_head_nomask_idx_reqs.append(list(
+                    split_with_q_head_nomask_idx_reqs.append(
+                        list(
                             range(kv_req_offset, kv_req_offset +
                                   chunk_len * q_head_chunk_id)))
                     q_tail_idx.extend(
@@ -3226,7 +3227,8 @@ class NPUModelRunner(GPUModelRunner):
                                 (q_tail_chunk_id + 1))))
                     kv_with_q_tail_nomask_seqlens.append(chunk_len *
                                                          q_tail_chunk_id)
-                    split_kv_with_q_tail_nomask_idx_reqs.append(list(
+                    split_kv_with_q_tail_nomask_idx_reqs.append(
+                        list(
                             range(kv_req_offset, kv_req_offset +
                                   chunk_len * q_tail_chunk_id)))
                     q_req_offset += seq_len

@@ -75,6 +75,7 @@ class AscendPrefillContextParallelMetadata:
 
     tail_attn_nomask_seqlens_list: Optional[list[torch.Tensor]] = None 
 
+
 @dataclass
 class AscendCommonAttentionMetadata:
     """

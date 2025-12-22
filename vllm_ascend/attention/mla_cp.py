@@ -929,6 +929,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
         mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
+        split_q_head_nomask_idx_tensor_list = attn_metadata.prefill.pcp_metadata.split_q_head_nomask_idx_tensor_list
+        head_attn_nomask_seqlens_list = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens_list
+        split_q_tail_nomask_idx_tensor_list = attn_metadata.prefill.pcp_metadata.split_q_tail_nomask_idx_tensor_list
+        tail_attn_nomask_seqlens_list = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens_list
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -941,8 +945,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             attn_nomask_seqlens=head_attn_nomask_seqlens,
             mask=mask,
             split_nomask_idx_tensor_list=split_q_head_nomask_idx_tensor_list,
-            attn_nomask_seqlens_list=head_attn_nomask_seqlens_list,
-        )
+            attn_nomask_seqlens_list=head_attn_nomask_seqlens_list)
 
         output_tail, lse_tail = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_tail_idx),
@@ -956,8 +959,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             attn_nomask_seqlens=tail_attn_nomask_seqlens,
             mask=mask,
             split_nomask_idx_tensor_list=split_q_tail_nomask_idx_tensor_list,
-            attn_nomask_seqlens_list=tail_attn_nomask_seqlens_list
-        )
+            attn_nomask_seqlens_list=tail_attn_nomask_seqlens_list)
 
         q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
         attn_output = torch.index_select(
