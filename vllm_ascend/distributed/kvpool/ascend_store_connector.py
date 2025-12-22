@@ -6,7 +6,10 @@ import zmq
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -17,28 +20,41 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
 from vllm_ascend.distributed.kvpool.pool_scheduler import (
-    KVPoolScheduler, get_zmq_rpc_path_lookup)
+    KVPoolScheduler,
+    get_zmq_rpc_path_lookup
+)
 from vllm_ascend.distributed.kvpool.pool_worker import KVPoolWorker
 
 
 class AscendStoreConnector(KVConnectorBase_V1):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 role: KVConnectorRole,
-                 kv_cache_config: Optional[KVCacheConfig] = None):
-        super().__init__(vllm_config=vllm_config,
-                         role=role,
-                         kv_cache_config=kv_cache_config)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: Optional[KVCacheConfig] = None
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            role=role,
+            kv_cache_config=kv_cache_config
+        )
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
-        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "use_layerwise", False)
+        self.use_layerwise = (
+            vllm_config
+            .kv_transfer_config
+            .kv_connector_extra_config
+            .get("use_layerwise", False)
+        )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
             logger.warning(
-                "It is recommended to use the AscendStoreConnector, as the MoonCakeStoreConnector will be removed in the future."
+                (
+                    "It is recommended to use the AscendStoreConnector, "
+                    "as the MoonCakeStoreConnector will be removed in the future."
+                )
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -46,8 +62,10 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(vllm_config,
-                                                       self.use_layerwise)
+            self.connector_scheduler = KVPoolScheduler(
+                vllm_config,
+                self.use_layerwise
+            )
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
@@ -55,25 +73,33 @@ class AscendStoreConnector(KVConnectorBase_V1):
             )
 
             assert self.connector_worker is not None
-            if vllm_config.parallel_config.rank == 0 and self.kv_role != "kv_consumer":
-                self.lookup_server = LookupKeyServer(self.connector_worker,
-                                                     vllm_config,
-                                                     self.use_layerwise)
+            if (
+                vllm_config.parallel_config.rank == 0
+                and self.kv_role != "kv_consumer"
+            ):
+                self.lookup_server = LookupKeyServer(
+                    self.connector_worker,
+                    vllm_config,
+                    self.use_layerwise
+                )
 
     ############################################################
     # Scheduler Side Methods
     ############################################################
 
     def get_num_new_matched_tokens(
-            self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+        self, request: "Request",
+        num_computed_tokens: int
+    ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int
+    ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
             request, blocks, num_external_tokens)
@@ -100,8 +126,11 @@ class AscendStoreConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(
+        self,
+        forward_context: "ForwardContext",
+        **kwargs
+    ) -> None:
         assert self.connector_worker is not None
         self.connector_worker.start_load_kv(self._get_connector_metadata())
 
@@ -110,8 +139,13 @@ class AscendStoreConnector(KVConnectorBase_V1):
             return
         self.connector_worker.wait_for_layer_load()
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs
+    ) -> None:
         if not self.use_layerwise:
             return
 
@@ -130,9 +164,12 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self,
+        finished_req_ids: set[str]
+    ) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
+
         assert self.connector_worker is not None
         meta = self._get_connector_metadata()
         done_sending, done_recving = self.connector_worker.get_finished()
