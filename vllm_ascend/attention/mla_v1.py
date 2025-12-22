@@ -1434,8 +1434,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                    device=hidden_states.device)
 
         # MLA Preprocess
-        decode_only = attn_metadata is None or attn_metadata.num_prefills == 0
-        if self.enable_mlapo and decode_only:
+        if self.enable_mlapo and attn_metadata.num_prefills == 0:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
