@@ -23,6 +23,7 @@ import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorHandshakeMetadata, KVConnectorMetadata,
     KVConnectorRole)
@@ -41,14 +42,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import prefill_context_parallel_enable
-
-# isort: off
-if prefill_context_parallel_enable():
-    from vllm.distributed import (get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size
-                                  )
-# isort: on
+from vllm_ascend.utils import is_vl_model, prefill_context_parallel_enable
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -323,16 +317,17 @@ class KVCacheRecvingThread(threading.Thread):
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
-        if self.use_mla:
-            self.k_head_dim = self.model_config.hf_config.kv_lora_rank
-            self.v_head_dim = self.model_config.hf_config.qk_rope_head_dim
-            self.num_kv_heads = 1
-        else:
-            self.k_head_dim = self.model_config.hf_config.head_dim
-            self.v_head_dim = self.model_config.hf_config.head_dim
-            self.num_kv_heads = max(
-                self.model_config.hf_config.num_key_value_heads //
-                self.tp_size, 1)
+        if not is_vl_model(vllm_config):
+            if self.use_mla:
+                self.k_head_dim = self.model_config.hf_config.kv_lora_rank
+                self.v_head_dim = self.model_config.hf_config.qk_rope_head_dim
+                self.num_kv_heads = 1
+            else:
+                self.k_head_dim = self.model_config.hf_config.head_dim
+                self.v_head_dim = self.model_config.hf_config.head_dim
+                self.num_kv_heads = max(
+                    self.model_config.hf_config.num_key_value_heads //
+                    self.tp_size, 1)
 
     def add_request(self, request_id: str, local_block_ids: list[int],
                     remote_block_ids: list[int], remote_engine_id: str,
@@ -1003,13 +998,12 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.pcp_size = get_prefill_context_model_parallel_world_size(
-        ) if prefill_context_parallel_enable() else 1
+        self.pcp_size = get_pcp_group().world_size
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size
                     > 1), "pp and pcp cannot open in same time"
-        self.pcp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.pcp_size > 1 else 0
+        self.pcp_rank = get_pcp_group(
+        ).rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0

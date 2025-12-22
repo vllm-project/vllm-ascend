@@ -19,7 +19,6 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
@@ -48,8 +47,8 @@ from vllm_ascend.quantization.w4a8_dynamic import \
     AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_enable_nz,
+from vllm_ascend.utils import (AscendDeviceType, enable_sp,
+                               get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,
                                shared_experts_calculation_stream)
 
@@ -73,12 +72,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
-        ):
-            layer.w13_weight.data = torch_npu.npu_format_cast(
-                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(
-                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        if get_ascend_device_type() != AscendDeviceType._310P:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -278,15 +274,6 @@ class AscendFusedMoE(FusedMoE):
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
 
-    @property
-    def expert_map(self) -> torch.Tensor | None:
-        return self._expert_map
-
-    @expert_map.setter
-    def expert_map(self, new_expert_map):
-        # TODO(Potabk): Remove this once we drop vllm v0.12.0(This makes backward compatibility with vllm v0.12.0)
-        self._expert_map = new_expert_map
-
     def get_log2phy_map(self):
         return self.log2phy
 
@@ -358,7 +345,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_out = fc3_context.shared_experts(hidden_states)
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                 moe_comm_type = forward_context.moe_comm_type
-                if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+                if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
                         and not shared_expert_dp_enabled():
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
                 set_flash_common3_context(shared_out=shared_out)
@@ -533,7 +520,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
             forward_context = get_forward_context()
             moe_comm_type = forward_context.moe_comm_type
-            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
                     and not shared_expert_dp_enabled():
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
         else:

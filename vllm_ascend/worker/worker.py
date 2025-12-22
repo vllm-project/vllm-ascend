@@ -55,7 +55,7 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
-                               enable_sp, get_ascend_device_type, is_enable_nz,
+                               enable_sp, get_ascend_device_type,
                                register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -137,6 +137,8 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         # Save the buffers before level 2 sleep
@@ -158,7 +160,7 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        if is_enable_nz():
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
                 "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")
@@ -230,8 +232,17 @@ class NPUWorker(WorkerBase):
         # for more details
         self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+        if self.use_v2_model_runner:
+            logger.error(
+                "npu model runner v2 is in developing, it can't work well for now."
+            )
+            from vllm_ascend.worker.v2.model_runner import \
+                NPUModelRunner as NPUModelRunnerV2
+            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+        else:
+            self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.

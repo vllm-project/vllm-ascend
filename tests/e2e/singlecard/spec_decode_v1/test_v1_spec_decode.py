@@ -145,7 +145,9 @@ def test_eagle_correctness(
 
     sampling_params = SamplingParams(
         max_tokens=300,
-        temperature=0.0,
+        temperature=0.8,
+        top_p=0.7,
+        top_k=4,
         ignore_eos=False,
     )
 
@@ -179,8 +181,6 @@ def test_eagle_correctness(
     del llm
 
 
-@pytest.mark.skip(
-    "Fix me, suffix decoding now exists some known accuracy issue, skip it")
 def test_suffix_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -217,8 +217,6 @@ def test_suffix_correctness(
     assert matches > int(0.66 * len(ref_outputs))
 
 
-@pytest.mark.skip(
-    "Fix me, suffix decoding now exists some functional issue, skip it")
 def test_suffix_acceptance(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
