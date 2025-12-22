@@ -242,9 +242,13 @@ class KVPoolScheduler:
                         f"but it is scheduled to be cached"
                     )
                 new_block_ids = cached_reqs.new_block_ids[i]
-                request_tracker.update(new_token_ids, new_block_ids)
+
                 if not new_block_ids:
+                    blank_block = []
+                    request_tracker.update(new_token_ids, blank_block)
                     continue
+
+                request_tracker.update(new_token_ids, new_block_ids)
 
                 # decode not save
                 if request_tracker.token_len > len(request.prompt_token_ids):
