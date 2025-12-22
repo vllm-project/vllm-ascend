@@ -49,7 +49,7 @@ The details of each configuration option are as follows:
 **xlite_graph_config**
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama or Qwen dense series models are supported. |
+| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama, Qwen dense series models, and Qwen3-vl are supported. |
 | `full_mode` | bool | `False` | Whether to enable xlite for both the prefill and decode stages. By default, xlite is only enabled for the decode stage. |
 
 **weight_prefetch_config**
