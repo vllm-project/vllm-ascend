@@ -18,14 +18,14 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata,
-    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata, ChunkedContextMetadata,
+    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata,
     DecodeMLAPreprocessResult, PrefillMLAPreprocessResult)
 #isort: on
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.attention.cp_common import AscendPCPMetadata
+from vllm_ascend.attention.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.shared_weight_layer import (
@@ -36,7 +36,6 @@ from vllm_ascend.utils import weak_ref_tensors
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
 M = TypeVar("M", bound=AscendMLAMetadata)
-
 
 class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
@@ -118,7 +117,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
-    ) -> ChunkedContextMetadata | None:
+    ) -> CPChunkedContextMetadata | None:
         chunked_context_metadata = super().build_chunked_metadata(
             common_prefix_len, common_attn_metadata, model)
         if chunked_context_metadata is None:
@@ -163,7 +162,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
             dtype=torch.int32,
         )
-        chunked_metadata = ChunkedContextMetadata(
+        chunked_metadata = CPChunkedContextMetadata(
             cu_seq_lens=chunked_context_metadata.cu_seq_lens,
             starts=local_chunk_starts.pin_memory().to(self.device,
                                                       non_blocking=True),

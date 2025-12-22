@@ -8,6 +8,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import ChunkedContextMetadata
+from vllm_ascend.attention.common_cp import CPChunkedContextMetadata
 
 
 def get_pcp_split_info(pcp_rank, pcp_size, seq_lens):
@@ -127,7 +128,7 @@ def get_chunk_metadata(pcp_size, dcp_size, num_prefills, num_decodes,
             out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
             dtype=torch.int32,
         )
-        chunked_context_metadata = ChunkedContextMetadata(
+        chunked_context_metadata = CPChunkedContextMetadata(
             cu_seq_lens=cu_seq_lens_cpu.to(non_blocking=True),
             starts=local_chunk_starts.to(non_blocking=True),
             seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
@@ -144,15 +145,16 @@ def get_chunk_metadata(pcp_size, dcp_size, num_prefills, num_decodes,
             chunk_size=padded_local_max_context_chunk_across_ranks,
         )
     else:
-        chunked_context_metadata = (ChunkedContextMetadata(
-            cu_seq_lens=cu_seq_lens_cpu.to(non_blocking=True),
-            starts=chunk_starts.to(non_blocking=True),
-            seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-            max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-            chunk_seq_lens=chunk_seq_lens,
-            chunk_seq_lens_npu=chunk_seq_lens,
-            workspace=None,
-        ))
+        chunked_context_metadata = (
+            ChunkedContextMetadata(
+                cu_seq_lens=cu_seq_lens_cpu.to(non_blocking=True),
+                starts=chunk_starts.to(non_blocking=True),
+                seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
+                max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
+                chunk_seq_lens=chunk_seq_lens,
+                chunk_seq_lens_npu=chunk_seq_lens,
+                workspace=None,
+            ))
     return chunked_context_metadata
 
 

@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.cp_common import AscendPCPMetadata
+from vllm_ascend.attention.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          enable_cp,
                                          maybe_save_kv_layer_to_connector,
@@ -85,14 +85,6 @@ class ChunkedContextMetadata:
     workspace: torch.Tensor
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
-    # for mla DCP & PCP
-    padded_chunk_seq_lens_npu: torch.Tensor = None
-    padded_local_chunk_seq_lens: Optional[list[list[int]]] = None
-    local_context_lens_allranks: Optional[list[list[int]]] = None
-    padded_local_cu_seq_lens: torch.Tensor = None
-    cu_seq_lens_lst: Optional[list[list[int]]] = None
-    chunk_size: Optional[int] = None
-
 
 @dataclass
 class AscendMLAPrefillMetadata:
@@ -106,7 +98,7 @@ class AscendMLAPrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
-    chunked_context: Optional[ChunkedContextMetadata] = None
+    chunked_context: Optional[ChunkedContextMetadata | CPChunkedContextMetadata] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     pcp_metadata: Optional[AscendPCPMetadata] = None
