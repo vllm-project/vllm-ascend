@@ -574,7 +574,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       key: torch.Tensor, value: torch.Tensor,
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
-        INT_MAX = 2147483647
+        # default max value of sliding window size
+        SWA_INT_MAX = 2147483647
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             attn_output, num_tokens = self.full_graph_fia(
@@ -595,8 +596,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            pre_tokens=self.sliding_window if self.sliding_window else INT_MAX,
-            next_tokens=0 if self.sliding_window else INT_MAX,
+            pre_tokens=self.sliding_window if self.sliding_window else SWA_INT_MAX,
+            next_tokens=0 if self.sliding_window else SWA_INT_MAX,
             atten_mask=self.swa_mask if self.sliding_window else attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
