@@ -59,13 +59,13 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         )
 
     def reshape_qkv_to_3d(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            bsz: int,
-            q_len: int,
-            kv_len: int,
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        bsz: int,
+        q_len: int,
+        kv_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Reshape query, key, value to 3D tensors:
