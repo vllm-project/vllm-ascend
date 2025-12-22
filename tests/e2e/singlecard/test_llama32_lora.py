@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import subprocess
-import sys
 
-import pytest
 import vllm
 import vllm.config
 from modelscope import snapshot_download  # type: ignore
