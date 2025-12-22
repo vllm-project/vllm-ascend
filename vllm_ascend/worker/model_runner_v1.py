@@ -792,6 +792,8 @@ class NPUModelRunner(GPUModelRunner):
         # _prepare_inputs may reorder the batch, so we must gather
         # multi-modal outputs after that to ensure the correct order
         if self.is_multimodal_model:
+            self.multimodal_cpu_fields = ["grid_thw"]
+            self._prepare_multimodal_fields()
             with self.maybe_get_ec_connector_output(
                     scheduler_output,
                     encoder_cache=self.encoder_cache,
@@ -3395,6 +3397,33 @@ class NPUModelRunner(GPUModelRunner):
                 torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32)
             mtp_slot_pad[unpad_mask] = mtp_slot_ori
             self.mtp_slot_pad = mtp_slot_pad.to(self.device, non_blocking=True)
+
+    def _prepare_multimodal_fields(self):
+        """
+        Ensures specific multimodal tensors are on CPU.
+        This is necessary for fields like 'grid_thw' which are converted to numpy 
+        inside the model's forward pass.
+        """
+        if not self.multimodal_cpu_fields:
+            return
+
+        req_ids = self.input_batch.req_ids
+        for req_id in req_ids:
+            req = self.requests.get(req_id)
+            if req is None:
+                continue
+
+            mm_data = getattr(req, 'multimodal_data', None)
+            if not mm_data:
+                continue
+
+            for field in self.multimodal_cpu_fields:
+                if field in mm_data:
+                    tensor = mm_data[field]
+                    if isinstance(
+                            tensor,
+                            torch.Tensor) and tensor.device.type != 'cpu':
+                        mm_data[field] = tensor.cpu()
 
 
 @contextmanager
