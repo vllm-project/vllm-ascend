@@ -77,12 +77,6 @@ class TestAscendMLAPrefillMetadata(TestBase):
         max_seq_lens = [2, 2]
         workspace = torch.randn(2, 4)
         chunk_seq_lens = torch.tensor([2, 2])
-        padded_chunk_seq_lens_npu = torch.tensor([2, 2])
-        padded_local_chunk_seq_lens = [[2], [2]]
-        local_context_lens_allranks = [[1, 1], [1, 1]]
-        padded_local_cu_seq_lens = torch.tensor([0, 2, 4])
-        cu_seq_lens_lst = [[0, 2], [2, 4]]
-        chunk_size = 2
 
         chunked_context = ChunkedContextMetadata(
             cu_seq_lens=cu_seq_lens,
@@ -91,13 +85,7 @@ class TestAscendMLAPrefillMetadata(TestBase):
             max_seq_lens=max_seq_lens,
             workspace=workspace,
             chunk_seq_lens=chunk_seq_lens,
-            chunk_seq_lens_npu=chunk_seq_lens,
-            padded_chunk_seq_lens_npu=padded_chunk_seq_lens_npu,
-            padded_local_chunk_seq_lens=padded_local_chunk_seq_lens,
-            local_context_lens_allranks=local_context_lens_allranks,
-            padded_local_cu_seq_lens=padded_local_cu_seq_lens,
-            cu_seq_lens_lst=cu_seq_lens_lst,
-            chunk_size=chunk_size)
+            chunk_seq_lens_npu=chunk_seq_lens)
 
         metadata = AscendMLAPrefillMetadata(
             attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
@@ -120,17 +108,6 @@ class TestAscendMLAPrefillMetadata(TestBase):
         self.assertIs(metadata.chunked_context.chunk_seq_lens, chunk_seq_lens)
         self.assertIs(metadata.chunked_context.chunk_seq_lens_npu,
                       chunk_seq_lens)
-        self.assertIs(metadata.chunked_context.padded_chunk_seq_lens_npu,
-                      padded_chunk_seq_lens_npu)
-        self.assertEqual(metadata.chunked_context.padded_local_chunk_seq_lens,
-                         padded_local_chunk_seq_lens)
-        self.assertEqual(metadata.chunked_context.local_context_lens_allranks,
-                         local_context_lens_allranks)
-        self.assertIs(metadata.chunked_context.padded_local_cu_seq_lens,
-                      padded_local_cu_seq_lens)
-        self.assertEqual(metadata.chunked_context.cu_seq_lens_lst,
-                         cu_seq_lens_lst)
-        self.assertEqual(metadata.chunked_context.chunk_size, chunk_size)
 
 
 class TestAscendMLADecodeMetadata(TestBase):
