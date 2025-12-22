@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_init_routing_custom_tiling.cpp
@@ -36,7 +36,7 @@ const static int64_t KV_FACTOR = 2;
 const static int64_t ONE_CORE_SORT_BUFFER = 6;
 const static int64_t EXPERT_IDX_MAX = 10240;
 const static int64_t KV_MODE_EXPERT_IDX_MAX = EXPERT_IDX_MAX / KV_FACTOR;
-const static int64_t ACTIVE_NUM_MIN_VALUE = static_cast<int64_t>(0);
+const static int64_t ACTIVE_NUM_MIN_VALUE = static_cast<int64_t>(-1);
 const static int64_t EXPERT_CAPACITY_MIN_VALUE = static_cast<int64_t>(0);
 
 const static int64_t INPUT_X_INDEX = 0;
@@ -146,7 +146,7 @@ static T1 CeilDiv(T1 a, T2 b)
 
 template <typename T>
 typename std::enable_if <std::is_integral<T>::value, T>::type CeilAlign(T x, T align) {
-  return CeilDiv(x, align) * align;
+    return CeilDiv(x, align) * align;
 }
 
 inline static int64_t CeilLog4(int64_t x)
@@ -222,14 +222,13 @@ private:
     void Tinlig4VBSMultiCoreCompute(MoeCustomVBSComputeTilingData *tilingData);
     void Tinlig4VBSOneCoreCompute(MoeCustomVBSComputeTilingData *tilingData);
     bool IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCALE_256_7168() const;
-    bool IsFullLoad(); 
+    bool IsFullLoad();
     int64_t IsGatherFirstFullLoad();
-    void SetGatherTilingData(
-        MoeCustomSrcToDstCapacityComputeTilingData* tilingData, int64_t perCoreRows, int64_t lastCoreRows, int64_t cols);
-    void SetGatherTilingDataCols(MoeCustomSrcToDstCapacityComputeTilingData* tilingData, int64_t baseMaxCols, int64_t cols);
-    void SetGatherTilingDataRows(
-        MoeCustomSrcToDstCapacityComputeTilingData* tilingData, int64_t perCoreRows, int64_t lastCoreRows,
-        int64_t basePerLoopMaxRows);
+    void SetGatherTilingData(MoeCustomSrcToDstCapacityComputeTilingData *tilingData, int64_t perCoreRows,
+                             int64_t lastCoreRows, int64_t cols);
+    void SetGatherTilingDataCols(MoeCustomSrcToDstCapacityComputeTilingData *tilingData, int64_t baseMaxCols, int64_t cols);
+    void SetGatherTilingDataRows(MoeCustomSrcToDstCapacityComputeTilingData *tilingData, int64_t perCoreRows,
+                                 int64_t lastCoreRows, int64_t basePerLoopMaxRows);
     void Tiling4SrcToDstDropPadCompute();
     void Tiling4SrcToDstDropPadDynamicCompute();
     void Tiling4SrcToDstCompute();
@@ -261,7 +260,7 @@ private:
     int64_t rowIdxType_ = -1L;
 
     bool isFullload_ = false;
-    int64_t gatherFirstFullload_ = 0; 
+    int64_t gatherFirstFullload_ = 0;
     int64_t ep_ = 0;
     int64_t smoothType_ = 0;
 
@@ -300,7 +299,7 @@ void MoeInitRountingCustomTilingBase::Reset()
 }
 
 ge::graphStatus MoeInitRountingCustomTilingBase::GetPlatformInfo()
-{  
+{
     auto compileInfoPtr = reinterpret_cast<const MoeInitRoutingCustomCompileInfo*>(context_->GetCompileInfo());
     CHECK_FAIL(context_, compileInfoPtr == nullptr, "fail to get platform info");
     aivNum = compileInfoPtr->aivNum;
@@ -313,17 +312,6 @@ ge::graphStatus MoeInitRountingCustomTilingBase::GetPlatformInfo()
 
 ge::graphStatus MoeInitRountingCustomTilingBase::CheckAttr()
 {
-    CHECK_FAIL(context_, activeExpertRangeListPtr_->GetSize() != ATTR_EXPERT_RANGE_DIM,
-                "The dim number of expert_range should be %ld.", ATTR_EXPERT_RANGE_DIM);
-    const int64_t *expertRangeList = reinterpret_cast<const int64_t *>(activeExpertRangeListPtr_->GetData());
-    expertStart_ = expertRangeList[0];
-    expertEnd_ = expertRangeList[1];
-    moeInitRoutingCustomTilingData.set_expertStart(expertStart_);
-    moeInitRoutingCustomTilingData.set_expertEnd(expertEnd_);
-    moeInitRoutingCustomTilingData.set_actualExpertNum(expertEnd_ - expertStart_);
-    OPS_LOG_I(context_->GetNodeName(), "expert_start is: %ld, expert_end is: %ld, actualExpertNum is: %ld ", expertStart_, expertEnd_,
-            expertEnd_ - expertStart_);
-
     quantMode_ = *quantModePtr_;
     moeInitRoutingCustomTilingData.set_quantMode(quantMode_);
     OPS_LOG_I(context_->GetNodeName(), "quant_mode is: %ld ", quantMode_);
@@ -331,32 +319,52 @@ ge::graphStatus MoeInitRountingCustomTilingBase::CheckAttr()
     dropPadMode_ = *dropPadModePtr_;
     moeInitRoutingCustomTilingData.set_dropPadMode(dropPadMode_);
     CHECK_FAIL(context_, (dropPadMode_ != DROP_LESS) && (dropPadMode_ != DROP_PAD), 
-                "drop_pad_mode should be %ld or %ld", DROP_LESS, DROP_PAD);
+               "drop_pad_mode should be %ld or %ld", DROP_LESS, DROP_PAD);
 
     rowIdxTytpe_ = *rowIdxTypePtr_;
     moeInitRoutingCustomTilingData.set_rowIdxType(rowIdxTytpe_);
     OPS_LOG_I(context_->GetNodeName(), "row_idx_type is: %ld ", rowIdxTytpe_);
 
     activeNum_ = *activeNumPtr_;
-    moeInitRoutingCustomTilingData.set_activeNum(activeNum_);
     if (dropPadMode_ == DROP_LESS) {
         CHECK_FAIL(context_, activeNum_ < ACTIVE_NUM_MIN_VALUE,
-                "active_num should be greater than or equal to 0");
+                   "active_num should be greater than or equal to 0");
     }
+
+    expertNum_ = *expertNumPtr_;
+    moeInitRoutingCustomTilingData.set_expertNum(expertNum_);
+	if (expertNum_ <= 0) {
+		OPS_LOG_E(context_->GetNodeName(), "expert_num should be greater than 0");
+		return ge::GRAPH_FAILED;
+	}
+	if (activeExpertRangeListPtr_->GetSize() != ATTR_EXPERT_RANGE_DIM && activeExpertRangeListPtr_->GetSize() != 0) {
+		OPS_LOG_E(context_, "The dim number of expert_range should be %ld or 0(no input)", ATTR_EXPERT_RANGE_DIM);
+        return ge::GRAPH_FAILED;
+	}
+    if (activeExpertRangeListPtr_->GetSize() == 0) {
+        expertStart_ = 0;
+        expertEnd_ = expertNum_;
+    } else {
+        const int64_t *expertRangeList = reinterpret_cast<const int64_t *>(activeExpertRangeListPtr_->GetData());
+        expertStart_ = expertRangeList[0];
+        expertEnd_ = expertRangeList[1];
+    }
+    moeInitRoutingCustomTilingData.set_expertStart(expertStart_);
+    moeInitRoutingCustomTilingData.set_expertEnd(expertEnd_);
+    moeInitRoutingCustomTilingData.set_actualExpertNum(expertEnd_ - expertStart_);
+    OPS_LOG_I(context_, "expert_start is: %ld, expert_end is: %ld, actualExpertNum is: %ld ", expertStart_, expertEnd_,
+              expertEnd_ - expertStart_);
     
     n_ = xShapePtr_->GetStorageShape().GetDim(0);
     expertCapacity_ = *expertCapacityPtr_;
     moeInitRoutingCustomTilingData.set_expertCapacity(expertCapacity_);
     if (dropPadMode_ == DROP_PAD) {
-        CHECK_FAIL(context_,expertCapacity_ <= EXPERT_CAPACITY_MIN_VALUE || 
-                    expertCapacity_ > n_,
-                    "expert_Capacity should be greater than 0 and less than %ld", n_);
-        CHECK_FAIL(context_,rowIdxTytpe_ == SCATTER, "rowIdxTytpe should be 0 when droppadmode is 1");
+        CHECK_FAIL(context_, expertCapacity_ <= EXPERT_CAPACITY_MIN_VALUE || expertCapacity_ > n_,
+                   "expert_Capacity should be greater than 0 and less than %ld", n_);
+        CHECK_FAIL(context_, rowIdxTytpe_ == SCATTER, "rowIdxTytpe should be 0 when droppadmode is 1");
+		CHECK_FAIL(context_, expertStart_ != 0 || expertEnd_ != expertNum_,
+		           "expert_range should be [0, %ld] when droppadmode is 1", expertNum_);
     }
-
-    expertNum_ = *expertNumPtr_;
-    moeInitRoutingCustomTilingData.set_expertNum(expertNum_);
-    CHECK_FAIL(context_,expertNum_ <= 0, "expert_num should be greater than 0");
 
     expertTokensNumType_ = *expertTokensNumTypePtr_;
     moeInitRoutingCustomTilingData.set_expertTokensNumType(expertTokensNumType_);
@@ -377,7 +385,7 @@ ge::graphStatus MoeInitRountingCustomTilingBase::CheckAttr()
     CHECK_FAIL(context_, expertEnd_ > expertNum_, "expert_end should be less than or equal to %ld", expertNum_);
     if (expertTokensNumType_ == KEY_VALUE) {
         CHECK_FAIL(context_, expertEnd_ > KV_MODE_EXPERT_IDX_MAX, "expert_end should be less than or equal to %ld in KEY_VALUE mode",
-                            KV_MODE_EXPERT_IDX_MAX);
+                   KV_MODE_EXPERT_IDX_MAX);
     } else {
         CHECK_FAIL(context_, expertEnd_ > EXPERT_IDX_MAX, "expert_end should be less than or equal to %ld", EXPERT_IDX_MAX);
     }
@@ -405,7 +413,7 @@ ge::graphStatus MoeInitRountingCustomTilingBase::CheckInputShape()
     moeInitRoutingCustomTilingData.set_k(k_);
     moeInitRoutingCustomTilingData.set_cols(cols_);
     totalLength_ = n_ * k_;
-    if (activeNum_ == 0) {
+    if (activeNum_ == 0 || activeNum_ == ACTIVE_NUM_MIN_VALUE) {
         activeNum_ = totalLength_;
     } else {
         activeNum_ = std::min(activeNum_, totalLength_);
@@ -891,7 +899,7 @@ void MoeInitRountingCustomTilingBase::Tinlig4VBSOneCoreCompute(MoeCustomVBSCompu
 void MoeInitRountingCustomTilingBase::Tinlig4VBSMultiCoreCompute(MoeCustomVBSComputeTilingData *tilingData)
 {
     int64_t needCoreNum = CeilDiv(totalLength_, sortLoopMaxElement);
-    needCoreNum = static_cast<int64_t>(std::pow(4, CeilLog4(needCoreNum)));
+    needCoreNum = static_cast<int64_t>(std::pow(NUM_FOUR, CeilLog4(needCoreNum)));
     needCoreNum = std::min(needCoreNum, aivNum);
 
     if (needCoreNum == 0) {
@@ -1040,18 +1048,19 @@ void MoeInitRountingCustomTilingBase::Tiling4SrcToDstDropPadCompute()
     int64_t lastCoreRows = totalLength_ - perCoreRows * (needCoreNum - 1);
     tilingData->set_lastCoreRows(lastCoreRows);
     bool needScaleCopy = (isInputScale_ != 0 && quantMode_ == -1);
+    int64_t inuptXDtypeSize = inuptXDtypeSize_ == SIZE_INT8 ? SIZE_INT16 : inuptXDtypeSize_;
 
     int64_t rowSize =
         (perCoreRows * sizeof(int32_t) * NUM_TWO + ONE_BLOCK_BYTE + ONE_BLOCK_BYTE * needScaleCopy + ONE_BLOCK_BYTE - 1) /
         ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
-    int64_t colSize = (cols * inuptXDtypeSize_ + ONE_BLOCK_BYTE - 1) / ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
+    int64_t colSize = (cols * inuptXDtypeSize + ONE_BLOCK_BYTE - 1) / ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
 
     if (rowSize + colSize < static_cast<int64_t>(aicoreParams_.ubSize)) {
         SetGatherTilingData(tilingData, perCoreRows, lastCoreRows, cols);
     } else {
         int64_t baseMaxCols = MAX_COLS_ONE_LOOP;
         int64_t baseMaxColsSize =
-            (baseMaxCols * inuptXDtypeSize_ + ONE_BLOCK_BYTE - 1) / ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
+            (baseMaxCols * inuptXDtypeSize + ONE_BLOCK_BYTE - 1) / ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
         int64_t basePerLoopMaxRows = (static_cast<int64_t>(aicoreParams_.ubSize) - baseMaxColsSize - ONE_BLOCK_BYTE -
                                      ONE_BLOCK_BYTE * needScaleCopy) /static_cast<int64_t>(sizeof(int32_t))
                                      / NUM_TWO / ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
@@ -1060,7 +1069,7 @@ void MoeInitRountingCustomTilingBase::Tiling4SrcToDstDropPadCompute()
                                  ONE_BLOCK_BYTE * needScaleCopy) / static_cast<int64_t>(sizeof(int32_t)) 
                                  / NUM_TWO / ONE_BLOCK_BYTE * ONE_BLOCK_BYTE;
         } else if (perCoreRows < basePerLoopMaxRows) {
-            baseMaxCols = (static_cast<int64_t>(aicoreParams_.ubSize) - rowSize) / inuptXDtypeSize_ / ONE_BLOCK_BYTE *
+            baseMaxCols = (static_cast<int64_t>(aicoreParams_.ubSize) - rowSize) / inuptXDtypeSize / ONE_BLOCK_BYTE *
                           ONE_BLOCK_BYTE;
         }
         tilingData->set_perLoopCols(std::min(baseMaxCols, cols));

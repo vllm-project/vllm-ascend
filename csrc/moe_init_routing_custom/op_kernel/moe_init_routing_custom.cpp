@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_init_routing_custom.cpp
@@ -78,7 +78,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
                                                           GM_ADDR expertTokensCountOrCumsum, GM_ADDR expandedScale,
                                                           GM_ADDR workspace, GM_ADDR tiling)
 {
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);     
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
     if (g_coreType == AIC) {
         return;
     }
@@ -117,7 +117,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
         return;
     }
 
-    if (TILING_KEY_IS(DYNAMIC_QUANT_GATHER_1H_DIM_SCALE_FULLLOAD)) {    
+    if (TILING_KEY_IS(DYNAMIC_QUANT_GATHER_1H_DIM_SCALE_FULLLOAD)) {
         if constexpr (!IsSameType<DTYPE_X, int8_t>::value) {
             TPipe fullLoadPipe;
             MoeCustomFullLoadDynamicQuant<DTYPE_X, GATHER, SCALE_1H> op;
@@ -129,7 +129,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
         return;
     }
 
-    if (TILING_KEY_IS(DYNAMIC_QUANT_GATHER_EH_SCALE_FULLLOAD)) { 
+    if (TILING_KEY_IS(DYNAMIC_QUANT_GATHER_EH_SCALE_FULLLOAD)) {
         if constexpr (!IsSameType<DTYPE_X, int8_t>::value) {
             TPipe fullLoadPipe;
             MoeCustomFullLoadDynamicQuant<DTYPE_X, GATHER, SCALE_EH> op;
@@ -239,7 +239,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_QUANT_GATHER_NODROP) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_QUANT_SCATTER_NODROP) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_DYNAMICQUANT_GATHER_NODROP) ||
-        TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_DYNAMICQUANT_SCATTER_NODROP)||
+        TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_DYNAMICQUANT_SCATTER_NODROP) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_QUANT_GATHER_DROP) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_DYNAMICQUANT_GATHER_DROP) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_GATHER_DROP)) {
@@ -265,26 +265,26 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_GATHER_SORTONECORE_SCATTER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_GATHER_SORTMULTICORE_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_GATHER_SORTMULTICORE_SCATTER)) {
-            TPipe histogramPipe;
-            if (t->expertTokensNumType == CUMSUM_MODE) {
-                ExpertTokensCount<CUMSUM_MODE> countOp;
-                countOp.Init<true>(expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &histogramPipe);
-                countOp.Process();
-                histogramPipe.Destroy();
-            } else if (t->expertTokensNumType == COUNT_MODE) {
-                ExpertTokensCount<COUNT_MODE> countOp;
-                countOp.Init<true>(expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &histogramPipe);
-                countOp.Process();
-                histogramPipe.Destroy();
-            } else {
-                ExpertTokensCount<KEY_VALUE_MODE> countOp;
-                countOp.Init<true>(expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &histogramPipe);
-                countOp.Process();
-                histogramPipe.Destroy();
-            }
+        TPipe histogramPipe;
+        if (t->expertTokensNumType == CUMSUM_MODE) {
+            ExpertTokensCount<CUMSUM_MODE> countOp;
+            countOp.Init<true>(expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &histogramPipe);
+            countOp.Process();
+            histogramPipe.Destroy();
+        } else if (t->expertTokensNumType == COUNT_MODE) {
+            ExpertTokensCount<COUNT_MODE> countOp;
+            countOp.Init<true>(expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &histogramPipe);
+            countOp.Process();
+            histogramPipe.Destroy();
+        } else {
+            ExpertTokensCount<KEY_VALUE_MODE> countOp;
+            countOp.Init<true>(expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &histogramPipe);
+            countOp.Process();
+            histogramPipe.Destroy();
+        }
 
     } else {
-        if(t->dropPadMode == 1 || t->ep == 1 || t->expertTokensNumFlag != EXERPT_TOKENS_NONE){
+        if (t->dropPadMode == 1 || t->ep == 1 || t->expertTokensNumFlag != EXERPT_TOKENS_NONE) {
             TPipe histogramPipe;
             if (t->expertTokensNumType == CUMSUM_MODE) {
                 ExpertTokensCount<CUMSUM_MODE> countOp;
@@ -306,28 +306,29 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
     }
 
     if (TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_GATHER_DROP) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTMULTICORE_GATHER_DROP)){
-            TPipe rowIdxGatherDropPadPipe;
-            MoeCustomSrcToDstWithCapacity<DTYPE_X, MoeInitRoutingCustomTilingData> rowIdxGatherDropPadOp;
-            rowIdxGatherDropPadOp.Init(expandedRowIdx, expandedX, expandedScale, userWS, t, &rowIdxGatherDropPadPipe);
-            rowIdxGatherDropPadOp.Process();
-            rowIdxGatherDropPadPipe.Destroy();
+        TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTMULTICORE_GATHER_DROP)) {
+        TPipe rowIdxGatherDropPadPipe;
+        MoeCustomSrcToDstWithCapacity<DTYPE_X, MoeInitRoutingCustomTilingData> rowIdxGatherDropPadOp;
+        rowIdxGatherDropPadOp.Init(expandedRowIdx, expandedX, expandedScale, userWS, t, &rowIdxGatherDropPadPipe);
+        rowIdxGatherDropPadOp.Process();
+        rowIdxGatherDropPadPipe.Destroy();
     } else if (TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_QUANT_GATHER_DROP) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTMULTICORE_QUANT_GATHER_DROP)){
-            TPipe rowIdxGatherDropPadPipe;
-            MoeCustomSrcToDstWithCapacity<int8_t, MoeInitRoutingCustomTilingData> rowIdxGatherDropPadOp;
-            rowIdxGatherDropPadOp.Init(expandedRowIdx, expandedX, expandedScale, userWS, t, &rowIdxGatherDropPadPipe);
-            rowIdxGatherDropPadOp.Process();
-            rowIdxGatherDropPadPipe.Destroy();
+               TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTMULTICORE_QUANT_GATHER_DROP)) {
+        TPipe rowIdxGatherDropPadPipe;
+        MoeCustomSrcToDstWithCapacity<int8_t, MoeInitRoutingCustomTilingData> rowIdxGatherDropPadOp;
+        rowIdxGatherDropPadOp.Init(expandedRowIdx, expandedX, expandedScale, userWS, t, &rowIdxGatherDropPadPipe);
+        rowIdxGatherDropPadOp.Process();
+        rowIdxGatherDropPadPipe.Destroy();
     } else if (TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_DYNAMICQUANT_GATHER_DROP) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTMULTICORE_DYNAMICQUANT_GATHER_DROP)) {
-            if constexpr (!IsSameType<DTYPE_X, int8_t>::value) {
-                TPipe gatherPipe;
-                MoeCustomSrcToDstAndGather<DTYPE_X, MoeInitRoutingCustomTilingData> gatherDroppadDynamicQuantOp;
-                gatherDroppadDynamicQuantOp.Init(x, scale, expandedRowIdx, expandedX, expandedScale, userWS, t, &gatherPipe);
-                gatherDroppadDynamicQuantOp.Process();
-                gatherPipe.Destroy();
-            }
+        if constexpr (!IsSameType<DTYPE_X, int8_t>::value) {
+            TPipe gatherPipe;
+            MoeCustomSrcToDstAndGather<DTYPE_X, MoeInitRoutingCustomTilingData> gatherDroppadDynamicQuantOp;
+            gatherDroppadDynamicQuantOp.Init(x, scale, expandedRowIdx, expandedX, expandedScale, userWS, t,
+                                             &gatherPipe);
+            gatherDroppadDynamicQuantOp.Process();
+            gatherPipe.Destroy();
+        }
     } else {
         TPipe rowIdxPipe;
         RowIdxGather rowIdxGatherOp;
@@ -361,7 +362,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
                TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTONECORE_DYNAMICQUANT_GATHER_NODROP)) {
         if constexpr (!IsSameType<DTYPE_X, int8_t>::value) {
             TPipe gatherPipe;
-            if (t->ep == 0 and t->smoothType != SCALE_EH ) {
+            if (t->ep == 0 and t->smoothType != SCALE_EH) {
                 MoeGatherOutDynamicQuant<DTYPE_X, GATHER> gatherDynamicQuantOp;
                 gatherDynamicQuantOp.Init(x, scale, userWS, expandedRowIdx, expandedX, expandedScale, t, &gatherPipe);
                 gatherDynamicQuantOp.Process();
@@ -370,7 +371,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_custom(GM_ADDR x, GM_ADDR
                 MoeGatherOutDynamicQuant<DTYPE_X, SCATTER> gatherDynamicQuantOp;
                 gatherDynamicQuantOp.Init(x, scale, userWS, expandedRowIdx, expandedX, expandedScale, t, &gatherPipe);
                 gatherDynamicQuantOp.Process();
-                gatherPipe.Destroy();          
+                gatherPipe.Destroy();
             }
         }
     } else if (TILING_KEY_IS(MOE_INIT_ROUTING_CUSTOM_SORTMULTICORE_QUANT_SCATTER_NODROP) ||

@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_static_quant_full_load.h
@@ -50,18 +50,17 @@ private:
 };
 
 template <typename T>
-__aicore__ inline void MoeCustomFullLoadStaticQuant<T>::Init(
-    GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR offset, GM_ADDR expandedX,
-    GM_ADDR expandedRowIdx, GM_ADDR expertTokensCountOrCumsum, GM_ADDR workspace,
-    const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
+__aicore__ inline void MoeCustomFullLoadStaticQuant<T>::Init(GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR offset,
+                                                         GM_ADDR expandedX, GM_ADDR expandedRowIdx,
+                                                         GM_ADDR expertTokensCountOrCumsum, GM_ADDR workspace,
+                                                         const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
 {
-    MoeCustomFullLoadBase<T>::Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, 
-                                workspace, tilingData, tPipe);
+    MoeCustomFullLoadBase<T>::Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, workspace, tilingData, tPipe);
 
     xGm_.SetGlobalBuffer((__gm__ T *)x);
     expandedXGm_.SetGlobalBuffer((__gm__ int8_t *)expandedX);
-    scaleGm_.SetGlobalBuffer((__gm__ float*)scale, 1);
-    offsetGm_.SetGlobalBuffer((__gm__ float*)offset, 1);
+    scaleGm_.SetGlobalBuffer((__gm__ float *)scale, 1);
+    offsetGm_.SetGlobalBuffer((__gm__ float *)offset, 1);
     this->scale_ = scaleGm_.GetValue(0);
     this->offset_ = offsetGm_.GetValue(0);
     SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
@@ -81,7 +80,7 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::Init(
 
 template <typename T>
 __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::Process()
-{   
+{
     if (this->blockIdx_ < this->needCoreNum_) {
         this->CopyIn();
         this->Compute();
@@ -114,7 +113,7 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::Process()
 
 template <typename T>
 __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::ComputeQuant(int64_t xLocalLength)
-{   
+{
     LocalTensor<float> floatLocal;
     LocalTensor<T> inLocal;
     LocalTensor<int8_t> outLocal = inputXOutQueue_.AllocTensor<int8_t>();
@@ -146,16 +145,16 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::ComputeQuant(int64_t xLo
         this->xCopyInQueue_.FreeTensor(inLocal);
         floatQueue_.FreeTensor(floatLocal);
     }
-    
+
     halfQueue_.FreeTensor(halfLocal);
 }
 
 template <typename T>
 __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::CopyOutXStaticQuant()
-{   
+{
     int64_t curIndex = this->curIndexStart_;
     int64_t curIndexEnd = curIndex + this->coreIndicesElements_ - 1;
-    
+
     if (this->ep_) {
         LocalTensor<int32_t> sortedRowIdx = this->expandDstToSrcRowQueue_.template DeQue<int32_t>();
         LocalTensor<int32_t> expandedExpertIdx = this->expandedExpertIdxCopyOutQueue_.template DeQue<int32_t>();
@@ -189,8 +188,8 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::CopyOutXStaticQuant()
         LocalTensor<int32_t> expandedRowIdx = this->expandedRowIdxCopyOutQueue_.template DeQue<int32_t>();
         int64_t inFactor = Align(this->cols_, sizeof(int8_t));
         uint32_t dstStride = (inFactor * sizeof(T) - AlignBytes(this->cols_, sizeof(T))) / BLOCK_BYTES;
-        DataCopyExtParams dataXCopyParams{
-            static_cast<uint16_t>(this->endXRow_ - this->startXRow_ + 1), static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, dstStride, 0};
+        DataCopyExtParams dataXCopyParams{static_cast<uint16_t>(this->endXRow_ - this->startXRow_ + 1),
+                                          static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, dstStride, 0};
         DataCopyPad(xLocal, this->xGm_[this->startXRow_ * this->cols_], dataXCopyParams, {false, 0, 0, 0});
         this->xCopyInQueue_.EnQue(xLocal);
         SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
@@ -203,7 +202,8 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::CopyOutXStaticQuant()
             for (; k < this->coreIndicesElements_ && curIndex / this->k_ == i; curIndex++, k++) {
                 int32_t outIndex = expandedRowIdx.GetValue(curIndex);
                 if (outIndex < this->activeNum_) {
-                    DataCopyPad(this->expandedXGm_[outIndex * this->cols_], outLocal[(i - this->startXRow_) * inFactor], intriParams);
+                    DataCopyPad(this->expandedXGm_[outIndex * this->cols_], outLocal[(i - this->startXRow_) * inFactor],
+                                intriParams);
                 }
             }
         }
@@ -214,7 +214,7 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::CopyOutXStaticQuant()
 
 template <typename T>
 __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::FreeLocalTensor()
-{ 
+{
     if (!this->ep_) {
         LocalTensor<int32_t> expandedRowIdx = this->expandedRowIdxCopyOutQueue_.template DeQue<int32_t>();
         this->expandedRowIdxCopyOutQueue_.FreeTensor(expandedRowIdx);
@@ -225,5 +225,5 @@ __aicore__ inline void MoeCustomFullLoadStaticQuant<T>::FreeLocalTensor()
     this->expandDstToSrcRowQueue_.FreeTensor(sortedRowIdx);
 }
 
-}
+} // namespace MoeInitRoutingCustom
 #endif // MOE_CUSTOM_FULL_LOAD_STATIC_QUANT_H

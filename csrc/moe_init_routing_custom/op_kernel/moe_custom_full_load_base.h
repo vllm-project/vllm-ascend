@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_base_full_load.h
@@ -24,8 +24,8 @@ template <typename T>
 class MoeCustomFullLoadBase {
 public:
     __aicore__ inline MoeCustomFullLoadBase(){};
-    __aicore__ inline void Init(GM_ADDR expertIdx, GM_ADDR expandedRowIdx,
-                                GM_ADDR expertTokensCountOrCumsum, GM_ADDR workspace, const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe);
+    __aicore__ inline void Init(GM_ADDR expertIdx, GM_ADDR expandedRowIdx, GM_ADDR expertTokensCountOrCumsum,
+                                GM_ADDR workspace, const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe);
 
 protected:
     __aicore__ inline void CopyIn();
@@ -93,8 +93,8 @@ protected:
 
 template <typename T>
 __aicore__ inline void MoeCustomFullLoadBase<T>::Init(GM_ADDR expertIdx, GM_ADDR expandedRowIdx,
-                                                    GM_ADDR expertTokensCountOrCumsum, GM_ADDR workspace,
-                                                    const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
+                                                      GM_ADDR expertTokensCountOrCumsum, GM_ADDR workspace,
+                                                      const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
 {
     this->gatherOutTilingData_ = &(tilingData->gatherOutComputeParamsOp);
     this->blockIdx_ = GetBlockIdx();
@@ -158,11 +158,10 @@ template <typename T>
 __aicore__ inline void MoeCustomFullLoadBase<T>::CopyIn()
 {
     LocalTensor<int32_t> inLocal = sortDataCopyInQueue_.AllocTensor<int32_t>();
-    DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1),
-                                     static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0, 0, 0};
+    DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0,
+                                     0, 0};
     DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
     DataCopyPad(inLocal[0], expertIdxGm_, dataCopyParams, dataCopyPadParams);
-    SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     ArithProgression<int32_t>(inLocal[this->sortNum_], 0, 1, totalLength_);
     sortDataCopyInQueue_.EnQue(inLocal);
 }
@@ -189,8 +188,7 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::SortComputeWithRange()
     Muls(expertIdxLocalFp32, expertIdxLocalFp32, (float)-1, totalLength_);
     PipeBarrier<PIPE_V>();
     if (gatherFirstFullload_) {
-        int64_t maskOffset =
-            AlignBytes(Ceil(totalLength_, MASK_STRIDE) * MASK_STRIDE / DST_REP_STRIDE, sizeof(int8_t));
+        int64_t maskOffset = AlignBytes(Ceil(totalLength_, MASK_STRIDE) * MASK_STRIDE / DST_REP_STRIDE, sizeof(int8_t));
         LocalTensor<uint8_t> compareScalarMaskLocalTensor0 = tempBuffer_.Get<uint8_t>()[maskOffset];
         LocalTensor<uint8_t> compareScalarMaskLocalTensor1 = tempBuffer_.Get<uint8_t>()[maskOffset * kvFactor_];
         LocalTensor<uint8_t> gatherMaskLocalTensor = tempBuffer_.Get<uint8_t>();
@@ -207,8 +205,8 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::SortComputeWithRange()
             (totalLength_ + ONE_REPEAT_COMPARE_NUM - 1) / ONE_REPEAT_COMPARE_NUM * ONE_REPEAT_COMPARE_NUM);
         PipeBarrier<PIPE_V>();
 
-        // 按位与操作，筛选出[expert_start, expert_end)
-        And(gatherMaskLocalTensor.ReinterpretCast<uint16_t>(), compareScalarMaskLocalTensor0.ReinterpretCast<uint16_t>(),
+        And(gatherMaskLocalTensor.ReinterpretCast<uint16_t>(),
+            compareScalarMaskLocalTensor0.ReinterpretCast<uint16_t>(),
             compareScalarMaskLocalTensor1.ReinterpretCast<uint16_t>(),
             Ceil(totalLength_, MASK_STRIDE) * MASK_STRIDE / DST_REP_STRIDE / kvFactor_);
         PipeBarrier<PIPE_V>();
@@ -220,13 +218,13 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::SortComputeWithRange()
         gatherMaskParams.src0RepeatStride = DST_REP_STRIDE;
         gatherMaskParams.src1RepeatStride = DST_REP_STRIDE;
         GatherMask(expertIdxLocalFp32, expertIdxLocalFp32, gatherMaskLocalTensor.ReinterpretCast<uint32_t>(), true,
-                static_cast<uint32_t>(totalLength_), gatherMaskParams, rsvdCnt);
+                   static_cast<uint32_t>(totalLength_), gatherMaskParams, rsvdCnt);
         PipeBarrier<PIPE_V>();
         actual_idx_num_ = rsvdCnt;
         sortNum_ = Ceil(actual_idx_num_, ONE_REPEAT_SORT_NUM) * ONE_REPEAT_SORT_NUM;
 
         GatherMask(rowIdxLocal, rowIdxLocal, gatherMaskLocalTensor.ReinterpretCast<uint32_t>(), true,
-                static_cast<uint32_t>(totalLength_), gatherMaskParams, actual_idx_num_);
+                   static_cast<uint32_t>(totalLength_), gatherMaskParams, actual_idx_num_);
         PipeBarrier<PIPE_V>();
         TilingInKernel();
     } else {
@@ -237,8 +235,8 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::SortComputeWithRange()
         LocalTensor<float> floatMinLocalTensor = sortedBuffer_.Get<float>();
         Duplicate(floatMinLocalTensor, MIN_FP32, totalLength_);
         PipeBarrier<PIPE_V>();
-        Select(expertIdxLocalFp32, maskLocalTensor, floatMinLocalTensor, expertIdxLocalFp32, SELMODE::VSEL_TENSOR_TENSOR_MODE,
-            totalLength_);
+        Select(expertIdxLocalFp32, maskLocalTensor, floatMinLocalTensor, expertIdxLocalFp32,
+               SELMODE::VSEL_TENSOR_TENSOR_MODE, totalLength_);
         PipeBarrier<PIPE_V>();
     }
     // handle actual_idx_num_ == 0
@@ -349,7 +347,8 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::SortCompute()
     if (rowIdxType_ == SCATTER or quantMode_ == 1) {
         Muls(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocalFp32, (float)-1, totalLength_);
         PipeBarrier<PIPE_V>();
-        Cast(expandDstToSrcRowLocal.ReinterpretCast<int32_t>(), expandDstToSrcRowLocalFp32, RoundMode::CAST_RINT, totalLength_);
+        Cast(expandDstToSrcRowLocal.ReinterpretCast<int32_t>(), expandDstToSrcRowLocalFp32, RoundMode::CAST_RINT,
+             totalLength_);
     }
     expandedExpertIdxCopyOutQueue_.EnQue<int32_t>(expandedExpertIdxLocalInt32);
     expandedRowIdxCopyOutQueue_.EnQue<uint32_t>(expandedRowIdx);
@@ -358,25 +357,28 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::SortCompute()
 }
 
 template <typename T>
-__aicore__ inline void MoeCustomFullLoadBase<T>::CopyOutDefaultGatherIdx() {
+__aicore__ inline void MoeCustomFullLoadBase<T>::CopyOutDefaultGatherIdx()
+{
     LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.AllocTensor<int32_t>();
     Duplicate(expandedRowIdx, static_cast<int32_t>(-1), static_cast<int32_t>(totalLength_));
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-    DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0, 0, 0};
+    DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0, 0,
+                                 0};
     DataCopyPad(expandedRowIdxGm_, expandedRowIdx, copyParams);
     expandedRowIdxCopyOutQueue_.FreeTensor(expandedRowIdx);
 }
 
 template <typename T>
-__aicore__ inline void MoeCustomFullLoadBase<T>::CopyOutDefaultTokenCountOrCumsum() {
+__aicore__ inline void MoeCustomFullLoadBase<T>::CopyOutDefaultTokenCountOrCumsum()
+{
     LocalTensor<int64_t> expertTokensOut = expertTokensCopyOutQueue_.AllocTensor<int64_t>();
     Duplicate(expertTokensOut.ReinterpretCast<int32_t>(), static_cast<int32_t>(0),
-                  static_cast<int32_t>(expertCountElements_ * EXERPT_TOKENS_KEY_VALUE));
-    SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);  
+              static_cast<int32_t>(expertCountElements_ * EXERPT_TOKENS_KEY_VALUE));
+    SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     DataCopyExtParams copyParams{static_cast<uint16_t>(1),
                                  static_cast<uint32_t>(expertCountElements_ * sizeof(int64_t)), 0, 0, 0};
     DataCopyPad(expertTokensCountOrCumsumGm_, expertTokensOut, copyParams);
-    expertTokensCopyOutQueue_.FreeTensor(expertTokensOut);            
+    expertTokensCopyOutQueue_.FreeTensor(expertTokensOut);
 }
 
 template <typename T>
@@ -385,7 +387,8 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::CopyOutIdx()
     LocalTensor<int32_t> expandedExpertIdx = expandedExpertIdxCopyOutQueue_.DeQue<int32_t>();
     LocalTensor<int32_t> expandDstToSrcRowLocal = expandDstToSrcRowQueue_.DeQue<int32_t>();
     if (rowIdxType_ == SCATTER) {
-        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(actual_idx_num_ * sizeof(int32_t)), 0, 0, 0};
+        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(actual_idx_num_ * sizeof(int32_t)),
+                                     0, 0, 0};
         DataCopyPad(expandedRowIdxGm_, expandDstToSrcRowLocal, copyParams);
     } else if (ep_) {
         LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.AllocTensor<int32_t>();
@@ -400,12 +403,14 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::CopyOutIdx()
             expandedRowIdx.SetValue(outIndices, i);
         }
         SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0, 0, 0};
+        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0,
+                                     0, 0};
         DataCopyPad(expandedRowIdxGm_, expandedRowIdx, copyParams);
         expandedRowIdxCopyOutQueue_.FreeTensor(expandedRowIdx);
     } else {
         LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.DeQue<int32_t>();
-        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0, 0, 0};
+        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(totalLength_ * sizeof(int32_t)), 0,
+                                     0, 0};
         DataCopyPad(expandedRowIdxGm_, expandedRowIdx, copyParams);
         expandedRowIdxCopyOutQueue_.EnQue(expandedRowIdx);
     }
@@ -420,7 +425,7 @@ __aicore__ inline void MoeCustomFullLoadBase<T>::ComputeExpertTokenCountOrCumsum
     LocalTensor<int32_t> expandedExpertIdx = expandedExpertIdxCopyOutQueue_.DeQue<int32_t>();
     LocalTensor<int64_t> expertTokensOut = expertTokensCopyOutQueue_.AllocTensor<int64_t>();
     Duplicate(expertTokensOut.ReinterpretCast<int32_t>(), static_cast<int32_t>(0),
-                  static_cast<int32_t>(expertCountElements_ * EXERPT_TOKENS_KEY_VALUE));
+              static_cast<int32_t>(expertCountElements_ * EXERPT_TOKENS_KEY_VALUE));
     SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     int64_t i = 0;
     int32_t lastExpertId = expandedExpertIdx.GetValue(0);

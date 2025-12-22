@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_row_idx_gather.h
@@ -31,7 +31,7 @@ public:
 private:
     __aicore__ inline void CopyIn(int64_t loop, int64_t elements);
     __aicore__ inline void Compute(int64_t loop, int64_t elements);
-    __aicore__ inline void CopyOut(int64_t loop, int64_t elements, GlobalTensor<int32_t>& RowIdxDstGm_);
+    __aicore__ inline void CopyOut(int64_t loop, int64_t elements, GlobalTensor<int32_t> &RowIdxDstGm_);
     __aicore__ inline void AssistInit();
 
 private:
@@ -87,13 +87,13 @@ __aicore__ inline void RowIdxGather::Init(GM_ADDR expandedRowIdx, GM_ADDR worksp
                                                 Align(tilingData->n * tilingData->k, sizeof(int32_t)) * 2 +
                                                 Align(actualExpertNum_, sizeof(int32_t)),
                                             actualExpertNum_);
-        AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(
-            expertTotalCountGm_);
+        AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                                          AscendC::DcciDst::CACHELINE_OUT>(expertTotalCountGm_);
         expertTotalCount_ = expertTotalCountGm_.GetValue(0);
     } else {
         expertTotalCount_ = tilingData->n * tilingData->k;
     }
-    assistGm_.SetGlobalBuffer((__gm__ int32_t*)assist, ASSIST_NUM);
+    assistGm_.SetGlobalBuffer((__gm__ int32_t *)assist, ASSIST_NUM);
     perCoreElements_ = Ceil(expertTotalCount_, srcToDstComputeTilingData_->needCoreNum);
     needCoreNum_ = Ceil(expertTotalCount_, perCoreElements_);
 
@@ -118,17 +118,18 @@ __aicore__ inline void RowIdxGather::Init(GM_ADDR expandedRowIdx, GM_ADDR worksp
     }
 
     if (rowIdxType_ == SCATTER) {
-        sortedExpertIndicesGm_.SetGlobalBuffer((__gm__ int32_t *)expandedRowIdx + blockIdx_ * perCoreElements_, actualExpertNum_);
+        sortedExpertIndicesGm_.SetGlobalBuffer((__gm__ int32_t *)expandedRowIdx + blockIdx_ * perCoreElements_,
+                                               actualExpertNum_);
     } else {
         sortedExpertIndicesGm_.SetGlobalBuffer((__gm__ int32_t *)workspace +
-                                               Align(tilingData->n * tilingData->k, sizeof(int32_t)) +
-                                               blockIdx_ * perCoreElements_,
-                                           actualExpertNum_);
+                                                   Align(tilingData->n * tilingData->k, sizeof(int32_t)) +
+                                                   blockIdx_ * perCoreElements_,
+                                               actualExpertNum_);
     }
 
     if ((ep_ == 0 && rowIdxType_ == SCATTER) && (blockIdx_ < needCoreNum_)) {
         expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t *)workspace +
-                                               Align(tilingData->n * tilingData->k, sizeof(int32_t)));
+                                          Align(tilingData->n * tilingData->k, sizeof(int32_t)));
     }
     pipe_->InitBuffer(sortedExpertIndicesInQueue_, 1, AlignBytes(perLoopElements_, sizeof(int32_t)));
     pipe_->InitBuffer(copyOutQueue_, 1, Ceil(perLoopElements_, ASSIST_NUM) * ASSIST_NUM * BLOCK_BYTES);
@@ -151,8 +152,8 @@ __aicore__ inline void RowIdxGather::Process()
                 Compute(loop, elements);
                 CopyOut(loop, elements, expandedRowIdxGm_);
             }
-        }   
-    } 
+        }
+    }
     AscendC::SyncAll();
 }
 
@@ -167,21 +168,21 @@ __aicore__ inline void RowIdxGather::CopyIn(int64_t loop, int64_t elements)
     sortedExpertIndicesInQueue_.EnQue(sortedExpertIndicesInLocal);
 }
 
-__aicore__ inline void RowIdxGather::Compute(int64_t loop, int64_t elements) {
+__aicore__ inline void RowIdxGather::Compute(int64_t loop, int64_t elements)
+{
     LocalTensor<int32_t> outLocal = copyOutQueue_.AllocTensor<int32_t>();
     LocalTensor<int32_t> assistTensor = assistBuffer_.Get<int32_t>(ASSIST_NUM);
     PipeBarrier<PIPE_V>();
     int64_t loops = Ceil(elements, ASSIST_INDEX_NUM);
     for (int64_t i = 0; i < loops; i++) {
-        Adds(
-            outLocal[i * ASSIST_NUM], assistTensor,
-            static_cast<int32_t>(perLoopElements_ * loop + i * ASSIST_INDEX_NUM), ASSIST_NUM);
+        Adds(outLocal[i * ASSIST_NUM], assistTensor,
+             static_cast<int32_t>(perLoopElements_ * loop + i * ASSIST_INDEX_NUM), ASSIST_NUM);
     }
     PipeBarrier<PIPE_V>();
     copyOutQueue_.EnQue<int32_t>(outLocal);
 }
 
-__aicore__ inline void RowIdxGather::CopyOut(int64_t loop, int64_t elements, GlobalTensor<int32_t>& RowIdxDstGm_)
+__aicore__ inline void RowIdxGather::CopyOut(int64_t loop, int64_t elements, GlobalTensor<int32_t> &RowIdxDstGm_)
 {
     LocalTensor<int32_t> inLocal = sortedExpertIndicesInQueue_.DeQue<int32_t>();
     LocalTensor<int32_t> outLocal = copyOutQueue_.DeQue<int32_t>();
@@ -192,6 +193,7 @@ __aicore__ inline void RowIdxGather::CopyOut(int64_t loop, int64_t elements, Glo
     uint32_t outOffset;
     for (int64_t idx = 0; idx < elements; idx++) {
         outOffset = inLocal.GetValue(idx);
+        SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
         DataCopyPad(RowIdxDstGm_[outOffset], outLocal[idx * INT32_ONE_BLOCK_NUM], intriParams);
     }
 

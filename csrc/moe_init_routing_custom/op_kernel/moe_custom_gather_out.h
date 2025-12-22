@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_gather_out.h
@@ -78,15 +78,15 @@ private:
     int64_t actualExpertNum_;
     int64_t expertTotalCount_;
 
-    int64_t rowIdxType_ = 0;
-    int64_t isInputScale_ = 0;
+    int64_t rowIdxType_;
+    int64_t isInputScale_;
     int64_t coreNum_;
 };
 
 template <typename T, const int EP>
 __aicore__ inline void MoeGatherOut<T, EP>::Init(GM_ADDR x, GM_ADDR scale, GM_ADDR workspace, GM_ADDR expandedRowIdx,
-                                             GM_ADDR expandedX, GM_ADDR expandedScale,
-                                             const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
+                                                 GM_ADDR expandedX, GM_ADDR expandedScale,
+                                                 const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
 {
     pipe_ = tPipe;
     blockIdx_ = GetBlockIdx();
@@ -106,13 +106,13 @@ __aicore__ inline void MoeGatherOut<T, EP>::Init(GM_ADDR x, GM_ADDR scale, GM_AD
     lastLoopCols_ = tilingData->gatherOutComputeParamsOp.lastLoopCols;
 
     actualExpertNum_ = tilingData->actualExpertNum;
-    
+
     if constexpr (EP) {
         expertTotalCountGm_.SetGlobalBuffer((__gm__ int32_t *)workspace + Align(n_ * k_, sizeof(int32_t)) * 2 +
                                                 Align(actualExpertNum_, sizeof(int32_t)),
                                             1);
-        AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(
-            expertTotalCountGm_);
+        AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                                          AscendC::DcciDst::CACHELINE_OUT>(expertTotalCountGm_);
         expertTotalCount_ = expertTotalCountGm_.GetValue(0);
     } else {
         expertTotalCount_ = n_ * k_;
@@ -151,20 +151,20 @@ __aicore__ inline void MoeGatherOut<T, EP>::Init(GM_ADDR x, GM_ADDR scale, GM_AD
     if constexpr (EP) {
         if (rowIdxType_ == SCATTER) {
             expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t *)expandedRowIdx + blockIdx_ * perCoreIndicesElements_,
-                                            Align(curCoreIndicesElements_, sizeof(int32_t)));
+                                              Align(curCoreIndicesElements_, sizeof(int32_t)));
         } else {
             expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t *)workspace + Align(n_ * k_, sizeof(int32_t)) +
-                                                blockIdx_ * perCoreIndicesElements_,
-                                            Align(curCoreIndicesElements_, sizeof(int32_t)));
+                                                  blockIdx_ * perCoreIndicesElements_,
+                                              Align(curCoreIndicesElements_, sizeof(int32_t)));
         }
     } else {
         if (rowIdxType_ == GATHER) {
             expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t *)expandedRowIdx + blockIdx_ * perCoreIndicesElements_,
-                                            Align(curCoreIndicesElements_, sizeof(int32_t)));
+                                              Align(curCoreIndicesElements_, sizeof(int32_t)));
         } else {
             expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t *)workspace + Align(n_ * k_, sizeof(int32_t)) +
-                                            blockIdx_ * perCoreIndicesElements_,
-                                            Align(curCoreIndicesElements_, sizeof(int32_t)));
+                                                  blockIdx_ * perCoreIndicesElements_,
+                                              Align(curCoreIndicesElements_, sizeof(int32_t)));
         }
     }
 }
@@ -224,7 +224,7 @@ __aicore__ inline void MoeGatherOut<T, EP>::GatherCopyOut(int64_t progress)
     SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
     int64_t curLoopCols = perLoopCols_;
     for (int64_t colsLoop = 0; colsLoop < colsLoops_; colsLoop++) {
-        int64_t initialRow = blockIdx_ * perCoreIndicesElements_ + perCoreIndicesElements_ * progress;
+        int64_t initialRow = blockIdx_ * perCoreIndicesElements_ + curCorePerLoopIndicesElements_ * progress;
         int64_t curLoopRow = 0;
         if (colsLoop == colsLoops_ - 1) {
             curLoopCols = lastLoopCols_;

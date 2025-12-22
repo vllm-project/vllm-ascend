@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_custom_full_load_dynamic_quant.h
@@ -22,11 +22,11 @@ namespace MoeInitRoutingCustom {
 using namespace AscendC;
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
-class MoeCustomFullLoadDynamicQuant : public MoeCustomFullLoadBase<T>{
+class MoeCustomFullLoadDynamicQuant : public MoeCustomFullLoadBase<T> {
 public:
     __aicore__ inline MoeCustomFullLoadDynamicQuant(){};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX,
-                                GM_ADDR expandedRowIdx, GM_ADDR expertTokensCountOrCumsum, GM_ADDR expandedScale, GM_ADDR workspace,
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX, GM_ADDR expandedRowIdx,
+                                GM_ADDR expertTokensCountOrCumsum, GM_ADDR expandedScale, GM_ADDR workspace,
                                 const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -34,12 +34,12 @@ private:
     __aicore__ inline void CopyOutXDynamicQuantFromGather();
     __aicore__ inline void CopyOutXDynamicQuantFromScatter();
     __aicore__ inline void FreeLocalTensor();
-    __aicore__ inline void ComputeQuant(LocalTensor<float>& smoothLocal);
+    __aicore__ inline void ComputeQuant(LocalTensor<float> &smoothLocal);
 
 private:
     TQue<QuePosition::VECIN, 1> xCopyInQueue_;
     TQue<QuePosition::VECIN, 1> smoothInQueue_;
-    TBuf<TPosition::VECCALC> tmpBuff;
+    TBuf<TPosition::VECCALC> tmpBuff_;
     TQue<QuePosition::VECOUT, 1> inputXOutQueue_;
     TQue<QuePosition::VECOUT, 1> scaleOutQueue_;
 
@@ -53,16 +53,16 @@ private:
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
 __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::Init(
-    GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX,
-    GM_ADDR expandedRowIdx, GM_ADDR expertTokensCountOrCumsum, GM_ADDR expandedScale, GM_ADDR workspace,
+    GM_ADDR x, GM_ADDR expertIdx, GM_ADDR scale, GM_ADDR expandedX, GM_ADDR expandedRowIdx,
+    GM_ADDR expertTokensCountOrCumsum, GM_ADDR expandedScale, GM_ADDR workspace,
     const MoeInitRoutingCustomTilingData *tilingData, TPipe *tPipe)
 {
     MoeCustomFullLoadBase<T>::Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, workspace, tilingData, tPipe);
 
     xGm_.SetGlobalBuffer((__gm__ T *)x);
     expandedXGm_.SetGlobalBuffer((__gm__ int8_t *)expandedX);
-    quantSmoothGm_.SetGlobalBuffer((__gm__ float*)scale);
-    expandedScaleGm_.SetGlobalBuffer((__gm__ float*)expandedScale);
+    quantSmoothGm_.SetGlobalBuffer((__gm__ float *)scale);
+    expandedScaleGm_.SetGlobalBuffer((__gm__ float *)expandedScale);
     this->colsAlign_ = Align(this->cols_, sizeof(T));
     if constexpr (IsSameType<T, float>::value) {
         this->pipe_->InitBuffer(xCopyInQueue_, 1, AlignBytes(this->cols_, sizeof(float)));
@@ -71,13 +71,13 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
     }
     this->pipe_->InitBuffer(inputXOutQueue_, 1, AlignBytes(this->cols_, sizeof(int8_t)));
     this->pipe_->InitBuffer(smoothInQueue_, 1, AlignBytes(this->cols_, sizeof(float)));
-    this->pipe_->InitBuffer(tmpBuff, AlignBytes(this->cols_, sizeof(float)));
+    this->pipe_->InitBuffer(tmpBuff_, AlignBytes(this->cols_, sizeof(float)));
     this->pipe_->InitBuffer(scaleOutQueue_, 1, BLOCK_BYTES + BLOCK_BYTES);
 }
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
 __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::Process()
-{   
+{
     if (this->blockIdx_ < this->needCoreNum_) {
         this->CopyIn();
         this->Compute();
@@ -116,9 +116,10 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
 }
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
-__aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::ComputeQuant(LocalTensor<float>& smoothLocal)
+__aicore__ inline void
+MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::ComputeQuant(LocalTensor<float> &smoothLocal)
 {
-    LocalTensor<float> tempLocal = tmpBuff.Get<float>();
+    LocalTensor<float> tempLocal = tmpBuff_.Get<float>();
     LocalTensor<int8_t> outLocal = inputXOutQueue_.AllocTensor<int8_t>();
     LocalTensor<float> dynamicQuantLocal = scaleOutQueue_.AllocTensor<float>();
     LocalTensor<float> inLocal = xCopyInQueue_.DeQue<float>();
@@ -163,8 +164,8 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
 __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::CopyOutXDynamicQuantFromScatter()
-{ 
-    LocalTensor<int32_t> sortedRowIdx = this->expandDstToSrcRowQueue_. template DeQue<int32_t>();
+{
+    LocalTensor<int32_t> sortedRowIdx = this->expandDstToSrcRowQueue_.template DeQue<int32_t>();
     LocalTensor<int32_t> expandedExpertIdx = this->expandedExpertIdxCopyOutQueue_.template DeQue<int32_t>();
 
     DataCopyExtParams dataXCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
@@ -172,7 +173,8 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
     DataCopyExtParams intriParams{1, static_cast<uint32_t>(this->cols_ * sizeof(int8_t)), 0, 0, 0};
     DataCopyExtParams quantScaleParams{1, static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0};
 
-    LocalTensor<float> smoothLocal = smoothInQueue_.AllocTensor<float>();;
+    LocalTensor<float> smoothLocal = smoothInQueue_.AllocTensor<float>();
+    ;
 
     if constexpr (SMOOTHTYPE == SCALE_1H) {
         DataCopyPad(smoothLocal, quantSmoothGm_, smoothCopyParams, {false, 0, 0, 0});
@@ -183,7 +185,7 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
     int64_t dstIndexStart = this->curIndexStart_;
     int64_t dstIndexEnd = dstIndexStart + this->coreIndicesElements_ - 1;
     int32_t lastExpertIdx = -1;
-    
+
     for (int64_t dstIndex = dstIndexStart; dstIndex <= dstIndexEnd; dstIndex++) {
         if (this->dropPadMode_ == DROPLESS_MODE && dstIndex >= this->activeNum_) {
             break;
@@ -199,7 +201,8 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
         if constexpr (IsSameType<T, float>::value) {
             DataCopyPad(xLocal, this->xGm_[srcIdx / this->k_ * this->cols_], dataXCopyParams, {false, 0, 0, 0});
         } else {
-            DataCopyPad(xLocal[colsAlign_], this->xGm_[srcIdx / this->k_ * this->cols_], dataXCopyParams, {false, 0, 0, 0});
+            DataCopyPad(xLocal[colsAlign_], this->xGm_[srcIdx / this->k_ * this->cols_], dataXCopyParams,
+                        {false, 0, 0, 0});
         }
         xCopyInQueue_.EnQue<T>(xLocal);
 
@@ -232,7 +235,7 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
 __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::CopyOutXDynamicQuantFromGather()
-{      
+{
     DataCopyExtParams dataXCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
     DataCopyExtParams smoothCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(float)), 0, 0, 0};
     DataCopyExtParams intriParams{1, static_cast<uint32_t>(this->cols_ * sizeof(int8_t)), 0, 0, 0};
@@ -282,16 +285,16 @@ __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>
 
 template <typename T, const int COPYOUTTYPE, const int SMOOTHTYPE>
 __aicore__ inline void MoeCustomFullLoadDynamicQuant<T, COPYOUTTYPE, SMOOTHTYPE>::FreeLocalTensor()
-{ 
+{
     if constexpr (!COPYOUTTYPE) {
         LocalTensor<int32_t> expandedRowIdx = this->expandedRowIdxCopyOutQueue_.template DeQue<int32_t>();
         this->expandedRowIdxCopyOutQueue_.FreeTensor(expandedRowIdx);
     }
-    LocalTensor<int32_t> sortedRowIdx = this->expandDstToSrcRowQueue_. template DeQue<int32_t>();
+    LocalTensor<int32_t> sortedRowIdx = this->expandDstToSrcRowQueue_.template DeQue<int32_t>();
     LocalTensor<int32_t> expandedExpertIdx = this->expandedExpertIdxCopyOutQueue_.template DeQue<int32_t>();
     this->expandDstToSrcRowQueue_.FreeTensor(sortedRowIdx);
     this->expandedExpertIdxCopyOutQueue_.FreeTensor(expandedExpertIdx);
 }
 
-}
+} // namespace MoeInitRoutingCustom
 #endif // MOE_CUSTOM_FULL_LOAD_DYNAMIC_QUANT_H
