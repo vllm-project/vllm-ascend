@@ -28,5 +28,4 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING and vllm_version_is('0.13.0'):
-    import vllm_ascend.patch.platform.patch_core  # noqa
-    import vllm_ascend.patch.platform.patch_scheduler  # noqa
+    import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
