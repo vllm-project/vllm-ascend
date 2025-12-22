@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (ReplicatedLinear,
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -109,9 +110,6 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 
 
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -154,6 +152,16 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             and self.vllm_config.compilation_config.cudagraph_mode
             == CUDAGraphMode.FULL_DECODE_ONLY
         ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendSFAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
