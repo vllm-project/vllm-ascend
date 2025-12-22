@@ -269,6 +269,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_mtp.py
 
       - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
         shell: bash -l {0}
