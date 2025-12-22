@@ -757,8 +757,8 @@ def ilama_lora_files():
 
 
 @pytest.fixture(scope="session")
-def sql_lora_files():
-    return snapshot_download(repo_id="vllm-ascend/llama-2-7b-sql-lora-test")
+def llama32_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/llama32-3b-text2sql-spider")
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:
