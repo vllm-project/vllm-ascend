@@ -22,6 +22,8 @@
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
+Updated on 2025-12-16:
+
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
 | 233 | [@UnifiedCacheManager](https://github.com/UnifiedCacheManager) | 2025/12/16 | [195eac6](https://github.com/vllm-project/vllm-ascend/commit/195eac665b2d42b8287c59128490586c6931d54c) |
