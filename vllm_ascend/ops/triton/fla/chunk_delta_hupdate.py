@@ -112,17 +112,18 @@ def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
             b_w_upd2 = b_w_upd2 * b_g[:, None]
 
         # compute [64, BT] @ [BT, 64]
-        b_hupd_local_11 = (off_hupd_1_top == off_hupd_2_top).to(tl.float16)
-        b_hupd_local_22 = (off_hupd_1_top == off_hupd_2_top).to(tl.float16)
+        b_hupd_local_11 = (off_hupd_1_top == off_hupd_2_top).to(tl.float32)
+        b_hupd_local_22 = (off_hupd_1_top == off_hupd_2_top).to(tl.float32)
 
+        # fp32
         if USE_G:
             b_hupd_local_11 = b_hupd_local_11 * b_g_last
             b_hupd_local_22 = b_hupd_local_22 * b_g_last
 
-        b_hupd_local_11 -= tl.dot(b_k_upd1, b_w_upd1.to(k.dtype.element_ty))
-        b_hupd_local_22 -= tl.dot(b_k_upd2, b_w_upd2.to(k.dtype.element_ty))
-        b_hupd_local_12 = -tl.dot(b_k_upd1, b_w_upd2.to(k.dtype.element_ty))
-        b_hupd_local_21 = -tl.dot(b_k_upd2, b_w_upd1.to(k.dtype.element_ty))
+        b_hupd_local_11 -= tl.dot(b_k_upd1, b_w_upd1.to(b_k_upd1.dtype))
+        b_hupd_local_22 -= tl.dot(b_k_upd2, b_w_upd2.to(b_k_upd2.dtype))
+        b_hupd_local_12 = -tl.dot(b_k_upd1, b_w_upd2.to(b_k_upd1.dtype)).to(tl.float32)
+        b_hupd_local_21 = -tl.dot(b_k_upd2, b_w_upd1.to(b_k_upd2.dtype)).to(tl.float32)
 
         hupd_base = h_update + (boh + i_t + i_n) * H * K * K + i_h * K * K
         p_hupd_11 = tl.make_block_ptr(hupd_base, (K, K), (K, 1), (0, 0),
@@ -138,17 +139,17 @@ def chunk_gated_delta_rule_fwd_kernel_hupdate_blockdim64(
                                     (64, 64), (1, 0))
         b_hupd_22 = tl.load(p_hupd_22, boundary_check=(1, 0))
 
-        b_hupd11_new = tl.dot(b_hupd_local_11.to(tl.bfloat16), b_hupd_11)
-        b_hupd11_new += tl.dot(b_hupd_local_12.to(tl.bfloat16), b_hupd_21)
+        b_hupd11_new = tl.dot(b_hupd_local_11.to(b_hupd_11.dtype), b_hupd_11).to(tl.float32)
+        b_hupd11_new += tl.dot(b_hupd_local_12.to(b_hupd_21.dtype), b_hupd_21)
 
-        b_hupd21_new = tl.dot(b_hupd_local_21.to(tl.bfloat16), b_hupd_11)
-        b_hupd21_new += tl.dot(b_hupd_local_22.to(tl.bfloat16), b_hupd_21)
+        b_hupd21_new = tl.dot(b_hupd_local_21.to(b_hupd_11.dtype), b_hupd_11).to(tl.float32)
+        b_hupd21_new += tl.dot(b_hupd_local_22.to(b_hupd_21.dtype), b_hupd_21)
 
-        b_hupd12_new = tl.dot(b_hupd_local_11.to(tl.bfloat16), b_hupd_12)
-        b_hupd12_new += tl.dot(b_hupd_local_12.to(tl.bfloat16), b_hupd_22)
+        b_hupd12_new = tl.dot(b_hupd_local_11.to(b_hupd_12.dtype), b_hupd_12).to(tl.float32)
+        b_hupd12_new += tl.dot(b_hupd_local_12.to(b_hupd_22.dtype), b_hupd_22)
 
-        b_hupd22_new = tl.dot(b_hupd_local_21.to(tl.bfloat16), b_hupd_12)
-        b_hupd22_new += tl.dot(b_hupd_local_22.to(tl.bfloat16), b_hupd_22)
+        b_hupd22_new = tl.dot(b_hupd_local_21.to(b_hupd_12.dtype), b_hupd_12).to(tl.float32)
+        b_hupd22_new += tl.dot(b_hupd_local_22.to(b_hupd_22.dtype), b_hupd_22)
 
         hupd_next = h_update + (boh + i_t + i_n + 1) * H * K * K + i_h * K * K
         p_hupd_11 = tl.make_block_ptr(hupd_next, (K, K), (K, 1), (0, 0),
@@ -204,11 +205,9 @@ def chunk_gated_delta_rule_fwd_hupdate(
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h_update = k.new_empty(B, NT + N, H, K, K)
+    h_update = k.new_empty(B, NT + N, H, K, K, dtype=torch.float32)
     update_indices = prepare_update_chunk_offsets(cu_seqlens, BT)[:-1]
     h_update[:, update_indices, :, :, :] = torch.eye(K, dtype=h_update.dtype, device=h_update.device)
-    # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
-    #     print(">>>>>>>>", h_update, h_update.shape)
 
     g = g.transpose(1, 2).contiguous()
 
@@ -230,5 +229,7 @@ def chunk_gated_delta_rule_fwd_hupdate(
         num_warps=4,
         num_stages=2,
     )
+    # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
+    #     print(">>>>>>>>", h_update.dtype, h_update.shape)
     h_update[:, :num_decodes * 2, :, :, :] = torch.zeros((K, K), dtype=h_update.dtype, device=h_update.device)
     return h_update

@@ -74,7 +74,7 @@ def chunk_fwd_kernel_o_update(
             # [BK, BV]
             b_updated_h_state = tl.load(p_updated_h_state, boundary_check=(0, 1))
 
-            b_h += tl.dot(b_hupd, b_updated_h_state.to(tl.bfloat16))
+            b_h += tl.dot(b_hupd.to(tl.bfloat16), b_updated_h_state.to(tl.bfloat16))
             tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
 

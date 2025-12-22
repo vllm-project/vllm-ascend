@@ -1125,11 +1125,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         if has_decode:
-            if not attn_metadata.use_hybrid_attn:
+            if not attn_metadata.use_hybrid_attn or not has_prefill:
                 decode_query = query[:num_decode_tokens]
             else:
                 decode_query = query[:num_decode_tokens * self.pcp_size: self.pcp_size]
-            decode_query = query[:num_decode_tokens]
             output_decode = self._forward_decode_pcp_dcp(
                 decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
@@ -1455,6 +1454,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
+        output_padded = output
 
         if len(kv_cache) > 1:
             if self.key_cache is None:
@@ -1500,7 +1500,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                     pcp_enter_fa_restore_idx)
                         qkv_fa_padding_workspace = query.new_empty((num_actual_tokens_pcp_padded, (self.num_heads + 2 * self.num_kv_heads) * self.head_size))
                         
-                        qkv_fa_padding_workspace[:attn_metadata.num_decode_tokens * self.pcp_size:] = actual_qkv[:attn_metadata.num_decode_tokens * self.pcp_size]
+                        qkv_fa_padding_workspace[:attn_metadata.num_decode_tokens * self.pcp_size] = actual_qkv[:attn_metadata.num_decode_tokens * self.pcp_size]
                         pcp_unpad_mask = attn_metadata.pcp_unpad_mask[attn_metadata.num_decodes * self.pcp_size:]
                         qkv_fa_padding_workspace[attn_metadata.num_decode_tokens * self.pcp_size:][pcp_unpad_mask] = actual_qkv[attn_metadata.num_decode_tokens * self.pcp_size:]
                         
@@ -1511,7 +1511,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         
                         output_local_padded_tokens_fa = num_actual_tokens_pcp_padded // self.pcp_size - num_tokens
                         if output_local_padded_tokens_fa > 0:
-                            output = F.pad(output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode='constant', value=0)
+                            output_padded = F.pad(output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode='constant', value=0)
 
                 prefill_cached_start = self.pcp_size * num_decode_tokens
                 torch_npu._npu_reshape_and_cache(
@@ -1529,13 +1529,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not forward_context.capturing:
             if self.pcp_size * self.dcp_size > 1:
                 attn_output = self._forward_pcp_dcp(query, key, value,
-                                                    kv_cache, attn_metadata,
-                                                    output, layer_idx)
+                                                kv_cache, attn_metadata,
+                                                output_padded, layer_idx)
                 output[:num_tokens] = attn_output[:num_tokens]
                 # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 0:
                 #     print(num_tokens, output.shape, output.mean(1)[:5])
-                # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
-                #     print(">>>>>>>>before", torch.isnan(attn_output).any())
+                # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 0 and query.shape[0] < 70 and query.shape[0] != 2:
+                #     # print(hidden_states[1:56, :], hidden_states.shape)
+                #     # [0,1,...,32,33,...,64,65,66,67]
+                #     print(output[:num_tokens], output[:num_tokens].shape)
                 return output[:num_tokens]
             if self.attn_type == AttentionType.ENCODER_ONLY:
                 attn_output = self._forward_encode(query, key, value,
@@ -1554,5 +1556,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output, num_tokens = self.full_graph_attention(
                 query, key, value, kv_cache, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
+        # if get_tp_group().rank_in_group == 0 and query.shape[0] < 70 and query.shape[0] != 2:
+        # #     # print(hidden_states[57:112, :], hidden_states.shape)
+        # #     # [0, 1, ..., 32, 33, ..., 64]
+        #     print(output[33:], output[33:].shape)
 
         return output

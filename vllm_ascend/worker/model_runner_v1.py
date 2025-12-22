@@ -1725,7 +1725,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         self.device, non_blocking=True)
                 else:
                     tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
-                    tokens_logits = tokens_original_tensor + self.pcp_pads_logits_hybrid_attn
+                    tokens_logits = tokens_original_tensor + self.pcp_pads_logits_hybrid_attn[:tokens_original_tensor.shape[0]]
                     logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
                     logits_indices = logits_indices.pin_memory().to(
                         self.device, non_blocking=True)
@@ -1765,7 +1765,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self._generate_pcp_mtp_input(
                 num_reqs, scheduler_output.total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens)
-
         long_seq_metadata = self._generate_pcp_metadata(
             total_num_scheduled_tokens=sum(num_scheduled_tokens_padded) if self.pcp_size > 1 and self.pcp_use_hybrid_attn else total_num_scheduled_tokens,
             num_scheduled_tokens=sum(num_scheduled_tokens),
@@ -4233,7 +4232,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             tokens[:num_decode_reqs] * self.pcp_size)
         self.num_pcp_pads = num_padded_scheduled_tokens - tokens
         self.pcp_pads_logits_hybrid_attn[:num_decode_reqs] = self.pcp_size - 1
-        self.pcp_pads_logits_hybrid_attn = self.pcp_pads_logits_hybrid_attn[:num_reqs]
 
         cu_padded_tokens, pcp_padded_arange = \
             self._get_cumsum_and_arange(num_padded_scheduled_tokens)
@@ -4420,7 +4418,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs or self.query_lens.size(0)
         num_decodes = sum(self.input_batch.num_computed_tokens_cpu[:num_reqs]
                           >= self.input_batch.num_prompt_tokens[:num_reqs])
-
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
 

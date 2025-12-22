@@ -153,6 +153,10 @@ def causal_conv1d_fn(
         conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[-1, ...]
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
+    # if get_pcp_group().rank_in_group == 1 and get_tp_group().rank_in_group == 1:
+    #     print(">>>>>>>>", out_ref_tensor, out_ref_tensor.shape)
+    # if get_tp_group().rank_in_group == 1:
+    #     print(">>>>>>>>", out_ref_tensor[:, -12:], out_ref_tensor.shape)
     return out_ref_tensor
 
 

@@ -180,12 +180,16 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                      b_v_new2.to(p_v_new2.dtype.element_ty),
                      boundary_check=(0, 1))
 
+
+        # b_v_new和b_h1_bv均为fp32
         if USE_G:
             b_v_new2 = b_v_new2 * b_g[:, None]
             b_h1_bv2 = b_h1_bv2 * b_g_last
 
         b_v_new2 = b_v_new2.to(k.dtype.element_ty)
+        # 此处b_h1_bv2为fp32，b_k与b_w均为bf16
         b_h1_bv2 += tl.dot(b_k, b_v_new2)
+        # 计算后b_h1_bv2仍为fp32
 
         # # get column-sliced w [BT, 64]
         # offs_w_upd1 = tl.arange(0, 64)[None, :]
@@ -331,5 +335,4 @@ def chunk_gated_delta_rule_fwd_h(
         num_warps=4,
         num_stages=2,
     )
-    # print("cu_seqlens", cu_seqlens)
-    return h, v_new, final_state, h_update
+    return h, v_new, final_state
