@@ -42,13 +42,14 @@ The following table lists additional configuration options available in vLLM Asc
 | `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                                                  |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
 | `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
+| `enable_async_exponential`          | int  | `0`     | Whether to enable async exponential overlap. To enable async exponential, set this config to 1.                                                                |
 
 The details of each configuration option are as follows:
 
 **xlite_graph_config**
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama or Qwen dense series models are supported. |
+| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama, Qwen dense series models, and Qwen3-vl are supported. |
 | `full_mode` | bool | `False` | Whether to enable xlite for both the prefill and decode stages. By default, xlite is only enabled for the decode stage. |
 
 **weight_prefetch_config**

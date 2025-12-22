@@ -64,6 +64,7 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
+_HAS_ROPE = None
 
 
 def _print_callback_on_stream(*args):
@@ -122,8 +123,22 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def is_enable_nz():
-    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
+def maybe_trans_nz(weight: torch.Tensor):
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        # NZ is not enabled
+        return weight
+    if weight.dtype == torch.float:
+        # fp32 can not support NZ
+        return weight
+    elif weight.dtype in {torch.bfloat16, torch.float16}:
+        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
+            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+        else:
+            return weight
+    else:
+        # quant weight will trans nz by default
+        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
@@ -636,6 +651,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
         AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
@@ -664,6 +680,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
+        "MMEncoderAttention": AscendMMEncoderAttention,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -809,9 +826,22 @@ def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
-        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        if "thinker_config" in hf_config:
+            # Qwen-Omni-thinker models
+            _IS_VL_MODEL = True
+        else:
+            _IS_VL_MODEL = "vision_config" in hf_config
     return _IS_VL_MODEL
+
+
+def has_rope(vllm_config: VllmConfig):
+    """Checks if the model uses rope."""
+    global _HAS_ROPE
+    if _HAS_ROPE is None and vllm_config and vllm_config.model_config:
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        _HAS_ROPE = "rope_parameters" in hf_config
+    return _HAS_ROPE
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -979,7 +1009,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     if not flashcomm2_enable():
         flashcomm2_oproj_shared = False
-        logger.info("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(

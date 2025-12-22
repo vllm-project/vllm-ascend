@@ -162,7 +162,7 @@ class RemoteOpenAIServer:
         self.proxy_port = proxy_port
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 1800
+        max_wait_seconds = max_wait_seconds or 2800
         if self.disaggregated_prefill:
             assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
             self._wait_for_server_pd(timeout=max_wait_seconds)
