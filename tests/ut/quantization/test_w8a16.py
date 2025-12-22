@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -54,16 +55,17 @@ class TestAscendW8A16LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
-    @patch("vllm_ascend.quantization.w8a16.is_enable_nz")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading_not_nz(self, mock_npu_format_cast,
-                                                  mock_is_nz):
+    def test_process_weights_after_loading_with_nz0(self,
+                                                    mock_npu_format_cast):
         layer = MagicMock()
-        layer.weight.data = torch.randn(128, 256)
+        layer.weight.data = torch.randint(-127,
+                                          128, (128, 256),
+                                          dtype=torch.int8)
         layer.weight_scale.data = torch.randn(128, 1)
         layer.weight_offset.data = torch.randn(128, 1)
 
-        mock_is_nz.return_value = 0
         mock_npu_format_cast.return_value = MagicMock
         self.method.process_weights_after_loading(layer)
 
@@ -71,17 +73,37 @@ class TestAscendW8A16LinearMethod(TestBase):
         self.assertEqual(layer.weight_offset.data.shape, (128, ))
         mock_npu_format_cast.assert_not_called()
 
-    @patch("vllm_ascend.quantization.w8a16.is_enable_nz")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
     @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading_nz(self, mock_npu_format_cast,
-                                              mock_is_nz):
+    def test_process_weights_after_loading_with_nz1(self,
+                                                    mock_npu_format_cast):
         layer = MagicMock()
 
-        layer.weight.data = torch.randn(128, 256)
+        layer.weight.data = torch.randint(-127,
+                                          128, (128, 256),
+                                          dtype=torch.int8)
         layer.weight_scale.data = torch.randn(128, 1)
         layer.weight_offset.data = torch.randn(128, 1)
 
-        mock_is_nz.return_value = 1
+        mock_npu_format_cast.return_value = MagicMock
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight_scale.data.shape, (128, ))
+        self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        mock_npu_format_cast.assert_called_once()
+
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"})
+    @patch('torch_npu.npu_format_cast')
+    def test_process_weights_after_loading_with_nz2(self,
+                                                    mock_npu_format_cast):
+        layer = MagicMock()
+
+        layer.weight.data = torch.randint(-127,
+                                          128, (128, 256),
+                                          dtype=torch.int8)
+        layer.weight_scale.data = torch.randn(128, 1)
+        layer.weight_offset.data = torch.randn(128, 1)
+
         mock_npu_format_cast.return_value = MagicMock
         self.method.process_weights_after_loading(layer)
 
