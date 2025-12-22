@@ -565,7 +565,6 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             """
             assert positions.ndim == 1 or positions.ndim == 2
             assert key is not None
-            print("111")
             self._match_cos_sin_cache_dtype(query)
             num_tokens = positions.shape[-1]
             # check if is first layer
