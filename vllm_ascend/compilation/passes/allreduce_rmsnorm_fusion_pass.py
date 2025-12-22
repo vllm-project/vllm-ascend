@@ -20,8 +20,10 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.config import VllmConfig
-
+from torch._inductor.pattern_matcher import PatternPrettyPrinter
+from vllm.distributed import tensor_model_parallel_all_reduce
 import logging
+
 
 class MatmulAllReduceAddRMSNormPattern:
 
@@ -31,44 +33,39 @@ class MatmulAllReduceAddRMSNormPattern:
         device_group = get_tp_group().device_group
         self.local_rank = torch.distributed.get_rank(group=device_group)
         backend = device_group._get_backend(torch.device("npu"))
-        self.tp_group_name = backend.get_hccl_comm_name(self.local_rank)
+        self.tp_group_name = get_tp_group().unique_name
 
     def get_inputs(self):
-        """
-        Generate example inputs for the AddRMSNormQuant fusion pattern.
-        """
-        x = torch.randn(2, 4, device="npu")
-        weight = torch.randn(8, 4, device="npu")
-        residual = torch.randn(2, 8, device="npu")
-        rms_norm_weight = torch.randn(8, device="npu")
+        batch_size, seq_len = 2, 4
+        hidden_size = 4096
+        x = torch.randn(batch_size, seq_len, hidden_size, device="npu")
+        weight = torch.randn(hidden_size, hidden_size, device="npu")
+        residual = torch.randn(batch_size, seq_len, hidden_size, device="npu")
+        rms_norm_weight = torch.randn(hidden_size, device="npu")
         return [x, weight, residual, rms_norm_weight]
-
+    
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(x, weight, residual, rms_norm_weight):
-            """
-            Pattern for AddRMSNormQuant fusion.
-            """
-            tmp = torch.nn.functional.linear(x, weight)
-            # all_reduce_ = torch.ops.vllm.all_reduce(tmp, group_name="")
-            all_reduce_ = torch.ops.vllm.tensor_model_parallel_all_reduce(tmp)
-            output = torch.ops.npu.npu_add_rms_norm(all_reduce_, residual, rms_norm_weight, self.eps)
+            mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
+            all_reduce_ = tensor_model_parallel_all_reduce(mm)
+            output = torch.ops.npu.npu_add_rms_norm.default(
+                all_reduce_, residual, rms_norm_weight
+            )
             out0 = output[0]
             out1 = output[2]
-
+            
             return out0, out1
         
         def replacement(x, weight, residual, rms_norm_weight):
-            """
-            Replacement for the AddRMSNormQuant fusion.
-            """
-            out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(x, weight, residual, rms_norm_weight,
-                            self.tp_group_name, 0, 0, self.eps, True, True)
+            out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
+                x, weight, residual, rms_norm_weight,
+                self.tp_group_name, 0, 0, self.eps, True, True
+            )
             return out0, out1
-
+        
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
-    
+
 
 class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
     def __init__(self, vllm_config: VllmConfig):
@@ -76,19 +73,25 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
             pass_name="allreduce_rmsnorm_fusion_pass")
         
-        common_epsilons = [1e-5, 1e-6]
-        for eps in common_epsilons:
-            MatmulAllReduceAddRMSNormPattern(vllm_config,
-                                   eps=eps).register(self.pattern_match_passes)
+        MatmulAllReduceAddRMSNormPattern(vllm_config,
+                                ).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         logging.info("=========before fusion graph========")
         logging.info(graph.graph)
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
+        logging.info("Fused %s matmul allreduce patterns", self.matched_count)
+        logging.info("Patterns registered for replacement:")
+        pattern_idx = 0
+        for pattern_entry in self.pattern_match_passes.patterns.values():
+            for p in pattern_entry:
+                p_str = PatternPrettyPrinter.run(p.pattern)
+                logging.info("Pattern %d: %s", pattern_idx, p_str)
+                pattern_idx += 1
         logging.info("=========after fusion graph========")
         logging.info(graph.graph)
-        logging.warning("Replaced %s patterns", self.matched_count)
+        logging.info("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
 
