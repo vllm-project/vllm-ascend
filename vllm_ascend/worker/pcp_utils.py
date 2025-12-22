@@ -89,17 +89,23 @@ class PCPManager:
                   self.dcp_world_size + self.pcp_world_size *
                   self.dcp_world_size * self.max_num_reqs))
         if self.speculative_config and self.pcp_world_size > 1:
-            self.input_ids_pcp_full = self._make_buffer(self.max_num_tokens,
-                                                        dtype=torch.int32)
-            self.query_start_loc_pcp_full = self._make_buffer(
-                self.max_num_reqs + 1, dtype=torch.int32)
+            self.input_ids_pcp_full = CpuGpuBuffer(self.max_num_tokens,
+                                                   dtype=torch.int32,
+                                                   device=device,
+                                                   pin_memory=pin_memory)
+            self.query_start_loc_pcp_full = CpuGpuBuffer(self.max_num_reqs + 1,
+                                                         dtype=torch.int32,
+                                                         device=device,
+                                                         pin_memory=pin_memory)
             self.positions_pcp_full = torch.zeros(self.max_num_tokens,
                                                   dtype=torch.int64,
                                                   device="cpu",
                                                   pin_memory=True)
             self.positions_pcp_full_np = self.positions_pcp_full.numpy()
-            self.query_lens_pcp_full = self._make_buffer(self.max_num_reqs,
-                                                         dtype=torch.int32)
+            self.query_lens_pcp_full = CpuGpuBuffer(self.max_num_reqs,
+                                                    dtype=torch.int32,
+                                                    device="cpu",
+                                                    pin_memory=True)
 
     def _get_cumsum_and_arange(
         self,
