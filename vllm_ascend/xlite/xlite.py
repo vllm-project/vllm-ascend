@@ -48,16 +48,23 @@ class LlamaXliteModel(XliteModel):
             vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
         dtype = vllm_config.model_config.dtype
         params_dict = dict(runnable.named_parameters())
-        layers = runnable.model.layers
+
+        if hasattr(runnable, "language_model"):
+            layers = runnable.language_model.model.layers
+            model_prefix = "language_model."
+        else:
+            layers = runnable.model.layers
+            model_prefix = ""
 
         config = self._build_model_config(vllm_config)
         xlite_model = Model()
-        xlite_model.embed = params_dict.get("model.embed_tokens.weight")
-        xlite_model.norm = params_dict.get("model.norm.weight")
+        xlite_model.embed = params_dict.get(model_prefix +
+                                            "model.embed_tokens.weight")
+        xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
         if vllm_config.model_config.hf_config.tie_word_embeddings:
             xlite_model.head = xlite_model.embed
         else:
-            xlite_model.head = params_dict.get("lm_head.weight")
+            xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
         xlite_model.attn_norm = [
             layer.input_layernorm.weight for layer in layers
         ]
@@ -112,6 +119,8 @@ class LlamaXliteModel(XliteModel):
 
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
         hf_config = vllm_config.model_config.hf_config
+        if hasattr(hf_config, "text_config"):
+            hf_config = hf_config.text_config
         config = ModelConfig()
         config.vocab_size = hf_config.vocab_size
         config.hidden_size = hf_config.hidden_size
@@ -166,6 +175,7 @@ def xlite_model_init(
         "LlamaForCausalLM": LlamaXliteModel,
         "Qwen2ForCausalLM": LlamaXliteModel,
         "Qwen3ForCausalLM": LlamaXliteModel,
+        "Qwen3VLForConditionalGeneration": LlamaXliteModel,
     }
 
     architecture = vllm_config.model_config.architectures[0]
