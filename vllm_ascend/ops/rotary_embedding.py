@@ -149,6 +149,18 @@ def apply_interleaved_rope(x: torch.Tensor,
     x_t[..., 2:mrope_section[2] * 3:3] = x[2, ..., 2:mrope_section[2] * 3:3]
     return x_t
 
+def npu_apply_rotary_emb_dispatch(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    """Dispatch to NPU rotary embedding kernel."""
+    if is_neox_style:
+        return torch_npu.npu_rotary_mul(x, cos, sin, "half").squeeze(0)
+    else:
+        return torch_npu.npu_rotary_mul(x, cos, sin, "interleaved").squeeze(0)
+
 def _rope_forward_oot(
     self,
     positions: torch.Tensor,
@@ -536,13 +548,6 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             beta_fast=beta_fast,
             beta_slow=beta_slow,
         )
-        self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
-        self.beta_fast = beta_fast
-        self.beta_slow = beta_slow
-        self.mrope_section = mrope_section
-        self.mrope_interleaved = mrope_interleaved
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2   
 
@@ -600,8 +605,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             query_rot = query[..., :self.rotary_dim]
             query_pass = query[..., self.rotary_dim:]
             query_rot = query_rot.unsqueeze(0)
-            query_rot = torch_npu.npu_rotary_mul(query_rot, self.cos, self.sin,
-                                                "half").squeeze(0)
+            query_rot = npu_apply_rotary_emb_dispatch(query_rot, self.cos, self.sin, self.is_neox_style)
             query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
             key_shape = key.shape
@@ -609,8 +613,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             key_rot = key[..., :self.rotary_dim]
             key_pass = key[..., self.rotary_dim:]
             key_rot = key_rot.unsqueeze(0)
-            key_rot = torch_npu.npu_rotary_mul(key_rot, self.cos, self.sin,
-                                                "half").squeeze(0)
+            key_rot = npu_apply_rotary_emb_dispatch(key_rot, self.cos, self.sin, self.is_neox_style)
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
             return query, key
 
