@@ -120,7 +120,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
-    ) -> CPChunkedContextMetadata | None:
+    ):
         chunked_context_metadata = super().build_chunked_metadata(
             common_prefix_len, common_attn_metadata, model)
         if chunked_context_metadata is None:

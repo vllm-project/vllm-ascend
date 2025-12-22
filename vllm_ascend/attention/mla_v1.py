@@ -451,7 +451,7 @@ class AscendMLAMetadataBuilder:
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
-    ) -> ChunkedContextMetadata | None:
+    ):
         if not self.chunked_prefill_enabled:
             return None
         num_reqs = common_attn_metadata.num_reqs
