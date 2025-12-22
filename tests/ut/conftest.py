@@ -21,9 +21,8 @@ from unittest.mock import MagicMock
 from vllm_ascend.utils import adapt_patch  # noqa E402
 from vllm_ascend.utils import register_ascend_customop
 
-sys.modules['torch_npu'] = MagicMock(npu=MagicMock(current_device=MagicMock(
-    return_value=0)))
 sys.modules['torch_npu._inductor'] = MagicMock()
+sys.modules['torch_npu.npu.current_device'] = MagicMock(return_value=0)
 
 triton_runtime = MagicMock()
 triton_runtime.driver.active.utils.get_device_properties.return_value = {
@@ -31,6 +30,17 @@ triton_runtime.driver.active.utils.get_device_properties.return_value = {
     'num_vectorcore': 8,
 }
 sys.modules['triton.runtime'] = triton_runtime
+
+# Mock accelerate to prevent circular import: accelerate.state <-> accelerate.utils.modeling
+sys.modules['accelerate'] = MagicMock()
+sys.modules['accelerate.state'] = MagicMock()
+sys.modules['accelerate.utils'] = MagicMock()
+sys.modules['accelerate.utils.modeling'] = MagicMock()
+sys.modules['accelerate.hooks'] = MagicMock()
+sys.modules['accelerate.big_modeling'] = MagicMock()
+
+from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import register_ascend_customop  # noqa E402
 
 adapt_patch()
 adapt_patch(True)
