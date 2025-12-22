@@ -95,29 +95,39 @@ class KVPoolWorker:
             self.pp_rank,
         )
 
-        num_hidden_layers = model_config.hf_config.num_hidden_layers
-        partition_list_str = os.getenv("PREFILL_PP_LAYER_PARTITION", None)
-        if partition_list_str is not None:
-            try:
-                partitions = [
-                    int(layer) for layer in partition_list_str.split(",")
-                ]
-            except ValueError as err:
-                raise ValueError("Invalid partition string: {}".format(
-                    partition_list_str)) from err
-            if len(partitions) != self.pp_size:
-                raise ValueError(
-                    f"{len(partitions)=} does not match {self.pp_size=}.")
-            if sum(partitions) != num_hidden_layers:
-                raise ValueError(
-                    f"{sum(partitions)=} does not match {num_hidden_layers=}.")
-        else:
-            layers_per_partition = num_hidden_layers // self.pp_size
-            partitions = [layers_per_partition for _ in range(self.pp_size)]
+        partitions = None
+        if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
+            num_hidden_layers = model_config.hf_config.num_hidden_layers
+            partition_list_str = os.getenv("PREFILL_PP_LAYER_PARTITION", None)
+            prefill_pp_size = len(
+                partition_list_str) if partition_list_str is not None else int(
+                    os.getenv("PREFILL_PP_SIZE", '1'))
 
-            if remaining_layers := num_hidden_layers % self.pp_size:
-                for i in range(2, remaining_layers + 2):
-                    partitions[-i] += 1
+            if partition_list_str is not None:
+                try:
+                    partitions = [
+                        int(layer) for layer in partition_list_str.split(",")
+                    ]
+                except ValueError as err:
+                    raise ValueError("Invalid partition string: {}".format(
+                        partition_list_str)) from err
+                if len(partitions) != prefill_pp_size:
+                    raise ValueError(
+                        f"{len(partitions)=} does not match {prefill_pp_size=}."
+                    )
+                if sum(partitions) != num_hidden_layers:
+                    raise ValueError(
+                        f"{sum(partitions)=} does not match {num_hidden_layers=}."
+                    )
+            else:
+                layers_per_partition = num_hidden_layers // prefill_pp_size
+                partitions = [
+                    layers_per_partition for _ in range(prefill_pp_size)
+                ]
+
+                if remaining_layers := num_hidden_layers % prefill_pp_size:
+                    for i in range(2, remaining_layers + 2):
+                        partitions[-i] += 1
 
         self.token_database = ChunkedTokenDatabase(self.metadata,
                                                    self.block_size,
@@ -206,7 +216,7 @@ class KVPoolWorker:
             ready_event.wait()
         else:
             if self.kv_role in ['kv_producer', 'kv_both'
-                                ] or not self.consumer_is_to_put:
+                                ] or self.consumer_is_to_put:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store, self.token_database, self.block_size,

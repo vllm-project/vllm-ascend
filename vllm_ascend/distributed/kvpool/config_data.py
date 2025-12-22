@@ -89,7 +89,7 @@ class LayerPoolKey(PoolKey):
 class ChunkedTokenDatabase():
 
     def __init__(self, metadata: KeyMetadata, block_size: int, use_mla: bool,
-                 partitions: List[int]):
+                 partitions: Optional[List[int]]):
         self.metadata = metadata
         self.block_size = block_size
         self.use_mla = use_mla
@@ -192,6 +192,9 @@ class ChunkedTokenDatabase():
                 yield start_idx, end_idx, self._make_key_by_hash(hash_val)
 
     def adaptor_pp(self, key, addr, size):
+        if self.partitions is None or len(self.partitions) == 1:
+            return key, addr, size
+
         new_key = []
         new_addr = []
         new_size = []
