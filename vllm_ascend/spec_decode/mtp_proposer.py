@@ -600,7 +600,7 @@ class MtpProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=self.runner.seq_lens
+            max_seq_len=0
         )
         return spec_common_attn_metadata, token_indices
 
