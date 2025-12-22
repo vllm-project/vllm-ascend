@@ -23,7 +23,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import logger
-
+from vllm.config.utils import Range
 
 class QKNormRopeFusionPattern:
 
@@ -272,7 +272,11 @@ class QKNormRopeFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
+        logger.info("before graph fusion")
+        logger.info(graph.graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
+        logger.info("after graph fusion")
+        logger.info(graph.graph)
         logger.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
         logger.debug("Patterns registered for replacement:")
         pattern_idx = 0
@@ -283,7 +287,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
                 pattern_idx += 1
         self.end_and_log()
 
-    def is_applicable(self, runtime_shape):
+    def is_applicable(self, compile_range: Range) -> bool:
         """
         Check if the pass is applicable for the current configuration.
         """

@@ -19,7 +19,7 @@
 from torch import fx as fx
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
-
+from vllm.compilation.inductor_pass import get_pass_context
 
 class GraphFusionPassManager:
     """
@@ -32,9 +32,11 @@ class GraphFusionPassManager:
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
 
-    def __call__(self, graph: fx.Graph, runtime_shape) -> fx.Graph:
+    def __call__(self, graph: fx.Graph, compile_range) -> fx.Graph:
+        compile_range = get_pass_context().compile_range
+        
         for pass_ in self.passes:
-            if pass_.is_applicable(runtime_shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
         return graph
 
