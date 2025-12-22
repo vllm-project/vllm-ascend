@@ -834,7 +834,6 @@ class TestAscendMLAImpl(TestBase):
     @patch('vllm.distributed.parallel_state._TP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def setUp(self, get_current_vllm_config, mock_tp, mock_dcp, mock_pcp):
         mock_tp.world_size = 2
         mock_tp.rank_in_group = MagicMock()
