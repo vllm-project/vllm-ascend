@@ -39,15 +39,14 @@ from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
 # AscendAttentionBackendImpl for GQA models, we cannot pass cos && sin by
 # attn_metadata. This causes that rope in GQA models must pass cos && sin
 # by different approaches.
-_cos_mla: torch.Tensor = None
-_sin_mla: torch.Tensor = None
-_cos_cache: torch.Tensor = None
-_sin_cache: torch.Tensor = None
-_cos_sin_cache: torch.Tensor = None
-_cos: torch.Tensor = None
-_sin: torch.Tensor = None
-_cos_slice: torch.Tensor = None
-_sin_slice: torch.Tensor = None
+_cos_mla: Optional[torch.Tensor] = None
+_sin_mla: Optional[torch.Tensor] = None
+_cos_cache: Optional[torch.Tensor] = None
+_sin_cache: Optional[torch.Tensor] = None
+_cos: Optional[torch.Tensor] = None
+_sin: Optional[torch.Tensor] = None
+_cos_slice: Optional[torch.Tensor] = None
+_sin_slice: Optional[torch.Tensor] = None
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
@@ -116,10 +115,15 @@ def get_cos_and_sin_mla(positions, use_cache=False):
 
 
 def _record_cos_sin_cache(cos_sin_cache):
-    global _cos_sin_cache
-    if _cos_sin_cache is not None:
+    global _cos_cache
+    global _sin_cache
+
+    if _cos_cache is not None \
+        and _sin_cache is not None:
         return
-    _cos_sin_cache = cos_sin_cache
+    cos_sin_cache = cos_sin_cache.view(-1, 2, cos_sin_cache.shape[-1] // 2).repeat(1, 1, 2).chunk(2, dim=-2)
+    _cos_cache = cos_sin_cache[0].contiguous()
+    _sin_cache = cos_sin_cache[1].contiguous()
 
 
 def _record_cos_and_sin_cache(cos_cache, sin_cache):
@@ -129,22 +133,26 @@ def _record_cos_and_sin_cache(cos_cache, sin_cache):
     _sin_cache = sin_cache
 
 
-def update_cos_sin(positions):
+def update_cos_sin(positions, is_draft_model=True):
     global _cos
     global _sin
     global _cos_slice
     global _sin_slice
 
-    if _cos_sin_cache is None or \
+    if _cos_cache is None or \
+        _sin_cache is None or \
         _cos is None or \
         _sin is None:
         return
 
+    if is_draft_model:
+        _cos_slice = None
+        _sin_slice = None
+        return
+
     num_tokens = positions.size(0)
-    _cos[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
-        num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
-    _sin[:, :num_tokens] = _cos_sin_cache.index_select(0, positions).view(
-        num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
+    _cos[:, :num_tokens] = _cos_cache.index_select(0, positions)
+    _sin[:, :num_tokens] = _sin_cache.index_select(0, positions)
     _cos_slice = _cos[:, :num_tokens]
     _sin_slice = _sin[:, :num_tokens]
 
@@ -190,7 +198,12 @@ def _rope_forward_oot(
     else:
         cos, sin = get_cos_and_sin_slice()
         if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
-                -1] == 128 and cos is not None and sin is not None:
+                -1] == 128:
+            if cos is None or sin is None:
+                num_tokens = positions.shape[0]
+                cos, sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)
+                cos = cos.view(1, num_tokens, -1,self.head_size)
+                sin = sin.view(1, num_tokens, -1,self.head_size)
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,
