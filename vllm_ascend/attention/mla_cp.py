@@ -82,9 +82,10 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         if long_seq_metadata is None:
             raise AssertionError("long_seq_metadata should not be None.")
-        self.num_actual_tokens = long_seq_metadata.num_actual_tokens_pcp_padded
-        if self.num_actual_tokens == 0:
-            self.num_actual_tokens = common_attn_metadata.num_actual_tokens
+
+        self.num_actual_tokens = max(
+            long_seq_metadata.num_actual_tokens_pcp_padded,
+            common_attn_metadata.num_actual_tokens)
 
     def build_cp_metadata(
         self,
@@ -125,15 +126,13 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             common_prefix_len, common_attn_metadata, model)
         if chunked_context_metadata is None:
             return None
-        num_reqs = common_attn_metadata.num_reqs
-        reqs_start = self.num_decodes  # prefill_start
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         local_context_lens_allranks = torch.tensor(
-            num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]).reshape(
+            num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten:]).reshape(
                 -1, self.dcp_size * self.pcp_size)
         # Note(qcs): The max local context lengths
         # padded to `cp_local_block_size`.
@@ -188,22 +187,18 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
     ):
-        if self.pcp_size > 1:
-            num_decodes_flatten = self.num_decodes * self.decode_threshold
-            self.block_table = common_attn_metadata.block_table_tensor[:
-                                                                       num_decodes_flatten
-                                                                       + self.
-                                                                       num_prefills]
-        else:
-            super().set_prefill_block_table(common_attn_metadata)
+        # For pcp + spec decode, we flatten seq_lens and block_table
+        # to avoid irregular spec_attn_mask shape
+        self.num_decodes_flatten = self.query_lens[:self.num_decodes].sum(
+        ).item()
+        self.block_table = common_attn_metadata.block_table_tensor[:self.
+                                                                   num_decodes_flatten
+                                                                   + self.
+                                                                   num_prefills]
 
     def set_decode_block_table(
             self, common_attn_metadata: AscendCommonAttentionMetadata):
-        if self.pcp_size > 1:
-            num_decodes_flatten = self.num_decodes * self.decode_threshold
-            self.block_table = self.block_table[:num_decodes_flatten, ...]
-        else:
-            self.block_table = self.block_table[:self.num_decodes, ...]
+        self.block_table = self.block_table[:self.num_decodes_flatten, ...]
 
     def build_prefill_metadata(
         self,
@@ -215,14 +210,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             common_prefix_len, common_attn_metadata, model)
         prefill_metadata.pcp_metadata = self.build_cp_metadata(
             common_prefix_len, common_attn_metadata, model)
-        if self.pcp_size > 1:
-            num_decodes_flatten = self.num_decodes * self.decode_threshold
-            self.block_table = common_attn_metadata.block_table_tensor[:
-                                                                       num_decodes_flatten
-                                                                       + self.
-                                                                       num_prefills]
-            prefill_metadata.block_table = self.block_table[
-                num_decodes_flatten:, ...]
+        prefill_metadata.block_table = self.block_table[
+            self.num_decodes_flatten:, ...]
         return prefill_metadata
 
     def build_decode_metadata(
@@ -237,22 +226,21 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
-        if num_computed_tokens_of_pcp_dcp is not None:
-            # [bs, pcp_size, dcp_size]
-            num_computed_tokens_of_cp_dcp_array = np.array(
-                num_computed_tokens_of_pcp_dcp)[:self.num_decodes *
-                                                self.decode_threshold]
+        assert num_computed_tokens_of_pcp_dcp is not None
+        # [bs, pcp_size, dcp_size]
+        num_computed_tokens_of_cp_dcp_array = np.array(
+            num_computed_tokens_of_pcp_dcp)[:self.num_decodes_flatten]
 
-            cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
-                                                             self.dcp_rank]
-            cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-            batch_seq_mask = (cp_seq_len == 0)
-            self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
-                batch_seq_mask, non_blocking=True)
-            batch_seq_mask = self.batch_seq_mask_buf[:batch_seq_mask.shape[0]]
-            cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
-            decode_metadata.cp_seq_len = cp_seq_len
-            decode_metadata.batch_seq_mask = batch_seq_mask
+        cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
+                                                         self.dcp_rank]
+        cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
+        batch_seq_mask = (cp_seq_len == 0)
+        self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
+            batch_seq_mask, non_blocking=True)
+        batch_seq_mask = self.batch_seq_mask_buf[:batch_seq_mask.shape[0]]
+        cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
+        decode_metadata.cp_seq_len = cp_seq_len
+        decode_metadata.batch_seq_mask = batch_seq_mask
         return decode_metadata
 
 
