@@ -193,6 +193,7 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -2179,7 +2180,11 @@ class NPUModelRunner(GPUModelRunner):
             self._dummy_run(mc2_tokens_capacity,
                             with_prefill=True,
                             is_profile=True)
+        origin_max_num_tokens = self.max_num_tokens
+        if self.pcp_size > 1:
+            self.max_num_tokens = self.max_num_tokens // self.pcp_size
         super().profile_run()
+        self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
