@@ -281,7 +281,7 @@ class NPUPlatform(Platform):
             parallel_config.all2all_backend = "flashinfer_all2allv"
             if ascend_config.xlite_graph_config.enabled:
                 logger.info(
-                    "Euler Xlite enabled. See: https://gitee.com/openeuler/GVirt/tree/master/xlite"
+                    "openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite"
                 )
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
