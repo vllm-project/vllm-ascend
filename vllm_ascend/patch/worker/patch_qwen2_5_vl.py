@@ -18,7 +18,6 @@
 import einops
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.models.qwen2_5_vl import (Qwen2_5_VisionAttention,
                                                    Qwen2_5_VLImageInputs,
@@ -26,7 +25,6 @@ from vllm.model_executor.models.qwen2_5_vl import (Qwen2_5_VisionAttention,
 from vllm.model_executor.models.qwen2_vl import Qwen2VisionAttention
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
@@ -47,7 +45,6 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
-        # Split q k v.
         qkv = einops.rearrange(
             x,
             "s b (three head head_dim) -> b s three head head_dim",
@@ -55,10 +52,6 @@ class AscendQwen2_5_VisionAttention(nn.Module):
             head=self.num_attention_heads_per_partition,
         )
         q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-        origin_shape = q.shape[-1]
-
-        # Convert cumulative tensor to intervals and move it to cpu.
-        cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
         cos = torch.cat((rotary_pos_emb_cos, rotary_pos_emb_cos), dim=-1)
         sin = torch.cat((rotary_pos_emb_sin, rotary_pos_emb_sin), dim=-1)
@@ -67,42 +60,13 @@ class AscendQwen2_5_VisionAttention(nn.Module):
         q = torch_npu.npu_rotary_mul(q, cos, sin)
         k = torch_npu.npu_rotary_mul(k, cos, sin)
 
-        q, k, v = [
-            einops.rearrange(x, "b s h d -> (b s) h d").contiguous()
-            for x in (q, k, v)
-        ]
-
-        enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
-                      and self.hidden_size_per_attention_head > MIN_PAD_SIZE
-                      and self.hidden_size_per_attention_head < MAX_PAD_SIZE)
-
-        if enable_pad:
-            pad_len = MAX_PAD_SIZE - origin_shape
-            # q/k/v: [b * s, head, head_dim] -> [b * s, head, MAX_PAD_SIZE]
-            q = F.pad(q, (0, pad_len), mode="constant", value=0)
-            k = F.pad(k, (0, pad_len), mode="constant", value=0)
-            v = F.pad(v, (0, pad_len), mode="constant", value=0)
-
-        context_layer = torch.empty_like(q)
-
-        # operator requires pta version >= 2.5.1
-        torch_npu._npu_flash_attention_unpad(
+        context_layer = self.attn(
             query=q,
             key=k,
             value=v,
-            seq_len=cu_seqlens,
-            scale_value=self.hidden_size_per_attention_head**-0.5,
-            num_heads=self.num_attention_heads_per_partition,
-            num_kv_heads=self.num_attention_heads_per_partition,
-            out=context_layer,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
-
-        if enable_pad:
-            context_layer = context_layer[..., :origin_shape]
-
-        context_layer = einops.rearrange(context_layer,
-                                         "(b s) h d -> s b (h d)",
-                                         b=batch_size).contiguous()
 
         output, _ = self.proj(context_layer)
         return output
