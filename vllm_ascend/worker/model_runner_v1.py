@@ -329,6 +329,8 @@ class NPUModelRunner(GPUModelRunner):
             ascend_config = get_ascend_config()
             self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
                                             self.eplb_process, self.process)
+            self.eplb_adaptor_cls: Optional[type[VllmEplbAdaptor]] = None
+            self.eplb_adaptor: Optional[VllmEplbAdaptor] = None
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -2209,6 +2211,7 @@ class NPUModelRunner(GPUModelRunner):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
+            assert self.eplb_adaptor_cls is not None
             self.eplb_adaptor = self.eplb_adaptor_cls(self.model)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
@@ -2221,9 +2224,10 @@ class NPUModelRunner(GPUModelRunner):
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 self.eplb_adaptor_cls = EplbAdaptorFactory.get_eplb_adapator(
-                    vllm_config=self.vllm_config
-                )
-                self.eplb_adaptor_cls.model_register(self.model, self.model_config)
+                    vllm_config=self.vllm_config)
+                assert self.eplb_adaptor_cls is not None
+                self.eplb_adaptor_cls.model_register(self.model,
+                                                     self.model_config)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
