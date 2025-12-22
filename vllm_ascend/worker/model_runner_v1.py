@@ -1043,7 +1043,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
                 prefill_context_parallel_metadata=long_seq_metadata,
-                max_seq_len=self.seq_lens)
+                max_seq_len=0)
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
@@ -1872,7 +1872,7 @@ class NPUModelRunner(GPUModelRunner):
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
                     prefill_context_parallel_metadata=long_seq_metadata,
-                    max_seq_len=self.seq_lens
+                    max_seq_len=0
                 )
                 if self.pcp_size * self.dcp_size > 1:
                     common_attn_metadata.block_table_tensor = \

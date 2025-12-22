@@ -268,7 +268,7 @@ class MtpProposer(Proposer):
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
-                    max_seq_len=self.runner.seq_lens
+                    max_seq_len=0
                 )
                 if self.pcp_size * self.dcp_size > 1:
                     # update long_seq related params and flatten block_table
@@ -1224,7 +1224,7 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
-            max_seq_len=common_attn_metadata.seq_lens)
+            max_seq_len=0)
 
         query_start_loc = common_attn_metadata.query_start_loc[
             1:1 + num_rejected_tokens_gpu.shape[0]]

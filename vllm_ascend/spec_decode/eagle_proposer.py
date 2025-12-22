@@ -742,7 +742,7 @@ class EagleProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=new_seq_lens_cpu.max().item())
+            max_seq_len=0)
         return spec_common_attn_metadata, token_indices
 
     def prepare_inputs_padded(
@@ -801,7 +801,7 @@ class EagleProposer(Proposer):
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
-            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item())
+            max_seq_len=0)
 
         token_indices_to_sample = (common_attn_metadata.query_start_loc[1:] -
                                    1 - num_rejected_tokens_gpu)
