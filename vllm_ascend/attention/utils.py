@@ -122,8 +122,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     For many of the tensors we keep both NPU and CPU versions.
     """
-    seq_lens_cpu: torch.Tensor | None = None
-    num_computed_tokens_cpu: torch.Tensor | None = None
+    seq_lens_cpu: torch.Tensor = None
+    num_computed_tokens_cpu: torch.Tensor = None
 
     decode_token_per_req: int = 1
     """decode token number per request"""
