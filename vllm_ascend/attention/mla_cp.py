@@ -16,10 +16,12 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 # isort: off
-from vllm_ascend.attention.mla_v1 import (
-    AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata,
-    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata,
-    DecodeMLAPreprocessResult, PrefillMLAPreprocessResult)
+from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
+                                          AscendMLAImpl, AscendMLAMetadata,
+                                          AscendMLAMetadataBuilder,
+                                          AscendMLAPrefillMetadata,
+                                          DecodeMLAPreprocessResult,
+                                          PrefillMLAPreprocessResult)
 #isort: on
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -36,6 +38,7 @@ from vllm_ascend.utils import weak_ref_tensors
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
 M = TypeVar("M", bound=AscendMLAMetadata)
+
 
 class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
