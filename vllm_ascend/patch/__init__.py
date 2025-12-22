@@ -273,3 +273,27 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
+# ** 14.File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
+#    Why:
+#       The Qwen3Next GatedDeltaNet forward cannot directly add custom operators.
+#    How：
+#       Add a branch in Qwen3NextGatedDeltaNet.forward to adapt to fused_qkvzba_split_reshape_cat.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30863
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
+# ** 15. File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#    Why:
+#       triton ops fused_recurrent_gated_delta_rule and fused_gdn_gating in vLLM perform not good on NPU.
+#    How：
+#       add a new fused triton ops in vLLM with ascend implementation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30860
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#

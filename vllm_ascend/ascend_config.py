@@ -154,14 +154,18 @@ class AscendConfig:
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
-        self.pa_shape_list = additional_config.get("pa_shape_list",
-                                                   [1, 2, 3, 4])
+        self.pa_shape_list = additional_config.get("pa_shape_list", [])
 
         kv_cfg = vllm_config.kv_transfer_config
         if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
                                               False):
             kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
             kv_cfg._engine_id_patched = True
+        self.enable_async_exponential = additional_config.get(
+            "enable_async_exponential", 0)
+        if self.enable_async_exponential not in (0, 1):
+            raise AssertionError(
+                "Enable async exponential can only be set to 0 or 1.")
 
 
 class FinegrainedTPConfig:

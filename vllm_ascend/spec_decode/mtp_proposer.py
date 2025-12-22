@@ -229,7 +229,8 @@ class MtpProposer(Proposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
-                  dummy_compute_logits=lambda hidden_states: None) -> None:
+                  dummy_compute_logits=lambda hidden_states: None,
+                  is_profile=False) -> None:
 
         (
             num_tokens,
@@ -299,7 +300,8 @@ class MtpProposer(Proposer):
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    is_mtp_model=True):
+                    is_mtp_model=True,
+                    in_profile_run=is_profile):
                 if self.enable_shared_expert_dp:
                     positions = positions.unsqueeze(-1)
                     positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
@@ -780,15 +782,16 @@ class MtpProposer(Proposer):
                             hidden_states)
 
                     for layer_name in self.attn_layer_name:
-                        if self.use_async_scheduling and attn_metadata[
-                                layer_name].decode is not None:
-                            actual_size = len(attn_metadata[layer_name].decode.
-                                              actual_seq_lengths_q)
+                        decode_metadata = getattr(attn_metadata[layer_name],
+                                                  "decode", None)
+                        if self.use_async_scheduling and decode_metadata is not None:
+                            actual_size = len(
+                                decode_metadata.actual_seq_lengths_q)
 
-                            attn_metadata[layer_name].decode.seq_lens_list = \
-                                attn_metadata[layer_name].decode.seq_lens_list[:actual_size]
-                            attn_metadata[layer_name].decode.block_table = \
-                                attn_metadata[layer_name].decode.block_table[:actual_size]
+                            decode_metadata.seq_lens_list = \
+                                decode_metadata.seq_lens_list[:actual_size]
+                            decode_metadata.block_table = \
+                                decode_metadata.block_table[:actual_size]
 
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
