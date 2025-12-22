@@ -596,9 +596,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            pre_tokens=self.sliding_window if self.sliding_window else SWA_INT_MAX,
+            pre_tokens=self.sliding_window
+            if self.sliding_window else SWA_INT_MAX,
             next_tokens=0 if self.sliding_window else SWA_INT_MAX,
-            atten_mask=self.swa_mask if self.sliding_window else attn_metadata.attn_mask,
+            atten_mask=self.swa_mask
+            if self.sliding_window else attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
