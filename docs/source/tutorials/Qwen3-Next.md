@@ -27,7 +27,10 @@ If the machine environment is an Atlas 800I A3(64G*16), the deployment approach 
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A2 machines:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
 --shm-size=1g \
 --name vllm-ascend-qwen3 \
