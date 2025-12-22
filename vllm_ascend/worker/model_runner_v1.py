@@ -3234,8 +3234,10 @@ class NPUModelRunner(GPUModelRunner):
                     q_req_offset += seq_len
                     kv_req_offset += seq_len * self.pcp_size
 
-                q_head_idx_tensor = self._list_to_tensor(q_head_idx, self.device)
-                q_tail_idx_tensor = self._list_to_tensor(q_tail_idx, self.device)
+                q_head_idx_tensor = self._list_to_tensor(
+                    q_head_idx, self.device)
+                q_tail_idx_tensor = self._list_to_tensor(
+                    q_tail_idx, self.device)
                 self.q_head_idx_tensor = q_head_idx_tensor
                 self.q_tail_idx_tensor = q_tail_idx_tensor
 
@@ -3310,8 +3312,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _list_to_tensor(self, lst, device, dtype=torch.int32):
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
-        tensor_npu.copy_(torch.tensor(lst, dtype=dtype),
-                            non_blocking=True)
+        tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
 
     def _split_nomask_idx_tensor_list(self, split_with_q_head_nomask_idx_reqs,
