@@ -1872,8 +1872,7 @@ class NPUModelRunner(GPUModelRunner):
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
                     prefill_context_parallel_metadata=long_seq_metadata,
-                    max_seq_len=0
-                )
+                    max_seq_len=0)
                 if self.pcp_size * self.dcp_size > 1:
                     common_attn_metadata.block_table_tensor = \
                         block_table_tensor[:num_reqs * self.decode_threshold]

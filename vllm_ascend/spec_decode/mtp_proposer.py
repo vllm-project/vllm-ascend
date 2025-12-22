@@ -268,8 +268,7 @@ class MtpProposer(Proposer):
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
-                    max_seq_len=0
-                )
+                    max_seq_len=0)
                 if self.pcp_size * self.dcp_size > 1:
                     # update long_seq related params and flatten block_table
                     common_attn_metadata.prefill_context_parallel_metadata = \
@@ -600,8 +599,7 @@ class MtpProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=0
-        )
+            max_seq_len=0)
         return spec_common_attn_metadata, token_indices
 
     def _propose(
