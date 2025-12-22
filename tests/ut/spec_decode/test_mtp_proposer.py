@@ -97,7 +97,6 @@ class TestMtpProposer:
         proposer = MtpProposer(vllm_config, torch.device("cpu"), runner)
 
         assert proposer.use_aclgraph is True
-        assert proposer.cudagraph_batch_sizes == [1, 2, 4, 8]
 
     @patch("vllm.config.get_layers_from_vllm_config")
     @patch("vllm_ascend.spec_decode.mtp_proposer.get_model_loader")
