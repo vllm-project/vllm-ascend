@@ -606,7 +606,7 @@ class ShardedCPRowParallelOp(CustomRowParallelOp):
     # Initialize `RowParallelLinear` as a replicated linear layer.
     def __init__(self, layer):
         super().__init__(layer)
-        self.reduce_results = False
+        self.layer.reduce_results = False
     @property
     def comm_group(self):
         # fake comm group to bypass tp logic
@@ -615,6 +615,11 @@ class ShardedCPRowParallelOp(CustomRowParallelOp):
             rank_in_group=0,
             device_group=None
         )
+    def apply_impl(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        return self.layer.forward(input_)
     
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):   
     @property
@@ -625,6 +630,11 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
             rank_in_group=0,
             device_group=None
         )
+    def apply_impl(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        return self.layer.forward(input_)
 
 
 
