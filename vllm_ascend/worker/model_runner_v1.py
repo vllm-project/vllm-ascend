@@ -116,8 +116,7 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
-                               lmhead_tp_enable, maybe_trans_nz,
-                               vllm_version_is)
+                               lmhead_tp_enable, maybe_trans_nz)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -243,24 +242,15 @@ class NPUModelRunner(GPUModelRunner):
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
                                   "index_topk")
-        if vllm_version_is('0.12.0'):
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse)
-        else:
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse,
-                use_mm_prefix=self.model_config is not None
-                and self.model_config.is_mm_prefix_lm)
+        self.attn_backend = get_attn_backend(
+            0,
+            self.dtype,
+            None,
+            self.block_size,
+            use_mla=self.model_config.use_mla,
+            use_sparse=self.use_sparse,
+            use_mm_prefix=self.model_config is not None
+            and self.model_config.is_mm_prefix_lm)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
@@ -1183,14 +1173,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
-        if self.model_config.runner_type == "pooling":
-            if isinstance(
-                    self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-                    EncoderOnlyAttentionSpec):
-                attn_state = AscendAttentionState.PrefillNoCache
-            else:
-                attn_state = AscendAttentionState.PrefillCacheHit
-        elif np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
+        if np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
@@ -1401,6 +1384,12 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
+
+        if self.ascend_config.enable_async_exponential != 0:
+            self.sampler.do_async_exponential(
+                b_s=logits_indices.shape[0],
+                head_dim=self.model_config.get_vocab_size(),
+                generators=self.input_batch.sampling_metadata.generators)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -1877,36 +1866,19 @@ class NPUModelRunner(GPUModelRunner):
                         self.speculative_config.method == "mtp":
                     attn_state = AscendAttentionState.SpecDecoding
 
-                if vllm_version_is("0.12.0"):
-                    common_metadata = CommonAttentionMetadata(
-                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
+                common_metadata = CommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                    query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
                                                                  1],
-                        query_start_loc_cpu=self.query_start_loc.
-                        cpu[:num_reqs + 1],
-                        seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                        seq_lens=self.seq_lens.cpu[:num_reqs],
-                        num_reqs=num_reqs,
-                        num_actual_tokens=num_tokens,
-                        block_table_tensor=block_table_tensor[:num_reqs],
-                        slot_mapping=slot_mapping.gpu,
-                        num_computed_tokens_cpu=num_computed_tokens_cpu,
-                        max_query_len=max_query_len,
-                        max_seq_len=seq_lens)
-                else:
-                    common_metadata = CommonAttentionMetadata(
-                        query_start_loc=self.query_start_loc.gpu[:num_reqs +
-                                                                 1],
-                        query_start_loc_cpu=self.query_start_loc.
-                        cpu[:num_reqs + 1],
-                        _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                        seq_lens=self.seq_lens.cpu[:num_reqs],
-                        num_reqs=num_reqs,
-                        num_actual_tokens=num_tokens,
-                        block_table_tensor=block_table_tensor[:num_reqs],
-                        slot_mapping=slot_mapping.gpu,
-                        _num_computed_tokens_cpu=num_computed_tokens_cpu,
-                        max_query_len=max_query_len,
-                        max_seq_len=seq_lens)
+                    _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                    seq_lens=self.seq_lens.cpu[:num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    block_table_tensor=block_table_tensor[:num_reqs],
+                    slot_mapping=slot_mapping.gpu,
+                    _num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    max_query_len=max_query_len,
+                    max_seq_len=seq_lens)
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
