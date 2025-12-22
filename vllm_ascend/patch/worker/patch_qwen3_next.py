@@ -35,6 +35,7 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import \
     fused_sigmoid_gating_delta_rule_update
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 
 
 class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
@@ -151,7 +152,6 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
-
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -211,14 +211,18 @@ class AscendQwen3Next_GatedDeltaNet(nn.Module, MambaBase):
             )
         else:
             mixed_qkv_non_spec = None
-
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(
             mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
             mixed_qkv_non_spec)
 
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
-            g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+            is_cuda_graph = forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            if (is_cuda_graph):
+                g, beta = fused_gdn_gating_patch(self.A_log, a, b,
+                                                 self.dt_bias)
+            else:
+                g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
             if spec_sequence_masks is not None:
                 if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:

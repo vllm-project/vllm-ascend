@@ -297,3 +297,13 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
+#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#    Why:
+#       The Qwen3Next GatedDeltaNet _forward_core cannot directly add custom operators.
+#    How：
+#       Add a branch in Qwen3NextGatedDeltaNet._forward_core to adapt to fused_gdn_gating_patch.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/31002
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
