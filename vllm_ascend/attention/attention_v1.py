@@ -363,6 +363,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.swa_mask = None
+        if self.sliding_window is not None:
+            mask = torch.ones(2048, 2048, dtype=torch.bool)
+            triu_mask = torch.triu(mask, diagonal=1).to("npu")
+            tril_mask = torch.tril(mask, -self.sliding_window).to("npu")
+            self.swa_mask = triu_mask + tril_mask
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,
@@ -568,6 +574,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       key: torch.Tensor, value: torch.Tensor,
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
+        INT_MAX = 2147483647
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             attn_output, num_tokens = self.full_graph_fia(
@@ -588,7 +595,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.attn_mask,
+            pre_tokens=self.sliding_window if self.sliding_window else INT_MAX,
+            next_tokens=0 if self.sliding_window else INT_MAX,
+            atten_mask=self.swa_mask if self.sliding_window else attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
@@ -597,7 +606,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=4 if self.sliding_window else 3,
         )
 
         attn_output = attn_output.view(num_tokens, self.num_heads,
