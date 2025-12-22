@@ -46,6 +46,9 @@ class EagleProposer(Proposer):
         self.device = device
         self.runner = runner
         self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
+        self.speculative_config = vllm_config.speculative_config
+        self.draft_model_config = self.speculative_config.draft_model_config
+        self.method = self.speculative_config.method
 
         self.block_size = vllm_config.cache_config.block_size
         # We need to get the hidden size from the draft model config because
@@ -121,6 +124,29 @@ class EagleProposer(Proposer):
                                        device="cpu",
                                        dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self.eagle3_use_aux_hidden_state: bool = (
+            self._get_eagle3_use_aux_hidden_state_from_config())
+
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """
+        NOTE(2025-12-18): This is an explicit copy from vLLM EagleProposer, only added
+        to align with its logics.
+
+        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        hidden states and directly uses the last layer output just like eagle1.
+        They might indicate this by setting "use_aux_hidden_state" to False
+        inside the "eagle_config" dict of their hf_config.
+        """
+        if self.method != "eagle3":
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
+        eagle_config = getattr(self.draft_model_config.hf_config,
+                               "eagle_config", None)
+        if eagle_config is not None:
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state",
+                                                    True)
+        return use_aux_hidden_state
 
     def get_model_name(self, model: nn.Module) -> str:
         if hasattr(model, "module"):

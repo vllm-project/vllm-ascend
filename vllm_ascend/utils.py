@@ -651,6 +651,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
         AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
@@ -679,6 +680,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
+        "MMEncoderAttention": AscendMMEncoderAttention,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -1007,7 +1009,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     if not flashcomm2_enable():
         flashcomm2_oproj_shared = False
-        logger.info("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(
