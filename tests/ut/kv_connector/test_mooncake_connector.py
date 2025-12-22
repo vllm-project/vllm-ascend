@@ -1195,7 +1195,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 "prefill": {"tp_size": prefill_tp_size, "dp_size": 1, "pp_size": prefill_pp_size},
                                 "decode": {"tp_size": decode_tp_size, "dp_size": 1, "pp_size": 1}
                             }.get(k, d)):
-                self.vllm_config.model_config.hf_config.num_key_value_heads = num_kv_heads
+                self.vllm_config.model_config.hf_text_config.num_key_value_heads = num_kv_heads
                 self.vllm_config.model_config.is_deepseek_mla = is_deepseek_mla
                 worker = MooncakeConnectorWorker(self.vllm_config,
                                                  self.engine_id)
