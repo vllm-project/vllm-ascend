@@ -1,9 +1,12 @@
 import torch
+import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import global_stream, npu_stream_switch
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               global_stream, npu_stream_switch)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -65,7 +68,14 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.apply_top_k_top_p = apply_top_k_top_p
+        is_async_scheduling = get_current_vllm_config(
+        ).scheduler_config.async_scheduling
+        is_ascend_310p = get_ascend_device_type() == AscendDeviceType._310P
+        # Currently, we do not call fused top_k_top_p op when async scheduling is enabled
+        # since it must cause D2H synchronize according to operation constraints.
+        self.use_fused_top_k_top_p_op = not (is_async_scheduling
+                                             or is_ascend_310p)
+        self.apply_top_k_top_p = apply_fused_top_k_top_p if self.use_fused_top_k_top_p_op else apply_top_k_top_p
 
     def set_q_event(self, q, event):
         # Pass in async exponential results.
@@ -124,3 +134,18 @@ def apply_top_k_top_p(
         logits.masked_fill_(elements_to_discard, -float("inf"))
 
     return logits
+
+
+def apply_fused_top_k_top_p(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    """Use torch_npu.npu_top_k_top_p if possible."""
+    if p is None and k is None:
+        return logits
+    # npu_top_k_top_p requires parameter k ranged from 1 to 1024 if given
+    if k is None or 1 <= int(k.max()) <= 1024:
+        # npu_top_k_top_p's parameter order is (logits, p, k), not (logits, k, p)
+        return torch_npu.npu_top_k_top_p(logits, p, k)
+    return apply_top_k_top_p(logits, k, p)
