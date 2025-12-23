@@ -115,6 +115,8 @@ class AscendCommonAttentionMetadata:
 
     spec_attn_mask: torch.Tensor = None
 
+    swa_attn_mask: torch.Tensor = None
+
     attn_state: Any = None
 
     graph_pad_size: int = -1
