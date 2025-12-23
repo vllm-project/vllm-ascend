@@ -366,8 +366,12 @@ class KVCacheRecvingThread(threading.Thread):
                 self.v_head_dim = self.model_config.hf_config.qk_rope_head_dim
                 self.num_kv_heads = 1
             else:
-                self.k_head_dim = self.model_config.hf_config.head_dim
-                self.v_head_dim = self.model_config.hf_config.head_dim
+                self.k_head_dim = (
+                    self.model_config.hf_config.num_key_value_heads
+                )
+                self.v_head_dim = (
+                    self.model_config.hf_config.num_key_value_heads
+                )
                 self.num_kv_heads = max(
                     self.model_config.hf_config.num_key_value_heads //
                     self.tp_size, 1)
