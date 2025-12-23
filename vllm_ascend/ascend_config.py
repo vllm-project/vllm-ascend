@@ -58,7 +58,7 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-
+        self.mix_placement = additional_config.get("mix_placement", False)
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
                                                    vllm_config)
@@ -238,13 +238,12 @@ class AscendCompilationConfig:
                  **kwargs):
         """
         Initialize the configuration.
-        
+
         Args:
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
-            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
-                Default: False
+
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
