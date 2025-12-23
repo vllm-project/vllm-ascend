@@ -196,7 +196,6 @@ class ACLGraphWrapper:
 
 
 def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
-    # TODO: Is pa should be adapted with draft_graph_params?
     graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
@@ -445,7 +444,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
 def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                                    runtime_shape):
     if forward_context.is_draft_model:
-        graph_params = get_mtp_graph_params()
+        graph_params = get_draft_graph_params()
     else:
         graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args

@@ -401,11 +401,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ):
+        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_draft_model:
-            graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if forward_context.capturing:
             # Get workspace from cache or calculate it if not present.
@@ -421,12 +418,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_table=attn_metadata.block_tables,
                     context_lens=attn_metadata.seq_lens,
                     out=output)
-                if forward_context.is_draft_model:
-                    update_draft_graph_params_workspaces(
-                        num_tokens, weak_ref_tensors(workspace))
-                else:
-                    update_graph_params_workspaces(num_tokens,
-                                                   weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens,
+                                               weak_ref_tensors(workspace))
 
             # Handle graph capturing mode
             stream = torch_npu.npu.current_stream()
