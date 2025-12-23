@@ -1,4 +1,4 @@
-# Maintainers and contributors
+# Maintainers and Contributors
 
 ## Maintainers
 
@@ -14,6 +14,9 @@
 | Yizhou Liu| [@yiz-liu](https://github.com/yiz-liu) | 2025/10 |
 | Jinqian Wei | [@weijinqian0](https://github.com/weijinqian0) | 2025/10 |
 | Chuanyu Qin | [@nalinaly](https://github.com/nalinaly) | 2025/10 |
+| Jie Wen| [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
+| Chao Lei| [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
+| JiaXu Liu| [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
 
 ## Contributors
 

@@ -8,6 +8,7 @@ env_common:
   OMP_NUM_THREADS: 100
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
+  NUMEXPR_MAX_THREADS: 128
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -32,7 +33,7 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
         --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
         "engine_id": "0",
@@ -67,7 +68,7 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
         --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
         "engine_id": "1",

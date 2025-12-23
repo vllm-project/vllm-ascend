@@ -1,11 +1,39 @@
 import torch
 import torch_npu
-from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
+from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               global_stream, npu_stream_switch)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
+
+
+def random_sample(
+    probs: torch.Tensor,
+    generators: dict[int, torch.Generator],
+) -> torch.Tensor:
+    """Randomly sample from the probabilities.
+
+    We use this function instead of torch.multinomial because torch.multinomial
+    causes CPU-NPU synchronization.
+    """
+    # NOTE(woosuk): To batch-process the requests without their own seeds,
+    # which is the common case, we first assume that every request does
+    # not have its own seed. Then, we overwrite the values for the requests
+    # that have their own seeds.
+    with npu_stream_switch(global_stream()):
+        q = torch.empty_like(probs)
+        if len(generators) != probs.shape[0]:
+            q.exponential_()
+        if generators:
+            # TODO(woosuk): This can be slow because we handle each request
+            # one by one. Optimize this.
+            for i, generator in generators.items():
+                q[i].exponential_(generator=generator)
+    torch.npu.current_stream().wait_stream(global_stream())
+    return probs.div_(q).argmax(dim=-1).view(-1)
 
 
 class AscendSampler(Sampler):
@@ -14,9 +42,34 @@ class AscendSampler(Sampler):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler()
+        self.async_exponential_event = torch.npu.Event()
+
+    def set_q_event(self, q, event):
+        self.topk_topp_sampler.set_q_event(q, event)
+
+    def do_async_exponential(self, b_s, head_dim, generators):
+        # Calculating exponential randoms in a different stream
+        # and overlapping with model executing.
+        with torch.npu.stream(global_stream()):
+            global_stream().wait_stream(torch.npu.current_stream())
+            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
+            # Goes to async exponential with AI-CPU exponential or default exponential.
+            if len(generators) != q.shape[0]:
+                q.exponential_()
+            if generators:
+                for i, generator in generators.items():
+                    q[i].exponential_(generator=generator)
+            self.async_exponential_event.record()
+        self.set_q_event(q, self.async_exponential_event)
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):
+
+    def set_q_event(self, q, event):
+        # Pass in async exponential results.
+        # Also pass in event to prevent synchronize errors.
+        self.q = q
+        self.async_event = event
 
     def _apply_top_k_top_p(
         self,
@@ -25,7 +78,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         p: torch.Tensor,
     ) -> torch.Tensor:
         # npu_top_k_top_p uses the operator aclnnApplyTopKTopP, but aclnnApplyTopKTopP currently does not support 310P
-        if not is_310p() and p is not None and k is not None and 1 <= int(
+        if get_ascend_device_type(
+        ) != AscendDeviceType._310P and p is not None and k is not None and 1 <= int(
                 k.max()) <= 1024:
             # npu_top_k_top_p's parameter order is (logits, p, k), not (logits, k, p)
             return torch_npu.npu_top_k_top_p(logits, p, k)
@@ -71,4 +125,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
+        if get_ascend_config().enable_async_exponential == 1:
+            # Add synchronize to prevent synchronize error.
+            self.async_event.synchronize()
+            return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
         return random_sample(probs, generators), logits_to_return

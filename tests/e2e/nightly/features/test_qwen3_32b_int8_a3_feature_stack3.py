@@ -14,14 +14,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import Any
 
-import openai
 import pytest
 from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
+from tools.send_request import send_text_request
 
 MODELS = [
     "vllm-ascend/Qwen3-32B-W8A8",
@@ -30,11 +29,13 @@ MODELS = [
 TENSOR_PARALLELS = [4]
 
 prompts = [
-    "San Francisco is a",
+    "9.11 and 9.8, which is greater?",
 ]
 
 api_keyword_args = {
-    "max_tokens": 10,
+    "chat_template_kwargs": {
+        "enable_thinking": True
+    },
 }
 
 aisbench_cases = [{
@@ -82,25 +83,17 @@ async def test_models(model: str, tp_size: int) -> None:
         "0.9", "--block-size", "128", "--max-num-seqs", "256",
         "--enforce-eager", "--max-model-len", "35840",
         "--max-num-batched-tokens", "35840", "--additional-config",
-        '{"ascend_scheduler_config":{"enabled":true},"enable_weight_nz_layout":true}',
-        "--compilation-config",
+        '{"enable_weight_nz_layout":true}', "--compilation-config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}'
     ]
-    request_keyword_args: dict[str, Any] = {
-        **api_keyword_args,
-    }
     with RemoteOpenAIServer(model,
                             server_args,
                             server_port=port,
                             env_dict=env_dict,
                             auto_port=False) as server:
-        client = server.get_async_client()
-        batch = await client.completions.create(
-            model=model,
-            prompt=prompts,
-            **request_keyword_args,
-        )
-        choices: list[openai.types.CompletionChoice] = batch.choices
-        assert choices[0].text, "empty response"
+        send_text_request(prompts[0],
+                          model,
+                          server,
+                          request_args=api_keyword_args)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)

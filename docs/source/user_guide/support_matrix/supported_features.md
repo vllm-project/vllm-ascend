@@ -2,6 +2,8 @@
 
 The feature support principle of vLLM Ascend is: **aligned with the vLLM**. We are also actively collaborating with the community to accelerate support.
 
+Functional call: https://docs.vllm.ai/en/latest/features/tool_calling/
+
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
 | Feature                       |      Status    | Next Step                                                              |
@@ -10,7 +12,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Automatic Prefix Caching      | 🟢 Functional  | Functional, see detailed note: [vllm-ascend#732][apc]                    |
 | LoRA                          | 🟢 Functional  | [vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]          |
 | Speculative decoding          | 🟢 Functional  | Basic support                                                          |
-| Pooling                       | 🟢 Functional  | CI needed to adapt to more models; V1 support rely on vLLM support.   |
+| Pooling                       | 🟢 Functional  | CI needed to adapt to more models; V1 support relies on vLLM support.   |
 | Enc-dec                       | 🟡 Planned     | vLLM should support this feature first.                                |
 | Multi Modality                | 🟢 Functional  | [Tutorial][multimodal], optimizing and adapting more models            |
 | LogProbs                      | 🟢 Functional  | CI needed                                                              |
