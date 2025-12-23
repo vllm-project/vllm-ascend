@@ -239,7 +239,9 @@ class TestNPUWorker(TestBase):
         "vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment"
     )
     @patch("vllm_ascend.worker.worker.NPUPlatform")
-    def test_init_device(self, mock_platform, mock_init_dist_env):
+    @patch("vllm_ascend.worker.worker.init_device_properties_triton")
+    def test_init_device(self, mock_init_triton, mock_platform,
+                         mock_init_dist_env):
         """Test _init_device method"""
         from vllm_ascend.worker.worker import NPUWorker
 
