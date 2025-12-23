@@ -146,53 +146,7 @@
 #    Future Plan:
 #       Identify this pattern in torch-npu and remove this patch.
 #
-# ** 5. File: worker/patch_qwen2_5_omni.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen2_5_omni_thinker.Qwen2_5OmniThinkerForConditionalGeneration`
-#    Why:
-#       we have ascend forward context which doesn't work with upstream.
-#    How：
-#       override forward_context in the model file
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only. we should drop set_ascend_forward_context
-#    Future Plan:
-#       Remove this patch once forward_context is refactor.
-#
-# ** 6. File: worker/patch_qwen2_5_vl.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration`
-#    Why:
-#       we have ascend forward context which doesn't work with upstream.
-#    How：
-#       override forward_context in the model file
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only. we should drop set_ascend_forward_context
-#    Future Plan:
-#       Remove this patch once forward_context is refactor.
-#
-#   2. `vllm.model_executor.models.qwen2_vl.Qwen2VisionAttention.forward`
-#    Why:
-#       the attention is not custom ops
-#    How：
-#       make it to custom ops and pluggable
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30125
-#    Future Plan:
-#       Remove this patch one the PR is merged into vLLM.
-#
-# ** 7. File: worker/patch_qwen3_vl.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.forward`
-#    Why:
-#       the attention is not custom ops
-#    How：
-#       make it to custom ops and pluggable
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30125
-#    Future Plan:
-#       Remove this patch one the PR is merged into vLLM.
-#
-# ** 8. File: worker/patch_roberta.py **
+# ** 5. File: worker/patch_roberta.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.bert `
 #    Why:
@@ -204,7 +158,7 @@
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
 #
-# ** 9. File: worker/patch_triton.py**
+# ** 6. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`
 #    Why:
@@ -216,7 +170,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 10. File: worker/patch_weight_loader.py**
+# ** 7. File: worker/patch_weight_loader.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.linear.UnquantizedLinearMethod`
 #    Why:
@@ -228,7 +182,7 @@
 #    Future Plan:
 #       Remove this patch when the bug is fixed.
 #
-# ** 11. File: worker/patch_qwen3_next_mtp.py**
+# ** 8. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -241,7 +195,7 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 12. File: worker/patch_module.py**
+# ** 9. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
@@ -257,7 +211,7 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
-# ** 13. File: worker/patch_rejection_sampler.py**
+# ** 10. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.rejection_sampler`
 #    Why:
@@ -273,7 +227,7 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-# ** 14.File: worker/patch_qwen3_next.py**
+# ** 11.File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
 #    Why:
@@ -285,7 +239,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 15. File: worker/patch_qwen3_next.py**
+# ** 12. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
