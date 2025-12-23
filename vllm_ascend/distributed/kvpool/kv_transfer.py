@@ -182,9 +182,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 sizes.append(size)
 
             if self.kv_role == "kv_consumer":
-                # D节点重组key addr list适配prefill并行策略
-                # TODO: D节点适配prefill qga tp逻辑
-                keys, addrs, sizes = self.token_database.adaptor_pp(
+                keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(
                     keys, addrs, sizes)
 
             if current_event is not None:
