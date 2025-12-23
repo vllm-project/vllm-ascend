@@ -198,7 +198,8 @@ class KVPoolScheduler:
                 scheduler_output.num_scheduled_tokens[request.req_id]
             )
             request_tracker = RequestTracker.from_new_request(
-                request, num_tokens_to_compute
+                request,
+                num_tokens_to_compute
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -217,8 +218,9 @@ class KVPoolScheduler:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
-                is_last_chunk=request_tracker.token_len
-                >= last_chunk_tokens_num,
+                is_last_chunk=(
+                    request_tracker.token_len >= last_chunk_tokens_num
+                ),
                 discard_partial_chunks=self._discard_partial_chunks,
             )
             if req_meta is not None:
@@ -249,10 +251,6 @@ class KVPoolScheduler:
                     continue
 
                 request_tracker.update(new_token_ids, new_block_ids)
-
-                # decode not save
-                if request_tracker.token_len > len(request.prompt_token_ids):
-                    continue
 
                 last_chunk_tokens_num = (
                     (
