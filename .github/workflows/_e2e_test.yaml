@@ -264,8 +264,8 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_kimi_k2_thinking_w4a16_tp4
           pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
