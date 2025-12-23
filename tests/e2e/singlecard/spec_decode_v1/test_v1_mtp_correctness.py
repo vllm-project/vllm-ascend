@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import os
-import json
-from typing import Any
 
 import pytest
-import openai
 from vllm import SamplingParams
-from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.config import CompilationConfig
+
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -16,15 +14,15 @@ MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-@pytest.mark.parametrize("num_speculative_tokens", [1,2,3])
+@pytest.mark.parametrize("num_speculative_tokens", [1, 2, 3])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("cudagraph_mode", ["PIECEWISE", "FULL_DECODE_ONLY"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 def test_offline_mtp_eagle_correctness(model_name: str,
-                    num_speculative_tokens: int,
-                    enforce_eager: bool,
-                    cudagraph_mode:str,
-                    disable_padded_drafter_batch: bool):
+                                       num_speculative_tokens: int,
+                                       enforce_eager: bool,
+                                       cudagraph_mode:str,
+                                       disable_padded_drafter_batch: bool):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -56,7 +54,9 @@ def test_offline_mtp_eagle_correctness(model_name: str,
                             cudagraph_mode=cudagraph_mode,
                             cudagraph_capture_sizes=[12],
                         )) as spec_llm:
-            sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
+            sampling_config = SamplingParams(temperature=0, 
+                                             max_tokens=256, 
+                                             ignore_eos=False)
             spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
     else:
@@ -77,9 +77,10 @@ def test_offline_mtp_eagle_correctness(model_name: str,
                             disable_padded_drafter_batch,
                         },
                         enforce_eager=enforce_eager,
-                        max_model_len=2000
-                        ) as spec_llm:
-            sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
+                        max_model_len=2000) as spec_llm:
+            sampling_config = SamplingParams(temperature=0, 
+                                             max_tokens=256, 
+                                             ignore_eos=False)
             spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
     with VllmRunner(model_name,
@@ -87,7 +88,9 @@ def test_offline_mtp_eagle_correctness(model_name: str,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
                     enforce_eager=enforce_eager) as ref_llm:
-        sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
+        sampling_config = SamplingParams(temperature=0, 
+                                         max_tokens=256, 
+                                         ignore_eos=False)
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
     matches = 0
