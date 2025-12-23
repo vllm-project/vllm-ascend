@@ -479,12 +479,7 @@ class KVPoolWorker:
         for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
         ):
             if self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
-                    req_id] == 0:
-                self.finished_store_req.add(req_id)
-            else:
-                continue
-
-            if req_id in self.finished_store_req:
+                    req_id] == 0 and req_id in self.finished_store_req:
                 self.finished_store_req.remove(req_id)
                 finished_sending.add(req_id)
                 self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
