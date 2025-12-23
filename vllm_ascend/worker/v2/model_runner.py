@@ -19,9 +19,9 @@ from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
                                               build_attn_state,
                                               make_attention_mask)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 
 logger = init_logger(__name__)
 
@@ -67,7 +67,7 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
             pin_memory=self.pin_memory,
         )
-        self.sampler = AscendSampler(
+        self.sampler: AscendSampler = AscendSampler(
             logprobs_mode=self.model_config.logprobs_mode, )
 
         # actual seq lengths for query (used in attention backends).

@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -32,7 +33,6 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
                                enable_sp, maybe_trans_nz, replace_layer)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-import vllm.envs as envs_vllm
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

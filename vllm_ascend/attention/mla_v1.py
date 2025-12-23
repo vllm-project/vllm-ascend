@@ -5,6 +5,7 @@ from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
 import numpy as np
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.utils import PAD_SLOT_ID
@@ -41,7 +42,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND,
                                flashcomm2_o_shared_enabled, maybe_trans_nz,
                                weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-import vllm.envs as envs_vllm
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

@@ -22,6 +22,7 @@ from typing import ClassVar, List, Optional, Tuple, Type
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.registry import (AttentionBackendEnum,
@@ -40,7 +41,6 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
-import vllm.envs as envs_vllm
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
