@@ -169,6 +169,9 @@ class AscendMetadata:
     # runner_type in model_config.
     model_runner_type: str = ""
 
+    # sliding window attention mask
+    swa_mask: Optional[torch.Tensor] = None
+
 
 class AscendAttentionMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
@@ -233,6 +236,7 @@ class AscendAttentionMetadataBuilder:
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
+        swa_mask =  common_attn_metadata.swa_mask
         attn_state = common_attn_metadata.attn_state
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
@@ -543,7 +547,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             pre_tokens=self.sliding_window
             if self.sliding_window else SWA_INT_MAX,
             next_tokens=0 if self.sliding_window else SWA_INT_MAX,
-            atten_mask=attn_metadata.attn_mask,
+            atten_mask=attn_metadata.swa_mask
+            if self.sliding_window else attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
