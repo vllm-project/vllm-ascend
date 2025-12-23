@@ -146,7 +146,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING":
-    lambda: bool(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0')),
+    lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
 }
 
 # end-env-vars-definition
