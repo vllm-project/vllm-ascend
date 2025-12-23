@@ -50,6 +50,7 @@ def test_models_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[1, 2, 4, 8],
                 quantization="ascend",
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
@@ -67,6 +68,7 @@ def test_models_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
+                cudagraph_capture_sizes=[1, 2, 4, 8],
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
@@ -153,7 +155,10 @@ def test_models_output_between_eager_and_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+                compilation_config={
+                    "cudagraph_capture_sizes": [4, 8, 32, 64],
+                    "cudagraph_mode": "FULL_DECODE_ONLY"
+                },
                 quantization="ascend",
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
@@ -247,7 +252,10 @@ def test_models_output_between_eager_and_fullgraph_npugraph_ex(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+                compilation_config={
+                    "cudagraph_capture_sizes": [4, 8, 32, 64],
+                    "cudagraph_mode": "FULL_DECODE_ONLY"
+                },
                 additional_config={"enable_npugraph_ex": True},
                 quantization="ascend",
         ) as runner:
