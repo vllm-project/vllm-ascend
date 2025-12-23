@@ -58,7 +58,6 @@ def test_models_with_multistream_overlap_shared_expert(
     with VllmRunner(
             model,
             max_model_len=1024,
-            enforce_eager=False,
             additional_config={
                 "multistream_overlap_shared_expert": True,
             },

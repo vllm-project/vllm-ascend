@@ -20,6 +20,9 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
+import os
+from unittest.mock import patch
+
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -27,6 +30,7 @@ from vllm.assets.image import ImageAsset
 from tests.e2e.conftest import VllmRunner
 
 
+@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_vl(vl_config):
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
@@ -42,7 +46,6 @@ def test_multimodal_vl(vl_config):
 
     with VllmRunner(vl_config["model"],
                     mm_processor_kwargs=vl_config["mm_processor_kwargs"],
-                    enforce_eager=False,
                     max_model_len=8192,
                     limit_mm_per_prompt={"image": 1}) as vllm_model:
         outputs = vllm_model.generate_greedy(
@@ -57,6 +60,7 @@ def test_multimodal_vl(vl_config):
             assert output_str, "Generated output should not be empty."
 
 
+@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_audio():
     audio_prompt = "".join([
         f"Audio {idx+1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
