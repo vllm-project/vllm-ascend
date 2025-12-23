@@ -86,6 +86,7 @@ jobs:
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
           # pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
@@ -177,6 +178,8 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/test_aclgraph_capture_replay.py
 
