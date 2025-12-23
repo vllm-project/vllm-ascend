@@ -24,6 +24,7 @@ from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
@@ -138,6 +139,28 @@ def _custom_rotary_embedding_enabled(query, neox_style, head_size):
     return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
     )
 
+def apply_interleaved_rope(x: torch.Tensor,
+                        mrope_section: list[int]) -> torch.Tensor:
+    """Apply interleaved MRoPE to 3D rotary embeddings.
+    Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+    interleaved [THTHWHTHW...TT], preserving frequency continuity.
+    """
+    x_t = x[0].clone()
+    x_t[..., 1:mrope_section[1] * 3:3] = x[1, ..., 1:mrope_section[1] * 3:3]
+    x_t[..., 2:mrope_section[2] * 3:3] = x[2, ..., 2:mrope_section[2] * 3:3]
+    return x_t
+
+def npu_apply_rotary_emb_dispatch(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    """Dispatch to NPU rotary embedding kernel."""
+    if is_neox_style:
+        return torch_npu.npu_rotary_mul(x, cos, sin, "half").squeeze(0)
+    else:
+        return torch_npu.npu_rotary_mul(x, cos, sin, "interleaved").squeeze(0)
 
 def _rope_forward_oot(
     self,
@@ -492,6 +515,108 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
 
 class AscendMRotaryEmbedding(MRotaryEmbedding):
+    """Rotary Embedding with Multimodal Sections."""
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+        mrope_section: Optional[list[int]] = None,
+        mrope_interleaved: bool = False,
+        # YaRN parameters.
+        *,
+        scaling_factor: Optional[float] = None,
+        extrapolation_factor: float = 1,
+        attn_factor: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+    ) -> None:
+        super().__init__(
+            head_size=head_size,
+            rotary_dim=rotary_dim,
+            max_position_embeddings=max_position_embeddings,
+            base=base,
+            is_neox_style=is_neox_style,
+            dtype=dtype,
+            mrope_section=mrope_section,
+            mrope_interleaved=mrope_interleaved,
+            scaling_factor=scaling_factor,
+            extrapolation_factor=extrapolation_factor,
+            attn_factor=attn_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+        )
+        if self.mrope_section:
+            assert sum(self.mrope_section) == rotary_dim // 2   
+
+
+    def forward_native(
+            self,
+            positions: torch.Tensor,
+            query: torch.Tensor,
+            key: Optional[torch.Tensor] = None,
+            offsets: Optional[torch.Tensor] = None,
+        ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+            """PyTorch-native implementation equivalent to forward().
+
+            Args:
+                positions:
+                    [num_tokens,] (text only) or
+                    [3, num_tokens] (T/H/W positions with multimodal inputs)
+                query: [num_tokens, num_heads * head_size]
+                key: [num_tokens, num_kv_heads * head_size]
+            """
+            assert positions.ndim == 1 or positions.ndim == 2
+            assert key is not None
+            self._match_cos_sin_cache_dtype(query)
+            num_tokens = positions.shape[-1]
+            # check if is first layer
+            forward_context = get_forward_context()
+            is_first_layer = forward_context.is_first_layer
+            if is_first_layer:
+                cos_sin = self.cos_sin_cache[positions]
+                cos, sin = cos_sin.chunk(2, dim=-1)
+                if positions.ndim == 2:
+                    assert self.mrope_section
+                    if self.mrope_interleaved:
+                        cos = apply_interleaved_rope(cos, self.mrope_section)
+                        sin = apply_interleaved_rope(sin, self.mrope_section)
+                    else:
+                        cos = torch.cat([
+                            m[i] for i, m in enumerate(
+                                cos.split(self.mrope_section, dim=-1))
+                        ],
+                                        dim=-1)
+                        sin = torch.cat([
+                            m[i] for i, m in enumerate(
+                                sin.split(self.mrope_section, dim=-1))
+                        ],
+                                        dim=-1)
+                cos = cos.repeat(1, 2) 
+                sin = sin.repeat(1, 2) 
+                self.cos = cos.unsqueeze(0).unsqueeze(-2).contiguous()
+                self.sin = sin.unsqueeze(0).unsqueeze(-2).contiguous()
+                forward_context.is_first_layer = False
+
+            query_shape = query.shape
+            query = query.view(num_tokens, -1, self.head_size)
+            query_rot = query[..., :self.rotary_dim]
+            query_pass = query[..., self.rotary_dim:]
+            query_rot = query_rot.unsqueeze(0)
+            query_rot = npu_apply_rotary_emb_dispatch(query_rot, self.cos, self.sin, self.is_neox_style)
+            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            key_rot = key[..., :self.rotary_dim]
+            key_pass = key[..., self.rotary_dim:]
+            key_rot = key_rot.unsqueeze(0)
+            key_rot = npu_apply_rotary_emb_dispatch(key_rot, self.cos, self.sin, self.is_neox_style)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            return query, key
 
     def forward_oot(
         self,
