@@ -21,7 +21,7 @@ MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 def test_offline_mtp_eagle_correctness(model_name: str,
                                        num_speculative_tokens: int,
                                        enforce_eager: bool,
-                                       cudagraph_mode:str,
+                                       cudagraph_mode: str,
                                        disable_padded_drafter_batch: bool):
     example_prompts = [
         "Hello, my name is",
@@ -54,8 +54,8 @@ def test_offline_mtp_eagle_correctness(model_name: str,
                             cudagraph_mode=cudagraph_mode,
                             cudagraph_capture_sizes=[12],
                         )) as spec_llm:
-            sampling_config = SamplingParams(temperature=0, 
-                                             max_tokens=256, 
+            sampling_config = SamplingParams(temperature=0,
+                                             max_tokens=256,
                                              ignore_eos=False)
             spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
@@ -78,8 +78,8 @@ def test_offline_mtp_eagle_correctness(model_name: str,
                         },
                         enforce_eager=enforce_eager,
                         max_model_len=2000) as spec_llm:
-            sampling_config = SamplingParams(temperature=0, 
-                                             max_tokens=256, 
+            sampling_config = SamplingParams(temperature=0,
+                                             max_tokens=256,
                                              ignore_eos=False)
             spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
@@ -88,8 +88,8 @@ def test_offline_mtp_eagle_correctness(model_name: str,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
                     enforce_eager=enforce_eager) as ref_llm:
-        sampling_config = SamplingParams(temperature=0, 
-                                         max_tokens=256, 
+        sampling_config = SamplingParams(temperature=0,
+                                         max_tokens=256,
                                          ignore_eos=False)
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
