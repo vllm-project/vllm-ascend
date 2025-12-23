@@ -47,7 +47,11 @@ class ExpertLoadBalancer(object):
 
     def generate_expert_placement_map(self):
         expert_placement_map = torch.full(
+<<<<<<< HEAD
             (self.layers_num, self.ranks_num, self.global_expert_num),
+=======
+            (self.layers_num, self.ranks_num, self.num_experts),
+>>>>>>> 274f2fd2 (eplb fix shape mismatch)
             -1,
             dtype=torch.int32,
         )
@@ -70,7 +74,11 @@ class ExpertLoadBalancer(object):
                 result_dict[key] = []
             result_dict[key].append(idx)
 
+<<<<<<< HEAD
         log2phy_map = torch.full((self.ranks_num, self.global_expert_num),
+=======
+        log2phy_map = torch.full((self.ranks_num, self.num_experts),
+>>>>>>> 274f2fd2 (eplb fix shape mismatch)
                                  -1,
                                  dtype=torch.int32)
         for rank in range(self.ranks_num):
