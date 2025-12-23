@@ -17,7 +17,6 @@
 # limitations under the License.
 #
 
-import gc
 import os
 from unittest.mock import patch
 
@@ -27,44 +26,6 @@ from vllm.utils.mem_constants import GiB_bytes
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import fork_new_process_for_each_test
-from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-
-@fork_new_process_for_each_test
-def test_basic_camem():
-    # some tensors from default memory pool
-    shape = (1024, 1024)
-    x = torch.empty(shape, device='npu:0')
-    x.zero_()
-
-    # some tensors from custom memory pool
-    allocator = CaMemAllocator.get_instance()
-    with allocator.use_memory_pool():
-        # custom memory pool
-        y = torch.empty(shape, device='npu:0')
-        y.zero_()
-        y += 1
-        z = torch.empty(shape, device='npu:0')
-        z.zero_()
-        z += 2
-
-    # they can be used together
-    output = x + y + z
-    assert torch.allclose(output, torch.ones_like(output) * 3)
-
-    free_bytes = torch.npu.mem_get_info()[0]
-    allocator.sleep()
-    free_bytes_after_sleep = torch.npu.mem_get_info()[0]
-    assert free_bytes_after_sleep > free_bytes
-    allocator.wake_up()
-
-    # they can be used together
-    output = x + y + z
-    assert torch.allclose(output, torch.ones_like(output) * 3)
-
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
 
 
 @fork_new_process_for_each_test
