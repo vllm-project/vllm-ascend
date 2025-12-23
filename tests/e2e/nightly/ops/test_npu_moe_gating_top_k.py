@@ -14,7 +14,7 @@ seed = 45
 random.seed(seed)
 numpy.random.seed(seed)
 torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)  # 如果你用 GPU
+torch.npu.manual_seed_all(seed)  # 如果你用 GPU
 
 def softmax_func(x, axis=None):
     # print("before softmax:",x)
@@ -75,11 +75,11 @@ class TestNpuMoeGatingTopK(TestCase):
                 kind='stable')[:, :k_group]  # Indices of top-k_group
 
             mask = numpy.ones((x.shape[0], group_count), 
-                              dtype=bool)  # 创建全 1 的掩码
+                              dtype=bool) 
             mask[numpy.arange(x.shape[0])[:, None],   
-                 indices] = False  # 在指定索引处设置为 False
+                 indices] = False  
             x = numpy.where(mask[..., None], float('-inf'), 
-                            x)  # 用 -inf 填充掩码为 True 的位置
+                            x)  
             x = x.reshape(x.shape[0], -1)
             
 
@@ -111,25 +111,12 @@ class TestNpuMoeGatingTopK(TestCase):
         x_dim1_range = [256, 128, 64, 208, 192, 160]
 
         # 所有参数组合
-        param_product = itertools.product(
-            group_select_modes,
-            renorms,
-            norm_types,
-            group_counts,
-            k_ranges,
-            x_dim0_range,
-            x_dim1_range
-        )
+        param_product = itertools.product(group_select_modes,renorms,
+                                          norm_types,group_counts,k_ranges,
+                                          x_dim0_range,x_dim1_range)
 
-        for (
-            group_select_mode,
-            renorm,
-            norm_type,
-            group_count,
-            k,
-            dim0,
-            dim1
-        ) in param_product:
+        for (group_select_mode,renorm,norm_type,group_count,k,dim0,
+            dim1) in param_product:
 
             group_count = 8
             k = 5
@@ -138,7 +125,7 @@ class TestNpuMoeGatingTopK(TestCase):
 
             # ---- 构造输入 ----
             x = numpy.random.uniform(-2, 2, (dim0, dim1)).astype(numpy.float32)
-            bias = numpy.random.uniform(-2, 2, (dim1,)).astype(numpy.float32)
+            bias = numpy.random.uniform(-2, 2, (dim1, )).astype(numpy.float32)
 
             x_tensor = torch.tensor(x, dtype=torch.float32)
             bias_tensor = torch.tensor(bias, dtype=torch.float32)
@@ -189,7 +176,8 @@ class TestNpuMoeGatingTopK(TestCase):
                 outFlag=out_flag,
                 routedScalingFactor=routed_scaling_factor,
                 eps=eps,
-                biasOptional = bias_tensor.npu(),
+                biasOptional = bias_tensor.npu()
+                if bias_tensor is not None,
             )
 
             # ---- 输出当前 case 信息 ----
@@ -197,13 +185,12 @@ class TestNpuMoeGatingTopK(TestCase):
                 f"[Case] x=({dim0},{dim1}), k={k}, "
                 f"group_count={group_count}, select_mode={group_select_mode}, "
                 f"norm_type={norm_type}, renorm={renorm},"
-                f"k_group={k_group}"
-            )
+                f"k_group={k_group}")
             print(y_npu.shape,expert_idx_npu.shape,out_npu.shape)
             print(x_tensor.dtype)
             print(y)
             print(y_npu.cpu())
-            print(y- y_npu.cpu())
+            print(y - y_npu.cpu())
             # ---- 校验 ----
             self.assertRtolEqual(y, y_npu.cpu())
             self.assertRtolEqual(expert_idx, expert_idx_npu.cpu().numpy())
