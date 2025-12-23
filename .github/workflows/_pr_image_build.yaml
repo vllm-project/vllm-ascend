@@ -38,7 +38,7 @@ jobs:
             runner: ubuntu-22.04-arm
             tag: arm64
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -86,7 +86,7 @@ jobs:
         digest="${{ steps.build.outputs.digest }}"
         touch "${{ runner.temp }}/digests/${digest#sha256:}"
     - name: Upload digest
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: digests-${{ inputs.suffix }}-${{ matrix.tag }}
         path: ${{ runner.temp }}/digests/*
@@ -100,7 +100,7 @@ jobs:
     if: ${{ inputs.should_push }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download arm64 digests
         uses: actions/download-artifact@v4
@@ -166,7 +166,12 @@ jobs:
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
 
           echo "Digests: $DIGESTS"
-          echo "Current tags: $TAGS"
-          docker buildx imagetools create \
-            -t TAGS \
-            $DIGESTS
+          echo "Current tags:"
+          echo "$TAGS"
+
+          for tag in $TAGS; do
+            echo "Creating tag $tag"
+            docker buildx imagetools create \
+              -t "$tag" \
+              $DIGESTS
+          done

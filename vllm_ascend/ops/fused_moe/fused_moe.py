@@ -274,15 +274,6 @@ class AscendFusedMoE(FusedMoE):
     def update_expert_map(self, new_expert_map):
         self._expert_map = new_expert_map
 
-    @property
-    def expert_map(self) -> torch.Tensor | None:
-        return self._expert_map
-
-    @expert_map.setter
-    def expert_map(self, new_expert_map):
-        # TODO(Potabk): Remove this once we drop vllm v0.12.0(This makes backward compatibility with vllm v0.12.0)
-        self._expert_map = new_expert_map
-
     def get_log2phy_map(self):
         return self.log2phy
 
@@ -354,7 +345,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_out = fc3_context.shared_experts(hidden_states)
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                 moe_comm_type = forward_context.moe_comm_type
-                if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+                if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
                         and not shared_expert_dp_enabled():
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
                 set_flash_common3_context(shared_out=shared_out)

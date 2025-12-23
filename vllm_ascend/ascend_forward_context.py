@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -15,11 +15,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
                                is_moe_model)
-
-if TYPE_CHECKING:
-    from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
-else:
-    WeightPrefetchMethod = None
 
 
 class MoECommType(Enum):
@@ -41,9 +36,7 @@ def set_ascend_forward_context(
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
-        prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
-        weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
         is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -116,13 +109,10 @@ def set_ascend_forward_context(
             forward_context.layer_idx is not None and \
             num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
-            forward_context.prefetch_stream = prefetch_stream
-            forward_context.model_instance = model_instance
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
-        forward_context.weight_prefetch_method = weight_prefetch_method
         forward_context.is_mtp_model = is_mtp_model
 
         if num_tokens is None and attn_metadata is not None:
@@ -253,12 +243,24 @@ def select_moe_comm_method(num_tokens: int,
         ascend_config = get_ascend_config()
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and get_ep_group(
-        ).world_size <= 16 and (not dynamic_eplb) and (not is_mtp_model)
+        # TODO: drop dynamic_eplb guard when dispatch_gmm_combine_decode supports tensor list inputs
+        # TODO: add guard for dispatch_gmm_combine_decode when mtp uses float while moe uses w8a8
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and (
+            not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.MC2
+            fused_decode_enable = fused_mc2_enable
+            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                fused_decode_enable = fused_mc2_enable and get_ep_group(
+                ).world_size <= 16 and (not is_mtp_model)
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
-            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.ALLTOALL
+            fused_prefill_enable = fused_mc2_enable
+            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                fused_prefill_enable = fused_mc2_enable and get_ep_group(
+                ).world_size <= 16 and (not is_mtp_model)
+            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+                fused_prefill_enable = False
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
