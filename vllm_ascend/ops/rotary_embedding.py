@@ -25,6 +25,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
@@ -200,6 +201,12 @@ def _rope_forward_oot(
             # Otherwise, the graph fusion operation may fail.
             query, key = torch_npu.npu_apply_rotary_pos_emb(
                 query, key, cos, sin)
+        elif cos is not None and sin is not None and HAS_TRITON:
+            query = query.view(query.shape[0], -1,
+                                            self.head_size)
+            key = key.view(key.shape[0], -1, self.head_size)
+            query, key = torch.ops.vllm.rope_forward(
+                query, key, cos, sin, self.rotary_dim, is_neox_style)
         elif self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
