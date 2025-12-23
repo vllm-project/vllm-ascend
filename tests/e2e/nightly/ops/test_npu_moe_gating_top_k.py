@@ -167,8 +167,7 @@ class TestNpuMoeGatingTopK(TestCase):
             
             out_npu,expert_idx_npu,y_npu= torch.ops._C_ascend.moe_gating_top_k(
                 x_tensor.npu(),
-                k,
-                biasOptional = bias_tensor.npu() if bias_tensor is not None else None,
+                k
                 kGroup=k_group,
                 groupCount=group_count,
                 groupSelectMode=group_select_mode,
@@ -177,6 +176,7 @@ class TestNpuMoeGatingTopK(TestCase):
                 outFlag=out_flag,
                 routedScalingFactor=routed_scaling_factor,
                 eps=eps,
+                biasOptional = bias_tensor.npu() if bias_tensor is not None else None,
             )
 
             # ---- 输出当前 case 信息 ----
