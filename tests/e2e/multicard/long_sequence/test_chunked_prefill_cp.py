@@ -118,7 +118,7 @@ def test_models_prefix_cache_with_cp_basic(model: str,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
 def test_models_prefix_cache_with_cp_piecewise(model: str,
-                                                max_tokens: int) -> None:
+                                               max_tokens: int) -> None:
     with VllmRunner(
             model,
             max_model_len=4096,
