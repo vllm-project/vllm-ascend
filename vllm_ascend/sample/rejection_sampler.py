@@ -5,9 +5,9 @@ import torch
 import torch_npu
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.rejection_sampler import generate_uniform_probs
 
+from vllm_ascend.sample.sampler import apply_top_k_top_p
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 PLACEHOLDER_TOKEN_ID = -1
