@@ -91,6 +91,20 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 6. File: platform/patch_balance_schedule.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#      `vllm.v1.core.sched.scheduler.Scheduler`
+#    Why:
+#       vLLM v1 scheduling currently enables chunkedprefill by default, which processes prefill and decode
+#       requests simultaneously in a single scheduling session. This can impact the overall system throughput
+#       and performance in some scenarios.
+#    How：
+#       Set environmental variables VLLM_ASCEND_BALANCE_SCHEDULING=1 in startup script.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/29721
+#    Future Plan:
+#       Remove this patch when vLLM merge the PR.
 #
 # * Worker Patch:
 # ===============
