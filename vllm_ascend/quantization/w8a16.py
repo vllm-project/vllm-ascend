@@ -20,8 +20,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch_npu
 
-from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               maybe_trans_nz)
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendW8A16LinearMethod:
@@ -30,9 +29,7 @@ class AscendW8A16LinearMethod:
     """
 
     def __init__(self) -> None:
-        # aclnn quant matmul requires to transpose matrix B, set to true by default.
-        self.transpose_weight = get_ascend_device_type(
-        ) != AscendDeviceType._310P
+        pass
 
     @staticmethod
     def get_weight(
@@ -77,27 +74,16 @@ class AscendW8A16LinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        if get_ascend_device_type() == AscendDeviceType._310P:
-            # On 300I Duo platform, we need transpose again if
-            # using nz. This transpose can be skipped in torchair.
-            output = torch_npu.npu_weight_quant_batchmatmul(
-                x=x,
-                weight=layer.weight.data.transpose(0, 1),
-                antiquant_scale=layer.weight_scale,
-                antiquant_offset=layer.weight_offset,
-                bias=bias)
-        else:
-            output = torch_npu.npu_weight_quant_batchmatmul(
-                x=x,
-                weight=layer.weight,
-                antiquant_scale=layer.weight_scale,
-                antiquant_offset=layer.weight_offset,
-                bias=bias)
+        output = torch_npu.npu_weight_quant_batchmatmul(
+            x=x,
+            weight=layer.weight,
+            antiquant_scale=layer.weight_scale,
+            antiquant_offset=layer.weight_offset,
+            bias=bias)
         return output
 
     def process_weights_after_loading(self, layer):
-        if self.transpose_weight:
-            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
