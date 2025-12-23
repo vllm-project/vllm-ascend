@@ -306,15 +306,19 @@ class FusedMC2CommImpl(MoECommMethod):
                 max_output_size=65536,
                 out=out,
             )
+            return out
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
-            out, _ = torch.ops._C_ascend.dispatch_gmm_combine_decode(
+            # Apply log2phy if needed
+            if log2phy is not None:
+                topk_ids = log2phy[topk_ids]
+            out, expert_token_nums = torch.ops._C_ascend.dispatch_gmm_combine_decode(
                 x=hidden_states,
                 expert_ids=topk_ids,
-                gmm1_permuted_weight=w1[0],
-                gmm1_permuted_weight_scale=w1_scale[0],
-                gmm2_weight=w2[0],
-                gmm2_weight_scale=w2_scale[0],
+                gmm1_permuted_weight=w1,
+                gmm1_permuted_weight_scale=w1_scale,
+                gmm2_weight=w2,
+                gmm2_weight_scale=w2_scale,
                 expert_smooth_scales=None,
                 expert_scales=topk_weights.to(torch.float32),
                 group_ep=self.token_dispatcher.moe_all_to_all_group_name,
@@ -322,7 +326,12 @@ class FusedMC2CommImpl(MoECommMethod):
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
                 moe_expert_num=len(expert_map),
                 global_bs=self.token_dispatcher.fused_global_bs)
+            if dynamic_eplb:
+                group_list_type = 1
+                return (out, group_list_type, expert_token_nums)
+            else:
+                return out
+
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
-        return out
