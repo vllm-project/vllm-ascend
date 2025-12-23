@@ -1,4 +1,3 @@
-import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -198,14 +197,15 @@ class ChunkedTokenDatabase():
         new_key = []
         new_addr = []
         new_size = []
-        pp_rank_pattern = re.compile(r'(@pp_rank:)\d+')
 
         for i, (addr_list, size_list) in enumerate(zip(addr, size)):
             start = 0
             for j, part in enumerate(self.partitions):
+                # part * 2 because addr and size contain both k and v
                 end = len(addr_list) if j == len(
                     self.partitions) - 1 else start + part * 2
-                new_str = pp_rank_pattern.sub(rf'\1{j}', key[i], count=1)
+                new_str = key[i].replace(  # type: ignore[attr-defined]
+                    "@pp_rank:0", f"@pp_rank:{j}", 1)
                 new_key.append(new_str)
                 new_addr.append(addr_list[start:end])
                 new_size.append(size_list[start:end])
