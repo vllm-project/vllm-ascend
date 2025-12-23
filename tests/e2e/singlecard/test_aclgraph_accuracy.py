@@ -36,7 +36,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_output_between_eager_and_aclgraph(
+def test_models_output_between_eager_and_aclgraph(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -50,7 +50,6 @@ def test_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 quantization="ascend",
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
@@ -68,7 +67,6 @@ def test_output_between_eager_and_aclgraph(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
@@ -100,7 +98,7 @@ def test_output_between_eager_and_aclgraph(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_output_between_eager_and_full_decode_only(
+def test_models_output_between_eager_and_full_decode_only(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -155,7 +153,6 @@ def test_output_between_eager_and_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
                 quantization="ascend",
         ) as runner:
@@ -166,7 +163,6 @@ def test_output_between_eager_and_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 compilation_config={
                     "cudagraph_capture_sizes": [4, 8, 32, 64],
                     "cudagraph_mode": "FULL_DECODE_ONLY"
@@ -196,7 +192,7 @@ def test_output_between_eager_and_full_decode_only(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_output_between_eager_and_fullgraph_npugraph_ex(
+def test_models_output_between_eager_and_fullgraph_npugraph_ex(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -251,7 +247,6 @@ def test_output_between_eager_and_fullgraph_npugraph_ex(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
                 additional_config={"enable_npugraph_ex": True},
                 quantization="ascend",
@@ -263,7 +258,6 @@ def test_output_between_eager_and_fullgraph_npugraph_ex(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=False,
                 compilation_config={
                     "cudagraph_capture_sizes": [4, 8, 32, 64],
                     "cudagraph_mode": "FULL_DECODE_ONLY"

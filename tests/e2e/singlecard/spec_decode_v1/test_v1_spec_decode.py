@@ -76,19 +76,22 @@ def test_ngram_correctness(
     should be the same when using ngram speculative decoding.
     '''
 
-    with VllmRunner(model_name, max_model_len=1024,
-                    enforce_eager=False) as ref_llm:
+    with VllmRunner(
+            model_name,
+            max_model_len=1024,
+    ) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
-    with VllmRunner(model_name,
-                    speculative_config={
-                        "method": "ngram",
-                        "prompt_lookup_max": 5,
-                        "prompt_lookup_min": 3,
-                        "num_speculative_tokens": 3,
-                    },
-                    max_model_len=1024,
-                    enforce_eager=False) as runner:
+    with VllmRunner(
+            model_name,
+            speculative_config={
+                "method": "ngram",
+                "prompt_lookup_max": 5,
+                "prompt_lookup_min": 3,
+                "num_speculative_tokens": 3,
+            },
+            max_model_len=1024,
+    ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
@@ -190,8 +193,7 @@ def test_suffix_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
-    with VllmRunner(model_name, max_model_len=1024,
-                    enforce_eager=False) as ref_llm:
+    with VllmRunner(model_name, max_model_len=1024) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
     with VllmRunner(model_name,
@@ -199,8 +201,7 @@ def test_suffix_correctness(
                         "method": "suffix",
                         "num_speculative_tokens": 8,
                     },
-                    max_model_len=1024,
-                    enforce_eager=False) as runner:
+                    max_model_len=1024) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
@@ -236,8 +237,7 @@ def test_suffix_acceptance(
                         "num_speculative_tokens": 10,
                     },
                     max_model_len=1024,
-                    disable_log_stats=False,
-                    enforce_eager=False) as runner:
+                    disable_log_stats=False) as runner:
         for i in range(10):
             runner.model.chat(test_prompts[i], sampling_config)
             metrics = runner.model.get_metrics()
@@ -278,7 +278,7 @@ def test_eagle_logprobs(
                                      max_tokens=10,
                                      ignore_eos=False)
 
-    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=False)
+    ref_llm = LLM(model=model_name, max_model_len=2048)
     ref_outputs = ref_llm.chat([prompt], sampling_params)
     ref_logprobs = []
     for output in ref_outputs[0].outputs:
@@ -300,7 +300,6 @@ def test_eagle_logprobs(
                 "max_model_len": 128,
             },
             max_model_len=128,
-            enforce_eager=False,
     ) as runner:
         spec_outputs = runner.model.chat([prompt], sampling_params)
 
