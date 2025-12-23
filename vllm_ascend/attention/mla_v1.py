@@ -105,6 +105,7 @@ class AscendMLAPrefillMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     pcp_metadata: Optional[AscendPCPMetadata] = None
+    reshape_cache_event: torch.npu.Event = None
 
 
 @dataclass
@@ -695,6 +696,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_sharing_target_layer_name: Optional[str],
         **kwargs,
     ):
+        self.vllm_config = get_current_vllm_config()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
