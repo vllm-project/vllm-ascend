@@ -29,7 +29,7 @@ MODELS = ["Qwen/Qwen3-0.6B"]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_eager_mode(
     model: str,
     max_tokens: int,
