@@ -73,9 +73,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         is_ascend_310p = get_ascend_device_type() == AscendDeviceType._310P
         # Currently, we do not call fused top_k_top_p op when async scheduling is enabled
         # since it must cause D2H synchronize according to operation constraints.
-        self.use_fused_top_k_top_p_op = not (is_async_scheduling
-                                             or is_ascend_310p)
-        self.apply_top_k_top_p = apply_fused_top_k_top_p if self.use_fused_top_k_top_p_op else apply_top_k_top_p
+        use_fused_top_k_top_p_op = not (is_async_scheduling or is_ascend_310p)
+        self.apply_top_k_top_p = apply_fused_top_k_top_p if use_fused_top_k_top_p_op else apply_top_k_top_p
 
     def set_q_event(self, q, event):
         # Pass in async exponential results.
