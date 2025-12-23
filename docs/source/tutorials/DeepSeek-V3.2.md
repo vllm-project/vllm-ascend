@@ -19,7 +19,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 - `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
 - `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 - `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
-- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot)
+- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -289,7 +289,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -364,7 +364,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -441,7 +441,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -519,7 +519,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -626,7 +626,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 ```shell
 lm_eval \
   --model local-completions \
-  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
@@ -654,7 +654,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:

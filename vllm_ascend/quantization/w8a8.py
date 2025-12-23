@@ -19,10 +19,10 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               get_ascend_device_type, maybe_trans_nz)
+                               get_ascend_device_type,
+                               get_weight_prefetch_method, maybe_trans_nz)
 
 
 def quant_per_tensor(in_tensor: torch.Tensor,
@@ -98,12 +98,7 @@ class AscendW8A8LinearMethod:
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
-            try:
-                weight_prefetch_method = get_forward_context(
-                ).weight_prefetch_method
-            except AssertionError:
-                weight_prefetch_method = None
-
+            weight_prefetch_method = get_weight_prefetch_method()
             # prefetch qkvo_proj.weight preprocess
             if weight_prefetch_method:
                 weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
