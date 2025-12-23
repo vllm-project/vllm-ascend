@@ -112,9 +112,10 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         context_layer = torch.empty_like(q)
 
         if cu_seqlens is None:
-            cu_seqlens = torch.arange(
-                0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="npu"
-            )
+            cu_seqlens = torch.arange(0, (bsz + 1) * q_len,
+                                      step=q_len,
+                                      dtype=torch.int32,
+                                      device=query.device)
 
         cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
