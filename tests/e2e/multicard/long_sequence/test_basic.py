@@ -34,7 +34,7 @@ os.environ["HCCL_BUFFSIZE"] = "768"
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
-def test_pcp_dcp_basic():
+def test_models_pcp_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
@@ -69,7 +69,7 @@ def test_pcp_dcp_basic():
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
-def test_pcp_dcp_full_graph():
+def test_models_pcp_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
@@ -77,7 +77,6 @@ def test_pcp_dcp_full_graph():
     model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
@@ -93,7 +92,6 @@ def test_pcp_dcp_full_graph():
 
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
@@ -110,7 +108,7 @@ def test_pcp_dcp_full_graph():
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
-def test_pcp_dcp_piece_wise():
+def test_models_pcp_dcp_piece_wise():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
@@ -118,7 +116,6 @@ def test_pcp_dcp_piece_wise():
     model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
@@ -130,7 +127,6 @@ def test_pcp_dcp_piece_wise():
 
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,

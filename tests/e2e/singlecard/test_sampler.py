@@ -21,7 +21,7 @@ from vllm import SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 
-def test_models_topk() -> None:
+def test_qwen3_topk() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
@@ -36,7 +36,7 @@ def test_models_topk() -> None:
         runner.generate(example_prompts, sampling_params)
 
 
-def test_models_prompt_logprobs() -> None:
+def test_qwen3_prompt_logprobs() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
@@ -49,7 +49,7 @@ def test_models_prompt_logprobs() -> None:
                                         num_logprobs=1)
 
 
-def test_exponential_overlap() -> None:
+def test_qwen3_exponential_overlap() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
