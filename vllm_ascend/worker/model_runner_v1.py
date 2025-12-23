@@ -104,7 +104,7 @@ from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
-from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.ops.rotary_embedding import set_cos_and_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.sampler import AscendSampler
@@ -1126,9 +1126,6 @@ class NPUModelRunner(GPUModelRunner):
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
-        # update global cos, sin
-        update_cos_sin(positions)
-
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(
@@ -2085,9 +2082,6 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions.gpu[:num_tokens_padded]
-
-            # update global cos, sin
-            update_cos_sin(positions)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None

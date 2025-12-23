@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -284,6 +286,37 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
     return output
 
 
+def _rope_detach_impl(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_cache: torch.Tensor,
+    sin_cache: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    query_shape, key_shape = query.shape, key.shape
+
+    cos = cos_cache.index_select(0, positions)
+    sin = sin_cache.index_select(0, positions)
+    rotary_dim = cos_cache.shape[-1]
+    num_tokens = query.shape[0]
+    query = query.contiguous().view(1, num_tokens, -1, rotary_dim)
+    key = key.contiguous().view(1, num_tokens, -1, rotary_dim)
+    torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
+
+    return query.view(query_shape), key.view(key_shape)
+
+
+def _rope_detach_impl_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_cache: torch.Tensor,
+    sin_cache: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    return query, key
+
+
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
 # is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
 # aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
@@ -367,5 +400,11 @@ direct_register_custom_op(op_name="matmul_and_reduce",
 direct_register_custom_op(op_name="quantize",
                           op_func=_quantize_impl,
                           fake_impl=_quantize_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="rope_detached",
+                          op_func=_rope_detach_impl,
+                          fake_impl=_rope_detach_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

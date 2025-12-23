@@ -29,6 +29,7 @@ def split_qkv_rmsnorm_rope_kernel(
     input_ptr,
     sin_ptr,
     cos_ptr,
+    pos_ptr,
     q_ptr,
     k_ptr,
     v_ptr,
@@ -44,6 +45,7 @@ def split_qkv_rmsnorm_rope_kernel(
     Q_BLOCK_SIZE: tl.constexpr,
     KV_BLOCK_SIZE: tl.constexpr,
     BIAS: tl.constexpr,
+    POS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     HALF_HEAD_DIM: tl.constexpr,
 ):
@@ -78,7 +80,11 @@ def split_qkv_rmsnorm_rope_kernel(
             normalized_values = (normalized_values * weight_values).to(
                 tl.bfloat16)
 
-        sc_offsets = row_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
+        if POS:
+            pos_idx = tl.load(pos_ptr + row_idx)
+        else:
+            pos_idx = row_idx
+        sc_offsets = pos_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
         sin = (tl.load(sin_ptr + sc_offsets)).reshape(1, HEAD_DIM)
         cos = (tl.load(cos_ptr + sc_offsets)).reshape(1, HEAD_DIM)
         x1 = tl.extract_slice(
@@ -143,7 +149,11 @@ def split_qkv_rmsnorm_rope_kernel(
         else:
             normalized_values = (normalized_values * weight_values).to(
                 tl.bfloat16)
-        sc_offsets = row_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
+        if POS:
+            pos_idx = tl.load(pos_ptr + row_idx)
+        else:
+            pos_idx = row_idx
+        sc_offsets = pos_idx * HEAD_DIM + tl.arange(0, HEAD_DIM)
         sin = (tl.load(sin_ptr + sc_offsets)).reshape(1, HEAD_DIM)
         cos = (tl.load(cos_ptr + sc_offsets)).reshape(1, HEAD_DIM)
         x1 = tl.extract_slice(
@@ -209,8 +219,9 @@ def split_qkv_rmsnorm_rope_impl(
     kv_hidden_size: int,
     head_dim: int,
     eps: float,
-    q_bias: Optional[torch.Tensor],
-    k_bias: Optional[torch.Tensor],
+    positions: Optional[torch.Tensor] = None,
+    q_bias: Optional[torch.Tensor] = None,
+    k_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     KV_BLOCK_SIZE = triton.next_power_of_2(head_dim)
     assert KV_BLOCK_SIZE == head_dim
@@ -235,11 +246,13 @@ def split_qkv_rmsnorm_rope_impl(
     assert num_vectorcore % n_cols == 0
     n_rows = num_vectorcore // n_cols
     BIAS = q_bias is not None
+    POS = positions is not None
 
     split_qkv_rmsnorm_rope_kernel[(n_rows, n_cols, 1)](
         input,
         sin,
         cos,
+        positions,
         q_output,
         k_output,
         v_output,
@@ -255,6 +268,7 @@ def split_qkv_rmsnorm_rope_impl(
         Q_BLOCK_SIZE,
         KV_BLOCK_SIZE,
         BIAS,
+        POS,
         head_dim,
         head_dim // 2,
     )
@@ -271,6 +285,7 @@ def split_qkv_rmsnorm_rope_impl_fake(
     kv_hidden_size: int,
     head_dim: int,
     eps: float,
+    positions: Optional[torch.Tensor] = None,
     q_bias: Optional[torch.Tensor] = None,
     k_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

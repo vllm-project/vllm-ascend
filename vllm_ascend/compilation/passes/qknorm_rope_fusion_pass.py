@@ -54,25 +54,32 @@ class QKNormRopeFusionPattern:
         k_weight = torch.empty(self.head_dim,
                                dtype=torch.bfloat16,
                                device="npu")
-        cos = torch.empty(1,
-                          T,
+        cos_cache = torch.empty(1,
+                          16384,
                           1,
                           self.head_dim,
                           dtype=torch.bfloat16,
                           device="npu")
-        sin = torch.empty(1,
-                          T,
+        sin_cache = torch.empty(1,
+                          16384,
                           1,
                           self.head_dim,
                           dtype=torch.bfloat16,
                           device="npu")
-        return [qkv, q_weight, k_weight, cos, sin]
+        positions = torch.randint(
+            low=0,
+            high=16384,
+            size=(T,),
+            dtype=torch.bfloat16,
+            device="npu"
+        )
+        return [qkv, q_weight, k_weight, cos_cache, sin_cache, positions]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(qkv: torch.Tensor, q_weight: torch.Tensor,
-                    k_weight: torch.Tensor, cos: torch.Tensor,
-                    sin: torch.Tensor):
+                    k_weight: torch.Tensor, cos_cache: torch.Tensor,
+                    sin_cache: torch.Tensor, positions: torch.Tensor):
 
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
                                 dim=-1)
@@ -87,22 +94,13 @@ class QKNormRopeFusionPattern:
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
                                                        self.eps)
 
-            q_flat = q_norm_out.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1,
-                                                 self.head_dim)
-
-            k_flat = k_norm_out.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1,
-                                                 self.head_dim)
-
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
-                q_reshape, k_reshape, cos, sin)
+            q_rope, k_rope = torch.ops.vllm.rope_detached(positions, q_norm_out, k_norm_out, cos_cache, sin_cache)
 
             return q_rope, k_rope, v
 
         def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
-                        k_weight: torch.Tensor, cos: torch.Tensor,
-                        sin: torch.Tensor):
+                        k_weight: torch.Tensor, cos_cache: torch.Tensor,
+                        sin_cache: torch.Tensor, positions: torch.Tensor):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
@@ -113,8 +111,9 @@ class QKNormRopeFusionPattern:
                 eps=self.eps,
                 q_bias=None,
                 k_bias=None,
-                sin=sin,
-                cos=cos)
+                positions=positions,
+                cos=cos_cache,
+                sin=sin_cache)
 
             return results
 
@@ -153,27 +152,34 @@ class QKNormRopeFusionPatternWithBias:
                                device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos = torch.empty(1,
-                          T,
+        cos_cache = torch.empty(1,
+                          16384,
                           1,
                           self.head_dim,
                           dtype=torch.bfloat16,
                           device="npu")
-        sin = torch.empty(1,
-                          T,
+        sin_cache = torch.empty(1,
+                          16384,
                           1,
                           self.head_dim,
                           dtype=torch.bfloat16,
                           device="npu")
+        positions = torch.randint(
+            low=0,
+            high=16384,
+            size=(T,),
+            dtype=torch.bfloat16,
+            device="npu"
+        )
 
-        return [qkv, q_weight, k_weight, q_bias, k_bias, cos, sin]
+        return [qkv, q_weight, k_weight, q_bias, k_bias, cos_cache, sin_cache, positions]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(qkv: torch.Tensor, q_weight: torch.Tensor,
                     k_weight: torch.Tensor, q_bias: torch.Tensor,
-                    k_bias: torch.Tensor, cos: torch.Tensor,
-                    sin: torch.Tensor):
+                    k_bias: torch.Tensor, cos_cache: torch.Tensor,
+                    sin_cache: torch.Tensor, positions: torch.Tensor):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
                                 dim=-1)
 
@@ -189,23 +195,14 @@ class QKNormRopeFusionPatternWithBias:
                                                        self.eps)
             k_normed = k_norm_out + k_bias
 
-            q_flat = q_normed.view(q.shape)
-            q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1,
-                                                 self.head_dim)
-
-            k_flat = k_normed.view(k.shape)
-            k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1,
-                                                 self.head_dim)
-
-            q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(
-                q_reshape, k_reshape, cos, sin)
+            q_rope, k_rope = torch.ops.vllm.rope_detached(positions, q_normed, k_normed, cos_cache, sin_cache)
 
             return q_rope, k_rope, v
 
         def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
                         k_weight: torch.Tensor, q_bias: torch.Tensor,
-                        k_bias: torch.Tensor, cos: torch.Tensor,
-                        sin: torch.Tensor):
+                        k_bias: torch.Tensor, cos_cache: torch.Tensor,
+                        sin_cache: torch.Tensor, positions: torch.Tensor):
             results = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
@@ -216,8 +213,9 @@ class QKNormRopeFusionPatternWithBias:
                 eps=self.eps,
                 q_bias=q_bias,
                 k_bias=k_bias,
-                cos=cos,
-                sin=sin)
+                positions=positions,
+                cos=cos_cache,
+                sin=sin_cache)
             return results
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
