@@ -14,7 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import torch
+
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if HAS_TRITON:
     import torch_npu._inductor  # noqa: F401
@@ -160,12 +163,12 @@ def _triton_rope(
                  mask=second_k_mask)
 
 
-def rope_forward_triton(q,
-                        k,
-                        cos,
-                        sin,
+def rope_forward_triton(q: torch.Tensor,
+                        k: torch.Tensor,
+                        cos: torch.Tensor,
+                        sin: torch.Tensor,
                         rope_dim: int = -1,
-                        is_neox_style: bool = True):
+                        is_neox_style: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
@@ -173,8 +176,8 @@ def rope_forward_triton(q,
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    cos = cos.view(num_tokens, -1)
-    sin = sin.view(num_tokens, -1)
+    cos = cos.view(-1, rope_dim)
+    sin = sin.view(-1, rope_dim)
     if rope_dim == -1:
         # If rope_dim is not specified, we assume that input cos/sin is not
         # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
@@ -208,3 +211,18 @@ def rope_forward_triton(q,
         IS_NEOX_STYLE=is_neox_style,
     )
     return q, k
+
+
+def rope_forward_triton_fake(q: torch.Tensor,
+                             k: torch.Tensor,
+                             cos: torch.Tensor,
+                             sin: torch.Tensor,
+                             rope_dim: int = -1,
+                             is_neox_style: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+    return q, k
+
+direct_register_custom_op(op_name="rope_forward",
+                          op_func=rope_forward_triton,
+                          fake_impl=rope_forward_triton_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")

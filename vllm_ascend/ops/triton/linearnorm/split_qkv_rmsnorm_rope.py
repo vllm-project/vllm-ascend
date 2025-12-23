@@ -303,3 +303,306 @@ direct_register_custom_op(op_name="qkv_rmsnorm_rope",
                           fake_impl=split_qkv_rmsnorm_rope_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
+
+# currently, only applicable to the qwen3-next model.
+@triton.jit
+def split_qkv_gated_rmsnorm_rope_kernel(
+    input_ptr,
+    sin_ptr,
+    cos_ptr,
+    q_ptr,
+    gate_ptr,
+    k_ptr,
+    v_ptr,
+    q_weight_ptr,
+    k_weight_ptr,
+    batch_size,
+    total_hidden_size: tl.constexpr,
+    eps: tl.constexpr,
+    num_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    q_gate_hidden_size: tl.constexpr,
+    kv_hidden_size: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ROPE_DIM: tl.constexpr,
+    PASS_DIM: tl.constexpr,
+    HALF_ROPE_DIM: tl.constexpr,
+):
+    pid, step = tl.program_id(0), tl.num_programs(0)
+
+    # base cols & masks
+    q_gate_cols = tl.arange(0, HEAD_DIM)
+    q_gate_mask = q_gate_cols < HEAD_DIM
+    kv_cols = tl.arange(0, kv_hidden_size)
+    kv_mask = kv_cols < kv_hidden_size
+    rot_cols = tl.arange(0, ROPE_DIM)
+    rot_mask = rot_cols < ROPE_DIM
+    pass_cols = tl.arange(0, PASS_DIM)
+    pass_mask = pass_cols < PASS_DIM
+
+    q_norm_weight = tl.load(q_weight_ptr + q_gate_cols, mask=q_gate_mask, other=0.0).to(tl.float32) + 1.0
+    k_norm_weight = tl.load(k_weight_ptr + q_gate_cols, mask=q_gate_mask, other=0.0).to(tl.float32) + 1.0
+
+    for x in tl.range(pid, batch_size, step):
+        sc_offset = x * ROPE_DIM
+        input_offset = x * total_hidden_size
+        output_offset = x * q_gate_hidden_size
+
+        sin = (tl.load(sin_ptr + sc_offset + rot_cols, mask=rot_mask, other=0.0)).to(tl.float32)
+        cos = (tl.load(cos_ptr + sc_offset + rot_cols, mask=rot_mask, other=0.0)).to(tl.float32)
+
+        # [HEAD0_q, HEAD0_gate, HEAD1_q, HEAD1_gate, ..., KV_HEAD0_k, KV_HEAD1_k, ..., KV_HEAD0_v, KV_HEAD1_v, ...]
+        # q norm & rope + gate copy
+        for _ in tl.range(num_heads):
+            q = tl.load(input_ptr + input_offset + q_gate_cols,
+                        mask=q_gate_mask,
+                        other=0.0).to(tl.float32)
+            # q norm
+            squa = q * q
+            var = tl.sum(squa) / HEAD_DIM
+            rstd = tl.rsqrt(var + eps)
+            norm = q * rstd
+            q_norm = (norm * q_norm_weight).reshape(1, HEAD_DIM)
+            # q rope
+            q_rot = tl.extract_slice(
+                q_norm,
+                offsets=(0, 0),
+                sizes=(1, ROPE_DIM),
+                strides=(1, 1),
+            )
+            q_pass = tl.extract_slice(
+                q_norm,
+                offsets=(0, ROPE_DIM),
+                sizes=(1, PASS_DIM),
+                strides=(1, 1),
+            )
+            x1 = tl.extract_slice(
+                q_rot,
+                offsets=(0, 0),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            x2 = tl.extract_slice(
+                q_rot,
+                offsets=(0, HALF_ROPE_DIM),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            cat_x = tl.zeros((1, ROPE_DIM),
+                            dtype=tl.float32)
+            cat_x = tl.insert_slice(
+                cat_x,
+                -x2,
+                offsets=(0, 0),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            cat_x = tl.insert_slice(
+                cat_x,
+                x1,
+                offsets=(0, HALF_ROPE_DIM),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            q_rot_rope = cat_x * sin + q_rot * cos
+            tl.store(q_ptr + output_offset + rot_cols,
+                    q_rot_rope.reshape(ROPE_DIM),
+                    mask=rot_mask)
+            tl.store(q_ptr + output_offset + ROPE_DIM + pass_cols,
+                    q_pass.reshape(PASS_DIM),
+                    mask=pass_mask)
+            input_offset += HEAD_DIM
+            # gate copy
+            i_gate = tl.load(input_ptr + input_offset + q_gate_cols,
+                            mask=q_gate_mask,
+                            other=0.0)
+            tl.store(gate_ptr + output_offset + q_gate_cols,
+                    i_gate,
+                    mask=q_gate_mask)
+
+            input_offset += HEAD_DIM
+            output_offset += HEAD_DIM
+
+        output_offset = x * kv_hidden_size
+        # k norm & rope
+        for _ in tl.range(num_kv_heads):
+            k = tl.load(input_ptr + input_offset + q_gate_cols,
+                        mask=q_gate_mask,
+                        other=0.0).to(tl.float32)
+            # k norm
+            squa = k * k
+            var = tl.sum(squa) / HEAD_DIM
+            rstd = tl.rsqrt(var + eps)
+            norm = k * rstd
+            k_norm = (norm * k_norm_weight).reshape(1, HEAD_DIM)
+            # k rope
+            k_rot = tl.extract_slice(
+                k_norm,
+                offsets=(0, 0),
+                sizes=(1, ROPE_DIM),
+                strides=(1, 1),
+            )
+            k_pass = tl.extract_slice(
+                k_norm,
+                offsets=(0, ROPE_DIM),
+                sizes=(1, PASS_DIM),
+                strides=(1, 1),
+            )
+            x1 = tl.extract_slice(
+                k_rot,
+                offsets=(0, 0),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            x2 = tl.extract_slice(
+                k_rot,
+                offsets=(0, HALF_ROPE_DIM),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            cat_x = tl.zeros((1, ROPE_DIM),
+                            dtype=tl.float32)
+            cat_x = tl.insert_slice(
+                cat_x,
+                -x2,
+                offsets=(0, 0),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            cat_x = tl.insert_slice(
+                cat_x,
+                x1,
+                offsets=(0, HALF_ROPE_DIM),
+                sizes=(1, HALF_ROPE_DIM),
+                strides=(1, 1),
+            )
+            k_rot_rope = cat_x * sin + k_rot * cos
+            tl.store(k_ptr + output_offset + rot_cols,
+                    k_rot_rope.reshape(ROPE_DIM),
+                    mask=rot_mask)
+            tl.store(k_ptr + output_offset + ROPE_DIM + pass_cols,
+                    k_pass.reshape(PASS_DIM),
+                    mask=pass_mask)
+            input_offset += HEAD_DIM
+            output_offset += HEAD_DIM
+
+        output_offset = x * kv_hidden_size
+        # v copy
+        i_v = tl.load(input_ptr + input_offset + kv_cols, mask=kv_mask, other=0.0)
+        tl.store(v_ptr + output_offset + kv_cols, i_v, mask=kv_mask)
+
+
+def split_qkv_gated_rmsnorm_rope_impl(
+    input: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_gate_hidden_size: int,
+    kv_hidden_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rope_dim: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    assert triton.next_power_of_2(
+        head_dim
+    ) == head_dim, "head_dim must be a power of 2 for triton kernel"
+    bs, total_hidden_size = input.shape
+    assert total_hidden_size == 2 * kv_hidden_size + 2 * q_gate_hidden_size
+    cos = cos.view(-1, rope_dim)
+    sin = sin.view(-1, rope_dim)
+    q_output = torch.empty(bs,
+                           q_gate_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
+    gate_output = torch.empty(bs,
+                           q_gate_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
+    k_output = torch.empty(bs,
+                           kv_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
+    v_output = torch.empty(bs,
+                           kv_hidden_size,
+                           device=input.device,
+                           dtype=input.dtype)
+
+    num_vectorcore = get_vectorcore_num()
+    grid = (num_vectorcore, )
+    split_qkv_gated_rmsnorm_rope_kernel[grid](
+        input,
+        sin,
+        cos,
+        q_output,
+        gate_output,
+        k_output,
+        v_output,
+        q_weight,
+        k_weight,
+        bs,
+        total_hidden_size,
+        eps,
+        num_heads,
+        num_kv_heads,
+        q_gate_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        rope_dim,
+        head_dim - rope_dim,
+        rope_dim // 2,
+    )
+    return q_output, gate_output, k_output, v_output
+
+
+def split_qkv_rmsnorm_rope_with_gate_impl_fake(
+    input: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_gate_hidden_size: int,
+    kv_hidden_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rope_dim: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Fake implementation for shape inference during Dynamo/AOT tracing.
+    # Note: sin and cos are not used in shape computation, but must be present in signature.
+    batch_size = input.shape[0]
+    q_output = torch.empty(
+        batch_size,
+        q_gate_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+    gate_output = torch.empty(
+        batch_size,
+        q_gate_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+    k_output = torch.empty(
+        batch_size,
+        kv_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+    v_output = torch.empty(
+        batch_size,
+        kv_hidden_size,
+        device=input.device,
+        dtype=input.dtype,
+    )
+
+    return q_output, gate_output, k_output, v_output
+
+direct_register_custom_op(op_name="qkv_gated_rmsnorm_rope",
+                          op_func=split_qkv_gated_rmsnorm_rope_impl,
+                          fake_impl=split_qkv_gated_rmsnorm_rope_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
