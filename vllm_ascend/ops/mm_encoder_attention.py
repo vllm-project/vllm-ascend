@@ -104,6 +104,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             context_layer = context_layer[..., :origin_shape]
 
         context_layer = einops.rearrange(context_layer,
-                                         "(b s) h d -> s b (h d)",
+                                         "(b s) h d -> b s h d",
                                          b=bsz).contiguous()
         return context_layer
