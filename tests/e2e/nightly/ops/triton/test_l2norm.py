@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from vllm_ascend.ops.triton.fla.l2norm import l2norm_fwd
 
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'dtype'),
     [
