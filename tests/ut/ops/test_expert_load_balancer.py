@@ -83,10 +83,14 @@ class TestExpertLoadBalancer(TestBase):
         self.assertEqual(expert_placement_map.shape,
                          (self.expert_load_balancer.layers_num,
 <<<<<<< HEAD
+<<<<<<< HEAD
                           self.expert_load_balancer.ranks_num, 10))
 =======
                           self.expert_load_balancer.ranks_num, 8))
 >>>>>>> 274f2fd2 (eplb fix shape mismatch)
+=======
+                          self.expert_load_balancer.ranks_num, 8))
+>>>>>>> 9b7984f0 (eplb fix shape mismatch)
         self.assertTrue(torch.all(expert_placement_map >= -1))
 
     def test_generate_log2phy_expert_map(self):
@@ -95,10 +99,14 @@ class TestExpertLoadBalancer(TestBase):
             layer_id)
         self.assertEqual(log2phy_map.shape,
 <<<<<<< HEAD
+<<<<<<< HEAD
                          (self.expert_load_balancer.ranks_num, 10))
 =======
                          (self.expert_load_balancer.ranks_num, 8))
 >>>>>>> 274f2fd2 (eplb fix shape mismatch)
+=======
+                         (self.expert_load_balancer.ranks_num, 8))
+>>>>>>> 9b7984f0 (eplb fix shape mismatch)
         self.assertTrue(torch.all(log2phy_map >= -1))
 
     @mock.patch("torch_npu.npu._lazy_init")
@@ -110,10 +118,14 @@ class TestExpertLoadBalancer(TestBase):
             layer_id, rank_id)
         self.assertEqual(rank_local_expert_num, 5)
 <<<<<<< HEAD
+<<<<<<< HEAD
         expected_tensor = torch.tensor([2, -1, 1, 3, -1, 4, -1, 0, -1, -1],
 =======
         expected_tensor = torch.tensor([2, -1, 1, 3, -1, 4, -1, 0],
 >>>>>>> 274f2fd2 (eplb fix shape mismatch)
+=======
+        expected_tensor = torch.tensor([2, -1, 1, 3, -1, 4, -1, 0],
+>>>>>>> 9b7984f0 (eplb fix shape mismatch)
                                        dtype=torch.int32).to(
                                            rank_expert_map.device)
         self.assertTrue(rank_expert_map.equal(expected_tensor))
@@ -122,10 +134,14 @@ class TestExpertLoadBalancer(TestBase):
         rank_local_expert_num, rank_expert_map = self.expert_load_balancer.get_rank_placement_map(
             layer_id, rank_id)
 <<<<<<< HEAD
+<<<<<<< HEAD
         expected_tensor = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3, -1, -1],
 =======
         expected_tensor = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3],
 >>>>>>> 274f2fd2 (eplb fix shape mismatch)
+=======
+        expected_tensor = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3],
+>>>>>>> 9b7984f0 (eplb fix shape mismatch)
                                        dtype=torch.int32).to(
                                            rank_expert_map.device)
         self.assertTrue(rank_expert_map.equal(expected_tensor))
@@ -136,10 +152,14 @@ class TestExpertLoadBalancer(TestBase):
         log2phy_map = self.expert_load_balancer.get_rank_log2phy_map(
             layer_id, rank_id)
 <<<<<<< HEAD
+<<<<<<< HEAD
         expected_tensor = torch.tensor([2, 6, 1, 3, 7, 4, 5, 0, -1, -1],
 =======
         expected_tensor = torch.tensor([2, 6, 1, 3, 7, 4, 5, 0],
 >>>>>>> 274f2fd2 (eplb fix shape mismatch)
+=======
+        expected_tensor = torch.tensor([2, 6, 1, 3, 7, 4, 5, 0],
+>>>>>>> 9b7984f0 (eplb fix shape mismatch)
                                        dtype=torch.int32).to(
                                            log2phy_map.device)
         self.assertTrue(log2phy_map.equal(expected_tensor))
@@ -148,10 +168,14 @@ class TestExpertLoadBalancer(TestBase):
         log2phy_map = self.expert_load_balancer.get_rank_log2phy_map(
             layer_id, rank_id)
 <<<<<<< HEAD
+<<<<<<< HEAD
         expected_tensor = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8, -1, -1],
 =======
         expected_tensor = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8],
 >>>>>>> 274f2fd2 (eplb fix shape mismatch)
+=======
+        expected_tensor = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8],
+>>>>>>> 9b7984f0 (eplb fix shape mismatch)
                                        dtype=torch.int32).to(
                                            log2phy_map.device)
         self.assertTrue(log2phy_map.equal(expected_tensor))
