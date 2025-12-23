@@ -77,10 +77,12 @@ def test_split_qkv_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads,
                       device=device)
     q_weight = torch.randn(head_size, dtype=dtype, device=device)
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
-    sin = np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])
-    cos = np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])
-    sin = torch.from_numpy(sin).to(dtype).npu()
-    cos = torch.from_numpy(cos).to(dtype).npu()
+    sin = torch.from_numpy(
+        np.random.uniform(0, 1,
+                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
+    cos = torch.from_numpy(
+        np.random.uniform(0, 1,
+                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
                                               q_weight=q_weight,
@@ -152,10 +154,12 @@ def test_split_qkv_rmsnorm_rope_with_bias(num_tokens, num_q_heads,
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     q_bias = torch.randn(head_size, dtype=dtype, device=device)
     k_bias = torch.randn(head_size, dtype=dtype, device=device)
-    sin = np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])
-    cos = np.random.uniform(0, 1, [num_tokens, 1, 1, head_size])
-    sin = torch.from_numpy(sin).to(dtype).npu()
-    cos = torch.from_numpy(cos).to(dtype).npu()
+    sin = torch.from_numpy(
+        np.random.uniform(0, 1,
+                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
+    cos = torch.from_numpy(
+        np.random.uniform(0, 1,
+                          [num_tokens, 1, 1, head_size])).to(dtype).npu()
     # fused kernel
     q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(input=qkv,
                                               q_weight=q_weight,
