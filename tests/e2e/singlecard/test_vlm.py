@@ -46,7 +46,6 @@ def test_multimodal_vl(vl_config):
 
     with VllmRunner(vl_config["model"],
                     mm_processor_kwargs=vl_config["mm_processor_kwargs"],
-                    enforce_eager=False,
                     max_model_len=8192,
                     limit_mm_per_prompt={"image": 1}) as vllm_model:
         outputs = vllm_model.generate_greedy(

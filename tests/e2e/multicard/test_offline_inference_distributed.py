@@ -189,7 +189,6 @@ def test_qwen3_dense_fc1_tp2(model):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
@@ -209,7 +208,6 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",

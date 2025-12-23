@@ -36,7 +36,6 @@ def test_embed_models_correctness(model: str):
     with VllmRunner(
             model_name,
             runner="pooling",
-            enforce_eager=False,
             max_model_len=None,
             cudagraph_capture_sizes=[4],
     ) as vllm_runner:
@@ -58,14 +57,13 @@ def test_embed_models_correctness(model: str):
     )
 
 
-def test_bge_model_correctness():
+def test_bge_m3_correctness():
     queries = ['What is the capital of China?', 'Explain gravity']
 
     model_name = snapshot_download("BAAI/bge-m3")
     with VllmRunner(
             model_name,
             runner="pooling",
-            enforce_eager=False,
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
