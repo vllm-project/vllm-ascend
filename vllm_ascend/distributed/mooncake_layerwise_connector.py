@@ -144,7 +144,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                     raise RuntimeError("Mooncake memory registration failed. ")
 
         self.send_queue = queue.Queue[Tuple[str, ReqMeta, int, torch.Tensor,
-                                            torch.Tensor]]()
+                                            torch.Tensor, torch.npu.Event]]()
 
         self.ready_event = ready_event
         self.callback_func = callback_func
@@ -155,15 +155,15 @@ class KVCacheSendingLayerThread(threading.Thread):
         torch.npu.set_device(device)
         self.ready_event.set()
         while True:
-            req_id, req_meta, layer_index, key, value = self.send_queue.get()
-            self._handle_request(req_id, req_meta, layer_index, key, value)
+            req_id, req_meta, layer_index, key, value, reshape_cache_event = self.send_queue.get()
+            self._handle_request(req_id, req_meta, layer_index, key, value, reshape_cache_event)
 
-    def _handle_request(self, req_id, req_meta, layer_index, key, value):
+    def _handle_request(self, req_id, req_meta, layer_index, key, value, reshape_cache_event):
         try:
             logger.debug(
                 f"Starting to transfer KV cache for request {req_id} {req_meta.remote_te_rpc_port=}."
             )
-            self._transfer_kv_cache(req_id, req_meta, layer_index, key, value)
+            self._transfer_kv_cache(req_id, req_meta, layer_index, key, value, reshape_cache_event)
             logger.debug(
                 f"Finished transferring KV cache for request {req_id} {req_meta.remote_te_rpc_port=}."
             )
@@ -171,7 +171,7 @@ class KVCacheSendingLayerThread(threading.Thread):
             logger.error("Failed to transfer KV cache for request "
                          f"{req_id}: {e}")
 
-    def _transfer_kv_cache(self, req_id, req_meta, layer_index, key, value):
+    def _transfer_kv_cache(self, req_id, req_meta, layer_index, key, value, reshape_cache_event):
         # send kv layer to remote
         if len(req_meta.local_block_ids) == 0:
             logger.debug(
@@ -227,7 +227,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                     length_list.append(length)
             if self.current_layer != layer_index:
                 self.current_layer = layer_index
-                self.model_stream.synchronize()
+                reshape_cache_event.synchronize()
             ret = self.engine.batch_transfer_sync_write(
                 session_id, src_list, dst_list, length_list)
             if ret < 0:
@@ -512,6 +512,11 @@ class MooncakeLayerwiseConnectorScheduler:
         self._reqs_need_send_layerwise: dict[str, tuple[
             int, list[int],
             Request]] = {}  # req_id, (len(prompt), local_block_ids, request)
+        
+        self.executor = ThreadPoolExecutor(32)
+        self.metaserver_client = httpx.Client(
+            limits=httpx.Limits(max_connections=100000),
+            timeout=None)
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -570,6 +575,36 @@ class MooncakeLayerwiseConnectorScheduler:
                 local_block_ids)
 
             params["do_remote_prefill"] = False
+
+            logger.info(
+                f"Send request: {request.request_id} to proxy metaserver: {params.get('metaserver', None)}"
+            )
+            # All parameters here should appear in the returned dict of
+            # request_finished in the scheduler side except "request_id".
+            kv_transfer_params = dict(
+                token_ids=[],
+                request_id=request.request_id,
+                do_remote_prefill=False,
+                do_remote_decode=True,
+                remote_block_ids=local_block_ids,
+                remote_engine_id=self.engine_id,
+                remote_host=self.side_channel_host,
+                remote_port=self.side_channel_port,
+            )
+            future = self.executor.submit(
+                self._access_metaserver,
+                url=params.get("metaserver", None),
+                message=kv_transfer_params,
+            )
+
+            def handle_exception(future):
+                if future.exception():
+                    logger.error(
+                        f"Access metaserver fail: {future.exception()}"
+                    )
+
+            future.add_done_callback(handle_exception)
+
 
         # Layerwise prefiller add request need send
         if params is not None and params.get("do_remote_decode"):
@@ -634,6 +669,21 @@ class MooncakeLayerwiseConnectorScheduler:
                         f"MooncakeLayerwiseConnector build_connector_meta: skip {req_id}, current tokens({current_tokens}={computed_tokens.get(req_id,0)}+{scheduled_tokens}), total tokens({total_tokens})"
                     )
         return meta
+
+    def _access_metaserver(self, url, message):
+        success = False
+        retry = 0
+        while retry < 3 and success is False:
+            retry += 1
+            try:
+                self.metaserver_client.post(url, json=message)
+                success = True
+            except Exception as e:
+                logger.error(
+                    f"Failed to connect to metaserver: {url}, retry {retry} time."
+                )
+                if retry == 3:
+                    raise e
 
     def request_finished(
         self,
@@ -907,6 +957,10 @@ class MooncakeLayerwiseConnectorWorker:
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys(
         ):
             # enable decode prefix cache
+            if self.use_mla:
+                reshape_cache_event = attn_metadata[layer_name].prefill.reshape_cache_event
+            else:
+                reshape_cache_event = attn_metadata.reshape_cache_event
             for request in connector_metadata.requests.values():
                 assert len(request.local_block_ids) >= len(
                     request.remote_block_ids
@@ -965,7 +1019,7 @@ class MooncakeLayerwiseConnectorWorker:
                 )
                 assert self.kv_send_layer_thread is not None
                 self.kv_send_layer_thread.send_queue.put(
-                    (req_id, req_meta_update, self.current_layer, key, value))
+                    (req_id, req_meta_update, self.current_layer, key, value, reshape_cache_event))
             self.current_layer += 1
 
     def _get_remote_socket(
