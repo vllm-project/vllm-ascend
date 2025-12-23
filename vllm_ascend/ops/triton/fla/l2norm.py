@@ -32,6 +32,7 @@ def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr,
 
         tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
 
+
 def l2norm_fwd(x: torch.Tensor,
                eps: float = 1e-6,
                output_dtype: torch.dtype | None = None):
