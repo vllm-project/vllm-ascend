@@ -666,8 +666,9 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
-        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
+        AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
+        AscendMRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -694,6 +695,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
+        "ApplyRotaryEmb": AscendApplyRotaryEmb,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
