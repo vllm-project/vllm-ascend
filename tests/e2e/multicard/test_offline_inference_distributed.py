@@ -178,7 +178,6 @@ def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
     example_prompts = [
@@ -198,7 +197,6 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"})
 def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
     example_prompts = [
