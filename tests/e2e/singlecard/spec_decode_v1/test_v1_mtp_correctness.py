@@ -1,32 +1,30 @@
 from __future__ import annotations
 
 import os
+import json
+from typing import Any
 
 import pytest
+import openai
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
-
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-
-@pytest.fixture
-def sampling_config():
-    return SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
+MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 
 
-@pytest.fixture
-def model_name():
-    return "wemaster/deepseek_mtp_main_random_bf16"
-
-
-def mtp_correctness(sampling_config: SamplingParams,
-                    model_name: str,
+@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("num_speculative_tokens", [1,2,3])
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("cudagraph_mode", ["PIECEWISE", "FULL_DECODE_ONLY"])
+@pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
+def test_offline_mtp_eagle_correctness(model_name: str,
                     num_speculative_tokens: int,
-                    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
-                    enforce_eager=False,
-                    disable_padded_drafter_batch=True):
+                    enforce_eager: bool,
+                    cudagraph_mode:str,
+                    disable_padded_drafter_batch: bool):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -37,38 +35,60 @@ def mtp_correctness(sampling_config: SamplingParams,
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
     '''
+    if not enforce_eager:
+        with VllmRunner(model_name,
+                        tensor_parallel_size=1,
+                        max_num_seqs=256,
+                        gpu_memory_utilization=0.7,
+                        distributed_executor_backend="mp",
+                        enable_expert_parallel=True,
+                        speculative_config={
+                            "method":
+                            "mtp",
+                            "num_speculative_tokens":
+                            num_speculative_tokens,
+                            "disable_padded_drafter_batch":
+                            disable_padded_drafter_batch,
+                        },
+                        enforce_eager=enforce_eager,
+                        max_model_len=2000,
+                        compilation_config=CompilationConfig(
+                            cudagraph_mode=cudagraph_mode,
+                            cudagraph_capture_sizes=[12],
+                        )) as spec_llm:
+            sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
+            spec_outputs = spec_llm.generate(example_prompts, sampling_config)
+
+    else:
+        if cudagraph_mode == "PIECEWISE":
+            pytest.skip("skipping the repeating case")
+        with VllmRunner(model_name,
+                        tensor_parallel_size=1,
+                        max_num_seqs=256,
+                        gpu_memory_utilization=0.7,
+                        distributed_executor_backend="mp",
+                        enable_expert_parallel=True,
+                        speculative_config={
+                            "method":
+                            "mtp",
+                            "num_speculative_tokens":
+                            num_speculative_tokens,
+                            "disable_padded_drafter_batch":
+                            disable_padded_drafter_batch,
+                        },
+                        enforce_eager=enforce_eager,
+                        max_model_len=2000
+                        ) as spec_llm:
+            sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
+            spec_outputs = spec_llm.generate(example_prompts, sampling_config)
+
     with VllmRunner(model_name,
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
                     enforce_eager=enforce_eager) as ref_llm:
+        sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
-
-    graph_mode_str = "PIECEWISE"
-    if graph_mode == CUDAGraphMode.FULL:
-        graph_mode_str = "FULL_DECODE_ONLY"
-
-    with VllmRunner(model_name,
-                    tensor_parallel_size=1,
-                    max_num_seqs=256,
-                    gpu_memory_utilization=0.7,
-                    distributed_executor_backend="mp",
-                    enable_expert_parallel=True,
-                    speculative_config={
-                        "method":
-                        "mtp",
-                        "num_speculative_tokens":
-                        num_speculative_tokens,
-                        "disable_padded_drafter_batch":
-                        disable_padded_drafter_batch,
-                    },
-                    enforce_eager=enforce_eager,
-                    max_model_len=2000,
-                    compilation_config=CompilationConfig(
-                        cudagraph_mode=graph_mode_str,
-                        cudagraph_capture_sizes=[12],
-                    )) as spec_llm:
-        spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
     matches = 0
     misses = 0
@@ -85,90 +105,5 @@ def mtp_correctness(sampling_config: SamplingParams,
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
+    cleanup_dist_env_and_memory()
     del spec_llm
-
-
-def test_mtp1_correctness_eager(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 1, enforce_eager=True)
-
-
-def test_mtp2_correctness_eager(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 2, enforce_eager=True)
-
-
-def test_mtp1_correctness_piecewise_graph(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 1)
-
-
-def test_mtp2_correctness_piecewise_graph(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 2)
-
-
-def test_mtp1_correctness_full_graph(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
-
-
-def test_mtp2_correctness_full_graph(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
-
-
-def test_mtp1_correctness_eager_with_pad(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config,
-                    model_name,
-                    1,
-                    enforce_eager=True,
-                    disable_padded_drafter_batch=False)
-
-
-def test_mtp2_correctness_eager_with_pad(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config,
-                    model_name,
-                    2,
-                    enforce_eager=True,
-                    disable_padded_drafter_batch=False)
-
-
-@pytest.mark.skip("TODO(xyx): Revert me when mtp aclgraph is fixed")
-def test_mtp1_correctness_piecewise_graph_with_pad(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config,
-                    model_name,
-                    1,
-                    disable_padded_drafter_batch=False)
-
-
-@pytest.mark.skip("TODO(xyx): Revert me when mtp aclgraph is fixed")
-def test_mtp2_correctness_piecewise_graph_with_pad(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config,
-                    model_name,
-                    2,
-                    disable_padded_drafter_batch=False)
