@@ -354,6 +354,7 @@ class NPUModelRunner(GPUModelRunner):
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
+        self.long_seq_metadata = None
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
