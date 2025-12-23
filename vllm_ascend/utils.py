@@ -823,6 +823,23 @@ def is_moe_model(vllm_config: VllmConfig):
     return _IS_MOE_MODEL
 
 
+def speculative_enable_dispatch_gmm_combine_decode(
+        vllm_config: VllmConfig) -> bool:
+    if vllm_config.speculative_config is None:
+        return True
+    speculative_method = getattr(vllm_config.speculative_config, "method",
+                                 None)
+    if speculative_method in [None, "ngram", "suffix"]:
+        return True
+    if speculative_method in ["eagle", "eagle3"]:
+        return False
+    if speculative_method == "mtp":
+        mtp_quant_type = getattr(vllm_config.model_config.hf_config,
+                                 "mtp_quantize", None)
+        return mtp_quant_type == "w8a8_dynamic"
+    return False
+
+
 def _is_contain_expert(config: Any):
     if isinstance(config, dict):
         for k, v in config.items():
