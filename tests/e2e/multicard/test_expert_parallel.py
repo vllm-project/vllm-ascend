@@ -15,14 +15,12 @@ def test_deepseek_correctness_ep(model_name):
     max_tokens = 5
 
     # FIXME: Really strange that chunked prefill might lead to different results, investigate further
-    with VllmRunner(model_name, tensor_parallel_size=2,
-                    enforce_eager=False) as vllm_model:
+    with VllmRunner(model_name, tensor_parallel_size=2) as vllm_model:
         tp_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     with VllmRunner(model_name,
                     tensor_parallel_size=2,
-                    enable_expert_parallel=True,
-                    enforce_eager=False) as vllm_model:
+                    enable_expert_parallel=True) as vllm_model:
         ep_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(

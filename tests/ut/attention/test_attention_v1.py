@@ -117,7 +117,8 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)

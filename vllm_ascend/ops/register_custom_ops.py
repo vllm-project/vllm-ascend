@@ -119,16 +119,16 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     model_instance = forward_context.model_instance
-    prefetch_stream = forward_context.prefetch_stream
+    weight_prefetch_stream = prefetch_stream()
     layer_idx = int(prefix.split('.')[2])
 
     # start point of gate_up_proj weight prefetch
     if prefix.split('.')[-2] == "self_attn":
         forward_context.prefetch_mlp_gate_up_proj = True
     if forward_context.prefetch_mlp_gate_up_proj:
-        prefetch_stream.wait_stream(torch.npu.current_stream())
+        weight_prefetch_stream.wait_stream(torch.npu.current_stream())
 
-        with torch.npu.stream(prefetch_stream):
+        with torch.npu.stream(weight_prefetch_stream):
             mlp_gate_up_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE
             torch_npu.npu_prefetch(
                 model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight,
@@ -178,13 +178,13 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
         return
     forward_context.prefetch_mlp_down_proj = True
     model_instance = forward_context.model_instance
-    prefetch_stream = forward_context.prefetch_stream
+    weight_prefetch_stream = prefetch_stream()
     layer_idx = forward_context.layer_idx
 
     # start point of down_proj weight prefetch
-    prefetch_stream.wait_stream(torch.npu.current_stream())
+    weight_prefetch_stream.wait_stream(torch.npu.current_stream())
 
-    with torch.npu.stream(prefetch_stream):
+    with torch.npu.stream(weight_prefetch_stream):
         mlp_down_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE
         torch_npu.npu_prefetch(
             model_instance.model.layers[layer_idx].mlp.down_proj.weight,
@@ -208,9 +208,9 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
         return
     if forward_context.prefetch_mlp_gate_up_proj or \
         forward_context.prefetch_mlp_down_proj:
-        prefetch_stream = forward_context.prefetch_stream
+        weight_prefetch_stream = prefetch_stream()
         # wait until prefetch done
-        torch.npu.current_stream().wait_stream(prefetch_stream)
+        torch.npu.current_stream().wait_stream(weight_prefetch_stream)
         forward_context.prefetch_mlp_gate_up_proj = False
         forward_context.prefetch_mlp_down_proj = False
     return

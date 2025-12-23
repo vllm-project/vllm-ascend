@@ -18,7 +18,8 @@ from typing import Callable, Optional
 
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
+
+from vllm_ascend.utils import get_weight_prefetch_method
 
 
 def select_experts(hidden_states: torch.Tensor,
@@ -56,7 +57,7 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
     # prefetch w1_w3_proj.weight preprocess
-    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")

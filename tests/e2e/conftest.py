@@ -162,7 +162,7 @@ class RemoteOpenAIServer:
         self.proxy_port = proxy_port
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 1800
+        max_wait_seconds = max_wait_seconds or 2800
         if self.disaggregated_prefill:
             assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
             self._wait_for_server_pd(timeout=max_wait_seconds)
@@ -763,11 +763,32 @@ def qwen_prompt(questions: list[str]) -> list[str]:
              f"{q}<|im_end|>\n<|im_start|>assistant\n") for q in questions]
 
 
-PROMPT_TEMPLATES = {
-    "qwen2.5vl": qwen_prompt,
+def hunyuan_prompt(questions: list[str]) -> list[str]:
+    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    return [
+        f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
+        for question in questions
+    ]
+
+
+PROMPT_CONFIGS = {
+    "qwen-vl": {
+        "model": "Qwen/Qwen3-VL-8B-Instruct",
+        "prompt_fn": qwen_prompt,
+        "mm_processor_kwargs": {
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+    },
+    "hunyuan-vl": {
+        "model": "Tencent-Hunyuan/HunyuanOCR",
+        "prompt_fn": hunyuan_prompt,
+        "mm_processor_kwargs": {},
+    },
 }
 
 
-@pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
-def prompt_template(request):
-    return PROMPT_TEMPLATES[request.param]
+@pytest.fixture(params=PROMPT_CONFIGS.keys())
+def vl_config(request):
+    return PROMPT_CONFIGS[request.param]

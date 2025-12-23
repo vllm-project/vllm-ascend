@@ -80,7 +80,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "HCCL_OP_EXPANSION_MODE": "AIV"
     }
     server_args = [
-        "--no-enable-prefix-caching", "--disable-mm-preprocessor-cache",
+        "--no-enable-prefix-caching", "--mm-processor-cache-gb", "0",
         "--tensor-parallel-size",
         str(tp_size), "--port",
         str(port), "--max-model-len", "30000", "--max-num-batched-tokens",

@@ -29,7 +29,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 
-def test_qwen_moe_with_full_decode_only():
+def test_qwen3_moe_full_decode_only_tp2():
     if 'HCCL_OP_EXPANSION_MODE' in os.environ:
         del os.environ['HCCL_OP_EXPANSION_MODE']
     prompts = [
@@ -41,7 +41,6 @@ def test_qwen_moe_with_full_decode_only():
     with VllmRunner(model,
                     max_model_len=1024,
                     tensor_parallel_size=2,
-                    enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL_DECODE_ONLY",
                         "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
@@ -53,7 +52,6 @@ def test_qwen_moe_with_full_decode_only():
             model,
             max_model_len=1024,
             tensor_parallel_size=2,
-            enforce_eager=False,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
@@ -75,7 +73,7 @@ def test_qwen_moe_with_full_decode_only():
     )
 
 
-def test_qwen_moe_with_full():
+def test_qwen3_moe_full_graph_tp2():
     if 'HCCL_OP_EXPANSION_MODE' in os.environ:
         del os.environ['HCCL_OP_EXPANSION_MODE']
     prompts = [
@@ -87,7 +85,6 @@ def test_qwen_moe_with_full():
     with VllmRunner(model,
                     max_model_len=1024,
                     tensor_parallel_size=2,
-                    enforce_eager=False,
                     compilation_config={
                         "cudagraph_mode": "FULL",
                         "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
@@ -99,7 +96,6 @@ def test_qwen_moe_with_full():
             model,
             max_model_len=1024,
             tensor_parallel_size=2,
-            enforce_eager=False,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 

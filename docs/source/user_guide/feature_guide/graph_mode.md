@@ -12,7 +12,7 @@ From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by defa
 
 There are two kinds for graph mode supported by vLLM Ascend:
 - **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.1rc1, Qwen and Deepseek series models are well tested.
-- **XliteGraph**: This is the euler xlite graph mode. In v0.11.0, only Llama and Qwen dense serise models are supported.
+- **XliteGraph**: This is the openeuler xlite graph mode. In v0.11.0, only Llama, Qwen dense series models, and Qwen3-vl are supported.
 
 ## Using ACLGraph
 ACLGraph is enabled by default. Take Qwen series models as an example, just set to use V1 Engine is enough.
@@ -36,7 +36,7 @@ vllm serve Qwen/Qwen2-7B-Instruct
 
 ## Using XliteGraph
 
-If you want to run Llama or Qwen dense series models with xlite graph mode, please install xlite, and set xlite_graph_config.
+If you want to run Llama, Qwen dense series models, or Qwen3-vl with xlite graph mode, please install xlite, and set xlite_graph_config.
 
 ```bash
 pip install xlite
@@ -59,7 +59,7 @@ Online example:
 vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
 ```
 
-You can find more details abort xlite [here](https://gitee.com/openeuler/GVirt/blob/master/xlite/README.md)
+You can find more details abort xlite [here](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
 
 ## Fallback to the Eager Mode
 
