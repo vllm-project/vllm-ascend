@@ -23,7 +23,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import logger
-from vllm.config.utils import Range
+from vllm.config.compilation import Range
 
 class QKNormRopeFusionPattern:
 
@@ -287,8 +287,5 @@ class QKNormRopeFusionPass(VllmInductorPass):
                 pattern_idx += 1
         self.end_and_log()
 
-    def is_applicable(self, compile_range: Range) -> bool:
-        """
-        Check if the pass is applicable for the current configuration.
-        """
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
         return True
