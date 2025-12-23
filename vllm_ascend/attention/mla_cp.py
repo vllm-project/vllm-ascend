@@ -28,8 +28,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.attention.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               get_mtp_graph_params,
+from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,
+                                               get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, reach_layer_for_shared_weight_series)
@@ -876,7 +876,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         }
         forward_context: ForwardContext = get_forward_context()
         if forward_context.is_draft_model:
-            graph_params = get_mtp_graph_params()
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if forward_context.capturing:

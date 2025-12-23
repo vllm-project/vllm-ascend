@@ -229,6 +229,7 @@ class EagleProposer(Proposer):
                 spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
+                max_seq_len=0,
             )
             dummy_compute_logits(self.hidden_states)
 
@@ -239,14 +240,14 @@ class EagleProposer(Proposer):
             for layer_name in [self.attn_layer_name]:
                 attn_metadata[layer_name] = attn_metadata_eagle
         for i in range(self.num_speculative_tokens):
-            if i > 0 and not in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            if i > 0 and in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_actual_tokens=0,
-                    in_profile_run=True,
+                    in_profile_run=is_profile,
                     batch_descriptor=batch_descriptor,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     is_draft_model=True):
@@ -263,6 +264,7 @@ class EagleProposer(Proposer):
                         self.update_stream,
                         forward_context,
                         num_tokens,
+                        self.vllm_config,
                     )
 
     def generate_token_ids(self,
@@ -468,7 +470,6 @@ class EagleProposer(Proposer):
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_actual_tokens=num_tokens,
-                in_profile_run=self.runner.in_profile_run,
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
                 is_draft_model=True):
@@ -484,6 +485,7 @@ class EagleProposer(Proposer):
                     self.update_stream,
                     forward_context,
                     num_input_tokens,
+                    self.vllm_config,
                 )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -612,6 +614,7 @@ class EagleProposer(Proposer):
                         self.update_stream,
                         forward_context,
                         input_batch_size,
+                        self.vllm_config,
                     )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
