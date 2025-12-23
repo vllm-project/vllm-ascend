@@ -232,7 +232,11 @@ class NPUPlatform(Platform):
                 "using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, \
                 "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
-            compilation_config.set_splitting_ops_for_v1()
+            compilation_config.set_splitting_ops_for_v1(
+                all2all_backend=vllm_config.parallel_config.all2all_backend,
+                data_parallel_size=vllm_config.parallel_config.
+                data_parallel_size,
+            )
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
