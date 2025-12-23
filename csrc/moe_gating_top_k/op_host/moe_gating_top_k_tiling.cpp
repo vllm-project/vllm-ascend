@@ -175,20 +175,18 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckInputShape()
             biasShape_->GetDim(0) != expertCount_,
             OP_LOGE(context_, "The first dim of bias is: %ld, but should be %ld.", biasShape_->GetDim(0), expertCount_),
             return ge::GRAPH_FAILED);
-        printf("111biasShape_->GetDim(0): %ld, expertCount_: %ld", biasShape_->GetDim(0), expertCount_);
+       
     }
-    printf("TILLING SHAPE4\n");
     moeGatingTopKTilingData_.set_addBias(addBias_);
-    printf("TILLING SHAPE5\n");
+   
     OP_CHECK_IF(k_ > expertCount_,
                 OP_LOGE(context_, "k is: %ld, expert num is: %ld, k cannot be greater than expert num.", k_, expertCount_),
-                return ge::GRAPH_FAILED);
-    printf("TILLING SHAPE6\n");            
+                return ge::GRAPH_FAILED);          
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus MoeGatingTopKTilingBase::CheckAttr()
-{   printf("TILLING CheckAttr");
+{  
     OP_CHECK_IF(
         expertCount_ > MAX_EXPERT_COUNT,
         OP_LOGE(context_, "expert count is: %ld, but should not greater than %ld.", expertCount_, MAX_EXPERT_COUNT),
@@ -252,7 +250,7 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckAttr()
 
     moeGatingTopKTilingData_.set_perGroupExpertCount(perGroupExpertCount_);
     moeGatingTopKTilingData_.set_perGroupExpertCountAlign(groupExpertCountAlign);
-    printf("TILLING SHAPE9\n"); 
+
     return ge::GRAPH_SUCCESS;
 }
 
