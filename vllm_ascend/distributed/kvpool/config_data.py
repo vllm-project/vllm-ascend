@@ -191,7 +191,7 @@ class ChunkedTokenDatabase():
             else:
                 yield start_idx, end_idx, self._make_key_by_hash(hash_val)
 
-    def adaptor_pp(self, key, addr, size):
+    def decode_adaptor_prefill_pp(self, key, addr, size):
         if self.partitions is None or len(self.partitions) == 1:
             return key, addr, size
 

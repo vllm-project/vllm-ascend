@@ -99,9 +99,7 @@ class KVPoolWorker:
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
             num_hidden_layers = model_config.hf_config.num_hidden_layers
             partition_list_str = os.getenv("PREFILL_PP_LAYER_PARTITION", None)
-            prefill_pp_size = len(
-                partition_list_str) if partition_list_str is not None else int(
-                    os.getenv("PREFILL_PP_SIZE", '1'))
+            prefill_pp_size = int(os.getenv("PREFILL_PP_SIZE", '1'))
 
             if partition_list_str is not None:
                 try:
