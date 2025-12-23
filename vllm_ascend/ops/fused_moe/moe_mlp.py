@@ -24,7 +24,8 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
-                               enable_custom_op, get_ascend_device_type)
+                               enable_custom_op, get_ascend_device_type,
+                               get_weight_prefetch_method)
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -100,7 +101,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype
 
-    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
             hidden_states)
