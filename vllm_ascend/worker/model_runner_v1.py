@@ -3064,7 +3064,8 @@ class NPUModelRunner(GPUModelRunner):
             (2 * self.pcp_size)).astype(np.int32) * (2 * self.pcp_size)
         num_padded_scheduled_tokens[:num_decode_reqs] = (
             tokens[:num_decode_reqs] * self.pcp_size)
-        self.num_pcp_pads[:num_reqs] = torch.tensor(num_padded_scheduled_tokens - tokens)
+        self.num_pcp_pads[:num_reqs] = torch.tensor(
+            num_padded_scheduled_tokens - tokens)
         cu_padded_tokens, pcp_padded_arange = \
             self._get_cumsum_and_arange(num_padded_scheduled_tokens)
         unpad_mask = torch.from_numpy(
