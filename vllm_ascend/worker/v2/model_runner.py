@@ -266,7 +266,9 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_tokens_cpu=self.req_states.
             num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
-            slot_mappings=slot_mappings,
+            # torch_npu._reshape_and_cache operator requires slot_mappings to
+            # be torch.int32.
+            slot_mappings=slot_mappings.to(torch.int32),
             kv_cache_config=self.kv_cache_config,
             decode_token_per_req=self.decode_token_per_req,
             attn_mask=attn_mask,
