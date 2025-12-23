@@ -781,11 +781,6 @@ PROMPT_CONFIGS = {
             "fps": 1,
         },
     },
-    "hunyuan-vl": {
-        "model": "Tencent-Hunyuan/HunyuanOCR",
-        "prompt_fn": hunyuan_prompt,
-        "mm_processor_kwargs": {},
-    },
 }
 
 
