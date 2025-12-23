@@ -187,6 +187,8 @@ class CustomDeepSeekMTP(DeepSeekMTP):
         self.model = CustomDeepSeekMultiTokenPredictor(vllm_config=vllm_config,
                                                        prefix=maybe_prefix(
                                                            prefix, "model"))
+        self.speculative_config = vllm_config.speculative_config
+        self.afd_config = vllm_config.afd_config
 
     def forward(
         self,

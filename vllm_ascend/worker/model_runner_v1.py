@@ -262,6 +262,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.compilation_config = vllm_config.compilation_config
         self.load_config = vllm_config.load_config
         self.lora_config = vllm_config.lora_config
+        self.afd_config = vllm_config.afd_config
         self.parallel_config = vllm_config.parallel_config
         self.pin_memory = is_pin_memory_available()
         self.scheduler_config = vllm_config.scheduler_config
@@ -358,7 +359,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                         2048,
                                                         dtype=torch.bool),
                                              diagonal=1).to(self.device)
-            if get_pp_group().is_last_rank:
+            if get_pp_group().is_last_rank and (not self.afd_config or self.afd_config.afd_role == "attention"):
                 # 开启mtp的模型drafter
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,

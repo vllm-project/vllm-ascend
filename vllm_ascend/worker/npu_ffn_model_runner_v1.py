@@ -50,6 +50,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         self.dtype = self.model_config.dtype
         self.load_config = vllm_config.load_config
         self.first_k_dense_replace = self.model_config.hf_config.first_k_dense_replace
+        self.num_hidden_layers = self.model_config.hf_config.num_hidden_layers
         self._forword_cnt = 0
 
         self.afd_config = vllm_config.afd_config
@@ -139,6 +140,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             # skip dense layer
             if current_layer_idx < self.first_k_dense_replace:
                 return
+            if current_layer_idx >= self.num_hidden_layers:
+                return
             torch.npu.synchronize()
             if self.use_aclgraph:
                 # replay
@@ -155,23 +158,19 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
-                m2n_afdconnector_data.quant_mode = 0
-                m2n_afdconnector_data.expand_x_type = torch.bfloat16
-                m2n_afdconnector_data.moe_expert_num = 64
-                m2n_afdconnector_data.h = 2048
-                m2n_afdconnector_data.k = 8
-                m2n_afdconnector_data.expert_token_nums_type = 0
-                m2n_afdconnector_data.aiv_num = 48
-                # self.max_num_tokens * topk * attn_size
-                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * self.attn_size
-                # [64,2048]
-                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                print(f'recv_attn_output success ,layer id is {current_layer_idx}')
-                m2n_afdconnector_data.handle = handle
-                m2n_afdconnector_data.topk_weights = topk_weights
-                print(f'dynamic_scales shape is {dynamic_scales.shape},dtype is {dynamic_scales.dtype}')
-                print(f'group_list shape is {group_list.shape},dtype is {group_list.dtype}')
-                print(f'topk_weights shape is {topk_weights.shape},dtype is {topk_weights.dtype}')
+
+                hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
+                self._build_and_recv_m2n_afdconnector(
+                    m2n_afdconnector_data=m2n_afdconnector_data,
+                    quant_mode= 0,
+                    expand_x_type = torch.bfloat16,
+                    n_routed_experts=self.n_routed_experts,
+                    hidden_size=self.hidden_size,
+                    topk=self.topk,
+                    expert_token_nums_type=0,
+                    attn_size=self.attn_size,
+                    max_num_tokens=self.max_num_tokens,
+                    )
             elif self.connector_name == "camconnector":
                 cam_afdconnector_data = CAMAFDConnectorMetadata(
                     moe_expert_num = 64,
@@ -578,7 +577,35 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             print("finsh capture warm_up")
         print(f'self.dummy_run_call_cnt is {self.dummy_run_call_cnt}')
         self.dummy_run_call_cnt += 1
-    
+
+    def _build_and_recv_m2n_afdconnector(
+        self,
+        m2n_afdconnector_data: M2NAFDConnectorMetadata,
+        n_routed_experts: int,
+        hidden_size: int,
+        topk: int,
+        expert_token_nums_type:int,
+        attn_size: int,
+        max_num_tokens: int,
+        quant_mode: int = 0,
+        expand_x_type: torch.dtype = torch.bfloat16,
+    ):
+        m2n_afdconnector_data.quant_mode = quant_mode
+        m2n_afdconnector_data.expand_x_type = expand_x_type
+        m2n_afdconnector_data.moe_expert_num = n_routed_experts
+        m2n_afdconnector_data.h = hidden_size
+        m2n_afdconnector_data.k = topk
+        m2n_afdconnector_data.expert_token_nums_type = expert_token_nums_type
+        m2n_afdconnector_data.aiv_num = 48
+        m2n_afdconnector_data.batch_size = max_num_tokens * m2n_afdconnector_data.k * attn_size
+        
+        hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
+        m2n_afdconnector_data.handle = handle
+        m2n_afdconnector_data.topk_weights = topk_weights
+        
+        return hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata
+
+
     def _ffn_forward(self,
                      batch_descriptor,
                      aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,):
@@ -588,20 +615,19 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
-                m2n_afdconnector_data.quant_mode = 0
-                m2n_afdconnector_data.expand_x_type = torch.bfloat16
-                m2n_afdconnector_data.moe_expert_num = 64
-                m2n_afdconnector_data.h = 2048
-                m2n_afdconnector_data.k = 8
-                m2n_afdconnector_data.expert_token_nums_type = 0
-                m2n_afdconnector_data.aiv_num = 48
-                # self.max_num_tokens * topk * attn_size
-                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * self.attn_size
-                # [64,2048]
-                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                # print(f'recv_attn_output success ,layer id is {layer_idx}')
-                m2n_afdconnector_data.handle = handle
-                m2n_afdconnector_data.topk_weights = topk_weights
+                hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
+                self._build_and_recv_m2n_afdconnector(
+                    m2n_afdconnector_data=m2n_afdconnector_data,
+                    quant_mode= 0,
+                    expand_x_type = torch.bfloat16,
+                    n_routed_experts=self.n_routed_experts,
+                    hidden_size=self.hidden_size,
+                    topk=self.topk,
+                    expert_token_nums_type=0,
+                    attn_size=self.attn_size,
+                    max_num_tokens=self.max_num_tokens,
+                    )
+
             elif self.connector_name == "camconnector":
                 cam_afdconnector_data = CAMAFDConnectorMetadata(
                     moe_expert_num = 64,
@@ -676,19 +702,18 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
-                m2n_afdconnector_data.quant_mode = 0
-                m2n_afdconnector_data.expand_x_type = torch.bfloat16
-                m2n_afdconnector_data.moe_expert_num = 64
-                m2n_afdconnector_data.h = 2048
-                m2n_afdconnector_data.k = 8
-                m2n_afdconnector_data.expert_token_nums_type = 0
-                m2n_afdconnector_data.aiv_num = 48
-                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * 2 # self.max_num_tokens*topk*die_nums
-                
-                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
-                m2n_afdconnector_data.handle = handle
-                m2n_afdconnector_data.topk_weights = topk_weights
+                hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
+                self._build_and_recv_m2n_afdconnector(
+                    m2n_afdconnector_data=m2n_afdconnector_data,
+                    quant_mode= 0,
+                    expand_x_type = torch.bfloat16,
+                    n_routed_experts=self.n_routed_experts,
+                    hidden_size=self.hidden_size,
+                    topk=self.topk,
+                    expert_token_nums_type=0,
+                    attn_size=self.attn_size,
+                    max_num_tokens=self.max_num_tokens,
+                    )
             elif self.connector_name == "camconnector":
                 cam_afdconnector_data = CAMAFDConnectorMetadata(
                     moe_expert_num = 64,
@@ -732,19 +757,18 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         if self.connector_name == "m2nconnector":
             # TODO metadata
             m2n_afdconnector_data = M2NAFDConnectorMetadata()
-            m2n_afdconnector_data.quant_mode = 0
-            m2n_afdconnector_data.expand_x_type = torch.bfloat16
-            m2n_afdconnector_data.moe_expert_num = 64
-            m2n_afdconnector_data.h = 2048
-            m2n_afdconnector_data.k = 8
-            m2n_afdconnector_data.expert_token_nums_type = 0
-            m2n_afdconnector_data.aiv_num = 48
-            m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * 2
-            
-            hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-            # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
-            m2n_afdconnector_data.handle = handle
-            m2n_afdconnector_data.topk_weights = topk_weights
+            hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
+            self._build_and_recv_m2n_afdconnector(
+                m2n_afdconnector_data=m2n_afdconnector_data,
+                quant_mode= 0,
+                expand_x_type = torch.bfloat16,
+                n_routed_experts=self.n_routed_experts,
+                hidden_size=self.hidden_size,
+                topk=self.topk,
+                expert_token_nums_type=0,
+                attn_size=self.attn_size,
+                max_num_tokens=self.max_num_tokens,
+                )
         elif self.connector_name == "camconnector":
             cam_afdconnector_data = CAMAFDConnectorMetadata(
                 moe_expert_num = 64,
