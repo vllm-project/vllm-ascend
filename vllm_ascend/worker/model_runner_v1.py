@@ -3209,8 +3209,9 @@ class NPUModelRunner(GPUModelRunner):
                 q_head_idx, q_tail_idx = [], []
                 kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
                 kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
+                split_with_q_head_nomask_idx_reqs = []
+                split_kv_with_q_tail_nomask_idx_reqs = []
                 chunk_seqlens = []
-                kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
                 kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
                 q_req_offset = 0
                 kv_req_offset = 0
