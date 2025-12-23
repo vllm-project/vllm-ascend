@@ -2201,6 +2201,7 @@ class NPUModelRunner(GPUModelRunner):
                             is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run
+        # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.pcp_size > 1:
             self.max_num_tokens = math.ceil(self.max_num_tokens /
                                             (self.pcp_size * 2)) * 2
