@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock
 
 import torch
@@ -5,6 +6,10 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+if 'torch_npu._inductor' not in sys.modules:
+    sys.modules['torch_npu._inductor'] = MagicMock()
+
 from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
                                           AscendSFAMetadata,
                                           AscendSFAMetadataBuilder)
