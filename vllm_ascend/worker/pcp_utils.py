@@ -499,8 +499,10 @@ class PCPManager:
         from vllm_ascend.attention.utils import \
             AscendPrefillContextParallelMetadata
         num_reqs = input_batch.num_reqs or query_lens.size(0)
-        num_decodes = sum(input_batch.num_computed_tokens_cpu[:num_reqs] >=
-                          input_batch.num_prompt_tokens[:num_reqs])
+        query_lens = self.query_lens_pcp_full.cpu[:num_reqs] \
+            if self.pcp_world_size > 1 and self.speculative_config else query_lens
+        num_decodes = (query_lens <= self.decode_threshold).sum().item()
+        num_prefills = num_reqs - num_decodes
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
@@ -518,16 +520,41 @@ class PCPManager:
                 dtype=torch.int32,
             )
             # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular spec_attn_mask shape
+            # to avoid irregular spec_attn_mask shape.
+            # Same as block_table, we flatten decode seq_lens to query_lens,
+            # and keep prefill seq_lens unchanged.
             for decode_idx in range(self.decode_threshold):
                 num_computed_tokens_of_pcp_dcp[
                     self.decode_threshold - 1 - decode_idx::self.decode_threshold] = \
                     self._get_cp_local_seq_lens(
-                        torch.tensor(context_lens),
+                        torch.tensor(context_lens) - decode_idx,
                         self.pcp_world_size,
                         self.dcp_world_size,
                         self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                     )
+            if self.decode_threshold > 1:
+                num_computed_tokens_of_pcp_dcp_list = []
+                if num_decodes:
+                    num_decodes_flatten = \
+                        query_lens[:num_decodes].sum().item()
+                    if query_lens[:num_decodes].min().item(
+                    ) == self.decode_threshold:
+                        decode_flatten_idx = list(range(num_decodes_flatten))
+                    else:
+                        decode_flatten_idx = []
+                        for req_id in range(num_decodes):
+                            offset = (req_id + 1) * self.decode_threshold
+                            decode_flatten_idx += \
+                                list(range(offset - query_lens[req_id], offset))
+                    num_computed_tokens_of_pcp_dcp_list.append(
+                        num_computed_tokens_of_pcp_dcp[decode_flatten_idx])
+                if num_prefills:
+                    num_computed_tokens_of_pcp_dcp_list.append(
+                        num_computed_tokens_of_pcp_dcp[
+                            (num_decodes + 1) * self.decode_threshold -
+                            1::self.decode_threshold])
+                num_computed_tokens_of_pcp_dcp = torch.cat(
+                    num_computed_tokens_of_pcp_dcp_list, dim=0)
             long_seq_metadata = AscendPrefillContextParallelMetadata(
                 num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.
