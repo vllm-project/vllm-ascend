@@ -41,7 +41,7 @@ from tests.e2e.conftest import VllmRunner
         "TASK_QUEUE_ENABLE": "1",
         "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP": "1"
     })
-def test_deepseek_moe_fused_allgather_ep():
+def test_deepseek_v3_moe_fused_allgather_ep_tp2():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
@@ -62,7 +62,7 @@ def test_deepseek_moe_fused_allgather_ep():
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     "TASK_QUEUE_ENABLE": "1"
 })
-def test_deepseek_moe_fused_alltoall_ep():
+def test_deepseek_v3_moe_fused_alltoall_ep_tp2():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
