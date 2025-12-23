@@ -253,8 +253,7 @@ class NPUModelRunner(GPUModelRunner):
         is_swa = hasattr(self.vllm_config.hf_text_config, "sliding_window")
         if self.model_config is not None and is_swa:
             self.swa_mask = self.attn_mask_builder.get_swa_mask(
-                self.dtype, self.vllm_config.hf_text_config.sliding_window
-            )
+                self.dtype, self.vllm_config.hf_text_config.sliding_window)
 
         # kv role
         self.is_kv_producer = False
