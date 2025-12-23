@@ -18,7 +18,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 - `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
 - `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
-- `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/deepseek-ai/DeepSeek-V3.2/)
+- `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
 - `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -29,10 +29,26 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image and install extra operator for supporting `DeepSeek-V3.2`.
+You can using our official docker image to run `DeepSeek-V3.2` directly..
 
 :::{note}
 We strongly recommend you to install triton ascend package to speed up the inference.
+
+The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
+
+Source the Ascend BiSheng toolkit, execute the command:
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+```
+
+Install Triton Ascend:
+
+```bash
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+```
+
 :::
 
 :::::{tab-set}
@@ -294,7 +310,7 @@ Before you start, please
             --enforce-eager \
             --no-enable-prefix-caching \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
@@ -369,7 +385,7 @@ Before you start, please
             --enforce-eager \
             --no-enable-prefix-caching \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
@@ -447,7 +463,7 @@ Before you start, please
             --async-scheduling \
             --quantization ascend \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
@@ -525,7 +541,7 @@ Before you start, please
             --no-enable-prefix-caching \
             --quantization ascend \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnector",
+            '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
@@ -638,7 +654,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/DeepSeek-V3.2-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:

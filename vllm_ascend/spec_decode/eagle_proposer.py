@@ -45,6 +45,9 @@ class EagleProposer(Proposer):
         self.vllm_config = vllm_config
         self.device = device
         self.runner = runner
+        self.speculative_config = vllm_config.speculative_config
+        self.draft_model_config = self.speculative_config.draft_model_config
+        self.method = self.speculative_config.method
 
         self.block_size = vllm_config.cache_config.block_size
         # We need to get the hidden size from the draft model config because
@@ -99,6 +102,29 @@ class EagleProposer(Proposer):
                                        device="cpu",
                                        dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self.eagle3_use_aux_hidden_state: bool = (
+            self._get_eagle3_use_aux_hidden_state_from_config())
+
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """
+        NOTE(2025-12-18): This is an explicit copy from vLLM EagleProposer, only added
+        to align with its logics.
+
+        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        hidden states and directly uses the last layer output just like eagle1.
+        They might indicate this by setting "use_aux_hidden_state" to False
+        inside the "eagle_config" dict of their hf_config.
+        """
+        if self.method != "eagle3":
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
+        eagle_config = getattr(self.draft_model_config.hf_config,
+                               "eagle_config", None)
+        if eagle_config is not None:
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state",
+                                                    True)
+        return use_aux_hidden_state
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -143,7 +169,8 @@ class EagleProposer(Proposer):
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None,
-                  dummy_compute_logits=lambda hidden_states: None):
+                  dummy_compute_logits=lambda hidden_states: None,
+                  is_profile=False):
         # update global cos, sin
         update_cos_sin(self.positions[:num_tokens])
 
@@ -383,12 +410,11 @@ class EagleProposer(Proposer):
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange_cpu[:batch_size + 1]
-        attn_metadata.query_start_loc_list = attn_metadata.query_start_loc[
-            1:].tolist()
         attn_metadata.num_decodes, attn_metadata.num_prefills, attn_metadata.num_decode_tokens, attn_metadata.num_prefill_tokens = 0, batch_size, 0, batch_size
         attn_metadata.num_actual_tokens_pcp_padded = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
 
-        attn_metadata.actual_seq_lengths_q = [1 + i for i in range(batch_size)]
+        attn_metadata.actual_seq_lengths_q = attn_metadata.query_start_loc[
+            1:].tolist()
         attn_metadata.seq_lens_list = attn_metadata.seq_lens.tolist()
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(

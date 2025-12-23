@@ -1,4 +1,4 @@
-from typing import ClassVar, List, Optional, Tuple, TypeVar
+from typing import ClassVar, Optional, Tuple, TypeVar
 
 import numpy as np
 import torch
@@ -27,6 +27,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               get_mtp_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
@@ -92,6 +93,10 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
+        # In dcp only spec decode graph padding case,
+        # num_actual_tokens_pcp_padded may be less than num_actual_tokens
+        num_actual_tokens_pcp_padded = max(num_actual_tokens_pcp_padded,
+                                           num_actual_tokens)
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
 
@@ -113,15 +118,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 common_attn_metadata.block_table_tensor[:graph_pad_size])
         else:
             block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
-        if self.pcp_size > 1:
-            num_decodes_flatten = num_decodes * self.decode_threshold
-            block_table = common_attn_metadata.block_table_tensor[:
-                                                                  num_decodes_flatten
-                                                                  +
-                                                                  num_prefills]
-
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
         input_positions = common_attn_metadata.positions[:
@@ -143,6 +139,13 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         query_lens = query_seq_lens_cpu[:num_reqs]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         num_computed_tokens_cpu = (seq_lens - query_lens)
+
+        # For pcp + spec decode, we flatten seq_lens and block_table
+        # to avoid irregular spec_attn_mask shape
+        num_decodes_flatten = query_lens[:num_decodes].sum().item()
+        block_table = common_attn_metadata.block_table_tensor[:
+                                                              num_decodes_flatten
+                                                              + num_prefills]
 
         prefill_metadata = None
         chunked_context_metadata = None
@@ -201,7 +204,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                              dtype=torch.int32)
 
                 local_context_lens_allranks = torch.tensor(
-                    num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]
+                    num_computed_tokens_of_pcp_dcp[num_decodes_flatten:]
                 ).reshape(-1, self.dcp_size * self.pcp_size)
                 # Note(qcs): The max local context lengths
                 # padded to `cp_local_block_size`.
@@ -280,9 +283,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 cos=cos,
                 pcp_metadata=pcp_metadata,
             )
-            if self.pcp_size > 1:
-                prefill_metadata.block_table = block_table[
-                    num_decodes_flatten:, ...]
+            prefill_metadata.block_table = \
+                block_table[num_decodes_flatten:, ...]
 
         decode_metadata = None
         if num_decodes > 0:
@@ -293,13 +295,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            if self.pcp_size > 1:
-                # For pcp + spec decode, we flatten seq_lens and block_table
-                # to avoid irregular spec_attn_mask shape
-                block_table = block_table[:num_decodes_flatten, ...]
-            else:
-                block_table = block_table[:num_decodes, ...]
-            # NOTE: Currently, MTP-fullgraph is incompatibility pcp
+            block_table = block_table[:num_decodes_flatten, ...]
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
             if graph_pad_size > num_decodes and \
                     self.speculative_config.disable_padded_drafter_batch:
@@ -308,8 +304,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
             # [bs, pcp_size, dcp_size]
             num_computed_tokens_of_cp_dcp_array = np.array(
-                num_computed_tokens_of_pcp_dcp)[:num_decodes *
-                                                self.decode_threshold]
+                num_computed_tokens_of_pcp_dcp)[:num_decodes_flatten]
 
             cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
                                                              self.dcp_rank]
@@ -1059,8 +1054,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "return_lse": True,
             "calc_type": "calc_type_ring",
         }
-        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
+        if forward_context.is_mtp_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
         if forward_context.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
@@ -1122,26 +1120,37 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 lse=softmax_lse)
 
         # Update out&lse
-        attn_out_lse_list = self._process_attn_out_lse(attn_output,
-                                                       softmax_lse,
-                                                       decode_meta)
-        attn_output = self._npu_attention_update(attn_out_lse_list)
+        attn_out_lse = self._process_attn_out_lse(attn_output, softmax_lse,
+                                                  decode_meta)
+        attn_output = self._npu_attention_update(attn_out_lse)
         return self._v_up_proj(attn_output)
 
-    def _npu_attention_update(
-            self, attn_out_lse_list: List[torch.Tensor]) -> torch.Tensor:
-        attn_out_split_cp = []
-        attn_lse_split_cp = []
-
-        for attn_out_lse in attn_out_lse_list:
-            attn_out_allgather, attn_lse_allgather = self._out_lse_reshape(
-                *torch.split(attn_out_lse, [self.kv_lora_rank, 1], dim=-1))
-            attn_out_split_cp.append(attn_out_allgather)
-            attn_lse_split_cp.append(attn_lse_allgather)
-        attn_out, _ = torch_npu.npu_attention_update(attn_lse_split_cp,
-                                                     attn_out_split_cp, 0)
-        attn_out = attn_out.view(-1, attn_out_lse_list[0].shape[1],
-                                 self.kv_lora_rank)
+    def _npu_attention_update(self,
+                              attn_out_lse: torch.Tensor) -> torch.Tensor:
+        # [PCP * S, DCP * H, D+1]
+        B_total, H_total, D_plus_1 = attn_out_lse.shape
+        S = B_total // self.pcp_size
+        H = H_total // self.dcp_size
+        D = self.kv_lora_rank
+        assert D_plus_1 == D + 1
+        # [PCP, S, DCP, H, D+1]
+        x = attn_out_lse.view(self.pcp_size, S, self.dcp_size, H, D_plus_1)
+        # [PCP, DCP, S, H, D+1]
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
+        x = x.view(-1, S, H, D_plus_1)
+        # Split out lse
+        out_flat, lse_flat = torch.split(x, [D, 1],
+                                         dim=-1)  # [N, S, H, D], [N, S, H, 1]
+        #    out: [N, S, H, D] -> [N, S*H, D]
+        #    lse: [N, S, H, 1] -> [N, S*H]
+        out_flat = out_flat.flatten(1, 2)  # [N, S*H, D]
+        lse_flat = lse_flat.flatten(1, -1)  # [N, S*H]
+        #  unbind to list
+        out_list = out_flat.unbind(0)  # [S*H, D]
+        lse_list = lse_flat.unbind(0)  # [S*H]
+        attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
+        attn_out = attn_out.view(-1, H, D)
         return attn_out
 
     def _out_lse_reshape(self, attn_out: torch.Tensor,
@@ -1157,8 +1166,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_output: torch.Tensor,
         softmax_lse: torch.Tensor,
         decode_meta: AscendMLADecodeMetadata,
-    ) -> List[torch.Tensor]:
-        attn_out_lse_list = []
+    ) -> torch.Tensor:
         out_mask = decode_meta.batch_seq_mask[:, None,
                                               None].expand_as(attn_output)
         attn_output = torch.where(out_mask, 0, attn_output)
@@ -1177,30 +1185,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
             dist.all_to_all_single(attn_out_lse_all2all,
                                    attn_out_lse,
                                    group=self.dcp_group)
-            # permute: [num_heads, v_head_dim+1, bs] -> [bs, num_heads, v_head_dim+1]
-            attn_out_lse_all2all = attn_out_lse_all2all.permute([2, 0, 1])
-            if self.pcp_size > 1:
-                attn_out_lse = attn_out_lse_all2all.contiguous()
-            attn_out_lse_list = list(
-                torch.chunk(attn_out_lse_all2all, self.dcp_size, dim=1))
+            attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
 
         if self.pcp_size > 1:
-            # AllGather out&lse within PCP group
-            attn_out_lse_list = [
-                torch.empty_like(attn_out_lse) for _ in range(self.pcp_size)
-            ]
-            dist.all_gather(attn_out_lse_list,
-                            attn_out_lse,
-                            group=self.pcp_group)
-        if self.dcp_size > 1 and self.pcp_size > 1:
-            attn_out_lse_list_pcp_dcp = []
-            for s in attn_out_lse_list:
-                attn_out_lse_list_split = list(
-                    torch.chunk(s, self.dcp_size, dim=1))
-                attn_out_lse_list_pcp_dcp += attn_out_lse_list_split
-            attn_out_lse_list = attn_out_lse_list_pcp_dcp
+            # AllGather out&lse within CP group
+            attn_out_lse = get_pcp_group().all_gather(
+                attn_out_lse.contiguous(), dim=0)
 
-        return attn_out_lse_list
+        return attn_out_lse
 
     def _reorg_kvcache(
         self,

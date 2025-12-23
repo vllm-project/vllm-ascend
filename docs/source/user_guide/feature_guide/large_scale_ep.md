@@ -158,7 +158,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
     --enforce-eager \
     --kv-transfer-config \
-    '{"kv_connector": "MooncakeConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
       "kv_buffer_device": "npu",
       "kv_role": "kv_producer",
       "kv_parallel_size": "1",
@@ -225,7 +225,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     --quantization ascend \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
     --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_buffer_device": "npu",
         "kv_role": "kv_consumer",
         "kv_parallel_size": "1",
@@ -430,7 +430,7 @@ In the PD separation scenario, we provide a optimized configuration.
 
 ```shell
 --kv-transfer-config \
-    '{"kv_connector": "MooncakeConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
       "kv_buffer_device": "npu",
       "kv_role": "kv_producer",
       "kv_parallel_size": "1",
@@ -453,7 +453,7 @@ In the PD separation scenario, we provide a optimized configuration.
 
 ```shell
 --kv-transfer-config
-    '{"kv_connector": "MooncakeConnector",
+    '{"kv_connector": "MooncakeConnectorV1",
       "kv_buffer_device": "npu",
       "kv_role": "kv_consumer",
       "kv_parallel_size": "1",

@@ -166,10 +166,6 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
-        kv_cache_dtype = vllm_config.additional_config.get(
-            "kv_cache_dtype", None)
-        if kv_cache_dtype is not None:
-            vllm_config.cache_config.cache_dtype = kv_cache_dtype
         elif model_config and hasattr(model_config.hf_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
@@ -285,11 +281,11 @@ class NPUPlatform(Platform):
             parallel_config.all2all_backend = "flashinfer_all2allv"
             if ascend_config.xlite_graph_config.enabled:
                 logger.info(
-                    "Euler Xlite enabled. See: https://gitee.com/openeuler/GVirt/tree/master/xlite"
+                    "openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite"
                 )
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         refresh_block_size(vllm_config)
 
@@ -355,22 +351,16 @@ class NPUPlatform(Platform):
         CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, *args, **kwargs):
-        if "attn_selector_config" in kwargs:
-            use_mla = kwargs["attn_selector_config"].use_mla
-            use_sparse = kwargs["attn_selector_config"].use_sparse
-        else:
-            use_mla = kwargs.get("use_mla",
-                                 args[4] if len(args) >= 5 else None)
-            use_sparse = kwargs.get("use_sparse",
-                                    args[6] if len(args) >= 7 else None)
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(use_mla, use_sparse)]
+
+        return backend_map[(attn_selector_config.use_mla,
+                            attn_selector_config.use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

@@ -26,7 +26,6 @@ class TestMoECommMethod(TestBase):
         self.moe_config.dp_group = MagicMock()
         self.moe_config.num_global_redundant_experts = 0
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"
@@ -36,11 +35,7 @@ class TestMoECommMethod(TestBase):
     )
     def test_all_gather_comm_impl(self, mock_token_dispatcher,
                                   mock_prepare_finalize,
-                                  mock_get_forward_context,
-                                  mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                                  mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "all_gather"
@@ -76,17 +71,12 @@ class TestMoECommMethod(TestBase):
                            context_metadata=context_metadata)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
     def test_mc2_comm_impl(self, mock_token_dispatcher, mock_prepare_finalize,
-                           mock_get_forward_context,
-                           mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                           mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "mc2"
@@ -124,7 +114,6 @@ class TestMoECommMethod(TestBase):
                            context_metadata=context_metadata)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAll2All"
@@ -134,11 +123,7 @@ class TestMoECommMethod(TestBase):
     )
     def test_alltoall_comm_impl(self, mock_token_dispatcher,
                                 mock_prepare_finalize,
-                                mock_get_forward_context,
-                                mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                                mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "alltoall"
@@ -168,7 +153,6 @@ class TestMoECommMethod(TestBase):
         mock_pf_instance.prepare.assert_called_once_with(
             hidden_states, router_logits, False, False, QuantType.NONE)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"
@@ -179,11 +163,7 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
     def test_fused_experts_method(self, mock_unified_apply_mlp,
                                   mock_token_dispatcher, mock_prepare_finalize,
-                                  mock_get_forward_context,
-                                  mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                                  mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "all_gather"
