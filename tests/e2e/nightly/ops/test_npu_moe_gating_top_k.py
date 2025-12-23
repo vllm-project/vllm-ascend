@@ -1,12 +1,11 @@
 import itertools
+import random
+
+
 import numpy 
 import torch
-import torch_npu
-import random
+from vllm_ascend.utils import enable_custom_op 
 from torch_npu.testing.testcase import TestCase, run_tests
-from torch_npu.testing.common_utils import create_common_tensor, SupportedDevices
-
-from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
@@ -32,9 +31,17 @@ def softmax_func(x, axis=None):
 
 class TestNpuMoeGatingTopK(TestCase):
 
-    def moe_gating_top_k_numpy(self,x: numpy.ndarray, k: int, bias: numpy.ndarray, k_group: int = 1, group_count: int = 1,
-                            group_select_mode: int = 0, renorm: int = 0, norm_type: int = 0, y2_flag: bool = False,
-                            routed_scaling_factor: float = 1.0, eps: float = 1e-20) -> tuple:
+    def moe_gating_top_k_numpy(self,
+                               x: numpy.ndarray,
+                               k: int, bias: numpy.ndarray, 
+                               k_group: int = 1, 
+                               group_count: int = 1,
+                               group_select_mode: int = 0, 
+                               renorm: int = 0, 
+                               norm_type: int = 0, 
+                               y2_flag: bool = False,
+                               routed_scaling_factor: float = 1.0, 
+                               eps: float = 1e-20) -> tuple:
 
         ori_dtype = x.dtype
         dtype = x.dtype
@@ -61,12 +68,18 @@ class TestNpuMoeGatingTopK(TestCase):
             if group_select_mode == 0:
                 group_x = numpy.amax(x, axis=-1)
             else:
-                group_x = numpy.partition(x, -2, axis=-1)[..., -2:].sum(axis=-1)
-            indices = numpy.argsort(-group_x, axis=-1, kind='stable')[:, :k_group]  # Indices of top-k_group
+                group_x = numpy.partition(x, -2, axis=-1)[..., 
+                                                          -2:].sum(axis=-1)
+            indices = numpy.argsort(
+                -group_x, axis=-1, 
+                kind='stable')[:, :k_group]  # Indices of top-k_group
 
-            mask = numpy.ones((x.shape[0], group_count), dtype=bool)  # 创建全 1 的掩码
-            mask[numpy.arange(x.shape[0])[:, None], indices] = False  # 在指定索引处设置为 False
-            x = numpy.where(mask[..., None], float('-inf'), x)  # 用 -inf 填充掩码为 True 的位置
+            mask = numpy.ones((x.shape[0], group_count), 
+                              dtype=bool)  # 创建全 1 的掩码
+            mask[numpy.arange(x.shape[0])[:, None],   
+                 indices] = False  # 在指定索引处设置为 False
+            x = numpy.where(mask[..., None], float('-inf'), 
+                            x)  # 用 -inf 填充掩码为 True 的位置
             x = x.reshape(x.shape[0], -1)
             
 
@@ -176,7 +189,7 @@ class TestNpuMoeGatingTopK(TestCase):
                 outFlag=out_flag,
                 routedScalingFactor=routed_scaling_factor,
                 eps=eps,
-                biasOptional = bias_tensor.npu() if bias_tensor is not None else None,
+                biasOptional = bias_tensor.npu(),
             )
 
             # ---- 输出当前 case 信息 ----

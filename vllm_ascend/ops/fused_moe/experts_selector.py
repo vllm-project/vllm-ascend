@@ -17,7 +17,7 @@
 from typing import Callable, Optional
 
 import torch
-import torch_npu
+
 
 from vllm_ascend.utils import get_weight_prefetch_method
 
@@ -214,7 +214,7 @@ def _select_experts_with_fusion_ops(
         e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(
             router_logits.dtype)
-    topk_weights, topk_ids, _= torch.ops._C_ascend.moe_gating_top_k(
+    topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
         router_logits,
         k=top_k,
         kGroup=topk_group,
@@ -228,8 +228,7 @@ def _select_experts_with_fusion_ops(
         eps=float(1e-20),
         biasOptional=e_score_correction_bias,
         )
-    #if scoring_func == "softmax":
-    #    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        
     return topk_weights, topk_ids
 
 
