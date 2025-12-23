@@ -654,15 +654,23 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self.positions.np[:total_num_scheduled_tokens] = positions_np
 
-        # Calculate M-RoPE positions.
-        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
-            self._calc_mrope_positions(scheduler_output)
-
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True)
+                non_blocking=True,
+            )
+        elif self.uses_xdrope_dim > 0:
+            self._calc_xdrope_positions(scheduler_output)
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
+                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True,
+            )
+        else:
+            # Common case (1D positions)
+            self.positions.copy_to_gpu(total_num_scheduled_tokens)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -845,9 +853,12 @@ class NPUModelRunner(GPUModelRunner):
             # then the embedding layer is not included in the ACL graph.
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
-        positions = self.positions.gpu[:num_input_tokens]
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
+        elif self.uses_xdrope_dim > 0:
+            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
+        else:
+            positions = self.positions.gpu[:num_input_tokens]
 
         # type: ignore
         if get_pp_group().is_first_rank:
@@ -2070,6 +2081,8 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
+            elif self.uses_xdrope_dim > 0:
+                positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions.gpu[:num_tokens_padded]
 
