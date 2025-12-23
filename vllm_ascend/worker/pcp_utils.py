@@ -416,7 +416,7 @@ class PCPManager:
             mtp_slot_ori = input_batch.block_table.block_tables[
                 0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
-            unpad_mask[::self.pcp_size] = True
+            unpad_mask[::self.pcp_world_size] = True
             mtp_slot_pad = \
                 torch.full([num_tokens_mtp_pad], -1, dtype=torch.int32)
             mtp_slot_pad[unpad_mask] = mtp_slot_ori
