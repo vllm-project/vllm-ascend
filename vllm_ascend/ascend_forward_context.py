@@ -226,6 +226,11 @@ def select_moe_comm_method(num_tokens: int,
     quant_type = getattr(
         vllm_config.model_config.hf_config, 'moe_quantize',
         getattr(vllm_config.model_config.hf_config, 'quantize', None))
+    model_with_mtp = vllm_config.speculative_config and \
+        getattr(vllm_config.speculative_config, 'method', None) == "mtp"
+    mtp_quant_type = getattr(
+        vllm_config.model_config.hf_config, 'mtp_quantize',
+        getattr(vllm_config.model_config.hf_config, 'quantize', None))
 
     if not vllm_config.parallel_config.enable_expert_parallel:
         moe_comm_type = MoECommType.ALLGATHER
@@ -242,7 +247,7 @@ def select_moe_comm_method(num_tokens: int,
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop dynamic_eplb guard when dispatch_gmm_combine_decode supports tensor list inputs
-        # TODO: add guard for dispatch_gmm_combine_decode when mtp uses float while moe uses w8a8
+        # TODO: drop non-w8a8 mtp guard when dispatch_gmm_combine_decode supports running with default MC2
         fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and (
             not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
@@ -250,6 +255,9 @@ def select_moe_comm_method(num_tokens: int,
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and get_ep_group(
                 ).world_size <= 16 and (not is_mtp_model)
+            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+                fused_decode_enable = fused_mc2_enable and (
+                    (not model_with_mtp) or mtp_quant_type == "w8a8_dynamic")
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
