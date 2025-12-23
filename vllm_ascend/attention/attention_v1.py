@@ -236,7 +236,7 @@ class AscendAttentionMetadataBuilder:
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
-        swa_mask =  common_attn_metadata.swa_mask
+        swa_mask = common_attn_metadata.swa_mask
         attn_state = common_attn_metadata.attn_state
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
