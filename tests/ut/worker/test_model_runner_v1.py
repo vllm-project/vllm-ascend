@@ -479,47 +479,33 @@ def test_generate_pcp_mtp_input(
     assert torch.equal(mock_runner.query_start_loc_pcp_full.cpu[:num_reqs + 1],
                        target_query_start_loc_pcp_full)
 
+
 @pytest.mark.parametrize(
     "pcp_rank, split_with_q_head_nomask_idx_reqs, split_kv_with_q_tail_nomask_idx_reqs,"
     "head_attn_nomask_seqlens, chunk_seqlens,"
     "target_split_q_head, target_split_q_tail, target_head_seqlens, target_tail_seqlens",
     [
         # case1: pcp_rank=0
-        (
-            0,
-            [[10, 20, 30]],
-            [[40, 50, 60]],
-            torch.tensor([[64], [0]], dtype=torch.int32),
-            [64],
-            [torch.tensor([1, 2, 3], dtype=torch.int32)],
-            [torch.tensor([40, 50, 60], dtype=torch.int32)],
-            [torch.tensor([[64], [0]], dtype=torch.int32)],
-            [torch.tensor([[64], [3]], dtype=torch.int32)]
-        ),
+        (0, [[10, 20, 30]], [[40, 50, 60]],
+         torch.tensor([[64], [0]], dtype=torch.int32), [64], [
+             torch.tensor([1, 2, 3], dtype=torch.int32)
+         ], [torch.tensor([40, 50, 60], dtype=torch.int32)], [
+             torch.tensor([[64], [0]], dtype=torch.int32)
+         ], [torch.tensor([[64], [3]], dtype=torch.int32)]),
         # case2: pcp_rank=1
-        (
-            1,
-            [[1, 2], [3, 4, 5]],
-            [[6, 7], [8, 9, 10]],
-            torch.tensor([[128, 128], [128, 128]], dtype=torch.int32),
-            [128, 128],
-            [torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)],
-            [torch.tensor([6, 7, 8, 9, 10], dtype=torch.int32)],
-            [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)],
-            [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)]
-        ),
+        (1, [[1, 2], [3, 4, 5]], [[6, 7], [8, 9, 10]],
+         torch.tensor([[128, 128], [128, 128]], dtype=torch.int32), [128, 128],
+         [torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)], [
+             torch.tensor([6, 7, 8, 9, 10], dtype=torch.int32)
+         ], [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)
+             ], [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)]),
         # case3: pcp_rank=2
-        (
-            2,
-            [[11, 12, 13, 14], [15, 16]],
-            [[17, 18, 19], [20, 21, 22, 23]],
-            torch.tensor([[256, 256], [512, 512]], dtype=torch.int32),
-            [256, 256],
-            [torch.tensor([11, 12, 13, 14, 15, 16], dtype=torch.int32)],
-            [torch.tensor([17, 18, 19, 20, 21, 22, 23], dtype=torch.int32)],
-            [torch.tensor([[256, 256], [4, 2]], dtype=torch.int32)],
-            [torch.tensor([[256, 256], [3, 4]], dtype=torch.int32)]
-        ),
+        (2, [[11, 12, 13, 14], [15, 16]], [[17, 18, 19], [20, 21, 22, 23]],
+         torch.tensor([[256, 256], [512, 512]], dtype=torch.int32), [256, 256],
+         [torch.tensor([11, 12, 13, 14, 15, 16], dtype=torch.int32)], [
+             torch.tensor([17, 18, 19, 20, 21, 22, 23], dtype=torch.int32)
+         ], [torch.tensor([[256, 256], [4, 2]], dtype=torch.int32)
+             ], [torch.tensor([[256, 256], [3, 4]], dtype=torch.int32)]),
         # case4: empty input
         (
             0,
@@ -539,7 +525,7 @@ def test_generate_pcp_mtp_input(
             [[40]],
             torch.tensor([[64], [0]], dtype=torch.int32),
             [64],
-            [torch.tensor([1, 2, 3], dtype=torch.int32)],  
+            [torch.tensor([1, 2, 3], dtype=torch.int32)],
             [torch.tensor([40], dtype=torch.int32)],
             [torch.tensor([[64], [0]], dtype=torch.int32)],
             [torch.tensor([[64], [1]], dtype=torch.int32)],
@@ -553,44 +539,40 @@ def test_generate_pcp_mtp_input(
             [128, 128],
             [torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)],
             [torch.tensor([6, 7, 8, 9, 10], dtype=torch.int32)],
-            [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)], 
+            [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)],
             [torch.tensor([[128, 128], [2, 3]], dtype=torch.int32)],
         ),
-    ]
-)
+    ])
 def test_split_nomask_idx_tensor_list(
-    pcp_rank,
-    split_with_q_head_nomask_idx_reqs,
-    split_kv_with_q_tail_nomask_idx_reqs,
-    head_attn_nomask_seqlens,
-    chunk_seqlens,
-    target_split_q_head,
-    target_split_q_tail,
-    target_head_seqlens,
-    target_tail_seqlens
-):
+        pcp_rank, split_with_q_head_nomask_idx_reqs,
+        split_kv_with_q_tail_nomask_idx_reqs, head_attn_nomask_seqlens,
+        chunk_seqlens, target_split_q_head, target_split_q_tail,
+        target_head_seqlens, target_tail_seqlens):
     # Mock input data
     mock_runner = MagicMock(spec=NPUModelRunner)
     mock_runner.device = "cpu"
     mock_runner.pcp_rank = 0
     mock_runner.kv_idx_names = {
-        "kv_with_q_head_nomask_idx_tensor": torch.tensor([1, 2, 3], dtype=torch.int32)
+        "kv_with_q_head_nomask_idx_tensor":
+        torch.tensor([1, 2, 3], dtype=torch.int32)
     }
 
     mock_runner.pcp_rank = pcp_rank
 
     # Mock output
-    mock_runner._split_multi_batch_kv_idx.side_effect = NPUModelRunner._split_multi_batch_kv_idx.__get__(mock_runner, NPUModelRunner)
-    mock_runner._list_to_tensor.side_effect = NPUModelRunner._list_to_tensor.__get__(mock_runner, NPUModelRunner)
+    mock_runner._split_multi_batch_kv_idx.side_effect = NPUModelRunner._split_multi_batch_kv_idx.__get__(
+        mock_runner, NPUModelRunner)
+    mock_runner._list_to_tensor.side_effect = NPUModelRunner._list_to_tensor.__get__(
+        mock_runner, NPUModelRunner)
 
     # Call the method under test
     result = NPUModelRunner._split_nomask_idx_tensor_list(
         mock_runner,
         split_with_q_head_nomask_idx_reqs=split_with_q_head_nomask_idx_reqs,
-        split_kv_with_q_tail_nomask_idx_reqs=split_kv_with_q_tail_nomask_idx_reqs,
+        split_kv_with_q_tail_nomask_idx_reqs=
+        split_kv_with_q_tail_nomask_idx_reqs,
         head_attn_nomask_seqlens=head_attn_nomask_seqlens,
-        chunk_seqlens=chunk_seqlens
-    )
+        chunk_seqlens=chunk_seqlens)
     split_q_head, split_q_tail, head_seqlens, tail_seqlens = result
 
     # Assert the method call
@@ -598,11 +580,9 @@ def test_split_nomask_idx_tensor_list(
     for res, target in zip(split_q_head, target_split_q_head):
         assert torch.equal(res, target)
 
-
     assert len(split_q_tail) == len(target_split_q_tail)
     for res, target in zip(split_q_tail, target_split_q_tail):
         assert torch.equal(res, target)
-
 
     assert len(head_seqlens) == len(target_head_seqlens)
     for res, target in zip(head_seqlens, target_head_seqlens):
@@ -610,7 +590,6 @@ def test_split_nomask_idx_tensor_list(
             assert torch.equal(res, target)
         else:
             assert res == target
-
 
     assert len(tail_seqlens) == len(target_tail_seqlens)
     for res, target in zip(tail_seqlens, target_tail_seqlens):
@@ -625,86 +604,49 @@ def test_split_nomask_idx_tensor_list(
     [
         # case1: multiple batches + split size greater than batch length
         (
-            [
-                [0, 1, 2, 3, 4],
-                [5, 6, 7]
-            ],
+            [[0, 1, 2, 3, 4], [5, 6, 7]],
             2,
             # expected  merged_split_kv_idx_3d
-            [
-                [0, 1, 5, 6],
-                [2, 3, 7],
-                [4]
-            ],
+            [[0, 1, 5, 6], [2, 3, 7], [4]],
             # expected merged_split_kv_len_2d
-            [
-                [2, 2],
-                [2, 1],
-                [1, 0]
-            ],
+            [[2, 2], [2, 1], [1, 0]],
         ),
         # case2: single batch + split size greater than batch length
         (
-            [
-                [0, 1, 2]
-            ],
+            [[0, 1, 2]],
             5,
-            [
-                [0, 1, 2]
-            ],
-            [
-                [3]
-            ],
+            [[0, 1, 2]],
+            [[3]],
         ),
         # case3: split size equals maximum batch length
         (
-            [
-                [0, 1, 2, 3],
-                [5, 6]
-            ],
+            [[0, 1, 2, 3], [5, 6]],
             4,
-            [
-                [0, 1, 2, 3, 5, 6]
-            ],
-            [
-                [4, 2]
-            ],
+            [[0, 1, 2, 3, 5, 6]],
+            [[4, 2]],
         ),
         # case4: Split size is 1 (minimum granularity split)
         (
-            [
-                [0, 1],
-                [2]
-            ],
+            [[0, 1], [2]],
             1,
-            [
-                [0, 2],
-                [1]
-            ],
-            [
-                [1, 1],
-                [1, 0]
-            ],
+            [[0, 2], [1]],
+            [[1, 1], [1, 0]],
         ),
         # case6: the batch contains an empty list
         (
-            [
-                [],
-                [0, 1],
-                [2]
-            ],
+            [[], [0, 1], [2]],
             1,
-            [
-                [0, 2],
-                [1]
-            ],
-            [
-                [0, 1, 1],
-                [0, 1, 0]
-            ],
+            [[0, 2], [1]],
+            [[0, 1, 1], [0, 1, 0]],
         ),
-    ]
-)
+        # case: empty input
+        (
+            [],
+            2,
+            [],
+            [],
+        ),
+    ])
 def test_split_multi_batch_kv_idx(
     kv_nomask_idx_multi_batch,
     split_size,
@@ -718,18 +660,19 @@ def test_split_multi_batch_kv_idx(
     result = NPUModelRunner._split_multi_batch_kv_idx(
         self=model_runner,
         kv_nomask_idx_multi_batch=kv_nomask_idx_multi_batch,
-        split_size=split_size
-    )
+        split_size=split_size)
 
     merged_split_kv_idx_3d, merged_split_kv_len_2d = result
 
     # Assert the method call
     assert len(merged_split_kv_idx_3d) == len(expected_merged_idx)
 
-    for t, (actual_seg, expected_seg) in enumerate(zip(merged_split_kv_idx_3d, expected_merged_idx)):
+    for t, (actual_seg, expected_seg) in enumerate(
+            zip(merged_split_kv_idx_3d, expected_merged_idx)):
         assert actual_seg == expected_seg
 
     assert len(merged_split_kv_len_2d) == len(expected_merged_len)
 
-    for t, (actual_len, expected_len) in enumerate(zip(merged_split_kv_len_2d, expected_merged_len)):
+    for t, (actual_len, expected_len) in enumerate(
+            zip(merged_split_kv_len_2d, expected_merged_len)):
         assert actual_len == expected_len

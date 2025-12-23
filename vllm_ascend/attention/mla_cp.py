@@ -1001,7 +1001,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                                    softmax_lse=attn_lse)
 
         # nomask
-        if len(kv_nomask_idx[0]) == 0:
+        if not kv_nomask_idx or len(kv_nomask_idx[0]) == 0:
             return attn_output, attn_lse
         for kv_nomask_idx_split, attn_nomask_seqlens_split in zip(
                 kv_nomask_idx, attn_nomask_seqlens):

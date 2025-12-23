@@ -3263,8 +3263,10 @@ class NPUModelRunner(GPUModelRunner):
                     q_req_offset += seq_len
                     kv_req_offset += seq_len * self.pcp_size
 
-                q_head_idx_tensor = self._list_to_tensor(q_head_idx, self.device)
-                q_tail_idx_tensor = self._list_to_tensor(q_tail_idx, self.device)
+                q_head_idx_tensor = self._list_to_tensor(
+                    q_head_idx, self.device)
+                q_tail_idx_tensor = self._list_to_tensor(
+                    q_tail_idx, self.device)
                 self.q_head_idx_tensor = q_head_idx_tensor
                 self.q_tail_idx_tensor = q_tail_idx_tensor
 
@@ -3413,6 +3415,8 @@ class NPUModelRunner(GPUModelRunner):
             merged_split_kv_idx_3d.append(current_time_merged)
 
         def reshape_kv_len_to_time_first(split_kv_len_2d):
+            if not split_kv_len_2d or not split_kv_len_2d[0]:
+                return []
             return [[batch_len[time_idx] for batch_len in split_kv_len_2d]
                     for time_idx in range(len(split_kv_len_2d[0]))]
 
