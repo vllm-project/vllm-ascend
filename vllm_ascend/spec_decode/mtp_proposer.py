@@ -893,13 +893,13 @@ class MtpProposer(Proposer):
                     # (_generate_pcp_mtp_input), and use updated slot_indices
                     # to get corresponding slot_mapping in each step.
                     num_reject_tokens = torch.tensor(
-                        self.runner.cu_num_tokens_pcp_full,
+                        self.runner.pcp_manager.cu_num_tokens_pcp_full,
                         dtype=torch.int32).to(
                             self.device) - ori_last_token_indices - 1
                     num_accept_tokens = \
                         query_lens_d.to(self.device) - num_reject_tokens
                     ori_seq_len = attn_metadata_i.seq_lens
-                    mtp_slot_mapping = self.runner.mtp_slot_pad
+                    mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                     # slot_mapping index base offset:
                     # scheduled tokens + pre-allocated mtp tokens + accepted tokens

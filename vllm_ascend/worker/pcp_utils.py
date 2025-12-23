@@ -499,9 +499,9 @@ class PCPManager:
         from vllm_ascend.attention.utils import \
             AscendPrefillContextParallelMetadata
         num_reqs = input_batch.num_reqs or query_lens.size(0)
-        query_lens = self.query_lens_pcp_full.cpu[:num_reqs] \
+        query_lens_new = self.query_lens_pcp_full.cpu[:num_reqs] \
             if self.pcp_world_size > 1 and self.speculative_config else query_lens
-        num_decodes = (query_lens <= self.decode_threshold).sum().item()
+        num_decodes = (query_lens_new <= self.decode_threshold).sum().item()
         num_prefills = num_reqs - num_decodes
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
