@@ -110,6 +110,12 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
         context_layer = torch.empty_like(q)
+
+        if cu_seqlens is None:
+            cu_seqlens = torch.arange(
+                0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="npu"
+            )
+
         cu_seqlens = torch.diff(cu_seqlens).to("cpu")
 
         # operator requires pta version >= 2.5.1
