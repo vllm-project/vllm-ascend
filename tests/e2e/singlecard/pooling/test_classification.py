@@ -5,7 +5,7 @@ from transformers import AutoModelForSequenceClassification
 from tests.e2e.conftest import HfRunner, VllmRunner
 
 
-def test_classify_correctness() -> None:
+def test_qwen_pooling_classify_correctness() -> None:
 
     model_name = snapshot_download("Howeee/Qwen2.5-1.5B-apeach")
 
