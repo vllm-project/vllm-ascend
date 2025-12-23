@@ -226,7 +226,7 @@ def _select_experts_with_fusion_ops(
         # y2_flag=False, # old api; should the third output be output
         routedScalingFactor=1,
         eps=float(1e-20),
-        biasOptional=e_score_correction_bias)
+        biasOptional=e_score_correction_bias,)
     #if scoring_func == "softmax":
     #    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
