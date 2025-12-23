@@ -89,6 +89,7 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
+    # TODO(Ronald1995): Optimize the performance of the kernel in npu.
     _gumbel_sample_kernel[(num_reqs, num_blocks)](
         local_argmax,
         local_argmax.stride(0),

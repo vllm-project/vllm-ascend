@@ -205,12 +205,13 @@ class NPUModelRunner(GPUModelRunner):
                                                                    1]
 
         # Get prefill tokens.
-        # prefill_token_ids.copy_to_gpu() because npu doesn't support uva buffer.
         prepare_prefill_inputs(
             self.input_buffers.input_ids,
             self.req_states.next_prefill_tokens,
             idx_mapping_npu,
             query_start_loc_gpu,
+            # use prefill_token_ids.copy_to_gpu() because npu doesn't
+            # support uva buffer.
             self.req_states.prefill_token_ids.copy_to_gpu(),
             self.req_states.prefill_len.gpu,
             self.req_states.num_computed_tokens,
