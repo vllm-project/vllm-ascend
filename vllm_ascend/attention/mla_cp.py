@@ -27,6 +27,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               get_mtp_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
@@ -92,6 +93,10 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
+        # In dcp only spec decode graph padding case,
+        # num_actual_tokens_pcp_padded may be less than num_actual_tokens
+        num_actual_tokens_pcp_padded = max(num_actual_tokens_pcp_padded,
+                                           num_actual_tokens)
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
 
@@ -113,15 +118,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 common_attn_metadata.block_table_tensor[:graph_pad_size])
         else:
             block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
-        if self.pcp_size > 1:
-            num_decodes_flatten = num_decodes * self.decode_threshold
-            block_table = common_attn_metadata.block_table_tensor[:
-                                                                  num_decodes_flatten
-                                                                  +
-                                                                  num_prefills]
-
-        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
         input_positions = common_attn_metadata.positions[:
@@ -143,6 +139,13 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         query_lens = query_seq_lens_cpu[:num_reqs]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         num_computed_tokens_cpu = (seq_lens - query_lens)
+
+        # For pcp + spec decode, we flatten seq_lens and block_table
+        # to avoid irregular spec_attn_mask shape
+        num_decodes_flatten = query_lens[:num_decodes].sum().item()
+        block_table = common_attn_metadata.block_table_tensor[:
+                                                              num_decodes_flatten
+                                                              + num_prefills]
 
         prefill_metadata = None
         chunked_context_metadata = None
@@ -201,7 +204,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                              dtype=torch.int32)
 
                 local_context_lens_allranks = torch.tensor(
-                    num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]
+                    num_computed_tokens_of_pcp_dcp[num_decodes_flatten:]
                 ).reshape(-1, self.dcp_size * self.pcp_size)
                 # Note(qcs): The max local context lengths
                 # padded to `cp_local_block_size`.
@@ -280,9 +283,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 cos=cos,
                 pcp_metadata=pcp_metadata,
             )
-            if self.pcp_size > 1:
-                prefill_metadata.block_table = block_table[
-                    num_decodes_flatten:, ...]
+            prefill_metadata.block_table = \
+                block_table[num_decodes_flatten:, ...]
 
         decode_metadata = None
         if num_decodes > 0:
@@ -293,13 +295,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            if self.pcp_size > 1:
-                # For pcp + spec decode, we flatten seq_lens and block_table
-                # to avoid irregular spec_attn_mask shape
-                block_table = block_table[:num_decodes_flatten, ...]
-            else:
-                block_table = block_table[:num_decodes, ...]
-            # NOTE: Currently, MTP-fullgraph is incompatibility pcp
+            block_table = block_table[:num_decodes_flatten, ...]
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
             if graph_pad_size > num_decodes and \
                     self.speculative_config.disable_padded_drafter_batch:
@@ -308,8 +304,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
             # [bs, pcp_size, dcp_size]
             num_computed_tokens_of_cp_dcp_array = np.array(
-                num_computed_tokens_of_pcp_dcp)[:num_decodes *
-                                                self.decode_threshold]
+                num_computed_tokens_of_pcp_dcp)[:num_decodes_flatten]
 
             cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
                                                              self.dcp_rank]
@@ -599,6 +594,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     self.vllm_config, self.o_proj):
                 reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
+
+        forward_context = get_forward_context()
+
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
         else:
@@ -606,19 +604,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
         assert attn_metadata.num_decodes is not None and \
                attn_metadata.num_prefills is not None and \
                attn_metadata.num_decode_tokens is not None
+
+        has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        o_proj_input_shape = (get_forward_context().num_tokens,
+        o_proj_input_shape = (forward_context.num_tokens,
                               self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape,
                                    dtype=hidden_states.dtype,
                                    device=hidden_states.device)
 
         # MLA Preprocess
-        forward_context = get_forward_context()
-        if (self.enable_mlapo and
-            (attn_metadata is None or not forward_context.with_prefill)):
+        if self.enable_mlapo and not has_prefill:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)
             decode_preprocess_res, prefill_preprocess_res = self._mla_decode_preprocess(
@@ -676,7 +674,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         del o_proj_input
 
-        has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded
@@ -1057,8 +1054,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "return_lse": True,
             "calc_type": "calc_type_ring",
         }
-        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
+        if forward_context.is_mtp_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
         if forward_context.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()

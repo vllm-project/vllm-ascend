@@ -606,7 +606,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             spec_attn_mask=None,
             attn_state=AscendAttentionState.PrefillNoCache,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
 
         base_inputs = {
             "num_actual_tokens": 10,
@@ -673,7 +674,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
 
         base_inputs = {
             "num_actual_tokens": 15,
@@ -729,7 +731,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             spec_attn_mask=None,
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
 
         base_inputs = {
             "num_actual_tokens": 3,
@@ -784,7 +787,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             spec_attn_mask=None,
             attn_state=AscendAttentionState.DecodeOnly,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
 
         base_inputs = {
             "num_actual_tokens": 3,
@@ -839,7 +843,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             spec_attn_mask=None,
             attn_state=AscendAttentionState.PrefillNoCache,
             num_computed_tokens_cpu=None,
-            seq_lens=None)
+            seq_lens=None,
+            max_seq_len=6)
 
         builder = AscendMLAMetadataBuilder(kv_cache_spec=self.kv_cache_spec,
                                            layer_names=["layer_0", "layer_1"],
