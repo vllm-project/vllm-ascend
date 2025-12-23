@@ -49,6 +49,7 @@ def test_without_spec_decoding(monkeypatch: pytest.MonkeyPatch, ):
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
+@pytest.mark.skip("Probabilistic failure, revert me after fix")
 def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,

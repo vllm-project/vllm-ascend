@@ -127,19 +127,32 @@ class TestAscendRejectionSampler(TestBase):
         x = torch.tensor([10, 20, 30])
         cu_num_tokens = torch.tensor([2, 5, 7])
         num_tokens = 7
+        # Test PyTorch path
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+            with patch("vllm_ascend.sample.rejection_sampler.expand_pytorch"
+                       ) as mock_pytorch:
+                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+                mock_pytorch.assert_called_once()
+                args = mock_pytorch.call_args[0]
+                assert (args[1] == x).all()
+                assert (args[2] == cu_num_tokens).all()
 
-        with patch("vllm_ascend.sample.rejection_sampler.expand_pytorch"
-                   ) as mock_kernel:
-            expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
-            mock_kernel.assert_called_once()
-            args = mock_kernel.call_args[0]
-            assert (args[1] == x).all()
-            assert (args[2] == cu_num_tokens).all()
+        # Test Triton kernel path
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True):
+            with patch("vllm_ascend.sample.rejection_sampler.expand_kernel"
+                       ) as mock_triton:
+                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+                # grid = triton.cdiv(n, BLOCK_SIZE) = triton.cdiv(3, 2) = 2
+                mock_triton.__getitem__.assert_called_once_with((2, ))
+                call_args = mock_triton.__getitem__.return_value.call_args[0]
+                assert (call_args[1] == x).all()
+                assert (call_args[2] == cu_num_tokens).all()
 
         # Run actual function
-        result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
-        expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
-        assert torch.equal(result, expected)
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+            result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+            expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
+            assert torch.equal(result, expected)
 
     def test_sample_recovered_tokens_pytorch_ngram(self):
         """Test recovered token sampling under n-gram mode"""
