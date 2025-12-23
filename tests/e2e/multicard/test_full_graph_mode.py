@@ -29,7 +29,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 
-def test_qwen_moe_with_full_decode_only():
+def test_qwen3_moe_full_decode_only_tp2():
     if 'HCCL_OP_EXPANSION_MODE' in os.environ:
         del os.environ['HCCL_OP_EXPANSION_MODE']
     prompts = [
@@ -75,7 +75,7 @@ def test_qwen_moe_with_full_decode_only():
     )
 
 
-def test_qwen_moe_with_full():
+def test_qwen3_moe_full_graph_tp2():
     if 'HCCL_OP_EXPANSION_MODE' in os.environ:
         del os.environ['HCCL_OP_EXPANSION_MODE']
     prompts = [

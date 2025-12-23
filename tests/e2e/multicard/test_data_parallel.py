@@ -38,7 +38,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
-def test_qwen_inference_dp2(model, max_tokens):
+def test_qwen3_inference_dp2(model, max_tokens):
     moe_models = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
     quantization_models = ["vllm-ascend/Qwen3-30B-A3B-W8A8"]
     script = "examples/offline_data_parallel.py"
