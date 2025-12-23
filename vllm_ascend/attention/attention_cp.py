@@ -152,6 +152,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                                                                          dcp_rank]
                 actual_seq_lengths_kv = torch.cumsum(
                     local_chunked_kv_lens_rank, dim=0).tolist()
+                local_total_toks = local_chunked_kv_lens_rank.sum()
                 chunked_req_mask = self._get_chunked_req_mask(
                     local_context_lens_allranks)
                 local_chunk_starts = torch.zeros(
@@ -181,7 +182,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                         cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
                         kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk,
                         batch_chunk_seq_mask=batch_chunk_seq_mask,
-                        chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices
+                        chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices,
+                        local_total_toks=local_total_toks.item()
                     )
             attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
             head_attn_nomask_seqlens = common_long_seq_metadata.head_attn_nomask_seqlens
@@ -672,8 +674,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         local_chunked_kv_lens_rank = local_chunked_kv_lens[:, self.pcp_rank,
                                                            self.dcp_rank]
-        total_toks = local_chunked_kv_lens_rank.sum()
-
+        total_toks = prefill_metadata.chunked_context.local_total_toks
         key, value = self._load_kv_for_chunk(attn_metadata, kv_cache,
                                              local_chunked_kv_lens_rank, query,
                                              total_toks)
@@ -682,16 +683,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             num_heads = self.num_heads
 
-        prefix_chunk_output = torch.full(
-            (query.size(0), num_heads, self.head_size),
-            fill_value=0,
-            dtype=query.dtype,
-            device=query.device)
-        prefix_chunk_lse = torch.full((query.size(0), num_heads, 1),
-                                      fill_value=-torch.inf,
-                                      dtype=torch.float32,
-                                      device=query.device)
-
+        prefix_chunk_output, prefix_chunk_lse = None, None
         if total_toks > 0:
             prefix_chunk_output, prefix_chunk_lse = torch.ops.npu.npu_fused_infer_attention_score(
                 query,
