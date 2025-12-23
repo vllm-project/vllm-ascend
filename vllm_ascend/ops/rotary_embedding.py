@@ -121,19 +121,14 @@ def _record_cos_sin_cache(cos_sin_cache):
     if _cos_cache is not None \
         and _sin_cache is not None:
         return
-    cos_sin_cache = cos_sin_cache.view(-1, 2, cos_sin_cache.shape[-1] // 2).repeat(1, 1, 2).chunk(2, dim=-2)
+    cos_sin_cache = cos_sin_cache.view(-1, 2,
+                                       cos_sin_cache.shape[-1] // 2).repeat(
+                                           1, 1, 2).chunk(2, dim=-2)
     _cos_cache = cos_sin_cache[0].contiguous()
     _sin_cache = cos_sin_cache[1].contiguous()
 
 
-def _record_cos_and_sin_cache(cos_cache, sin_cache):
-    global _cos_cache
-    global _sin_cache
-    _cos_cache = cos_cache
-    _sin_cache = sin_cache
-
-
-def update_cos_sin(positions, is_draft_model=True):
+def update_cos_sin(positions, is_draft_model=False):
     global _cos
     global _sin
     global _cos_slice
@@ -201,9 +196,12 @@ def _rope_forward_oot(
                 -1] == 128:
             if cos is None or sin is None:
                 num_tokens = positions.shape[0]
-                cos, sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)
-                cos = cos.view(1, num_tokens, -1,self.head_size)
-                sin = sin.view(1, num_tokens, -1,self.head_size)
+                cos, sin = self.cos_sin_cache.index_select(0, positions).view(
+                    num_tokens, 2, -1).repeat_interleave(2,
+                                                         dim=-1).chunk(2,
+                                                                       dim=-2)
+                cos = cos.view(1, num_tokens, -1, self.head_size)
+                sin = sin.view(1, num_tokens, -1, self.head_size)
             # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
             # This method requires head_size and rotary_dim equal 128 and neox_style is True
             query = query.contiguous().view(1, query.shape[0], -1,

@@ -202,7 +202,7 @@ class EagleProposer(VllmEagleProposer):
                   dummy_compute_logits=lambda hidden_states: None,
                   is_profile=False):
         # update global cos, sin
-        update_cos_sin(self.positions[:num_tokens], False)
+        update_cos_sin(self.positions[:num_tokens], is_draft_model=True)
 
         attn_metadata = None
         if not self.use_cuda_graph:
@@ -336,7 +336,7 @@ class EagleProposer(VllmEagleProposer):
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
         # update global cos, sin
-        update_cos_sin(self.positions[:num_input_tokens], False)
+        update_cos_sin(self.positions[:num_input_tokens], is_draft_model=True)
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_name:
             per_layer_attn_metadata[layer_name] = attn_metadata
@@ -463,7 +463,7 @@ class EagleProposer(VllmEagleProposer):
             attn_metadata.attn_mask = attn_mask
 
             # update global cos, sin
-            update_cos_sin(self.positions[:input_batch_size], False)
+            update_cos_sin(self.positions[:input_batch_size], is_draft_model=True)
 
             # Run the model.
             with set_ascend_forward_context(
