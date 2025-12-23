@@ -15,6 +15,9 @@
 # limitations under the License.
 #
 
+import os
+from unittest.mock import patch
+
 import pytest
 from vllm import SamplingParams
 
@@ -26,7 +29,8 @@ MODELS = ["Qwen/Qwen3-0.6B"]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
-def test_output_between_eager_and_aclgraph(
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+def test_eager_mode(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
