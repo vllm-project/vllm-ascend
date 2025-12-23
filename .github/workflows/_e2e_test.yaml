@@ -68,10 +68,23 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Run vllm-project/vllm-ascend test (non triton)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        if: ${{ inputs.type == 'full' }}
+        run: |
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'light' }}
         run: |
@@ -83,7 +96,6 @@ jobs:
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
@@ -164,10 +176,20 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' }}
+        run: |
+          pytest -sv --durations=0 tests/e2e/multicard/test_aclgraph_capture_replay.py
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'light' }}
         run: |
           # pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
@@ -175,7 +197,6 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
           # pytest -sv --durations=0 tests/e2e/multicard/test_quantization.py
@@ -258,11 +279,16 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         run: |
           # pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           # pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
