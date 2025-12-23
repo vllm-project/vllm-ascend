@@ -71,6 +71,10 @@ def gumbel_sample(
     pos: torch.Tensor,  # [num_reqs]
     apply_temperature: bool,
 ) -> torch.Tensor:
+    """Override the function because there are some bugs
+    when _gumbel_sample_kernel runs on npu, we need to make some fixes.
+    you could read NOTE(Ronald1995) comments to understand.
+    """
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)

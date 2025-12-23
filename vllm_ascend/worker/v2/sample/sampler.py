@@ -15,7 +15,7 @@ class AscendSampler(Sampler):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Override sample method because we need to override triton operators 
+        """Override sample method because we need to override triton operators
         called in the method.
         """
         # Copy logits to a new FP32 tensor.

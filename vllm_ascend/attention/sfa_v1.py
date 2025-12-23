@@ -32,6 +32,7 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
                                enable_sp, maybe_trans_nz, replace_layer)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+import vllm.envs as envs_vllm
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -43,7 +44,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND_SFA"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "ASCEND_SFA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_builder_cls():

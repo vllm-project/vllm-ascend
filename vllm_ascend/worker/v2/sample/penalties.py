@@ -96,6 +96,10 @@ def apply_penalties_and_temperature(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> None:
+    """Override the function because there are some bugs
+    when _penalties_and_temperature_kernel runs on npu, we need to make some fixes.
+    you could read NOTE(Ronald1995) comments to understand.
+    """
     num_reqs, vocab_size = logits.shape
     # NOTE(Ronald1995): change BLOCK_SIZE from 8192 to 4096 in case UB overflow
     # in triton-ascend.
