@@ -78,5 +78,9 @@ def uva_wrapper():
         def __init__(self, *args, **kwargs):
             pass
 
-    # TODO(Ronald1995): rectify this when NPU support uva.
-    vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
+    try:
+        # TODO(Ronald1995): rectify this when NPU support uva.
+        vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
+        yield
+    finally:
+        pass
