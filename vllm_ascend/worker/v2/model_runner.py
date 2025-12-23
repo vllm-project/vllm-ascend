@@ -94,12 +94,6 @@ class NPUModelRunner(GPUModelRunner):
                 pin_memory=self.pin_memory,
             )
 
-    @torch.inference_mode()
-    def profile_run(self):
-        """Override the method beacuse thera cuda operation in it."""
-        with torch_cuda_wrapper():
-            super().profile_run()
-
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -331,13 +325,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 self.num_rejected_tokens_event.record()
         return sampler_output, num_sampled, num_rejected
-
-    def sample_tokens(self, grammar_output):
-        """Override sample_tokens method because there are
-        some torch.cuda operations in it.
-        """
-        with torch_cuda_wrapper():
-            return super().sample_tokens(grammar_output)
 
     def _update_seq_lens_cpu(
         self,

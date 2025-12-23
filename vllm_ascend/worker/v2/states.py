@@ -19,16 +19,15 @@ class AscendRequestState(RequestState):
         device: torch.device,
         pin_memory: bool,
     ):
-        with uva_wrapper():
-            super().__init__(
-                max_num_reqs,
-                max_model_len,
-                max_num_batched_tokens,
-                num_speculative_steps,
-                vocab_size,
-                device,
-                pin_memory,
-            )
+        super().__init__(
+            max_num_reqs,
+            max_model_len,
+            max_num_batched_tokens,
+            num_speculative_steps,
+            vocab_size,
+            device,
+            pin_memory,
+        )
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.prefill_token_ids
@@ -80,9 +79,4 @@ def uva_wrapper():
             pass
 
     # TODO(Ronald1995): rectify this when NPU support uva.
-    ori_class = vllm.v1.worker.gpu.states.UvaBuffer
-    try:
-        vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
-        yield
-    finally:
-        vllm.v1.worker.gpu.states.UvaBuffer = ori_class
+    vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
