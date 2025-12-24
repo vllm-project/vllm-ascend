@@ -27,6 +27,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
 from vllm_ascend.attention.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               get_mtp_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -390,6 +391,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
         assert prefill_metadata.chunked_context is not None
+        assert isinstance(prefill_metadata.chunked_context,
+                          CPChunkedContextMetadata)
         assert prefill_metadata.chunked_context.padded_chunk_seq_lens_npu is not None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         assert 0 <= index < iters
