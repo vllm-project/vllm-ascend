@@ -68,22 +68,35 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Run vllm-project/vllm-ascend test (non triton)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        if: ${{ inputs.type == 'full' }}
+        run: |
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
           # pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           # pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_classify_correctness
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_qwen_pooling_classify_correctness
 
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
@@ -92,9 +105,7 @@ jobs:
 
           pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
           #pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
@@ -105,6 +116,8 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
           pytest -sv --durations=0 tests/e2e/singlecard/pooling/
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_cross_layer_attn_model.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
@@ -164,10 +177,22 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 tests/e2e/multicard/test_aclgraph_capture_replay.py
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
@@ -175,11 +200,9 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_aclgraph_capture_replay.py
           pytest -sv --durations=0 tests/e2e/multicard/test_full_graph_mode.py
           pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/test_expert_parallel.py
@@ -190,13 +213,14 @@ jobs:
           #pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_fc2_for_qwen3_moe
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_flashcomm_v1
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
 
           pytest -sv --durations=0 tests/e2e/multicard/test_prefix_caching.py
           pytest -sv --durations=0 tests/e2e/multicard/test_pipeline_parallel.py
@@ -258,31 +282,21 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test for V1 Engine
-        working-directory: ./vllm-ascend
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Kimi_K2_Thinking_W4A16
-          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_mtp.py
-
-      - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
+      - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
           . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
           python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
 
-      - name: Run vllm-project/vllm-ascend Qwen3 Next test
+      - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
-        shell: bash -el {0}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_kimi_k2_thinking_w4a16_tp4
+          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_mtp.py
           pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_next.py
