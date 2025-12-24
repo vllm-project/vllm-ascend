@@ -397,7 +397,7 @@ class MtpProposer(Proposer):
             # update pcp related params
             if self.pcp_size > 1:
                 token_indices_to_sample = \
-                    query_start_loc_pcp_full_cpu[1:num_reqs + 1] - 1
+                    query_start_loc_pcp_full[1:num_reqs + 1] - 1
                 target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
                 target_hidden_states = hidden_states
@@ -985,7 +985,7 @@ class MtpProposer(Proposer):
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             if self.pcp_size * self.dcp_size > 1:
                 # update local seq_len and batch_seq_mask
-                num_computed_tokens_of_pcp_dcp = self.runner._get_cp_local_seq_lens(
+                num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
                     ori_seq_len + step + 1,
                     self.pcp_size,
                     self.dcp_size,

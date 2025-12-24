@@ -1133,7 +1133,7 @@ class NPUModelRunner(GPUModelRunner):
             # sharing kv across layers need to read the kvcache,
             # directly return chunked prefill in this scenario
             return AscendAttentionState.ChunkedPrefill
-        if np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
+        if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):

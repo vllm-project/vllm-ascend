@@ -100,12 +100,12 @@ class PCPManager:
             self.positions_pcp_full = torch.zeros(self.max_num_tokens,
                                                   dtype=torch.int64,
                                                   device="cpu",
-                                                  pin_memory=True)
+                                                  pin_memory=pin_memory)
             self.positions_pcp_full_np = self.positions_pcp_full.numpy()
             self.query_lens_pcp_full = CpuGpuBuffer(self.max_num_reqs,
                                                     dtype=torch.int32,
                                                     device=device,
-                                                    pin_memory=True)
+                                                    pin_memory=pin_memory)
 
     def _get_cumsum_and_arange(
         self,
