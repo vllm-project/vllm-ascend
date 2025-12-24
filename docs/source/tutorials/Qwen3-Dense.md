@@ -181,6 +181,7 @@ vllm serve /model/Qwen3-32B-W8A8 \
   --max-model-len 5500 \
   --max-num-batched-tokens 40960 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80]}' \
   --port 8113 \
   --block-size 128 \
   --gpu-memory-utilization 0.9
@@ -190,6 +191,8 @@ vllm serve /model/Qwen3-32B-W8A8 \
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
 - If the model is not a quantized model, remove the `--quantization ascend` parameter.
+
+- **[Optional]** `--additional-config '{"pa_shape_list":[48,64,72,80]}'`: `pa_shape_list` specifies the batch sizes where you want to switch to the PA operator. This is a temporary tuning knob. Currently, the attention operator dispatch defaults to the FIA operator. In some batch-size (concurrency) settings, FIA may have suboptimal performance. By setting `pa_shape_list`, when the runtime batch size matches one of the listed values, vLLM-Ascend will replace FIA with the PA operator to prevent performance degradation. In the future, FIA will be optimized for these scenarios and this parameter will be removed.
 
 - If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./Qwen3-Dense.md#key-optimization-points)、[optimization-highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
