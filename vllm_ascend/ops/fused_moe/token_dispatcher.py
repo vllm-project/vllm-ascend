@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import torch
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -98,16 +99,33 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.enable_dispatch_v2 = hasattr(torch_npu,
                                           "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = (
-            get_ascend_device_type() == AscendDeviceType._910_93)
+            get_ascend_device_type() == AscendDeviceType.A3)
 
-        # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-        self.a3_need_extra_args = \
-            get_ascend_device_type() == AscendDeviceType._910_93
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
         self.need_expert_scale = is_hierarchical_communication_enabled()
         self.with_quant = False
+
+        # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
+        # dispatch & combine operators with different input num_tokens per rank.
+        vllm_config = get_current_vllm_config()
+        scheduler_config = vllm_config.scheduler_config
+        compilation_config = vllm_config.compilation_config
+        speculative_config = vllm_config.speculative_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        uniform_decode_query_len = 1 if not speculative_config else \
+            1 + speculative_config.num_speculative_tokens
+        decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
+                                      0)
+        max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+        if compilation_config.cudagraph_capture_sizes:
+            max_num_tokens = compilation_config.max_cudagraph_capture_size
+        else:
+            max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
+        self.fused_global_bs = max_num_tokens * self.ep_world_size
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -130,7 +148,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": moe_expert_num,
-            "global_bs": 0,
+            "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
 
@@ -146,10 +164,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                 "group_tp": self.moe_all_to_all_group_name,
                 "tp_world_size": 1,
                 "tp_rank_id": 0,
-            })
-        if self.a3_need_extra_args and self.enable_dispatch_v2:
-            stage1_kwargs.update({
-                "x_active_mask": mc2_mask,
             })
         if self.need_expert_scale:
             stage1_kwargs.update({
@@ -214,7 +228,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         context_metadata = {
             "topk_ids": topk_ids,
             "topk_weights": topk_weights,
-            "mc2_mask": mc2_mask,
             "expert_map": expert_map,
             "ep_recv_counts": ep_recv_counts,
             "tp_recv_counts": tp_recv_counts,
@@ -243,7 +256,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         ep_recv_counts = context_metadata["ep_recv_counts"]
         tp_recv_counts = context_metadata["tp_recv_counts"]
         assist_info_for_combine = context_metadata["assist_info_for_combine"]
-        mc2_mask = context_metadata["mc2_mask"]
         expand_scales = context_metadata["expand_scales"]
 
         assert expert_map is not None
@@ -256,7 +268,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": moe_expert_num,
-            "global_bs": 0,
+            "global_bs": self.global_bs,
         }
 
         if self.with_quant:
@@ -284,9 +296,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                 "tp_world_size": 1,
                 "tp_rank_id": 0,
             })
-
-        if self.a3_need_extra_args and self.enable_dispatch_v2:
-            stage3_kwargs["x_active_mask"] = mc2_mask
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
@@ -411,69 +420,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             final_hidden_states = final_hidden_states.view(self.original_shape)
 
         # these values are no longer used, so they need to be set to None for memory release.
-        return final_hidden_states
-
-
-# mypy: disable-error-code="override"
-class TokenDispatcherWithMoge(MoETokenDispatcher):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.apply_router_weight_on_input = False
-        self.local_num_experts = self.num_experts // self.ep_size
-        self.local_num_group = self.top_k // self.ep_size
-        self.bsz = None
-
-    def token_dispatch(self,
-                       hidden_states: torch.Tensor,
-                       topk_weights: torch.Tensor,
-                       topk_ids: torch.Tensor,
-                       expert_map: Optional[torch.Tensor] = None,
-                       log2phy: Optional[torch.Tensor] = None,
-                       global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[Any] = None,
-                       quantized_x_for_share: Optional[Any] = None,
-                       dynamic_scale_for_share: Optional[Any] = None,
-                       mc2_mask: Optional[torch.Tensor] = None,
-                       apply_router_weight_on_input: bool = False,
-                       with_quant: bool = False,
-                       dynamic_eplb: bool = False,
-                       pertoken_scale: Optional[torch.Tensor] = None):
-        self.bsz, _ = hidden_states.shape
-        flatten_topk_ids = topk_ids.view(-1)
-        self.sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
-        self.sorted_topk_ids = self.sorted_topk_ids.to(torch.int32)
-        sorted_hidden_states = hidden_states.index_select(
-            0, self.sorted_topk_ids // self.local_num_group)
-
-        experts_id = torch.arange(0,
-                                  self.local_num_experts,
-                                  dtype=topk_ids.dtype,
-                                  device=topk_ids.device)
-        num_tokens_per_expert = (
-            flatten_topk_ids.unsqueeze(-1) == experts_id).to(
-                torch.float32).sum(0)
-        topk_scales = topk_weights.view(-1).index_select(
-            0, self.sorted_topk_ids).unsqueeze(-1)
-        group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
-        group_list_type = 0
-        return {
-            "group_list_type": group_list_type,
-            "hidden_states": sorted_hidden_states,
-            "group_list": group_list,
-            "topk_scales": topk_scales
-        }
-
-    def token_combine(self,
-                      hidden_states: torch.Tensor,
-                      context_metadata: dict,
-                      bias: torch.Tensor = None):
-        unsorted_topk_ids = torch.argsort(self.sorted_topk_ids.float()).to(
-            torch.int32)
-        unsorted_hidden_states = hidden_states.index_select(
-            0, unsorted_topk_ids)
-        final_hidden_states = unsorted_hidden_states.reshape(
-            self.bsz, self.top_k // self.ep_size, -1).sum(1)
         return final_hidden_states
 
 

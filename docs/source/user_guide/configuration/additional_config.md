@@ -30,24 +30,26 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`                  | dict | `{}`    | Configuration options for module tensor parallelism                                                                                             |
 | `weight_prefetch_config`            | dict | `{}`    | Configuration options for weight prefetch                                                                                                        |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case.                                      |
-| `expert_map_path`                   | str  | `None`  | When using expert load balancing for an MoE model, an expert map path needs to be passed in.                                                 |
-| `kv_cache_dtype`                    | str  | `None`  | When using the KV cache quantization method, KV cache dtype needs to be set, currently only int8 is supported.                                |
+| `expert_map_path`                   | str  | `None`  | When using expert load balancing for an MoE model, an expert map path needs to be passed in.                                                 |                              |
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
-| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effects on MoE models with shared experts.                                |
+| `lmhead_tensor_parallel_size`       | int  | `None`  | The custom tensor parallel size of lmhead. Restriction: Can only be used when tensor_parallel=1                                                                                                   |
+| `oproj_tensor_parallel_size`        | int  | `None`  | The custom tensor parallel size of oproj.                                                                                                     |
+| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effect on MoE models with shared experts.                                |
 | `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic EPLB.                                                                                                                |
 | `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when EPLB begins.                                                                                                      |
 | `gate_eplb`                         | bool | `False` | Whether to enable EPLB only once.                                                                                                              |
 | `num_wait_worker_iterations`        | int  | `30`    | The  forward iterations when the EPLB worker will finish CPU tasks. In our test default value 30 can cover most cases.                           |
-| `expert_map_record_path`            | str  | `None`  | When dynamic EPLB is completed, save the current expert load heatmap to the specified path.                                                   |
+| `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                                                  |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
 | `dump_config`                      | str | `None`  | Configuration file path for msprobe dump(eager mode).                                                                                          |
+| `enable_async_exponential`          | int  | `0`     | Whether to enable async exponential overlap. To enable async exponential, set this config to 1.                                                                |
 
 The details of each configuration option are as follows:
 
 **xlite_graph_config**
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama or Qwen dense series models are supported. |
+| `enabled` | bool | `False` | Whether to enable xlite graph mode. Currently only Llama, Qwen dense series models, and Qwen3-vl are supported. |
 | `full_mode` | bool | `False` | Whether to enable xlite for both the prefill and decode stages. By default, xlite is only enabled for the decode stage. |
 
 **weight_prefetch_config**

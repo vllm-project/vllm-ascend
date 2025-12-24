@@ -62,6 +62,10 @@ set(VLLM_ASCEND_CUSTOM_OP
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
+    ${KERNEL_FILES}/bgmv_expand.cpp
+    ${KERNEL_FILES}/bgmv_shrink.cpp
+    ${KERNEL_FILES}/sgmv_expand.cpp
+    ${KERNEL_FILES}/sgmv_shrink.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 

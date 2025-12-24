@@ -31,9 +31,10 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -51,6 +52,7 @@ ACL_FORMAT_FRACTAL_NZ = 29
 _CUSTOM_OP_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
@@ -63,6 +65,7 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
+_HAS_ROPE = None
 
 
 def _print_callback_on_stream(*args):
@@ -121,8 +124,22 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def is_enable_nz():
-    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
+def maybe_trans_nz(weight: torch.Tensor):
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        # NZ is not enabled
+        return weight
+    if weight.dtype == torch.float:
+        # fp32 can not support NZ
+        return weight
+    elif weight.dtype in {torch.bfloat16, torch.float16}:
+        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
+            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+        else:
+            return weight
+    else:
+        # quant weight will trans nz by default
+        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
@@ -291,6 +308,18 @@ def prefetch_stream() -> torch.npu.Stream:
         # we return the default stream.
         _PREFETCH_STREAM = torch_npu.npu.Stream()
     return _PREFETCH_STREAM
+
+
+def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
+    global _WEIGHT_PREFETCH_METHOD
+    if _WEIGHT_PREFETCH_METHOD is None:
+        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
+    return _WEIGHT_PREFETCH_METHOD
+
+
+def get_weight_prefetch_method():
+    return _WEIGHT_PREFETCH_METHOD
 
 
 def global_stream() -> torch.npu.Stream:
@@ -475,9 +504,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Calculate maximum supported batch sizes considering model architecture
     resources_per_graph = num_hidden_layers + 1
-    if vllm_config.speculative_config is not None:
-        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
-        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+    # For suffix decoding, use the suffix path when no draft_model_config is provided.
+    if (spec := vllm_config.speculative_config) and \
+    (draft := spec.draft_model_config):
+        resources_per_graph += draft.hf_config.num_hidden_layers + 1
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
@@ -634,9 +664,11 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
-        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
+        AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
+        AscendMRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -662,6 +694,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
+        "MMEncoderAttention": AscendMMEncoderAttention,
+        "ApplyRotaryEmb": AscendApplyRotaryEmb,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -672,10 +706,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
 
 class AscendDeviceType(Enum):
-    _910B = 0  # A2
-    _910_93 = 1  # A3
+    A2 = 0
+    A3 = 1
     _310P = 2
-    _910_95 = 3  # A5
+    A5 = 3
 
 
 _ascend_device_type = None
@@ -694,13 +728,13 @@ def check_ascend_device_type():
 
     soc_version = torch_npu.npu.get_soc_version()
     if 220 <= soc_version <= 225:
-        cur_device_type = AscendDeviceType._910B
+        cur_device_type = AscendDeviceType.A2
     elif 250 <= soc_version <= 255:
-        cur_device_type = AscendDeviceType._910_93
+        cur_device_type = AscendDeviceType.A3
     elif 200 <= soc_version <= 205:
         cur_device_type = AscendDeviceType._310P
     elif soc_version == 260:
-        cur_device_type = AscendDeviceType._910_95
+        cur_device_type = AscendDeviceType.A5
     else:
         raise RuntimeError(f"Can not support soc_version: {soc_version}.")
 
@@ -807,9 +841,22 @@ def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
-        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        if "thinker_config" in hf_config:
+            # Qwen-Omni-thinker models
+            _IS_VL_MODEL = True
+        else:
+            _IS_VL_MODEL = "vision_config" in hf_config
     return _IS_VL_MODEL
+
+
+def has_rope(vllm_config: VllmConfig):
+    """Checks if the model uses rope."""
+    global _HAS_ROPE
+    if _HAS_ROPE is None and vllm_config and vllm_config.model_config:
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        _HAS_ROPE = "rope_parameters" in hf_config
+    return _HAS_ROPE
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -844,6 +891,13 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+    # For IntermediateTensors used in pipeline parallelism
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -887,9 +941,6 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
-        "ep": {
-            "hccl_buffer_size": calculate_ep_buffer_size()
-        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -909,30 +960,6 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
-
-
-def calculate_ep_buffer_size() -> int:
-    """
-    formula of ep buffer size:
-    batch_size * hidden_size * topk * 4
-    """
-    ep_buffer_size = _DEFAULT_BUFFER_SIZE
-    try:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        hf_config = vllm_config.model_config.hf_config
-
-        hidden_size = hf_config.hidden_size
-        topk = getattr(hf_config, "num_experts_per_token", 1)
-        batch_size = vllm_config.scheduler_config.max_num_batched_tokens
-        int8_size = torch.iinfo(torch.int8).bits // 8
-        bf16_size = torch.finfo(torch.bfloat16).bits // 8
-        ep_buffer_size = math.ceil(
-            (batch_size * hidden_size * topk *
-             (int8_size * 2 + bf16_size)) / (1024 * 1024))
-    except Exception:
-        pass
-    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
@@ -969,7 +996,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     if not flashcomm2_enable():
         flashcomm2_oproj_shared = False
-        logger.info("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(
