@@ -625,8 +625,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # If it's necessary, the slots should be sliced.
                 torch_npu.npu_scatter_pa_kv_cache(
                     key=key[:attn_metadata.num_actual_tokens],
-                    value=value[:attn_metadata.
-                                num_actual_tokens].contiguous(),
+                    value=value[:attn_metadata.num_actual_tokens].contiguous(),
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_mapping=slots)
