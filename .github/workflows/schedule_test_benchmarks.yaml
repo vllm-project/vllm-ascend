@@ -106,17 +106,27 @@ jobs:
           path: ./vllm-empty
           ref: ${{  matrix.vllm_branch }}
 
+      - name: Cache pip
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/pip/wheels
+          key: ${{ runner.os }}-pip-${{ hashFiles('vllm-empty/requirements/common.txt', 'vllm-empty/pyproject.toml', 'vllm-empty/setup.py', 'vllm-ascend/requirements.txt', 'vllm-ascend/pyproject.toml', 'vllm-ascend/setup.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty pip install -e . --cache-dir ~/.cache/pip
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -e .
-          pip install -r benchmarks/requirements-bench.txt
+          pip install -e . --cache-dir ~/.cache/pip
+          pip install -r benchmarks/requirements-bench.txt --cache-dir ~/.cache/pip
 
       - name: Run current commit benchmarks
         if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
