@@ -21,7 +21,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 
-def test_quant_W8A8():
+def test_qwen3_w8a8_quant():
     max_tokens = 5
     example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
@@ -33,9 +33,8 @@ def test_quant_W8A8():
                             )]
 
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"),
+            snapshot_download("vllm-ascend/Qwen3-0.6B-W8A8"),
             max_model_len=8192,
-            enforce_eager=False,
             gpu_memory_utilization=0.7,
             quantization="ascend",
     ) as vllm_model:
