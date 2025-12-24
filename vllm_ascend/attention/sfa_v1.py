@@ -384,22 +384,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
             register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
             
-            #TODO: Temporarily adapt sfa-cp, remove after adapting near PCP. --clrs97
-            # from vllm_ascend.distributed.parallel_state import \
-            #     get_shard_weight_group
-            # if is_hidden_layer(self.q_proj):
-            #     register_layer_to_shard_weight_series(
-            #         series_name="q_proj",
-            #         group=get_shard_weight_group(),
-            #         layer=self.q_proj,
-            #         prefetch_step=1)
-            # if is_hidden_layer(self.o_proj):
-            #     register_layer_to_shard_weight_series(
-            #         series_name="o_proj",
-            #         group=get_shard_weight_group(),
-            #         layer=self.o_proj,
-            #         prefetch_step=1)
-            
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
