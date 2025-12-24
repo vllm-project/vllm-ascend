@@ -8,7 +8,7 @@ import vllm.compilation.piecewise_backend
 from torch._dispatch.python import enable_python_dispatcher
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.piecewise_backend import PiecewiseBackend, RangeEntry
+from vllm.compilation.piecewise_backend import RangeEntry
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
