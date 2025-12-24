@@ -187,7 +187,7 @@ class KVCacheSendingThread(threading.Thread):
         self.ready_event = ready_event
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
-        self.port_send_num = {}
+        self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
 
@@ -253,7 +253,7 @@ class KVCacheSendingThread(threading.Thread):
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
                     remote_port_send_num = msg[2]
-                    if remote_port_send_num is not None:
+                    if remote_port_send_num:
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
@@ -344,7 +344,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_kv_heads = max(
                     self.model_config.hf_config.num_key_value_heads //
                     self.tp_size, 1)
-        self.proc_not_transfer_request = {}
+        self.proc_not_transfer_request: dict[str, bool] = {}
 
     def add_request(self,
                     request_id: str,
@@ -355,7 +355,7 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_handshake_port: int,
                     offset: int,
                     tp_num_need_pulls: int,
-                    remote_port_send_num: dict[str, int] = None,
+                    remote_port_send_num: dict[int, int] = {},
                     all_task_done: bool = False):
         """Add a new request to the queue for processing."""
         logger.debug(f"Adding request {request_id} to the queue.")
@@ -428,7 +428,7 @@ class KVCacheRecvingThread(threading.Thread):
     def _send_done_signal_to_free_remote_port(self, request_id, remote_host,
                                               remote_port_send_num):
         if self.side_channel_port != self.local_handshake_port \
-            or remote_port_send_num is None:
+            or not remote_port_send_num:
             return
         if request_id not in self.proc_not_transfer_request:
             self.proc_not_transfer_request[request_id] = True
@@ -652,7 +652,7 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _send_done_recv_signal(self, request_id: str, remote_host: str,
                                remote_handshake_port: int,
-                               remote_port_send_num: dict[str, int]):
+                               remote_port_send_num: dict[int, int]):
         logger.debug("Sending done recving signal for request %s to %s:%d",
                      request_id, remote_host, remote_handshake_port)
         sock: Optional[zmq.Socket] = None  # type: ignore
@@ -877,7 +877,7 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, list[int]], int] = {}
         self._reqs_need_send: dict[str, float] = {}
 
         # master-slave meta information for cross-nodes
@@ -1102,7 +1102,7 @@ class MooncakeConnectorWorker:
                 1, self.num_key_value_heads // self._prefill_tp_size)
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping = None
-        self.remote_port_send_num = None
+        self.remote_port_send_num: dict[int, int] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1317,7 +1317,7 @@ class MooncakeConnectorWorker:
 
         def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
             # key is kv_head_group, value is cp_groups and which cp_groups to select
-            cp_group_meta = {}
+            cp_group_meta: dict = {}
             kv_head_groups = get_kv_head_groups(tp_size)
             dcp_repeat_num = tp_size // len(kv_head_groups) // dcp_size
 
@@ -1353,7 +1353,7 @@ class MooncakeConnectorWorker:
                                                      self.pcp_size,
                                                      self.dcp_size,
                                                      self.side_channel_port)
-            local_remote_block_port_mappings = {}
+            local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
             for d_node_head_key in d_node_cp_group_meta.keys():
                 for p_node_head_key in p_node_cp_group_meta.keys():
                     if not set(p_node_head_key).issubset(set(d_node_head_key)):
@@ -1386,7 +1386,7 @@ class MooncakeConnectorWorker:
             return local_remote_block_port_mappings
 
         def get_remote_port_send_num(local_remote_block_port_mappings):
-            remote_port_send_num = {}
+            remote_port_send_num: dict[int, int] = {}
             for port in range(self._prefill_tp_size * meta.remote_pcp_size):
                 remote_port_send_num[meta.remote_port + port] = 0
             for local_port in local_remote_block_port_mappings.keys():
@@ -1437,8 +1437,8 @@ class MooncakeConnectorWorker:
             remote_block_nums_all[i] -= 1
 
         # make sure the last block (which may be unfull) of P nodes is put to the last block of D node
-        remote_block_nums = []
-        final_block_idx = None
+        remote_block_nums: list[int] = []
+        final_block_idx: int = None
         local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
         local_cp_size = self.dcp_size * self.pcp_size
         for cp_rank, block_num in enumerate(remote_block_nums_all):
