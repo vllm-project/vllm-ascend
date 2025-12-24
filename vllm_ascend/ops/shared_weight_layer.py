@@ -247,6 +247,6 @@ def reach_layer_for_shared_weight_series(layer: LinearBase):
 
 
 def is_hidden_layer(vllm_config, layer: LinearBase) -> bool:
-    num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+    num_hidden_layers = vllm_config.model_config.hf_text_config.num_hidden_layers
     layer_idx = extract_layer_index(layer.prefix)
     return layer_idx < num_hidden_layers

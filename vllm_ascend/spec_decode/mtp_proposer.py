@@ -155,7 +155,7 @@ class MtpProposer(Proposer):
             device=device,
             with_numpy=True,
         )
-        self.use_sparse = hasattr(vllm_config.model_config.hf_config,
+        self.use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                   "index_topk")
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
 
