@@ -27,7 +27,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer, post_process_after_loading_for_shard_weight_series,
-    reach_layer_for_shard_weight_series, register_layer_to_shard_weight_series, register_all_layers_to_shard_weight_series)
+    reach_layer_for_shard_weight_series,
+    register_all_layers_to_shard_weight_series)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
@@ -374,7 +375,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.local_num_heads = self.num_heads * self.tp_size
 
             self._replace_linear_class_for_sfa_cp()
-            
+
             for layer_name in (get_ascend_config().layer_sharding or []):
                 if layer_name in kwargs:
                     self.layer_sharding_kwargs.append(kwargs[layer_name])
@@ -382,8 +383,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                     raise ValueError(
                         f"Layer '{layer_name}' not found in kwargs for layer sharding."
                     )
-            register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
-            
+            register_all_layers_to_shard_weight_series(
+                self.layer_sharding_kwargs)
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
@@ -802,7 +803,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 for layer in (self.layer_sharding_kwargs or []):
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
-            
+
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
 
