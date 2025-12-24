@@ -140,6 +140,7 @@ def test_pcp_dcp_piece_wise():
                     quantization="ascend") as runner:
         runner.model.generate(prompts, sampling_params)
 
+
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
 def test_pcp_basic():
@@ -159,6 +160,7 @@ def test_pcp_basic():
                     enable_expert_parallel=True,
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
+
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
@@ -184,6 +186,7 @@ def test_pcp_full_graph():
                     }) as runner:
         runner.model.generate(prompts, sampling_params)
 
+
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
 def test_pcp_piece_wise():
@@ -204,6 +207,7 @@ def test_pcp_piece_wise():
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
 
+
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
 def test_dcp_basic():
@@ -223,6 +227,7 @@ def test_dcp_basic():
                     enable_expert_parallel=True,
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
+
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
@@ -247,6 +252,7 @@ def test_dcp_full_graph():
                         "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
                     }) as runner:
         runner.model.generate(prompts, sampling_params)
+
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
