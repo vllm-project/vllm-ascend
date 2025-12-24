@@ -563,7 +563,6 @@ class NPUModelRunner(GPUModelRunner):
                                  )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
-            scheduler_output.total_num_scheduled_tokens = total_num_scheduled_tokens
             req_indices = np.repeat(self.arange_np[:num_reqs],
                                     num_scheduled_tokens)
             cu_num_tokens, _ = self._get_cumsum_and_arange(
@@ -1015,13 +1014,16 @@ class NPUModelRunner(GPUModelRunner):
                         ori_query_lens[:num_decode_reqs], dim=0))
                 common_attn_metadata.block_table_tensor = \
                     blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
+                assert self.long_seq_metadata is not None
+                self.long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
+                
                 if 'pad_size' in locals() and pad_size > 0:
                     ori_query_lens_cpu[-pad_size:] = \
                         torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
-                assert self.long_seq_metadata is not None
                 self.long_seq_metadata.max_query_len_pcp_full = \
                     ori_query_lens_cpu.max().item()
-                self.long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
+                
+                
 
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
