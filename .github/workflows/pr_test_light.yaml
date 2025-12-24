@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: v0.13.0
+      vllm: 5fbfa8d9ef15948599631baeb91e8220b2ee9bcc
   changes:
     runs-on: linux-aarch64-a2-0
     outputs:
@@ -90,7 +90,7 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [v0.13.0]
+        vllm_version: [5fbfa8d9ef15948599631baeb91e8220b2ee9bcc, v0.13.0]
 
     steps:
       - name: Free up disk space
@@ -127,6 +127,12 @@ jobs:
           python3 -m pip install -r requirements-dev.txt
           python3 -m pip install -v .
 
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+
       - name: Run unit test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -154,7 +160,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.13.0]
+        vllm_version: [5fbfa8d9ef15948599631baeb91e8220b2ee9bcc, v0.13.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
