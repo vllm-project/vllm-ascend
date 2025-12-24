@@ -48,9 +48,11 @@ def test_models_with_multistream_overlap_shared_expert(
             model,
             max_model_len=1024,
             enforce_eager=True,
+            cudagraph_capture_sizes=[4, 8, 16, 32],
             additional_config={
                 "multistream_overlap_shared_expert": True,
             },
+            quantization="ascend",
     ) as runner:
         vllm_moe_ms_eager_outputs = runner.model.generate(
             prompts, sampling_params)
@@ -58,9 +60,11 @@ def test_models_with_multistream_overlap_shared_expert(
     with VllmRunner(
             model,
             max_model_len=1024,
+            cudagraph_capture_sizes=[4, 8, 16, 32],
             additional_config={
                 "multistream_overlap_shared_expert": True,
             },
+            quantization="ascend",
     ) as runner:
         vllm_moe_ms_aclgraph_outputs = runner.model.generate(
             prompts, sampling_params)
@@ -69,6 +73,8 @@ def test_models_with_multistream_overlap_shared_expert(
             model,
             max_model_len=1024,
             enforce_eager=True,
+            cudagraph_capture_sizes=[4, 8, 16, 32],
+            quantization="ascend",
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
