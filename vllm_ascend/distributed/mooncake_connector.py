@@ -249,7 +249,10 @@ class KVCacheSendingThread(threading.Thread):
                 exc_info=True
             )
 
-    def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
+    def run_busy_loop(
+        self,
+        sock: zmq.Socket # type: ignore
+    ):
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         size_in_bytes = len(encoded_data)
@@ -1372,11 +1375,11 @@ class MooncakeConnectorWorker:
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_sending = (
-            self.kv_send_thread.get_and_clear_finished_requests()
+            self.kv_send_thread.get_and_clear_finished_requests() # type: ignore[union-attr]
             if self.kv_role == 'kv_producer' else set()
         )
         done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests()
+            self.kv_recv_thread.get_and_clear_finished_requests() # type: ignore[union-attr]
             if self.kv_role == 'kv_consumer' else set()
         )
         if self.tp_rank == 0:

@@ -252,7 +252,7 @@ class KVPoolWorker:
                 self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 if self.load_async:
-                    self.kv_recv_thread.add_request(request)
+                    self.kv_recv_thread.add_request(request) # type: ignore[union-attr]
                 else:
                     addr_list = []
                     size_list = []
@@ -340,7 +340,7 @@ class KVPoolWorker:
                 continue
 
             request.current_event = current_event
-            self.kv_send_thread.add_request(request)
+            self.kv_send_thread.add_request(request) # type: ignore[union-attr]
 
     def retrieve_layer(
         self,
@@ -471,14 +471,14 @@ class KVPoolWorker:
         done_sending = (
             self
             .kv_send_thread
-            .get_and_clear_finished_requests()
+            .get_and_clear_finished_requests() # type: ignore[union-attr]
             if self.kv_role in ['kv_producer', 'kv_both'] else set()
         )
 
         done_recving = (
             self
             .kv_recv_thread
-            .get_and_clear_finished_requests()
+            .get_and_clear_finished_requests() # type: ignore[union-attr]
             if self.load_async else set()
         )
 

@@ -99,7 +99,7 @@ class KVPoolScheduler:
             token_len = len(request.prompt_token_ids)
 
         num_external_hit_tokens = (
-            self.client.lookup(token_len, request.block_hashes)
+            self.client.lookup(token_len, request.block_hashes) # type: ignore[union-attr]
         )
 
         if num_external_hit_tokens == request.num_tokens:
@@ -246,7 +246,7 @@ class KVPoolScheduler:
                 new_block_ids = cached_reqs.new_block_ids[i]
 
                 if not new_block_ids:
-                    blank_block = []
+                    blank_block: list[int] = []
                     request_tracker.update(new_token_ids, blank_block)
                     continue
 
