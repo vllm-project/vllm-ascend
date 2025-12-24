@@ -598,16 +598,20 @@ class KVCacheRecvingThread(threading.Thread):
                                         dtype=torch.int32).to(device=device)
 
         # Initialize buffers
-        k_buffer = torch.empty(block_len,
-                               num_kv_head,
-                               head_dim,
-                               dtype=dtype,
-                               device=device)
-        v_buffer = torch.empty(block_len,
-                               num_kv_head,
-                               head_dim,
-                               dtype=dtype,
-                               device=device)
+        k_buffer = torch.empty(
+            block_len,
+            num_kv_head,
+            head_dim,
+            dtype=dtype,
+            device=device
+        )
+        v_buffer = torch.empty(
+            block_len,
+            num_kv_head,
+            head_dim,
+            dtype=dtype,
+            device=device
+        )
 
         # Create slot mapping for reshape operations
         block_offsets = torch.arange(0, block_size, dtype=torch.int32)

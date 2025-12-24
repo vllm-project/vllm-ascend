@@ -391,10 +391,12 @@ class KVPoolWorker:
                     if not is_finish:
                         logger.info("Layerwise get failed")
                 self.get_event.clear()
-                req_meta = LasyerMultiBlockReqMeta(request.req_id,
-                                                   keys_multi_chunk, starts,
-                                                   ends, request.block_ids,
-                                                   layer_id)
+                req_meta = LasyerMultiBlockReqMeta(
+                    request.req_id,
+                    keys_multi_chunk, starts,
+                    ends, request.block_ids,
+                    layer_id
+                )
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 first_flag = False
@@ -450,12 +452,14 @@ class KVPoolWorker:
         if keys:
             keys = [list(row) for row in zip(*keys)]  #[layer_num,block_num]
             for layer_id, keys_multi_chunk in enumerate(keys):
-                req_meta = LasyerMultiBlockReqMeta(request.req_id,
-                                                   keys_multi_chunk, starts,
-                                                   ends, request.block_ids,
-                                                   layer_id,
-                                                   request.is_last_chunk,
-                                                   current_event)
+                req_meta = LasyerMultiBlockReqMeta(
+                    request.req_id,
+                    keys_multi_chunk, starts,
+                    ends, request.block_ids,
+                    layer_id,
+                    request.is_last_chunk,
+                    current_event
+                )
                 self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 yield
@@ -581,8 +585,10 @@ class KVPoolWorker:
             return start
         return end
 
-    def check_all_layers_exists(self, res: list[int],
-                                num_layers: int) -> list[int]:
+    def check_all_layers_exists(
+        self, res: list[int],
+        num_layers: int
+    ) -> list[int]:
         total_chunks = len(res) // num_layers
         result = []
 
@@ -596,7 +602,10 @@ class KVPoolWorker:
 
     def find_min_first_non_one_index(self, arr):
         try:
-            return min(idx for row in arr for idx, val in enumerate(row)
-                       if val != 1)
+            return min(
+                idx for row in arr 
+                for idx, val in enumerate(row) 
+                if val != 1
+            )
         except ValueError:
             return -1

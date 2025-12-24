@@ -51,10 +51,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
             logger.warning(
-                (
-                    "It is recommended to use the AscendStoreConnector, "
-                    "as the MoonCakeStoreConnector will be removed in the future."
-                )
+                "It is recommended to use the AscendStoreConnector, "
+                "as the MoonCakeStoreConnector will be removed in the future."
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -88,7 +86,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
     ############################################################
 
     def get_num_new_matched_tokens(
-        self, request: "Request",
+        self,
+        request: "Request",
         num_computed_tokens: int
     ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None

@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata
+)
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -57,7 +58,8 @@ class PoolKey:
                     self.key_metadata,
                     self.chunk_hash,
                     layer_id,
-                ))
+                )
+            )
         return keys
 
 
@@ -94,9 +96,11 @@ class ChunkedTokenDatabase():
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
 
-    def _make_key_by_hash(self,
-                          chunk_hash: str,
-                          layer_id: Optional[int] = None):
+    def _make_key_by_hash(
+        self,
+        chunk_hash: str,
+        layer_id: Optional[int] = None
+    ):
         assert self.metadata is not None
         return PoolKey(
             self.metadata,
@@ -114,8 +118,10 @@ class ChunkedTokenDatabase():
         size_list = []
         block_id = block_ids[start // self.block_size]
         for index, base_addr in enumerate(self.kv_caches_base_addr):
-            block_len = (self.block_len[index % 2]
-                         if self.use_mla else self.block_len[0])
+            block_len = (
+                self.block_len[index % 2]
+                if self.use_mla else self.block_len[0]
+            )
 
             addr = base_addr + block_id * block_len
             length = int(block_len / self.block_size * (end - start))
@@ -123,23 +129,42 @@ class ChunkedTokenDatabase():
             size_list.append(length)
         return addr_list, size_list, block_id
 
-    def prepare_value_layer(self, start: int, end: int, block_ids: list[int],
-                            layer_id: int):
+    def prepare_value_layer(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        layer_id: int
+    ):
         block_id = block_ids[start // self.block_size]
         if self.use_mla:
-            addr_k = self.kv_caches_base_addr[layer_id *
-                                              2] + block_id * self.block_len[0]
-            addr_v = self.kv_caches_base_addr[layer_id * 2 +
-                                              1] + block_id * self.block_len[1]
-            length_k = int(self.block_len[0] / self.block_size * (end - start))
-            length_v = int(self.block_len[1] / self.block_size * (end - start))
+            addr_k = (
+                self.kv_caches_base_addr[layer_id * 2]
+                + block_id * self.block_len[0]
+            )
+            addr_v = (
+                self.kv_caches_base_addr[layer_id * 2 + 1]
+                + block_id * self.block_len[1]
+            )
+            length_k = int(
+                self.block_len[0] / self.block_size * (end - start)
+            )
+            length_v = int(
+                self.block_len[1] / self.block_size * (end - start)
+            )
             size_list = [length_k, length_v]
         else:
-            addr_k = self.kv_caches_base_addr[layer_id *
-                                              2] + block_id * self.block_len[0]
-            addr_v = self.kv_caches_base_addr[layer_id * 2 +
-                                              1] + block_id * self.block_len[0]
-            length = int(self.block_len[0] / self.block_size * (end - start))
+            addr_k = (
+                self.kv_caches_base_addr[layer_id * 2]
+                + block_id * self.block_len[0]
+            )
+            addr_v = (
+                self.kv_caches_base_addr[layer_id * 2 + 1]
+                + block_id * self.block_len[0]
+            )
+            length = int(
+                self.block_len[0] / self.block_size * (end - start)
+            )
             size_list = [length, length]
         addr_list = [addr_k, addr_v]
         return addr_list, size_list
@@ -315,12 +340,16 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = (cdiv(tracker.num_saved_tokens + 1, block_size) *
-                          block_size if discard_partial_chunks else 0)
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+            if discard_partial_chunks else 0
+        )
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
-        num_tokens_to_save = ((input_token_len // block_size * block_size)
-                              if discard_partial_chunks else input_token_len)
+        num_tokens_to_save = (
+            (input_token_len // block_size * block_size)
+            if discard_partial_chunks else input_token_len
+        )
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
@@ -341,7 +370,9 @@ class ReqMeta:
             # Do not load if not in `can_load` state
             load_spec = None
         logger.debug(
-            f"request:{tracker.req_id}, meta save spec:{not skip_save}, meta load spec:{load_spec}"
+            f"request:{tracker.req_id}, "
+            f"meta save spec:{not skip_save}, "
+            f"meta load spec:{load_spec}"
         )
         return ReqMeta(
             req_id=tracker.req_id,
