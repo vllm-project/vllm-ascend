@@ -144,6 +144,7 @@ class AscendMLADecodeMetadata:
     cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
     batch_seq_mask: torch.Tensor = None
+    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
 
 
 @dataclass
@@ -177,6 +178,7 @@ class AscendMLAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     query_lens: Optional[list[int]] = None
+    actual_seq_lengths_q: Optional[list[int]] = None
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -653,6 +655,7 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
+            actual_seq_lengths_q=actual_seq_lengths_q,
         )
 
     def build_for_graph_capture(

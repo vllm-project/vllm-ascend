@@ -1040,13 +1040,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
-
-        k_nope = k_nope.view(-1, block_size, self.num_kv_heads,
-                             self.kv_lora_rank)
-        k_pe = k_pe.view(-1, block_size, self.num_kv_heads,
-                         self.qk_rope_head_dim)
-        q_nope = q_nope.view(num_tokens, num_heads, -1)
-        q_pe = q_pe.view(num_tokens, num_heads, -1)
         # use pcp & dcp split computed token nums from scheduler to compute actual seq_len and seq_mask
         seq_len = decode_meta.cp_seq_len
 
@@ -1060,6 +1053,13 @@ class AscendMlaCPImpl(AscendMLAImpl):
         else:
             graph_params = get_graph_params()
         if forward_context.capturing:
+            k_nope = k_nope.view(-1, block_size, self.num_kv_heads,
+                        self.kv_lora_rank)
+            k_pe = k_pe.view(-1, block_size, self.num_kv_heads,
+                            self.qk_rope_head_dim)
+            
+            q_nope = q_nope.view(num_tokens, num_heads, -1)
+            q_pe = q_pe.view(num_tokens, num_heads, -1)
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)
@@ -1100,24 +1100,47 @@ class AscendMlaCPImpl(AscendMLAImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
+            k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+            k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+            q_nope = q_nope.view(num_tokens, num_heads, 1, -1)
+            q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
+            input_layout = "BNSD" # Batch Head-Num Seq-Length Head-Dim
+            sparse_mode = 0
+            spec_attn_mask = None
             attn_output = torch.empty_like(q_nope)
-            softmax_lse = torch.empty((num_tokens, num_heads, 1),
-                                      dtype=q_nope.dtype,
-                                      device=q_nope.device)
-            torch_npu.atb.npu_multi_head_latent_attention(
+            softmax_lse = torch.empty((q_nope.shape[0], num_heads, 1),
+                                    dtype=q_nope.dtype,
+                                    device=q_nope.device)
+            common_kwargs = {
+                'query_rope': q_pe,
+                'key_rope': k_pe,
+                'num_heads': num_heads,
+                'num_key_value_heads': self.num_kv_heads,
+                'input_layout': input_layout,
+                'atten_mask': spec_attn_mask,
+                'sparse_mode': sparse_mode,
+                'scale': self.scale,
+                'antiquant_mode': 0,
+                'antiquant_scale': None,
+                'block_table': decode_meta.block_table,
+                'block_size': block_size,
+                'actual_seq_lengths': attn_metadata.actual_seq_lengths_q[:attn_metadata.num_decodes],
+                'actual_seq_lengths_kv': decode_meta.num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank],
+                'softmax_lse_flag': True,
+            }
+
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
                 q_nope,
-                q_pe,
                 k_nope,
-                k_pe,
-                decode_meta.block_table,
-                seq_len,
-                num_heads,
-                self.scale,
-                self.num_kv_heads,
-                return_lse=True,
-                calc_type="calc_type_ring",
-                output=attn_output,
-                lse=softmax_lse)
+                k_nope,
+                **common_kwargs,
+            )
+            
+        B_attn, N_attn, S, D = attn_output.shape
+        B_lse, N_lse, Q_S, _ = softmax_lse.shape
+
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
+        softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
         attn_out_lse = self._process_attn_out_lse(attn_output, softmax_lse,
