@@ -38,8 +38,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
-_CUSTOM_PREFIX_IDX = 0
-
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
     """Linear method without quantization"""
