@@ -30,12 +30,13 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_vl_model,
-                               update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes,
-                               update_default_aclgraph_sizes)
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
+    AWQ_QUANTIZATION_METHOD, AscendDeviceType, enable_sp,
+    get_ascend_device_type, is_vl_model, update_aclgraph_sizes,
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes)
+
+# isort: on
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -59,7 +60,8 @@ class NPUPlatform(Platform):
     dispatch_key: str = "PrivateUse1"
 
     supported_quantization: list[str] = [
-        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+        ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
+        AWQ_QUANTIZATION_METHOD
     ]
 
     def is_sleep_mode_available(self) -> bool:
@@ -108,6 +110,8 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
+        from vllm_ascend.quantization.awq.awq import \
+            AWQQuantConfig  # noqa: F401
         from vllm_ascend.quantization.compressed_tensors.compressed_tensors import \
             AscendCompressedTensorsConfig  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
@@ -298,7 +302,8 @@ class NPUPlatform(Platform):
             compilation_config.custom_ops = ["all"]
 
         if ascend_config.recompute_scheduler_enable:
-            from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
+            from vllm_ascend.core.recompute_scheduler import \
+                RecomputeSchedulerConfig
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
                 vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
