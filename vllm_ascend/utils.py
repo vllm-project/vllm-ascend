@@ -941,9 +941,6 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
-        "ep": {
-            "hccl_buffer_size": calculate_ep_buffer_size()
-        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -963,31 +960,6 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
-
-
-def calculate_ep_buffer_size() -> int:
-    """
-    formula of ep buffer size:
-    batch_size * hidden_size * topk * 4
-    """
-    ep_buffer_size = _DEFAULT_BUFFER_SIZE
-    try:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        hf_config = vllm_config.model_config.hf_config
-
-        hidden_size = hf_config.hidden_size
-        topk = getattr(hf_config, "num_experts_per_tok", 1)
-        batch_size = vllm_config.scheduler_config.max_num_batched_tokens // tp_size
-        int8_size = torch.iinfo(torch.int8).bits // 8
-        bf16_size = torch.finfo(torch.bfloat16).bits // 8
-        ep_buffer_size = math.ceil(
-            (batch_size * hidden_size * topk *
-             (int8_size + bf16_size) * 3) / (1024 * 1024))
-    except Exception:
-        pass
-    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
