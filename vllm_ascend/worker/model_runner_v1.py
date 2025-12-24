@@ -1773,9 +1773,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
-                self.cp_kv_recover_idx = torch.zeros(self.max_num_tokens,
-                                                     dtype=torch.int32,
-                                                     device=self.device)
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
                     num_tokens, self.query_lens, self.attn_mask,
                     self.input_batch)
