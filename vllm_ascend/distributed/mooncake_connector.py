@@ -257,8 +257,12 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
+                        device_index = self.pp_rank * self.tp_size + \
+                                       self.tp_rank + self.pcp_rank * \
+                                       self.prefill_tp_size
+                        handshake_port = self.side_channel_port + device_index
                         if self.port_send_num[request_id] >= \
-                            remote_port_send_num[self.side_channel_port]:
+                            remote_port_send_num[handshake_port]:
                             self.task_tracker.update_done_task_count(
                                 request_id)
                             del self.port_send_num[request_id]
