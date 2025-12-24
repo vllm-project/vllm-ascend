@@ -21,7 +21,7 @@ class AscendPCPMetadata:
 
 
 @dataclass
-class ChunkedContextMetadata:
+class CPChunkedContextMetadata:
     # New for MLA (compared to FlashAttention)
     # For handling chunked prefill
     cu_seq_lens: torch.Tensor

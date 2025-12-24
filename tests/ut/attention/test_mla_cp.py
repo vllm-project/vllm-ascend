@@ -6,7 +6,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.common_cp import ChunkedContextMetadata
+from vllm_ascend.attention.common_cp import CPChunkedContextMetadata
 from vllm_ascend.attention.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import ChunkedContextMetadata
 
