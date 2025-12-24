@@ -754,8 +754,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             if layer_name in kwargs:
                 self.layer_sharding_kwargs.append(kwargs[layer_name])
             else:
-                raise ValueError(
-                    f"Layer '{layer_name}' not found in kwargs for layer sharding."
+                logger.warning_once(
+                    f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 

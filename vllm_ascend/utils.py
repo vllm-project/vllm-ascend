@@ -1027,6 +1027,10 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     logger.info(
         f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}"
     )
+    if "o_proj" in ascend_config.layer_sharding:
+        logger.info_once(
+            "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
+        )
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."

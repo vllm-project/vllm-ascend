@@ -52,6 +52,9 @@ class AscendConfig:
         self.weight_prefetch_config = WeightPrefetchConfig(
             weight_prefetch_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
+        logger.info_once(
+            f"Linear layer sharding enabled with config: {self.layer_sharding}"
+        )
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
