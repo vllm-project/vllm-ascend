@@ -288,96 +288,86 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache,
                                attn_metadata):
+        if not self.pcp_size > 1:
+            return super().mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        if self.pcp_size > 1:
-            num_actual_tokens = (attn_metadata.num_actual_tokens_pcp_padded -
-                                 self.pcp_size * num_decode_tokens
-                                 ) // self.pcp_size + num_decode_tokens
+        num_actual_tokens = (attn_metadata.num_actual_tokens_pcp_padded -
+                             self.pcp_size * num_decode_tokens
+                             ) // self.pcp_size + num_decode_tokens
         prefill_kv_no_split = kv_no_split[num_decode_tokens:num_actual_tokens]
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
         prefill_q = self.q_proj(prefill_q_c)[0] \
             .view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
         prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
-        if self.pcp_size > 1:
-            cos = attn_metadata.prefill.cos[:num_actual_tokens -
-                                            num_decode_tokens]
-            sin = attn_metadata.prefill.sin[:num_actual_tokens -
-                                            num_decode_tokens]
-        else:
-            cos = attn_metadata.prefill.cos
-            sin = attn_metadata.prefill.sin
+        cos = attn_metadata.prefill.cos[:num_actual_tokens -
+                                        num_decode_tokens]
+        sin = attn_metadata.prefill.sin[:num_actual_tokens -
+                                        num_decode_tokens]
         prefill_slots = attn_metadata.slot_mapping[
             num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
-        if self.pcp_size > 1:
-            prefill_kv_no_split = kv_no_split[:num_actual_tokens]
-            kv_c, k_pe = prefill_kv_no_split.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-            assert len(
-                kv_cache
-            ) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
-            kv_c_normed = kv_c_normed.view(
-                [num_actual_tokens, self.num_kv_heads, -1])
-            k_pe = k_pe.unsqueeze(1)
-            prefill_k_pe = k_pe
-            prefill_k_pe[
-                num_decode_tokens:num_actual_tokens] = self.rope_single(
-                    prefill_k_pe[num_decode_tokens:num_actual_tokens], cos,
-                    sin)
-            prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
-            prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe],
-                                          dim=-1)
-            prefill_kv_c_k_pe = get_pcp_group().all_gather(
-                prefill_kv_c_k_pe, 0)
-            prefill_kv_c_k_pe = torch.index_select(
-                prefill_kv_c_k_pe, 0,
-                attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx)
-            prefill_kv_c_k_pe = prefill_kv_c_k_pe[num_decode_tokens *
-                                                  self.pcp_size:]
-            prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
-            prefill_k_c_normed = prefill_k_c_normed.squeeze()
-            slot_mapping = attn_metadata.slot_mapping[self.pcp_size *
-                                                      num_decode_tokens:]
-            torch_npu._npu_reshape_and_cache(key=kv_c_normed,
-                                             value=k_pe,
-                                             key_cache=kv_cache[0],
-                                             value_cache=kv_cache[1],
-                                             slot_indices=slot_mapping)
-        else:
-            prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
-                prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
+        prefill_kv_no_split = kv_no_split[:num_actual_tokens]
+        kv_c, k_pe = prefill_kv_no_split.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        assert len(
+            kv_cache
+        ) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
+        kv_c_normed = kv_c_normed.view(
+            [num_actual_tokens, self.num_kv_heads, -1])
+        k_pe = k_pe.unsqueeze(1)
+        prefill_k_pe = k_pe
+        prefill_k_pe[
+            num_decode_tokens:num_actual_tokens] = self.rope_single(
+                prefill_k_pe[num_decode_tokens:num_actual_tokens], cos,
+                sin)
+        prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
+        prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe],
+                                      dim=-1)
+        prefill_kv_c_k_pe = get_pcp_group().all_gather(
+            prefill_kv_c_k_pe, 0)
+        prefill_kv_c_k_pe = torch.index_select(
+            prefill_kv_c_k_pe, 0,
+            attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx)
+        prefill_kv_c_k_pe = prefill_kv_c_k_pe[num_decode_tokens *
+                                              self.pcp_size:]
+        prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
+        prefill_k_c_normed = prefill_k_c_normed.squeeze()
+        slot_mapping = attn_metadata.slot_mapping[self.pcp_size *
+                                                  num_decode_tokens:]
+        torch_npu._npu_reshape_and_cache(key=kv_c_normed,
+                                         value=k_pe,
+                                         key_cache=kv_cache[0],
+                                         value_cache=kv_cache[1],
+                                         slot_indices=slot_mapping)
         prefill_k_nope, prefill_value = self.kv_b_proj(
             prefill_k_c_normed)[0].view(
                 -1, self.num_heads,
                 self.qk_nope_head_dim + self.v_head_dim).split(
                     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        if not self.pcp_size > 1:
-            prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0],
-                                             self.num_kv_heads, -1)
         prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe,
                                           prefill_k_nope, prefill_k_pe,
                                           prefill_value)
 
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
+        if not self.dcp_size > 1:
+            return super().mla_preprocess_decode(q_c, kv_no_split, kv_cache,attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
         cos = attn_metadata.decode.cos
         sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = \
             self._q_proj_and_k_up_proj(decode_q_c)
-        if self.dcp_size > 1:
-            decode_q_no_split = torch.cat([decode_ql_nope, decode_q_pe],
-                                          dim=-1)
-            decode_q_no_split = get_dcp_group().all_gather(
-                decode_q_no_split, 1)
-            decode_ql_nope, decode_q_pe = decode_q_no_split.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        decode_q_no_split = torch.cat([decode_ql_nope, decode_q_pe],
+                                      dim=-1)
+        decode_q_no_split = get_dcp_group().all_gather(
+            decode_q_no_split, 1)
+        decode_ql_nope, decode_q_pe = decode_q_no_split.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens *
                                                   self.pcp_size:self.pcp_size]
