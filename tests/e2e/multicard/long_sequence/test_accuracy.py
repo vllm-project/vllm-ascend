@@ -36,7 +36,7 @@ MODELS = [
                     reason="0.12.0 is not supported for context sequence.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [10])
-def test_output_between_tp_and_cp(
+def test_models_long_sequence_output_between_tp_and_cp(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -69,7 +69,6 @@ def test_output_between_tp_and_cp(
             "tensor_parallel_size": 1,
             "decode_context_parallel_size": 1,
             "prefill_context_parallel_size": 2,
-            "enforce_eager": False,
             "compilation_config": {
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
