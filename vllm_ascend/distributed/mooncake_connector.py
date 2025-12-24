@@ -367,10 +367,10 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_kv_heads = 1
             else:
                 self.k_head_dim = (
-                    self.model_config.hf_config.num_key_value_heads
+                    self.model_config.hf_text_config.num_key_value_heads
                 )
                 self.v_head_dim = (
-                    self.model_config.hf_config.num_key_value_heads
+                    self.model_config.hf_text_config.num_key_value_heads
                 )
                 self.num_kv_heads = max(
                     self.model_config.hf_config.num_key_value_heads //
@@ -1165,7 +1165,7 @@ class MooncakeConnectorWorker:
         )
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = (
-            self.vllm_config.model_config.hf_config.num_key_value_heads
+            self.vllm_config.model_config.hf_text_config.num_key_value_heads
         )
 
         # Handshake base port
