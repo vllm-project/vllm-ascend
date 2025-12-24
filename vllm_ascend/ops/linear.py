@@ -38,6 +38,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
+_CUSTOM_PREFIX_IDX = 0
+
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
     """Linear method without quantization"""
@@ -235,11 +237,13 @@ class AscendRowParallelLinear(RowParallelLinear):
         # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
         if enable_sp():
             compilation_config = get_current_vllm_config().compilation_config
-            # TODO(shaopeng-666): Remove the visual check after the mm model reconstruction is complete.
-            if prefix in compilation_config.static_forward_context and \
-                "visual" not in prefix:
-                raise ValueError(f"Duplicate layer name: {prefix}")
-            compilation_config.static_forward_context[prefix] = self
+            custom_prefix = prefix
+            if prefix in compilation_config.static_forward_context:
+                global _CUSTOM_PREFIX_IDX
+                custom_prefix = f"{prefix}.custom_prefix{_CUSTOM_PREFIX_IDX}"
+                _CUSTOM_PREFIX_IDX += 1
+            self.custom_prefix = custom_prefix
+            compilation_config.static_forward_context[custom_prefix] = self
 
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "row")
