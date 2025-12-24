@@ -43,7 +43,7 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
 
-
+CHUNKED_PREFILL_STREAM = None
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
@@ -237,6 +237,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
             block_tables=block_table,
             query_start_loc=query_start_loc,
+            query_start_loc_list=query_start_loc_cpu[1:].tolist(),
             seq_lens=seq_lens,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
@@ -282,6 +283,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         ) if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group(
         ).device_group if self.dcp_size > 1 else None
+        self.comm_event = torch_npu.npu.Event()
 
     def _attention_with_nomask_and_mask(self, q: torch.Tensor,
                                         q_seqlens: List[int],
@@ -594,19 +596,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                               dim=0)
         return out_final, lse_final
 
-    def _process_chunk_prefill(self, current_attn_output_prefill,
-                               current_attn_lse_prefill, kv_cache,
-                               prefill_query, attn_metadata):
-        if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
-            prefill_query_all = self._prefill_query_all_gather(
-                attn_metadata, prefill_query)
-            attn_output_full_chunk, attn_lse_full_chunk = self._compute_prefill_context(
-                prefill_query_all, kv_cache, attn_metadata)
-            self._update_chunk_attn_out_lse_with_current_attn_out_lse(
-                current_attn_output_prefill, current_attn_lse_prefill,
-                attn_output_full_chunk, attn_lse_full_chunk, prefill_query,
-                attn_metadata)
-
     def _update_chunk_attn_out_lse_with_current_attn_out_lse(
             self, current_attn_output_prefill, current_attn_lse_prefill,
             attn_output_full_chunk, attn_lse_full_chunk, prefill_query,
@@ -642,18 +631,16 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 current_attn_output_prefill.dtype)
 
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
-        if self.dcp_size > 1:
-            prefill_query = get_dcp_group().all_gather(prefill_query, 1)
-
+        # Note(qcs): we need let communication continuous.
         if self.pcp_size > 1:
             prefill_query = get_pcp_group().all_gather(prefill_query, 0)
-
-        prefill_query_all = torch.index_select(prefill_query,
-                                               0,
-                                               attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk) \
-            if self.pcp_size > 1 else prefill_query
-
-        return prefill_query_all
+        if self.dcp_size > 1:
+            prefill_query = get_dcp_group().all_gather(prefill_query, 1)
+        if self.pcp_size > 1:
+            prefill_query = torch.index_select(prefill_query,
+                                                   0,
+                                                   attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk)
+        return prefill_query
 
     def _compute_prefill_context(self, query: torch.Tensor,
                                  kv_cache: Tuple[torch.Tensor],
@@ -697,18 +684,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 actual_seq_lengths=attn_metadata.prefill.chunked_context.
                 actual_chunk_seq_lengths)
             batch_chunk_seq_mask = attn_metadata.prefill.chunked_context.batch_chunk_seq_mask
-            out_mask = batch_chunk_seq_mask[:, None, None].expand_as(
-                prefix_chunk_output)
-            prefix_chunk_output = torch.where(out_mask, 0, prefix_chunk_output)
             lse_mask = batch_chunk_seq_mask[:, None,
                                             None].expand_as(prefix_chunk_lse)
             prefix_chunk_lse = torch.where(lse_mask, -torch.inf,
                                            prefix_chunk_lse)
 
-        prefix_output, prefix_lse = self._update_chunk_attn_out_lse(
-            prefix_chunk_output, prefix_chunk_lse)
-
-        return prefix_output, prefix_lse
+        return prefix_chunk_output, prefix_chunk_lse
 
     def _update_chunk_attn_out_lse(self, prefix_chunk_output,
                                    prefix_chunk_lse):
@@ -836,6 +817,49 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         return key, value
 
+    def _compute_local_context(self, prefill_query, kv_cache, attn_metadata):
+        prefill_query_all = self._prefill_query_all_gather(
+            attn_metadata, prefill_query)
+        output, lse = self._compute_prefill_context(prefill_query_all, kv_cache,
+                                              attn_metadata)
+        return torch.cat([output, lse], dim=-1)
+
+    def _gather_global_context_output(self, local_context_attn_output):
+        if self.dcp_size > 1:
+            dcp_context_attn_output = torch.empty_like(local_context_attn_output)
+            dist.all_to_all_single(dcp_context_attn_output,
+                                                local_context_attn_output,
+                                                group=self.dcp_group)
+        else:
+            dcp_context_attn_output = local_context_attn_output
+
+        if self.pcp_size > 1:
+            # AllGather out&lse within CP group
+            global_context_attn_output = get_pcp_group().all_gather(dcp_context_attn_output, dim=-1)
+        else:
+            global_context_attn_output = dcp_context_attn_output
+                
+        return global_context_attn_output
+
+    def _update_global_context_output(self, global_context_output):
+        B_total, H_total, D_plus_1 = global_context_output.shape
+        S = B_total // self.pcp_size
+        H = H_total // self.dcp_size
+        D = self.head_size
+        assert D_plus_1 == D + 1
+        # [PCP, S, DCP, H, D+1]
+        x = global_context_output.view(self.pcp_size, S, self.dcp_size, H, D_plus_1)
+        # [PCP, DCP, S, H, D+1]
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
+        x = x.view(-1, S, H, D_plus_1)
+        # Split out lse
+        attn_out_allgather, attn_lse_allgather = torch.split(x, [D, 1],
+                                                             dim=-1)  # [N, S, H, D], [N, S, H, 1]
+        context_output, context_lse = self._update_out_and_lse(
+            attn_out_allgather, attn_lse_allgather)
+        return context_output, context_lse
+
     def forward_impl(
         self,
         query: torch.Tensor,
@@ -861,6 +885,19 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
             key = key[self.pcp_size * num_decode_tokens:].contiguous()
             value = value[self.pcp_size * num_decode_tokens:].contiguous()
+            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
+                local_context_output = self._compute_local_context(prefill_query.clone(), kv_cache, attn_metadata)
+                local_context_output = local_context_output.permute([1, 2,
+                                                                 0]).contiguous()
+                global CHUNKED_PREFILL_STREAM
+                if CHUNKED_PREFILL_STREAM is None:
+                    CHUNKED_PREFILL_STREAM = torch_npu.npu.Stream(
+                        device=torch.npu.current_device())
+
+                CHUNKED_PREFILL_STREAM.wait_stream(torch.npu.current_stream())
+                with torch_npu.npu.stream(CHUNKED_PREFILL_STREAM):
+                    global_context_output = self._gather_global_context_output(local_context_output)
+
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP
                 attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp(
@@ -885,8 +922,15 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     actual_seq_lengths=attn_metadata.prefill.
                     actual_seq_lengths_q)
 
-            self._process_chunk_prefill(attn_output_prefill, attn_lse_prefill,
-                                        kv_cache, prefill_query, attn_metadata)
+            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
+                torch.npu.current_stream().wait_stream(CHUNKED_PREFILL_STREAM)
+                global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
+                context_output, context_lse = self._update_global_context_output(global_context_output)
+                self._update_chunk_attn_out_lse_with_current_attn_out_lse(
+                    attn_output_prefill, attn_lse_prefill,
+                    context_output, context_lse, prefill_query,
+                    attn_metadata)
+
             output[num_decode_tokens:attn_output_prefill.shape[0] +
                    num_decode_tokens] = attn_output_prefill
         return output
