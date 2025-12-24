@@ -219,6 +219,9 @@ class AscendRowParallelLinear(RowParallelLinear):
     and the original TP group in other modules.
     """
 
+    # NOTE: Globally unique prefix identifier used in SP scenarios
+    unique_prefix_idx = 0
+
     def __init__(
         self,
         input_size: int,
@@ -234,16 +237,15 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        # TODO(kunpengW-code):  Specifying the prefix in linear layers of some models in the vLLM.
+        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
         if enable_sp():
             compilation_config = get_current_vllm_config().compilation_config
-            custom_prefix = prefix
+            unique_prefix = prefix
             if prefix in compilation_config.static_forward_context:
-                global _CUSTOM_PREFIX_IDX
-                custom_prefix = f"{prefix}.custom_prefix{_CUSTOM_PREFIX_IDX}"
-                _CUSTOM_PREFIX_IDX += 1
-            self.custom_prefix = custom_prefix
-            compilation_config.static_forward_context[custom_prefix] = self
+                unique_prefix = f"{prefix}.unique_prefix{AscendRowParallelLinear.unique_prefix_idx}"
+                AscendRowParallelLinear.unique_prefix_idx += 1
+            self.unique_prefix = unique_prefix
+            compilation_config.static_forward_context[unique_prefix] = self
 
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "row")
