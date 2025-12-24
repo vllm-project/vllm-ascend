@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -15,11 +15,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
                                is_moe_model)
-
-if TYPE_CHECKING:
-    from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
-else:
-    WeightPrefetchMethod = None
 
 
 class MoECommType(Enum):
@@ -36,14 +31,11 @@ def set_ascend_forward_context(
         virtual_engine: int = 0,
         num_tokens: int = 0,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
-        with_prefill: bool = True,
         in_profile_run: bool = False,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
-        prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
-        weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
         is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -67,7 +59,6 @@ def set_ascend_forward_context(
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
-        forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
 
         forward_context.in_profile_run = in_profile_run
@@ -116,13 +107,10 @@ def set_ascend_forward_context(
             forward_context.layer_idx is not None and \
             num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
-            forward_context.prefetch_stream = prefetch_stream
-            forward_context.model_instance = model_instance
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
-        forward_context.weight_prefetch_method = weight_prefetch_method
         forward_context.is_mtp_model = is_mtp_model
 
         if num_tokens is None and attn_metadata is not None:
