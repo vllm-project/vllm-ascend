@@ -234,7 +234,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
+        # TODO(kunpengW-code):  Specifying the prefix in linear layers of some models in the vLLM.
         if enable_sp():
             compilation_config = get_current_vllm_config().compilation_config
             custom_prefix = prefix
