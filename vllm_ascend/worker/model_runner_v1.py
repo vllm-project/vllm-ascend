@@ -412,8 +412,9 @@ class NPUModelRunner(GPUModelRunner):
             return False
 
         def needs_mc2(num_tokens: int) -> bool:
-            return select_moe_comm_method(
-                num_tokens, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+            return select_moe_comm_method(num_tokens, self.vllm_config) in {
+                MoECommType.MC2, MoECommType.FUSED_MC2
+            }
 
         # Determine whether decode must use MC2. Use max cudagraph capture size
         # if available, otherwise use the maximal uniform decode token count.
@@ -437,7 +438,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Skip all-reduce if decode requires MC2 and either prefill also
         # requires MC2 or recompute-based scheduler is enabled.
-        return decode_must_use_mc2 and (prefill_must_use_mc2 or self.ascend_config.recompute_scheduler_enable)
+        return decode_must_use_mc2 and (
+            prefill_must_use_mc2
+            or self.ascend_config.recompute_scheduler_enable)
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
