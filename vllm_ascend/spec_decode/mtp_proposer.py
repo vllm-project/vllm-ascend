@@ -265,7 +265,6 @@ class MtpProposer(Proposer):
                     slot_mapping.gpu,
                     positions=self.runner.positions.gpu,
                     attn_mask=self.runner.attn_mask,
-                    spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
                     max_seq_len=0)
@@ -595,7 +594,6 @@ class MtpProposer(Proposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
             attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0)
@@ -1214,7 +1212,6 @@ class MtpProposer(Proposer):
             slot_mapping=common_attn_metadata.slot_mapping,
             positions=common_attn_metadata.positions,
             attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.

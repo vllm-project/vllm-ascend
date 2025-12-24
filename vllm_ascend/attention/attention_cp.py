@@ -202,8 +202,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 attn_mask_seqlens=attn_mask_seqlens,
                 head_attn_nomask_seqlens=head_attn_nomask_seqlens,
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
-                q_full_idx=common_long_seq_metadata.q_full_idx,
-                pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask)
+                q_full_idx=common_long_seq_metadata.q_full_idx)
 
             prefill_metadata = AscendMetadataForPrefill(
                 pcp_metadata=pcp_metadata,
@@ -379,7 +378,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
-        mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
+        mask = attn_metadata.attn_mask
 
         # 1. Attention calculation in the first half of Q in load balancing
         output_heads, lse_heads = self._attention_with_nomask_and_mask(
