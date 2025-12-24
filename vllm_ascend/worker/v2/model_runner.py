@@ -67,6 +67,8 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
             pin_memory=self.pin_memory,
         )
+        # we need to adjust triton operators in sampler,
+        # so reinitialize sampler here.
         self.sampler: AscendSampler = AscendSampler(
             logprobs_mode=self.model_config.logprobs_mode, )
 
