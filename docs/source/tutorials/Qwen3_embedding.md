@@ -30,7 +30,7 @@ Using the Qwen3-Embedding-8B model as an example, first run the docker container
 ### Online Inference
 
 ```bash
-vllm serve Qwen/Qwen3-Embedding-8B --host 127.0.0.1 --port 8888
+vllm serve Qwen/Qwen3-Embedding-8B --runner pooling --host 127.0.0.1 --port 8888
 ```
 
 Once your server is started, you can query the model with input prompts.
