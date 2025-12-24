@@ -87,8 +87,7 @@ class EagleProposer(Proposer):
             device=device,
             with_numpy=True,
         )
-        self.decode_threshold = 1 + \
-            self.vllm_config.speculative_config.num_speculative_tokens
+        self.decode_threshold = 1 + self.num_speculative_tokens
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
@@ -438,8 +437,6 @@ class EagleProposer(Proposer):
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
 
-        aclgraph_runtime_mode = CUDAGraphMode.NONE
-        batch_descriptor = None
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -492,14 +489,13 @@ class EagleProposer(Proposer):
         draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
-        if self.vllm_config.speculative_config.num_speculative_tokens == 1:
+        if self.num_speculative_tokens == 1:
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
 
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
-            (self.vllm_config.speculative_config.num_speculative_tokens,
-             *draft_token_ids.shape),
+            (self.num_speculative_tokens, *draft_token_ids.shape),
             dtype=draft_token_ids.dtype,
             device=self.device)
         draft_token_ids_tensor[0] = draft_token_ids
@@ -530,9 +526,7 @@ class EagleProposer(Proposer):
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
-        for now_speculative in range(
-                self.vllm_config.speculative_config.num_speculative_tokens -
-                1):
+        for now_speculative in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
