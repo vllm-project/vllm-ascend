@@ -74,7 +74,8 @@ class AscendPiecewiseCompileInterpreter(torch.fx.Interpreter):
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
-            r1 = Range(start=1, end=8192)
+            max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            r1 = Range(start=1, end=max_num_batched_tokens)
             compiled_graph_for_dynamic_shape = (
                 self.vllm_backend.compiler_manager.compile(
                     submod,
