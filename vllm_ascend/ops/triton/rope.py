@@ -176,8 +176,8 @@ def rope_forward_triton(q: torch.Tensor,
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    cos = cos.view(-1, rope_dim)
-    sin = sin.view(-1, rope_dim)
+    cos = cos.view(num_tokens, -1)
+    sin = sin.view(num_tokens, -1)
     if rope_dim == -1:
         # If rope_dim is not specified, we assume that input cos/sin is not
         # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
