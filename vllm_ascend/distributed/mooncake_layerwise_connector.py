@@ -65,6 +65,32 @@ class ReqMeta:
     remote_te_rpc_port: Optional[int]
     remote_kv_caches_base_addr: Optional[list[int]]
     metaserver: Optional[str]
+    chunk_finish: Optional[bool]
+
+
+@dataclass
+class SendReqInfo:
+    local_block_ids: list[int]
+    remote_block_ids: List[int]
+    remote_cache_tokens: int
+    local_transfered_tokens: int
+    local_computed_tokens: int
+    request: "Request"
+
+    def extend_local_block_ids(self, new_block_ids: List[int]) -> None:
+        """extend local block ids for this step"""
+        self.local_block_ids.extend(new_block_ids)
+
+    def update_computed_tokens(self, computed_tokens: int) -> None:
+        """update local computen tokens for this step"""
+        self.local_computed_tokens = computed_tokens
+    
+    def update_transfered_tokens(self, transferred_tokens: int) -> None:
+        """update transfered tokens for this step"""
+        self.local_transfered_tokens = transferred_tokens
+
+    def unpack(self):
+        return self.local_block_ids, self.remote_block_ids, self.remote_cache_tokens, self.local_transfered_tokens, self.local_computed_tokens, self.request
 
 
 @dataclass
@@ -172,12 +198,6 @@ class KVCacheSendingLayerThread(threading.Thread):
                          f"{req_id}: {e}")
 
     def _transfer_kv_cache(self, req_id, req_meta, layer_index, key, value, reshape_cache_event):
-        # send kv layer to remote
-        if len(req_meta.local_block_ids) == 0:
-            logger.debug(
-                f"Cancelling KV cache transfer for request {req_id}. Reason: No local blocks to transfer."
-            )
-            return
         # not need to send kv cache
         if self.tp_rank % self.num_head_replica != 0:
             logger.debug(
@@ -291,7 +311,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 logger.error("Mooncake transfer failed for request %s", req_id)
                 raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
-        if layer_index == (self.total_layers - 1):
+        if layer_index == (self.total_layers - 1) and req_meta.chunk_finish:
             self.callback_func(req_id, req_meta)
 
 
@@ -382,7 +402,8 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
                     request_id: str,
                     local_block_ids: list[int],
                     kv_transfer_params: dict[str, Any],
-                    token_ids: Optional[list[int]] = None):
+                    token_ids: Optional[list[int]] = None,
+                    chunk_finish: bool = False):
         self.requests[request_id] = ReqMeta(
             token_ids=token_ids or [],
             local_block_ids=local_block_ids,
@@ -395,6 +416,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             remote_kv_caches_base_addr=kv_transfer_params.get(
                 "remote_kv_caches_base_addr", None),
             metaserver=kv_transfer_params.get("metaserver", None),
+            chunk_finish=chunk_finish
         )
 
 
@@ -515,9 +537,7 @@ class MooncakeLayerwiseConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int],
                                               list[int]]] = {}
-        self._reqs_need_send_layerwise: dict[str, tuple[
-            int, list[int],
-            Request]] = {}  # req_id, (len(prompt), local_block_ids, request)
+        self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
         
         self.executor = ThreadPoolExecutor(32)
         self.metaserver_client = httpx.Client(
@@ -618,8 +638,11 @@ class MooncakeLayerwiseConnectorScheduler:
             logger.debug(
                 f"MooncakeLayerwiseConnector update_state_after_alloc: add {request.request_id} to need send queue"
             )
-            self._reqs_need_send_layerwise[request.request_id] = (len(
-                request.all_token_ids), local_block_ids, request)
+            remote_block_ids = copy.deepcopy(params["remote_block_ids"])
+            remote_cache_tokens = ((len(request.all_token_ids) + self.block_size - 1) // self.block_size - len(remote_block_ids)) * self.block_size
+            local_transfered_tokens = remote_cache_tokens
+            local_computed_tokens = None
+            self._reqs_need_send_layerwise[request.request_id] = SendReqInfo(local_block_ids=local_block_ids, remote_block_ids=remote_block_ids, remote_cache_tokens=remote_cache_tokens, local_transfered_tokens=local_transfered_tokens, local_computed_tokens=local_computed_tokens, request=request)
 
     def build_connector_meta(
         self,
@@ -627,53 +650,67 @@ class MooncakeLayerwiseConnectorScheduler:
     ) -> KVConnectorMetadata:
         meta = MooncakeLayerwiseConnectorMetadata()
 
-        # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, token_ids,
-                     block_ids) in self._reqs_need_recv.items():
-            assert req.kv_transfer_params is not None
-            # For the case where there are no remote blocks to pull
-            # (block_ids is empty), we don't need to schedule
-            # an async read on the worker side.
-            meta.add_new_req(request_id=req_id,
-                             local_block_ids=block_ids,
-                             kv_transfer_params=req.kv_transfer_params,
-                             token_ids=token_ids)
+        if self.vllm_config.kv_transfer_config.is_kv_consumer:
+            # Loop through scheduled reqs and convert to ReqMeta.
+            for req_id, (req, token_ids,
+                        block_ids) in self._reqs_need_recv.items():
+                assert req.kv_transfer_params is not None
+                # For the case where there are no remote blocks to pull
+                # (block_ids is empty), we don't need to schedule
+                # an async read on the worker side.
+                meta.add_new_req(request_id=req_id,
+                                local_block_ids=block_ids,
+                                kv_transfer_params=req.kv_transfer_params,
+                                token_ids=token_ids)
 
-        # Clear the list once workers start the transfers
-        self._reqs_need_recv.clear()
+            # Clear the list once workers start the transfers
+            self._reqs_need_recv.clear()
+        else:
+            cached_reqs = scheduler_output.scheduled_cached_reqs
+            new_reqs = scheduler_output.scheduled_new_reqs
+            scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+            # update local block ids
+            for req_id, new_blocks in zip(cached_reqs.req_ids,
+                                        cached_reqs.new_block_ids):
+                if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
+                    self._reqs_need_send_layerwise[req_id].extend_local_block_ids(new_blocks[0])
 
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        new_reqs = scheduler_output.scheduled_new_reqs
-        for req_id, new_blocks in zip(cached_reqs.req_ids,
-                                      cached_reqs.new_block_ids):
-            if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
-                total_tokens, block_ids, req = self._reqs_need_send_layerwise[
-                    req_id]
-                block_ids.extend(new_blocks[0])
+            computed_tokens = dict(
+                list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens)) +
+                [(x.req_id, x.num_computed_tokens) for x in new_reqs])
+            for req_id, scheduled_tokens in scheduler_output.num_scheduled_tokens.items(
+            ):
+                if req_id in self._reqs_need_send_layerwise:
+                    send_req_info = self._reqs_need_send_layerwise[req_id]
+                    # update local computed tokens, not transfer spec decode tokens
+                    spec_decode_tokens = len(scheduled_spec_decode_tokens[req_id]) if (req_id in scheduled_spec_decode_tokens) else 0
+                    send_req_info.update_computed_tokens(computed_tokens.get(req_id,0) + scheduled_tokens - spec_decode_tokens)
 
-        computed_tokens = dict(
-            list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens)) +
-            [(x.req_id, x.num_computed_tokens) for x in new_reqs])
-        for req_id, scheduled_tokens in scheduler_output.num_scheduled_tokens.items(
-        ):
-            if req_id in self._reqs_need_send_layerwise:
-                total_tokens, block_ids, req = self._reqs_need_send_layerwise[
-                    req_id]
-                current_tokens = computed_tokens.get(req_id,
-                                                     0) + scheduled_tokens
-                if current_tokens >= total_tokens:
-                    logger.debug(
-                        f"MooncakeLayerwiseConnector build_connector_meta: add {req_id}, current tokens({current_tokens}={computed_tokens.get(req_id,0)}+{scheduled_tokens}), total tokens({total_tokens})"
-                    )
-                    meta.add_new_req(request_id=req_id,
-                                     local_block_ids=block_ids,
-                                     kv_transfer_params=req.kv_transfer_params,
-                                     token_ids=[])
-                    self._reqs_need_send_layerwise.pop(req_id)
-                else:
-                    logger.debug(
-                        f"MooncakeLayerwiseConnector build_connector_meta: skip {req_id}, current tokens({current_tokens}={computed_tokens.get(req_id,0)}+{scheduled_tokens}), total tokens({total_tokens})"
-                    )
+                    def add_tranfer_task(req_id, send_req_info: SendReqInfo, chunk_finish=False):
+                        local_block_ids, remote_block_ids, remote_cache_tokens, local_transfered_tokens, local_computed_tokens, request = send_req_info.unpack()
+                        local_trans_block_ids = local_block_ids[(local_transfered_tokens // self.block_size): (local_computed_tokens  // self.block_size)]
+                        remote_trans_block_ids = remote_block_ids[((local_transfered_tokens - remote_cache_tokens) // self.block_size): ((local_computed_tokens - remote_cache_tokens) // self.block_size)]
+                        request.kv_transfer_params["remote_block_ids"] = remote_trans_block_ids
+                        assert len(local_trans_block_ids)==len(remote_trans_block_ids), f"len of local trans block ids : {len(local_trans_block_ids)} not equal to the len of remote trans block ids : {len(remote_trans_block_ids)}"
+                        adjusted_tokens = local_computed_tokens - (self.block_size - 1) if chunk_finish else local_computed_tokens
+                        logger.info(f"MooncakeLayerwiseConnector scheduler add transfer task: {req_id=} {local_block_ids=} {remote_block_ids=} {local_trans_block_ids=} {remote_trans_block_ids=} local_computed_tokens={adjusted_tokens} request.all_token_ids={len(request.all_token_ids)}")
+                        meta.add_new_req(request_id=req_id,
+                                        local_block_ids=local_trans_block_ids,
+                                        kv_transfer_params=request.kv_transfer_params,
+                                        token_ids=[],
+                                        chunk_finish = chunk_finish)
+                        # update local_transfered_tokens
+                        local_transfered_tokens = (local_computed_tokens // self.block_size) * self.block_size
+                        send_req_info.update_transfered_tokens(local_transfered_tokens)
+                    
+                    # no chunk or last chunk
+                    if send_req_info.local_computed_tokens >= len(send_req_info.request.all_token_ids):
+                        send_req_info.update_computed_tokens(send_req_info.local_computed_tokens + self.block_size - 1)
+                        add_tranfer_task(req_id, send_req_info, chunk_finish=True)
+                        self._reqs_need_send_layerwise.pop(req_id)
+                    # chunk
+                    elif (send_req_info.local_computed_tokens // self.block_size) - (send_req_info.local_transfered_tokens // self.block_size) > 0:
+                        add_tranfer_task(req_id, send_req_info)
         return meta
 
     def _access_metaserver(self, url, message):
@@ -918,12 +955,7 @@ class MooncakeLayerwiseConnectorWorker:
                 reshape_cache_event = attn_metadata[layer_name].prefill.reshape_cache_event
             else:
                 reshape_cache_event = attn_metadata.reshape_cache_event
-            for request in connector_metadata.requests.values():
-                assert len(request.local_block_ids) >= len(
-                    request.remote_block_ids
-                ), "When prefix cache enabled, remote KVCacheBlocks num should not larger than local KVCacheBlocks num."
-                request.local_block_ids = request.local_block_ids[
-                    -len(request.remote_block_ids):]
+            
             if self.pd_head_ratio != 1:
 
                 def sort_kv_cache(input_kv: list[list[int]]):
