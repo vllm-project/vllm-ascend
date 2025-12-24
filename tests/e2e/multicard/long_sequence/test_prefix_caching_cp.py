@@ -26,7 +26,7 @@ from typing import Any, Dict
 
 import pytest
 
-from tests.e2e.conftest import VllmRunner, _LONG_PROMPTS
+from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
 from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
