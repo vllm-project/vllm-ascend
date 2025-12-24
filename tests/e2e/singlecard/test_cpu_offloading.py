@@ -6,7 +6,6 @@ import time
 import msgspec
 import msgspec.msgpack
 import zmq
-from tqdm import tqdm
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
@@ -20,12 +19,12 @@ class MockSubscriber:
         endpoint: str,
         topic: str,
     ):
-        self.ctx = zmq.Context.instance()
+        self.ctx = zmq.Context.instance()  # type: ignore
         self.topic_bytes = topic.encode("utf-8")
 
         # Set up subscriber socket
-        self.sub = self.ctx.socket(zmq.SUB)
-        self.sub.setsockopt(zmq.SUBSCRIBE, self.topic_bytes)
+        self.sub = self.ctx.socket(zmq.SUB)  # type: ignore
+        self.sub.setsockopt(zmq.SUBSCRIBE, self.topic_bytes)  # type: ignore
         self.sub.connect(endpoint)
 
         self.decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
@@ -33,14 +32,14 @@ class MockSubscriber:
     def get_new_cpu_stored_events(self) -> list[BlockStored]:
         cpu_stored_events: list[BlockStored] = []
 
-        poller = zmq.Poller()
-        poller.register(self.sub, zmq.POLLIN)
+        poller = zmq.Poller()  # type: ignore
+        poller.register(self.sub, zmq.POLLIN)  # type: ignore
 
         timeout = 1000  # 1 second
         while True:
             events = dict(poller.poll(timeout))
 
-            if events.get(self.sub) != zmq.POLLIN:
+            if events.get(self.sub) != zmq.POLLIN:  # type: ignore
                 return cpu_stored_events
 
             topic_bytes, _, payload = self.sub.recv_multipart()
@@ -68,7 +67,7 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber):
     total_gpu_hit_time = 0.0
     total_cpu_hit_time = 0.0
     prompt_token_ids = [0] * 10001
-    for i in tqdm(range(num_tests), desc="Running tests"):
+    for i in range(num_tests):
         prompt_token_ids[0] = i
         prompts = [TokensPrompt(prompt_token_ids=prompt_token_ids)]
 
