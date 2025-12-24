@@ -92,7 +92,6 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 
 ```
 {
-    "local_hostname": "xx.xx.xx.xx",
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
