@@ -68,11 +68,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable fused_experts_allgather_ep. MoeInitRoutingV3 and
-    # GroupedMatmulFinalizeRouting operators are combined to implement EP.
-    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
-                 ),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
