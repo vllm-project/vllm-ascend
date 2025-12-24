@@ -354,20 +354,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
                                           prefill_value)
 
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
-        if not self.dcp_size > 1:
-            return super().mla_preprocess_decode(q_c, kv_no_split, kv_cache,attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
         cos = attn_metadata.decode.cos
         sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = \
             self._q_proj_and_k_up_proj(decode_q_c)
-        decode_q_no_split = torch.cat([decode_ql_nope, decode_q_pe],
-                                      dim=-1)
-        decode_q_no_split = get_dcp_group().all_gather(
-            decode_q_no_split, 1)
-        decode_ql_nope, decode_q_pe = decode_q_no_split.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if self.dcp_size > 1:
+            decode_q_no_split = torch.cat([decode_ql_nope, decode_q_pe],
+                                          dim=-1)
+            decode_q_no_split = get_dcp_group().all_gather(
+                decode_q_no_split, 1)
+            decode_ql_nope, decode_q_pe = decode_q_no_split.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens *
                                                   self.pcp_size:self.pcp_size]
