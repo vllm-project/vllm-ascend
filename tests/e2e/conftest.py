@@ -763,11 +763,27 @@ def qwen_prompt(questions: list[str]) -> list[str]:
              f"{q}<|im_end|>\n<|im_start|>assistant\n") for q in questions]
 
 
-PROMPT_TEMPLATES = {
-    "qwen2.5vl": qwen_prompt,
+def hunyuan_prompt(questions: list[str]) -> list[str]:
+    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    return [
+        f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
+        for question in questions
+    ]
+
+
+PROMPT_CONFIGS = {
+    "qwen-vl": {
+        "model": "Qwen/Qwen3-VL-8B-Instruct",
+        "prompt_fn": qwen_prompt,
+        "mm_processor_kwargs": {
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+    },
 }
 
 
-@pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
-def prompt_template(request):
-    return PROMPT_TEMPLATES[request.param]
+@pytest.fixture(params=PROMPT_CONFIGS.keys())
+def vl_config(request):
+    return PROMPT_CONFIGS[request.param]
