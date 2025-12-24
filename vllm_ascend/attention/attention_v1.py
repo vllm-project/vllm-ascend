@@ -505,7 +505,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def _forward_prefill(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
                          output: torch.Tensor, **kwargs):
-        # FIXED: 在函数内部导入必要的模块以确保可用性
+
         import torch_npu
         from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
 
@@ -542,21 +542,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # TODO: Refactor this to step-level instead of layer-level
 
         # Fixed: Check device compatibility for FusedInferAttentionScore
-        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType, aligned_16
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
 
         if get_ascend_device_type() == AscendDeviceType._310P:
-            # Fallback for 310P: Use flash attention implementation from v0.10.0rc1
-            # Handle KV cache first, then use fallback
             kv_cache = kwargs.get('kv_cache', None)
             if kv_cache is not None and len(kv_cache) > 1:
                 if self.key_cache is None:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
                 num_actual_tokens = attn_metadata.num_actual_tokens
-                print(f"[PRECISION DEBUG BEFORE RESHAPE] NEW VERSION:")
-                print(f"[PRECISION DEBUG BEFORE RESHAPE]   key_before: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
-                print(f"[PRECISION DEBUG BEFORE RESHAPE]   value_before: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
-                print(f"[PRECISION DEBUG BEFORE RESHAPE]   num_actual_tokens: {num_actual_tokens}")
 
                 # Stage 1: KV cache storage using original tensors (like v0.10.0rc1:319-324)
                 torch_npu._npu_reshape_and_cache(
@@ -565,10 +559,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots)
-
-                print(f"[PRECISION DEBUG AFTER RESHAPE] NEW VERSION:")
-                print(f"[PRECISION DEBUG AFTER RESHAPE]   key_after: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
-                print(f"[PRECISION DEBUG AFTER RESHAPE]   value_after: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
 
             return self._forward_prefill_310p_fallback(
                 query, key, value, attn_metadata, output
