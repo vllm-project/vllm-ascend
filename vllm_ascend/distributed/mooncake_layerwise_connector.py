@@ -227,6 +227,12 @@ class KVCacheSendingLayerThread(threading.Thread):
                     length_list.append(length)
             if self.current_layer != layer_index:
                 self.current_layer = layer_index
+                """
+                Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
+                This issue will be fixed in CANN version 8.5.rc1.
+                You can manually build the master branch of the project at https://gitcode.com/cann/hixl
+                to resolve this issue before the 8.5.RC1 release.
+                """
                 reshape_cache_event.synchronize()
             ret = self.engine.batch_transfer_sync_write(
                 session_id, src_list, dst_list, length_list)
@@ -726,11 +732,6 @@ class MooncakeLayerwiseConnectorWorker:
         self.total_layers = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
-        self.executor = ThreadPoolExecutor(32)
-        self.metaserver_client = httpx.Client(
-            limits=httpx.Limits(max_connections=100000),
-            timeout=None) if self.tp_rank == 0 else None
-
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
@@ -884,21 +885,6 @@ class MooncakeLayerwiseConnectorWorker:
             self.kv_recv_layer_thread.start()
             ready_event.wait()
 
-    def _access_metaserver(self, url, message):
-        success = False
-        retry = 0
-        while retry < 3 and success is False:
-            retry += 1
-            try:
-                self.metaserver_client.post(url, json=message)
-                success = True
-            except Exception as e:
-                logger.error(
-                    f"Failed to connect to metaserver: {url}, retry {retry} time."
-                )
-                if retry == 3:
-                    raise e
-
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_recving = (
             self.kv_recv_layer_thread.
@@ -915,35 +901,6 @@ class MooncakeLayerwiseConnectorWorker:
         self.current_layer = 0
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
             for req_id, meta in metadata.requests.items():
-                if self.tp_rank % self.tp_size == 0:
-                    logger.info(
-                        f"Send request: {req_id} to proxy metaserver: {meta.metaserver}"
-                    )
-                    # All parameters here should appear in the returned dict of
-                    # request_finished in the scheduler side except "request_id".
-                    kv_transfer_params = dict(
-                        token_ids=meta.token_ids,
-                        request_id=req_id,
-                        do_remote_prefill=False,
-                        do_remote_decode=True,
-                        remote_block_ids=meta.local_block_ids,
-                        remote_engine_id=self.engine_id,
-                        remote_host=self.side_channel_host,
-                        remote_port=self.side_channel_port,
-                    )
-                    future = self.executor.submit(
-                        self._access_metaserver,
-                        url=meta.metaserver,
-                        message=kv_transfer_params,
-                    )
-
-                    def handle_exception(future):
-                        if future.exception():
-                            logger.error(
-                                f"Access metaserver fail: {future.exception()}"
-                            )
-
-                    future.add_done_callback(handle_exception)
                 assert self.kv_recv_layer_thread is not None
                 with self.kv_recv_layer_thread.lock:
                     self.kv_recv_layer_thread.task_tracker[req_id] = 0
@@ -1018,6 +975,7 @@ class MooncakeLayerwiseConnectorWorker:
                     f"Add request {req_id} to kv send layer thread. {req_meta_update=}"
                 )
                 assert self.kv_send_layer_thread is not None
+                assert reshape_cache_event is not None
                 self.kv_send_layer_thread.send_queue.put(
                     (req_id, req_meta_update, self.current_layer, key, value, reshape_cache_event))
             self.current_layer += 1
