@@ -144,6 +144,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # with W8A8, non-dynamic-eplb. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
+    # Whether to anbale balance scheduling
+    "VLLM_ASCEND_BALANCE_SCHEDULING":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
 }
 
 # end-env-vars-definition
