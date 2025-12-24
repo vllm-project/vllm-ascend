@@ -17,6 +17,7 @@
 import json
 from typing import Any
 
+import httpx
 import openai
 import pytest
 from vllm.utils import get_open_port
@@ -59,6 +60,11 @@ aisbench_aime = [{
     "baseline": 86.67,
     "threshold": 7
 }]
+
+BASELINES = {
+    "mtp2": [0.85, 0.60],
+    "mtp3": [0.83, 0.34, 0.10],
+}
 
 
 @pytest.mark.asyncio
@@ -138,3 +144,52 @@ async def test_models(model: str, mode: str) -> None:
                            port,
                            aisbench_cases,
                            server_args=server_args)
+        async with httpx.AsyncClient() as client:
+            metrics_text = (await client.get(server.url_for("metrics"))).text
+
+    num_drafts, num_accepted_tokens_per_pos = analysis_metrics(
+        metrics_text, speculative_config["num_speculative_tokens"],
+    )
+
+    acceptance_per_pos = [
+        num_accepted_tokens / num_drafts
+        for num_accepted_tokens in num_accepted_tokens_per_pos
+    ]
+    golden = BASELINES[mode]
+
+    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
+def analysis_metrics(metrics_text: str, mtp: int) -> tuple[float, list[float]]:
+    lines = metrics_text.splitlines()
+    num_drafts_lines = []
+    num_accepted_tokens_per_pos_lines = []
+    for line in lines:
+        if line.startswith("vllm:spec_decode_num_drafts_total"):
+            num_drafts_lines.append(line)
+        elif line.startswith(
+            "vllm:spec_decode_num_accepted_tokens_per_pos_total",
+        ):
+            num_accepted_tokens_per_pos_lines.append(line)
+    assert len(num_drafts_lines) == 2
+    assert len(num_accepted_tokens_per_pos_lines) == 2 * mtp
+
+    num_drafts = sum([
+        float(line.strip().split()[-1])
+        for line in num_drafts_lines
+    ])
+    num_accepted_tokens_per_pos = []
+    for index in range(mtp):
+        line_dp0 = num_accepted_tokens_per_pos_lines[index]
+        line_dp1 = num_accepted_tokens_per_pos_lines[index + mtp]
+        num_accepted_tokens_per_pos.append(sum([
+            float(line_dp0.strip().split()[-1]) +
+            float(line_dp1.strip().split()[-1])
+        ]))
+
+    return num_drafts, num_accepted_tokens_per_pos
