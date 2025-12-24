@@ -118,3 +118,17 @@ def swiglu_quant(x, group_list, group_list_type, need_quant=True):
         multibuffer=True,
     )
     return out, scale
+
+def swiglu_quant_impl_fake(x:torch.Tensor, group_list:Optional[torch.Tensor], group_list_type:int, need_quant: bool = True
+) -> tuple[torch.Tensor, torch.Tensor]:
+    s, h = x.shape
+    out_dtype = torch.int8 if need_quant else x.dtype
+    out = torch.empty((s, h // 2), dtype=out_dtype, device=x.device)
+    scale = torch.empty((s, ), dtype=torch.float32, device=x.device)
+    return out, scale
+
+direct_register_custom_op(op_name="swiglu_quant",
+                          op_func=swiglu_quant,
+                          fake_impl=swiglu_quant_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
