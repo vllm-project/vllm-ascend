@@ -78,12 +78,8 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
     ) -> Tuple[int, ...]:
         from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
-        # FIX_START: 恢复老版本310P的内存压缩优化，解决内存分配失败问题
-        # 老版本使用 num_kv_heads * head_size // 16 来压缩内存，减少310P内存占用
-        # 新版本移除了 is_310p() 函数，改用 get_ascend_device_type() 检测设备类型
         if get_ascend_device_type() == AscendDeviceType._310P:
             return (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
-        # FIX_END: 恢复310P压缩优化
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -519,11 +515,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
         elif attn_metadata.attn_state == \
                 AscendAttentionState.PrefillCacheHit:
-            # DEBUG: KV cache重塑前检查格式 - PrefillCacheHit分支
-            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW] PrefillCacheHit branch:")
-            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
-            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
-
             batch_size = attn_metadata.query_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
@@ -533,48 +524,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_block, block_size, -1)
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
-            # DEBUG: KV cache重塑后检查格式 - PrefillCacheHit分支
-            #            print(f"[DEBUG FORMAT AFTER KV_VIEW] PrefillCacheHit branch:")
-            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   key after view: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   value after view: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-        # chunked_prefill.
         else:
-            # DEBUG: KV cache重塑前检查格式 - chunked_prefill分支
-            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW] chunked_prefill branch:")
-            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.key_cache: shape={self.key_cache.shape}; format={torch_npu.get_npu_format(self.key_cache)}")
-            #            print(f"[DEBUG FORMAT BEFORE KV_VIEW]   self.value_cache: shape={self.value_cache.shape}; format={torch_npu.get_npu_format(self.value_cache)}")
-
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            # FIXED: 310P设备不执行key/value重塑，避免格式继承问题
-            # 对齐老版本做法：310P直接使用原始key/value参数
             if get_ascend_device_type() != AscendDeviceType._310P:
                 key = self.key_cache.view(  # type: ignore
                     num_block, block_size, -1)
                 value = self.value_cache.view(  # type: ignore
                     num_block, block_size, -1)
-
-            # print(f"[DEBUG FORMAT 310P CHUNKED_PREFILL] 310P: Skipping key/value reshape, using original parameters")
-            # 310P: key和value保持原始传入的参数，不进行重塑
-
-            # DEBUG: KV cache重塑后检查格式 - chunked_prefill分支
-            #            print(f"[DEBUG FORMAT AFTER KV_VIEW] chunked_prefill branch:")
-            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   key after view: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-            #            print(f"[DEBUG FORMAT AFTER KV_VIEW]   value after view: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
 
-        # DEBUG: 检查张量格式 - 入口点1
         import torch_npu
-        # DEBUG: 精度检查 - 新版本attention入口处的原始输入
-        print(f"[PRECISION DEBUG FORWARD ENTRY] NEW VERSION _forward_prefill:")
-        print(f"[PRECISION DEBUG FORWARD ENTRY]   query_orig: shape={query.shape}; mean={query.float().mean().item():.6f}; std={query.float().std().item():.6f}")
-        print(f"[PRECISION DEBUG FORWARD ENTRY]   key_orig: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
-        print(f"[PRECISION DEBUG FORWARD ENTRY]   value_orig: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
-        print(f"[PRECISION DEBUG FORWARD ENTRY]   attn_state: {attn_metadata.attn_state}")
-
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
 
@@ -590,9 +553,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
                 num_actual_tokens = attn_metadata.num_actual_tokens
-
-                # DEBUG: reshape_and_cache前检查格式
-                # DEBUG: 精度检查 - reshape_and_cache前后的key/value变化
                 print(f"[PRECISION DEBUG BEFORE RESHAPE] NEW VERSION:")
                 print(f"[PRECISION DEBUG BEFORE RESHAPE]   key_before: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
                 print(f"[PRECISION DEBUG BEFORE RESHAPE]   value_before: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
@@ -606,7 +566,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     value_cache=self.value_cache,
                     slot_indices=slots)
 
-                # DEBUG: 精度检查 - reshape_and_cache后key/value是否被修改
                 print(f"[PRECISION DEBUG AFTER RESHAPE] NEW VERSION:")
                 print(f"[PRECISION DEBUG AFTER RESHAPE]   key_after: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
                 print(f"[PRECISION DEBUG AFTER RESHAPE]   value_after: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
@@ -615,13 +574,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, attn_metadata, output
             )
 
-        # DEBUG: 非310P路径 - npu_fused_infer_attention_score调用前检查格式
-        #        print(f"[DEBUG FORMAT NON-310P] Before npu_fused_infer_attention_score:")
-        #        print(f"[DEBUG FORMAT NON-310P]   query: shape={query.shape}; format={torch_npu.get_npu_format(query)}")
-        #        print(f"[DEBUG FORMAT NON-310P]   key: shape={key.shape}; format={torch_npu.get_npu_format(key)}")
-        #        print(f"[DEBUG FORMAT NON-310P]   value: shape={value.shape}; format={torch_npu.get_npu_format(value)}")
-
-        # Get workspace from cache or calculate it if not present.
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,
@@ -649,10 +601,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # DEBUG: 精度检查 - DecodeOnly路径的输入
-        print(f"[PRECISION DEBUG DECODE_ONLY ENTRY] NEW VERSION:")
-        print(f"[PRECISION DEBUG DECODE_ONLY ENTRY]   query: shape={query.shape}; mean={query.float().mean().item():.6f}; std={query.float().std().item():.6f}")
-
         # Fixed: Check device compatibility for decode attention
         from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
         if self.sliding_window is not None and attn_metadata.seq_lens.shape[
@@ -670,10 +618,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             
 
             if get_ascend_device_type() == AscendDeviceType._310P:
-                # DEPRECATED: 310P no longer uses sliding window branch
-                # 310P now uses the else branch below (non-sliding window)
-                print(f"[DEPRECATED] 310P sliding window branch - should not reach here")
-                # Fallback for 310P: Use paged attention instead of fused attention
                 torch_npu._npu_paged_attention(
                     query=query,
                     key_cache=self.key_cache,
@@ -703,24 +647,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
             if get_ascend_device_type() == AscendDeviceType._310P:
-                # FIXED: 310P requires seq_lens to be on NPU device (match old version behavior)
-                # print(f"[DEBUG 310P SEQ_LENS_DEVICE] Before fix: device={attn_metadata.seq_lens.device}")
                 attn_metadata.seq_lens = attn_metadata.seq_lens.to(device=query.device)
-                # print(f"[DEBUG 310P SEQ_LENS_DEVICE] After fix: device={attn_metadata.seq_lens.device}")
-
-                # DEBUG: Detailed 310P paged attention parameter validation
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] ===== DETAILED PARAM CHECK =====")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] query: shape={query.shape}, dtype={query.dtype}, device={query.device}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] key_cache: shape={self.key_cache.shape}, dtype={self.key_cache.dtype}, device={self.key_cache.device}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] value_cache: shape={self.value_cache.shape}, dtype={self.value_cache.dtype}, device={self.value_cache.device}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_kv_heads: {self.num_kv_heads}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] num_heads: {self.num_heads}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] scale_value: {self.scale}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] block_table: shape={attn_metadata.block_tables.shape}, dtype={attn_metadata.block_tables.dtype}, device={attn_metadata.block_tables.device}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] context_lens: shape={attn_metadata.seq_lens.shape}, dtype={attn_metadata.seq_lens.dtype}, values={attn_metadata.seq_lens}, device={attn_metadata.seq_lens.device}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] output: shape={output.shape}, dtype={output.dtype}, device={output.device}")
-                # print(f"[DEBUG 310P PAGED_ATTENTION PRE] ==================================================")
-
             torch_npu._npu_paged_attention(
                 query=query,
                 key_cache=self.key_cache,
@@ -731,11 +658,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 context_lens=attn_metadata.seq_lens,
                 out=output)
-
-        # DEBUG: 精度检查 - DecodeOnly路径的输出
-        print(f"[PRECISION DEBUG DECODE_ONLY EXIT] NEW VERSION:")
-        print(f"[PRECISION DEBUG DECODE_ONLY EXIT]   output: shape={output.shape}; mean={output.float().mean().item():.6f}; std={output.float().std().item():.6f}")
-
         return output
 
     def _forward_encode(
@@ -809,28 +731,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         forward_context: ForwardContext = get_forward_context()
 
-        # DEBUG: 检查代码路径选择
-        print(f"[PRECISION DEBUG PATH] forward_context.capturing: {forward_context.capturing}")
         if not forward_context.capturing:
-            print(f"[PRECISION DEBUG PATH] Taking normal execution path")
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                print(f"[PRECISION DEBUG PATH] Taking DecodeOnly path")
                 output = self._forward_decode_only(query, attn_metadata,
                                                    output)
-                print(f"[PRECISION DEBUG PATH] DecodeOnly completed")
             else:
-                print(f"[PRECISION DEBUG PATH] Taking prefill path, attn_state: {attn_metadata.attn_state}")
                 output = self._forward_prefill(query, key, value,
                                                attn_metadata, output, kv_cache=kv_cache)
-                print(f"[PRECISION DEBUG PATH] prefill completed")
         else:
-            print(f"[PRECISION DEBUG PATH] Taking full_graph_attention path (capturing mode)")
             attn_output, num_tokens = self.full_graph_attention(
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
-            print(f"[PRECISION DEBUG PATH] full_graph_attention completed, output shape: {output.shape}")
-
-        print(f"[PRECISION DEBUG PATH] forward_impl completed, returning output")
         return output
 
     def forward(
@@ -857,29 +768,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-
-        # DEBUG: 输出层名称用于对应新老版本的DEBUG信息
-        layer_name = getattr(layer, 'layer_name', 'unknown_layer')
-        print(f"[PRECISION DEBUG LAYER] ===== ENTERING LAYER: {layer_name} =====")
-
-        # 检查当前layer的权重初始化状态
-        if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'qkv_proj'):
-            qkv_weight = layer.self_attn.qkv_proj.weight if hasattr(layer.self_attn.qkv_proj, 'weight') else None
-            if qkv_weight is not None:
-                print(f"[WEIGHT DEBUG NEW] QKV weight stats: shape={qkv_weight.shape}, mean={qkv_weight.float().mean():.6f}, std={qkv_weight.float().std():.6f}")
-
-        # DEBUG: 跟踪第1层输入时的张量状态（第0层到第1层转换）
-        if 'layers.1.' in layer_name:
-            print(f"[LAYER TRANSFORM DEBUG NEW] Layer 1 attention input analysis:")
-            print(f"  query: shape={query.shape}, mean={query.float().mean():.6f}, std={query.float().std():.6f}, min={query.float().min():.6f}, max={query.float().max():.6f}")
-            print(f"  key: shape={key.shape}, mean={key.float().mean():.6f}, std={key.float().std():.6f}, min={key.float().min():.6f}, max={key.float().max():.6f}")
-            print(f"  value: shape={value.shape}, mean={value.float().mean():.6f}, std={value.float().std():.6f}, min={value.float().min():.6f}, max={value.float().max():.6f}")
-
-            # 检查是否有NaN或Inf
-            print(f"  query has NaN: {torch.isnan(query).any()}, has Inf: {torch.isinf(query).any()}")
-            print(f"  key has NaN: {torch.isnan(key).any()}, has Inf: {torch.isinf(key).any()}")
-            print(f"  value has NaN: {torch.isnan(value).any()}, has Inf: {torch.isinf(value).any()}")
-
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
@@ -900,10 +788,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        print(f"[PRECISION DEBUG PATH] About to call forward_impl")
         output = self.forward_impl(query, key, value, kv_cache, attn_metadata,
                                    output)
-        print(f"[PRECISION DEBUG PATH] forward_impl returned, output shape: {output.shape}")
         return output
 
     def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
@@ -913,31 +799,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         """
         # DEBUG: 精度检查 - fallback函数入口数值
         import torch_npu
-        print(f"[PRECISION DEBUG FALLBACK ENTRY] NEW VERSION:")
-        print(f"[PRECISION DEBUG FALLBACK ENTRY]   query: shape={query.shape}; mean={query.float().mean().item():.6f}; std={query.float().std().item():.6f}")
-        print(f"[PRECISION DEBUG FALLBACK ENTRY]   key: shape={key.shape}; mean={key.float().mean().item():.6f}; std={key.float().std().item():.6f}")
-        print(f"[PRECISION DEBUG FALLBACK ENTRY]   value: shape={value.shape}; mean={value.float().mean().item():.6f}; std={value.float().std().item():.6f}")
-        print(f"[PRECISION DEBUG FALLBACK ENTRY]   output_before: shape={output.shape}; mean={output.float().mean().item():.6f}")
-
         from vllm_ascend.utils import aligned_16, ACL_FORMAT_FRACTAL_NZ
-
         num_tokens = query.shape[0]
-
-        # Apply 310P-specific alignments from v0.10.0rc1
-        print(f"[PRECISION DEBUG ALIGNED_16] Before aligned_16:")
-        print(f"[PRECISION DEBUG ALIGNED_16]   query_orig: shape={query.shape}; mean={query.float().mean().item():.6f}")
-        print(f"[PRECISION DEBUG ALIGNED_16]   key_orig: shape={key.shape}; mean={key.float().mean().item():.6f}")
-        print(f"[PRECISION DEBUG ALIGNED_16]   value_orig: shape={value.shape}; mean={value.float().mean().item():.6f}")
-
         query = aligned_16(query)
         key = aligned_16(key)
         value = aligned_16(value)
         output = aligned_16(output)
-
-        print(f"[PRECISION DEBUG ALIGNED_16] After aligned_16:")
-        print(f"[PRECISION DEBUG ALIGNED_16]   query_aligned: shape={query.shape}; mean={query.float().mean().item():.6f}")
-        print(f"[PRECISION DEBUG ALIGNED_16]   key_aligned: shape={key.shape}; mean={key.float().mean().item():.6f}")
-        print(f"[PRECISION DEBUG ALIGNED_16]   value_aligned: shape={value.shape}; mean={value.float().mean().item():.6f}")
 
         # Handle attention mask - format for 310P compatibility
         mask = attn_metadata.attn_mask
@@ -959,14 +826,5 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_kv_heads=self.num_kv_heads,
             out=output
         )
-
-        # DEBUG: 精度检查 - attention计算后的输出
-        print(f"[PRECISION DEBUG ATTENTION OUTPUT] After torch_npu._npu_flash_attention:")
-        print(f"[PRECISION DEBUG ATTENTION OUTPUT]   output_full: shape={output.shape}; mean={output.float().mean().item():.6f}; std={output.float().std().item():.6f}")
-
-        # Return only the actual tokens (truncate padding from aligned_16)
-        # FIXED: Return same shape as other attention branches for consistency
-        # Other branches expect (num_tokens, num_heads, head_size) shape
         final_output = output[:num_tokens, :, :]
-        print(f"[PRECISION DEBUG ATTENTION OUTPUT]   final_output: shape={final_output.shape}; mean={final_output.float().mean().item():.6f}; std={final_output.float().std().item():.6f}")
         return final_output

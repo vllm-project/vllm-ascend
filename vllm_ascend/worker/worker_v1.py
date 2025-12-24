@@ -186,20 +186,9 @@ class NPUWorker(WorkerBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        from vllm.logger import logger
-        from vllm.utils.mem_constants import GiB_bytes
-        from vllm_ascend.platform import NPUPlatform
-
-        # Monitor memory before any cache operations
-        free_before, total = NPUPlatform.mem_get_info()
-        logger.info(f"[NEW_MEMORY_DEBUG] initialize_cache start: Free={free_before/GiB_bytes:.2f}GiB")
-
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        # Monitor memory after setting block counts
-        free_after_config, total = NPUPlatform.mem_get_info()
-        logger.info(f"[NEW_MEMORY_DEBUG] after cache config: Free={free_after_config/GiB_bytes:.2f}GiB")
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
@@ -249,7 +238,6 @@ class NPUWorker(WorkerBase):
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         free_npu_memory, _ = NPUPlatform.mem_get_info()
-        logger.info(f"[NEW_MEMORY_DEBUG] After profile_run: Free={free_npu_memory/GiB_bytes:.2f}GiB")
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         assert self.init_npu_memory > free_npu_memory, (
@@ -260,19 +248,15 @@ class NPUWorker(WorkerBase):
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
-        logger.info(f"[NEW_MEMORY_DEBUG] Peak torch memory: {peak_memory/GiB_bytes:.2f}GiB")
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
         NPUPlatform.empty_cache()
-        free_after_empty, _ = NPUPlatform.mem_get_info()
-        logger.info(f"[NEW_MEMORY_DEBUG] After empty_cache: Free={free_after_empty/GiB_bytes:.2f}GiB")
-
         torch_allocated_bytes = torch_npu.npu.memory_stats(
         )["allocated_bytes.all.current"]
         total_allocated_bytes = torch_npu.npu.mem_get_info(
         )[1] - torch_npu.npu.mem_get_info()[0]
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        logger.info(f"[NEW_MEMORY_DEBUG] Non-torch allocations: {non_torch_allocations/GiB_bytes:.2f}GiB")
+
 
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
@@ -280,9 +264,6 @@ class NPUWorker(WorkerBase):
             total_npu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
-
-        logger.info(f"[NEW_MEMORY_DEBUG] Available KV cache memory: {available_kv_cache_memory/GiB_bytes:.2f}GiB")
-
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
         )
@@ -400,14 +381,6 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
-        from vllm.logger import logger
-        from vllm.utils.mem_constants import GiB_bytes
-        from vllm_ascend.platform import NPUPlatform
-
-        # Monitor memory before KV cache allocation
-        free_before_kv, total = NPUPlatform.mem_get_info()
-        logger.info(f"[NEW_MEMORY_DEBUG] before model_runner.initialize_kv_cache: Free={free_before_kv/GiB_bytes:.2f}GiB")
-
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -416,10 +389,6 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
-
-        # Monitor memory after KV cache allocation
-        free_after_kv, total = NPUPlatform.mem_get_info()
-        logger.info(f"[NEW_MEMORY_DEBUG] after model_runner.initialize_kv_cache: Free={free_after_kv/GiB_bytes:.2f}GiB")
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
