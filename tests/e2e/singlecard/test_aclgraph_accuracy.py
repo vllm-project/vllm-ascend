@@ -22,7 +22,6 @@ Run `pytest tests/compile/test_aclgraph_accuracy.py`.
 
 import os
 
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 import pytest
 from vllm import SamplingParams
 
@@ -227,7 +226,7 @@ def test_models_output_between_eager_and_fullgraph_npugraph_ex(
     ]
     vllm_aclgraph_qwen_answers = [
         ' \n\nTo solve this problem, we need to use the Law of Sines and Law of Cosines. Let me start by drawing triangle $ABC$ with the',
-        " \n\nTo solve this problem, we can use the following approach: Let $ABCD$ be a unit square with coordinates $A(0,0), B",
+        " \n\nTo solve this problem, we can use the fact that the expected value of the area of a triangle formed by two random points on a square's perimeter is",
         ' \n\nTo solve this problem, we can use the following approach: Let $ \\alpha $ be the common real root of the two equations. Then, we can'
     ]
 
