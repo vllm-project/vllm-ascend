@@ -209,8 +209,8 @@ def split_qkv_rmsnorm_rope_impl(
     kv_hidden_size: int,
     head_dim: int,
     eps: float,
-    q_bias: Optional[torch.Tensor],
-    k_bias: Optional[torch.Tensor],
+    q_bias: Optional[torch.Tensor] = None,
+    k_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     KV_BLOCK_SIZE = triton.next_power_of_2(head_dim)
     assert KV_BLOCK_SIZE == head_dim
