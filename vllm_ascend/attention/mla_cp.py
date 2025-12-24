@@ -25,7 +25,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
 #isort: on
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
-from vllm_ascend.attention.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
+from vllm_ascend.attention.common_cp import AscendPCPMetadata, ChunkedContextMetadata
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
@@ -160,7 +160,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
             dtype=torch.int32,
         )
-        chunked_metadata = CPChunkedContextMetadata(
+        chunked_metadata = ChunkedContextMetadata(
             cu_seq_lens=chunked_context_metadata.cu_seq_lens,
             starts=local_chunk_starts.pin_memory().to(self.device,
                                                       non_blocking=True),
@@ -716,7 +716,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        chunked_context: CPChunkedContextMetadata,
+        chunked_context: ChunkedContextMetadata,
         chunk_idx: int,
         toks: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:

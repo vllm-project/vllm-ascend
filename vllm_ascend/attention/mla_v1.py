@@ -20,7 +20,7 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.common_cp import (AscendPCPMetadata,
-                                             CPChunkedContextMetadata)
+                                             ChunkedContextMetadata)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          enable_cp,
                                          maybe_save_kv_layer_to_connector,
@@ -76,19 +76,6 @@ class AscendMLABackend(AttentionBackend):
 
 
 @dataclass
-class ChunkedContextMetadata:
-    # New for MLA (compared to FlashAttention)
-    # For handling chunked prefill
-    cu_seq_lens: torch.Tensor
-    starts: torch.Tensor
-    seq_tot: list[int]
-    max_seq_lens: list[int]
-    workspace: torch.Tensor
-    chunk_seq_lens: torch.Tensor
-    chunk_seq_lens_npu: torch.Tensor
-
-
-@dataclass
 class AscendMLAPrefillMetadata:
     """ Prefill Specific Metadata for Ascend"""
     attn_mask: torch.Tensor
@@ -100,8 +87,7 @@ class AscendMLAPrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
-    chunked_context: Optional[ChunkedContextMetadata
-                              | CPChunkedContextMetadata] = None
+    chunked_context: Optional[ChunkedContextMetadata] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     pcp_metadata: Optional[AscendPCPMetadata] = None
@@ -969,7 +955,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        chunked_context: CPChunkedContextMetadata,
+        chunked_context: ChunkedContextMetadata,
         chunk_idx: int,
         toks: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
