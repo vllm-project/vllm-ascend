@@ -217,8 +217,10 @@ class PCPManager:
         self.pcp_unpad_mask_cpu[:pcp_padded_arange.shape[0]] = (
             pcp_padded_arange < np.repeat(num_scheduled_tokens,
                                           num_padded_scheduled_tokens))
-        unpad_mask_decode = self.pcp_unpad_mask_cpu[:num_decode_tokens * self.pcp_world_size]
-        unpad_mask_decode = unpad_mask_decode.reshape([-1, self.pcp_world_size])
+        unpad_mask_decode = self.pcp_unpad_mask_cpu[:num_decode_tokens *
+                                                    self.pcp_world_size]
+        unpad_mask_decode = unpad_mask_decode.reshape(
+            [-1, self.pcp_world_size])
         unpad_mask_decode[:, 0] = True
         unpad_mask_decode[:, 1:] = False
         pcp_tokens = num_padded_scheduled_tokens // self.pcp_world_size
@@ -681,5 +683,5 @@ class PCPManager:
                     'tail_attn_nomask_seqlens']
                 long_seq_metadata.pcp_prefill_mask = self.extra_long_seq_kwargs[
                     'pcp_prefill_mask']
-            self.long_seq_metadata = long_seq_metadata
+        self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata

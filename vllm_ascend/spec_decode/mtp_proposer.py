@@ -272,7 +272,7 @@ class MtpProposer(Proposer):
                 if self.pcp_size * self.dcp_size > 1:
                     # update long_seq related params and flatten block_table
                     common_attn_metadata.prefill_context_parallel_metadata = \
-                        self.runner.long_seq_metadata
+                        self.runner.pcp_manager.long_seq_metadata
                     common_attn_metadata.block_table_tensor = \
                         self.runner.input_batch.block_table[0].get_device_tensor()[
                             :num_reqs * self.decode_threshold]

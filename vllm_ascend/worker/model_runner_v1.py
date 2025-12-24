@@ -1016,14 +1016,14 @@ class NPUModelRunner(GPUModelRunner):
                     blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
                 assert self.long_seq_metadata is not None
                 self.long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
-                
+
                 if 'pad_size' in locals() and pad_size > 0:
                     ori_query_lens_cpu[-pad_size:] = \
                         torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
                 self.long_seq_metadata.max_query_len_pcp_full = \
                     ori_query_lens_cpu.max().item()
-                
-                
+
+
 
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
