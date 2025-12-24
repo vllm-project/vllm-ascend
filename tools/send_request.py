@@ -6,7 +6,10 @@ from modelscope import snapshot_download  # type: ignore
 
 
 def get_prompt_from_dataset(dataset_path, file_name):
-    dataset_dir = snapshot_download(dataset_path, repo_type='dataset')
+    if os.path.isabs(dataset_path):
+        dataset_dir = dataset_path
+    else:
+        dataset_dir = snapshot_download(dataset_path, repo_type='dataset')
     file_path = os.path.join(dataset_dir, file_name)
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
