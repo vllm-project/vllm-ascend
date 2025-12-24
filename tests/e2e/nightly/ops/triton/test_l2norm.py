@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm_ascend.ops.triton.fla.l2norm import l2norm_fwd
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
 @pytest.mark.parametrize(
@@ -19,6 +20,7 @@ from vllm_ascend.ops.triton.fla.l2norm import l2norm_fwd
 )
 def test_l2norm(B: int, T: int, H: int, D: int, dtype: torch.dtype):
     torch.manual_seed(42)
+    init_device_properties_triton()
     device = "npu"
     rtol, atol = (3e-4, 1e-3) if dtype == torch.float32 else (3e-3, 5e-3)
     if dtype == torch.bfloat16:
