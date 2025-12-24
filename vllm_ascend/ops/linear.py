@@ -109,7 +109,9 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        v_head_size: int | None = None,
     ):
+        self.v_head_size = v_head_size if v_head_size is not None else head_size
         self.custom_op, _, tp_size = get_parallel_op(disable_tp, prefix, self,
                                                      "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
