@@ -217,21 +217,22 @@ class TestMtpProposer:
         mock_deps.runner.spec_decode_common_attn_metadata = MagicMock()
         mock_deps.runner.pcp_size = 2
         mock_deps.runner.dcp_size = 1
-        mock_deps.runner.input_ids_pcp_full = CpuGpuBuffer(
+        mock_deps.runner.pcp_manager = MagicMock()
+        mock_deps.runner.pcp_manager.input_ids_pcp_full = CpuGpuBuffer(
             32,
             dtype=torch.int32,
             pin_memory=False,
             device='cpu',
         )
-        mock_deps.runner.input_ids_pcp_full.cpu = \
+        mock_deps.runner.pcp_manager.input_ids_pcp_full.cpu = \
             torch.arange(32, dtype=torch.int32)
-        mock_deps.runner.query_start_loc_pcp_full = CpuGpuBuffer(
+        mock_deps.runner.pcp_manager.query_start_loc_pcp_full = CpuGpuBuffer(
             5,
             dtype=torch.int32,
             pin_memory=False,
             device='cpu',
         )
-        mock_deps.runner.query_start_loc_pcp_full.cpu = \
+        mock_deps.runner.pcp_manager.query_start_loc_pcp_full.cpu = \
             torch.tensor([0, 8, 16, 24, 32])
         mock_deps.positions = torch.arange(16, dtype=torch.int32)
         mock_deps.hidden_states = torch.zeros(16, 4096, dtype=torch.float16)
