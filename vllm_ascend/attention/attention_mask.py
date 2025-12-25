@@ -77,8 +77,9 @@ class AttentionMaskBuilder:
 
     def get_swa_mask(self, dtype: torch.dtype, sliding_window):
         if self.swa_mask is None or self.swa_mask.dtype != dtype:
-            mask = torch.ones(2048, 2048, dtype=torch.bool)
-            triu_mask = torch.triu(mask, diagonal=1).to(self.device)
-            tril_mask = torch.tril(mask, -sliding_window).to(self.device)
-            self.swa_mask = triu_mask + tril_mask
+            if sliding_window is not None:
+                mask = torch.ones(2048, 2048, dtype=torch.bool)
+                triu_mask = torch.triu(mask, diagonal=1).to(self.device)
+                tril_mask = torch.tril(mask, -sliding_window).to(self.device)
+                self.swa_mask = triu_mask + tril_mask
         return self.swa_mask
