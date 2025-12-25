@@ -403,16 +403,16 @@ def test_llama_qwen_eagle_acceptance(
     compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
 
     with VllmRunner(
-        main_model_name,
-        max_model_len=2048,
-        disable_log_stats=False,
-        tensor_parallel_size=1,
-        max_num_seqs=256,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.7,
-        speculative_config=speculative_config,
-        compilation_config=compilation_config,
-        async_scheduling=async_scheduling,
+            main_model_name,
+            max_model_len=2048,
+            disable_log_stats=False,
+            tensor_parallel_size=1,
+            max_num_seqs=256,
+            distributed_executor_backend="mp",
+            gpu_memory_utilization=0.7,
+            speculative_config=speculative_config,
+            compilation_config=compilation_config,
+            async_scheduling=async_scheduling,
     ) as llm:
         _ = llm.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
