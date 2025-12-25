@@ -166,7 +166,7 @@ async def test_models(model: str, mode: str) -> None:
     assert match
 
 
-def analysis_metrics(metrics_text: str, mtp: int) -> tuple[float, list[float]]:
+def analysis_metrics(metrics_text: str, mtp: int) -> tuple[int, list[int]]:
     num_drafts = 0
     num_accepted_tokens_per_pos = [0] * mtp
     for family in text_string_to_metric_families(metrics_text):
