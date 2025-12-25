@@ -73,10 +73,9 @@ async def test_models(model: str) -> None:
     env_dict["EXPERT_MAP_RECORD"] = "true"
     env_dict["DYNAMIC_EPLB"] = "true"
     additional_config["dynamic_eplb"] = True
-    additional_config["num_iterations_eplb_update"] = 14000
-    additional_config["num_wait_worker_iterations"] = 30
-    additional_config["init_redundancy_expert"] = 0
-    additional_config["gate_eplb"] = False
+    additional_config["expert_heat_collection_interval"] = 14000
+    additional_config["algorithm_execution_interval"] = 30
+    additional_config["num_redundant_experts"] = 0
     server_args.extend(
         ["--compilation-config",
          json.dumps(compilation_config)])

@@ -81,10 +81,11 @@ def test_qwen3_moe_distributed_aiv_tp2():
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     port = get_open_port()
+    compilation_config = json.dumps({"cudagraph_capture_sizes": [8]})
     server_args = [
         "--max_model_len", "8192", "--tensor_parallel_size", "2",
         "--enable_expert_parallel", "--quantization", "ascend", "--port",
-        str(port), "--enforce_eager"
+        str(port), "--compilation-config", compilation_config
     ]
     env_dict = {"HCCL_BUFFSIZE": "1024"}
     with RemoteOpenAIServer(model,
@@ -107,8 +108,9 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     env_dict.update({"DYNAMIC_EPLB": "true"})
     additional_config = {
         "dynamic_eplb": True,
-        "num_iterations_eplb_update": 100,
-        "num_wait_worker_iterations": 20
+        "expert_heat_collection_interval": 100,
+        "algorithm_execution_interval": 20,
+        "num_redundant_experts": 2
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     with RemoteOpenAIServer(model,

@@ -41,8 +41,8 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.num_dense_layers = self.model.config.first_k_dense_replace
             self.global_expert_num = self.model.config.n_routed_experts
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        self.init_redundancy_expert = get_ascend_config(
-        ).init_redundancy_expert
+        self.num_redundant_experts = get_ascend_config(
+        ).num_redundant_experts
 
         for i in range(self.num_dense_layers,
                        self.model.config.num_hidden_layers):
@@ -302,7 +302,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                 end = self.global_expert_num
                 local_count = self.global_expert_num - r * local_num_experts
 
-            if r < self.init_redundancy_expert:
+            if r < self.num_redundant_experts:
                 local_count += 1
                 if end < self.global_expert_num:
                     end += 1
