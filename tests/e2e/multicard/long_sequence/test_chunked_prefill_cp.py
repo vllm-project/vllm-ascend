@@ -26,7 +26,7 @@ from typing import Any, Dict
 
 import pytest
 
-from tests.e2e.conftest import VllmRunner, _LONG_PROMPTS
+from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
 from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
@@ -72,7 +72,6 @@ def test_models_prefix_cache_with_cp_basic(model: str,
             model,
             max_model_len=4096,
             enforce_eager=True,
-            trust_remote_code=True,
             max_num_batched_tokens=128,
             enable_expert_parallel=True,
             enable_prefix_caching=False,
@@ -93,7 +92,6 @@ def test_models_prefix_cache_with_cp_piecewise(model: str,
             model,
             max_model_len=4096,
             enforce_eager=False,
-            trust_remote_code=True,
             max_num_batched_tokens=128,
             enable_expert_parallel=True,
             enable_prefix_caching=False,
@@ -113,7 +111,6 @@ def test_models_prefix_cache_with_cp_full_graph(model: str,
     with VllmRunner(model,
                     max_model_len=4096,
                     enforce_eager=False,
-                    trust_remote_code=True,
                     max_num_batched_tokens=128,
                     enable_expert_parallel=True,
                     enable_prefix_caching=False,
