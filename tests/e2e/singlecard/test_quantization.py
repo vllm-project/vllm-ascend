@@ -18,6 +18,7 @@
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.model_utils import check_outputs_equal
 
 
 def test_qwen3_w8a8_quant():
@@ -25,10 +26,53 @@ def test_qwen3_w8a8_quant():
     example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
     ]
+    vllm_target_outputs = [([
+        85, 4086, 44, 374, 264, 1550, 42747, 628, 323, 4938, 72816, 44378, 323,
+        13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 311, 387
+    ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be'
+                            )]
+
     with VllmRunner(
             snapshot_download("vllm-ascend/Qwen3-0.6B-W8A8"),
             max_model_len=8192,
             gpu_memory_utilization=0.7,
             quantization="ascend",
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_quant_w8a8_outputs = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_target_outputs,
+        outputs_1_lst=vllm_quant_w8a8_outputs,
+        name_0="vllm_target_outputs",
+        name_1="vllm_w8a16_outputs",
+    )
+
+
+def test_qwen3_dense_w8a16():
+    max_tokens = 5
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
+    ]
+    vllm_target_outputs = [([
+        85, 4086, 44, 374, 264, 1550, 42747, 628, 323, 4938, 72816, 44378, 323,
+        13480, 4712, 369, 444, 10994, 82, 13, 1084, 374, 6188, 311, 387
+    ], 'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be'
+                            )]
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/Qwen3-0.6B-W8A16"),
+            max_model_len=8192,
+            enforce_eager=False,
+            gpu_memory_utilization=0.7,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_quant_w8a16_outputs = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_target_outputs,
+        outputs_1_lst=vllm_quant_w8a16_outputs,
+        name_0="vllm_target_outputs",
+        name_1="vllm_w8a16_outputs",
+    )
