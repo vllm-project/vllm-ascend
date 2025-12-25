@@ -19,18 +19,20 @@
 
 import os
 
+from modelscope import snapshot_download  # type: ignore
+
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def test_minicpm_2b() -> None:
+def test_minicpm() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
 
-    with VllmRunner("openbmb/MiniCPM-2B-sft-bf16",
+    with VllmRunner(snapshot_download("OpenBMB/MiniCPM4-0.5B"),
                     max_model_len=512,
                     gpu_memory_utilization=0.7) as runner:
         runner.generate_greedy(example_prompts, max_tokens)
