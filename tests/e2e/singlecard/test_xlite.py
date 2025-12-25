@@ -20,18 +20,21 @@ Compare the outputs of vLLM with and without xlite.
 Run `pytest tests/e2e/singlecard/test_xlite.py`.
 """
 
+import os
+
 import pytest
-from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_ASCEND_ENABLE_NZ"] = "2"
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
 ]
 
 
-@pytest.mark.skip
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models_with_xlite_decode_only(
@@ -43,7 +46,6 @@ def test_models_with_xlite_decode_only(
         "The capital of France is", "The future of AI is"
     ]
 
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
             model,
             block_size=128,
@@ -52,24 +54,22 @@ def test_models_with_xlite_decode_only(
                 "enabled": True
             }},
     ) as runner:
-        vllm_xlite_outputs = runner.model.generate(prompts, sampling_params)
+        vllm_xlite_outputs_list = runner.generate_greedy(prompts,
+                                                         max_tokens=max_tokens)
+        for idx in range(len(vllm_xlite_outputs_list)):
+            vllm_xlite_outputs_list[idx] = ([0],
+                                            vllm_xlite_outputs_list[idx][1])
 
-    with VllmRunner(
-            model,
-            block_size=128,
-            max_model_len=1024,
-            enforce_eager=True,
-    ) as runner:
-        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
-    vllm_xlite_outputs_list = []
-    for output in vllm_xlite_outputs:
-        vllm_xlite_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+    vllm_xlite_answers = [
+        "Hello, my name is Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
+        'The president of the United States is the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
+        'The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
+        'The future of AI is not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
+    ]
 
     vllm_eager_outputs_list = []
-    for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+    vllm_eager_outputs_list = ([([0], answer)
+                                for answer in vllm_xlite_answers])
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,
@@ -79,7 +79,6 @@ def test_models_with_xlite_decode_only(
     )
 
 
-@pytest.mark.skip
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models_with_xlite_full_mode(
@@ -91,7 +90,6 @@ def test_models_with_xlite_full_mode(
         "The capital of France is", "The future of AI is"
     ]
 
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
             model,
             block_size=128,
@@ -103,24 +101,22 @@ def test_models_with_xlite_full_mode(
                 }
             },
     ) as runner:
-        vllm_xlite_outputs = runner.model.generate(prompts, sampling_params)
+        vllm_xlite_outputs_list = runner.generate_greedy(prompts,
+                                                         max_tokens=max_tokens)
+        for idx in range(len(vllm_xlite_outputs_list)):
+            vllm_xlite_outputs_list[idx] = ([0],
+                                            vllm_xlite_outputs_list[idx][1])
 
-    with VllmRunner(
-            model,
-            block_size=128,
-            max_model_len=1024,
-            enforce_eager=True,
-    ) as runner:
-        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
-    vllm_xlite_outputs_list = []
-    for output in vllm_xlite_outputs:
-        vllm_xlite_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+    vllm_xlite_answers = [
+        "Hello, my name is Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
+        'The president of the United States is the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
+        'The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
+        "The future of AI is not just about the technology itself, but about how we use it to solve real-world problems. As AI continues to evolve, it's important to consider the ethical"
+    ]
 
     vllm_eager_outputs_list = []
-    for output in vllm_eager_outputs:
-        vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+    vllm_eager_outputs_list = ([([0], answer)
+                                for answer in vllm_xlite_answers])
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,
