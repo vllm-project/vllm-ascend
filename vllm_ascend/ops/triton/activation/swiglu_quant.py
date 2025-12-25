@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from vllm.triton_utils import tl, triton
 
@@ -80,7 +82,10 @@ def _swiglu_quant_kernel(
             tl.store(out_ptr + o_offsets, out.to(out_ptr.dtype.element_ty))
 
 
-def swiglu_quant(x, group_list, group_list_type, need_quant=True):
+def swiglu_quant(x: torch.Tensor,
+                 group_list: Optional[torch.Tensor],
+                 group_list_type: int,
+                 need_quant: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
     # group_list_type must be 0 cusum, 1 count or 2 none.
     if group_list_type not in [0, 1, 2]:
         raise ValueError(
