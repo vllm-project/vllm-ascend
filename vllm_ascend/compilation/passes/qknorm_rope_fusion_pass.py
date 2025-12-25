@@ -275,8 +275,8 @@ class QKNormRopeFusionPatternWithGate:
                     k_weight: torch.Tensor, cos: torch.Tensor,
                     sin: torch.Tensor):
             # split q gate k v
-            q_gate, k, v = qkv.split([2 * self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
+            q_gate, k, v = qkv.split(
+                [2 * self.q_size, self.kv_size, self.kv_size], dim=-1)
             orig_shape = q_gate.shape[:-1]
             q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
             q, gate = torch.chunk(q_gate, 2, dim=-1)
@@ -284,17 +284,25 @@ class QKNormRopeFusionPatternWithGate:
             gate = gate.contiguous().reshape(*orig_shape, -1)
 
             # q norm & k norm
-            q_norm, _ = torch.ops.npu.npu_rms_norm(q.view(-1, self.num_heads, self.head_dim), 1.0 + q_weight, self.eps)
+            q_norm, _ = torch.ops.npu.npu_rms_norm(
+                q.view(-1, self.num_heads, self.head_dim), 1.0 + q_weight,
+                self.eps)
             q_norm = q_norm.view(-1, self.num_heads * self.head_dim)
-            k_norm, _ = torch.ops.npu.npu_rms_norm(k.view(-1, self.num_kv_heads, self.head_dim), 1.0 + k_weight, self.eps)
+            k_norm, _ = torch.ops.npu.npu_rms_norm(
+                k.view(-1, self.num_kv_heads, self.head_dim), 1.0 + k_weight,
+                self.eps)
             k_norm = k_norm.view(-1, self.num_kv_heads * self.head_dim)
 
             # q rope & k rope
             q_shape, k_shape = q_norm.shape, k_norm.shape
             q_norm = q_norm.view(q_norm.shape[0], -1, self.head_dim)
             k_norm = k_norm.view(k_norm.shape[0], -1, self.head_dim)
-            q_rope, k_rope = torch.ops.vllm.rope_forward(
-                q_norm, k_norm, cos, sin, self.rope_dim, is_neox_style=True)
+            q_rope, k_rope = torch.ops.vllm.rope_forward(q_norm,
+                                                         k_norm,
+                                                         cos,
+                                                         sin,
+                                                         self.rope_dim,
+                                                         is_neox_style=True)
 
             return q_rope.view(q_shape), gate, k_rope.view(k_shape), v
 
@@ -307,8 +315,10 @@ class QKNormRopeFusionPatternWithGate:
                 cos=cos,
                 q_weight=q_weight,
                 k_weight=k_weight,
-                q_hidden_size=self.q_size,
+                q_gate_hidden_size=self.q_size,
                 kv_hidden_size=self.kv_size,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
                 rope_dim=self.rope_dim,
                 eps=self.eps)
@@ -345,7 +355,9 @@ class QKNormRopeFusionPass(VllmInductorPass):
             )
             return
         layer = next(iter(attn_layers.values()))
-        rope_dim = int(layer.head_size * getattr(vllm_config.model_config.hf_text_config, "partial_rotary_factor", 1.0))
+        rope_dim = int(layer.head_size *
+                       getattr(vllm_config.model_config.hf_text_config,
+                               "partial_rotary_factor", 1.0))
         for epsilon in [1e-6, 1e-5]:
             # if layer.head_size != 128:
             #     logger.debug(
@@ -360,20 +372,20 @@ class QKNormRopeFusionPass(VllmInductorPass):
                                         eps=epsilon).register(
                                             self.pattern_match_passes)
 
-                QKNormRopeFusionPatternWithBias(vllm_config=vllm_config,
-                                                head_dim=layer.head_size,
-                                                num_heads=layer.num_heads,
-                                                num_kv_heads=layer.num_kv_heads,
-                                                eps=epsilon).register(
-                                                    self.pattern_match_passes)
+                QKNormRopeFusionPatternWithBias(
+                    vllm_config=vllm_config,
+                    head_dim=layer.head_size,
+                    num_heads=layer.num_heads,
+                    num_kv_heads=layer.num_kv_heads,
+                    eps=epsilon).register(self.pattern_match_passes)
             elif layer.head_size == 256:
-                QKNormRopeFusionPatternWithGate(vllm_config=vllm_config,
-                                                head_dim=layer.head_size,
-                                                rope_dim=rope_dim,
-                                                num_heads=layer.num_heads,
-                                                num_kv_heads=layer.num_kv_heads,
-                                                eps=epsilon).register(
-                                                    self.pattern_match_passes)
+                QKNormRopeFusionPatternWithGate(
+                    vllm_config=vllm_config,
+                    head_dim=layer.head_size,
+                    rope_dim=rope_dim,
+                    num_heads=layer.num_heads,
+                    num_kv_heads=layer.num_kv_heads,
+                    eps=epsilon).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

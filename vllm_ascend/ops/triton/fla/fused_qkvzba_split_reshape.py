@@ -12,9 +12,6 @@
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
-if HAS_TRITON:
-    import torch_npu._inductor  # noqa: F401
-
 
 @triton.jit
 def fused_qkvzba_split_reshape_cat_kernel(
