@@ -513,6 +513,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     num_comm_groups = sum(size > 1 for size in [
         parallel_config.data_parallel_size,
         parallel_config.tensor_parallel_size,
+        parallel_config.prefill_context_parallel_size,
     ])
 
     if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
