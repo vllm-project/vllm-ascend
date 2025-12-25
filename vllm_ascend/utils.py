@@ -772,10 +772,6 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-def dense_optim_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
-
-
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:

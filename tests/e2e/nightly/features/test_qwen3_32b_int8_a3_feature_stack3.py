@@ -72,7 +72,6 @@ async def test_models(model: str, tp_size: int) -> None:
         "OMP_PROC_BIND": "false",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1",
         "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
     }
     server_args = [
