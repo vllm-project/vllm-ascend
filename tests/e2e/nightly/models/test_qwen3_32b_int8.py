@@ -81,7 +81,6 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
-        "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
         "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
