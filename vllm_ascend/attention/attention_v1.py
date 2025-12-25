@@ -43,9 +43,9 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
 
-
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
