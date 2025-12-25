@@ -22,17 +22,19 @@ def _swiglu_quant_kernel(
     NUM_CORES: tl.constexpr,
     DTYPE_MAX: tl.constexpr,
     SCALE: tl.constexpr,
+    GROUPED: tl.constexpr,
 ):
     # calc real total_rows
-    if GROUP_LIST_TYPE == 0:  # cusum
-        total_rows = tl.load(group_list_ptr + NUM_EXPERTS).to(tl.int32)
-    elif GROUP_LIST_TYPE == 1:  # count
-        gl_offsets = tl.arange(0, NUM_EXPERTS_ALGIN)
-        gl_mask = gl_offsets < NUM_EXPERTS
-        group_list = tl.load(group_list_ptr + gl_offsets, gl_mask,
-                             other=0).to(tl.int32)
-        total_rows = tl.sum(group_list)
-    else:  # none
+    if GROUPED:
+        if GROUP_LIST_TYPE == 0:  # cusum
+            total_rows = tl.load(group_list_ptr + NUM_EXPERTS).to(tl.int32)
+        else:  # count
+            gl_offsets = tl.arange(0, NUM_EXPERTS_ALGIN)
+            gl_mask = gl_offsets < NUM_EXPERTS
+            group_list = tl.load(group_list_ptr + gl_offsets, gl_mask,
+                                 other=0).to(tl.int32)
+            total_rows = tl.sum(group_list)
+    else:  # dense model
         total_rows = n_rows
 
     block_size = (total_rows - 1) // NUM_CORES + 1
@@ -83,18 +85,24 @@ def _swiglu_quant_kernel(
 
 
 def swiglu_quant(x: torch.Tensor,
-                 group_list: Optional[torch.Tensor],
-                 group_list_type: int,
+                 group_list: Optional[torch.Tensor] = None,
+                 group_list_type: int = 1,
                  need_quant: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
-    # group_list_type must be 0 cusum, 1 count or 2 none.
-    if group_list_type not in [0, 1, 2]:
-        raise ValueError(
-            f"group_list_type must be 0, 1 or 2, but got {group_list_type}")
     s, h = x.shape
     out_dtype = torch.int8 if need_quant else x.dtype
     out = torch.empty((s, h // 2), dtype=out_dtype, device=x.device)
     scale = torch.empty((s, ), dtype=torch.float32, device=x.device)
     if group_list is not None:
+        # For MoE models we use group list to control which tokens need to be calculated.
+        # The group_list_type controls how to interpret the group_list.
+        # The definition of group_list_type follows torch_npu.npu_grouped_matmul:
+        # 0: cumsum style
+        # 1: count style
+        # 2: shape of group_list is (group_num, 2), each row is (group_idx, group_size)
+        # Currently only type 0 and 1 are supported. 2 is not supported yet.
+        if group_list_type not in [0, 1]:
+            raise ValueError(
+                f"group_list_type must be 0 or 1, but got {group_list_type}")
         num_experts = group_list.shape[0]
         # ub must be 32-byte aligned on npu
         if group_list.dtype == torch.int64:
@@ -125,6 +133,7 @@ def swiglu_quant(x: torch.Tensor,
         NUM_CORES=num_vectorcore,
         DTYPE_MAX=127,
         SCALE=need_quant,
+        GROUPED=group_list is not None,
         multibuffer=True,
     )
     return out, scale
