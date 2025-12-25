@@ -919,7 +919,7 @@ class NPUModelRunner(GPUModelRunner):
                 if self.pcp_size == 1:
                     slot_mapping[
                         total_num_scheduled_tokens:num_input_tokens].fill_(-1)
-            slot_mapping = blk_table.slot_mapping.gpu
+                slot_mapping = blk_table.slot_mapping.gpu
             if self.pcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
