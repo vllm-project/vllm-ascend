@@ -329,17 +329,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output = attn_out_mask
         attn_lse = attn_lse_mask
         if k_nomask is not None:
-            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:
-                output = self._npu_attn_out_lse_update(attn_lse_mask,
-                                                       attn_lse_nomask,
-                                                       attn_out_mask,
-                                                       attn_out_nomask)
+            output, attn_lse = self._npu_attn_out_lse_update(
+                attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask)
+            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:               
                 attn_lse = None
-            else:
-                output, attn_lse = self._update_out_and_lse(
-                    torch.stack([attn_out_nomask, attn_out_mask], dim=0),
-                    torch.stack([attn_lse_nomask, attn_lse_mask], dim=0))
-
         return output, attn_lse
 
     def _npu_attn_out_lse_update(self, attn_lse_mask, attn_lse_nomask,
@@ -358,10 +351,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_output = [attn_out_nomask, attn_out_mask]
         attn_lse = [attn_lse_nomask, attn_lse_mask]
         update_type = 0
-        output, _ = torch_npu.npu_attention_update(attn_lse, attn_output,
-                                                   update_type)
+        output, attn_lse_updated = torch_npu.npu_attention_update(
+            attn_lse, attn_output, update_type)
         output = output.view(T, N, D)
-        return output
+        return output, attn_lse_updated
 
     def _forward_prefill_cp(self, query: torch.Tensor, key: torch.Tensor,
                             value: torch.Tensor,
@@ -749,8 +742,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         # [N, S, H, D], [N, S, H, 1]
         attn_out_allgather, attn_lse_allgather = torch.split(x, [D, 1], dim=-1)
 
-        prefix_output, prefix_lse = self._update_out_and_lse(
-            attn_out_allgather, attn_lse_allgather)
+        prefix_output, prefix_lse = self._npu_attn_out_lse_update(
+            attn_lse_allgather[1], attn_lse_allgather[0],
+            attn_out_allgather[1], attn_out_allgather[0])
 
         return prefix_output, prefix_lse
 
