@@ -217,6 +217,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 num_expert_group=num_expert_group,
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias,
                 global_num_experts=global_num_experts)
         assert topk_ids is not None
