@@ -575,10 +575,10 @@ class NPUModelRunner(GPUModelRunner):
                 tokens)
             num_scheduled_tokens = np.array(tokens, dtype=np.int32)
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-            total_num_pcp_pads = torch.sum(self.num_pcp_pads).item()
+            total_num_pcp_pads = torch.sum(self.num_pcp_pads[:num_reqs]).item()
         else:
             position_pcp, pcp_unpad_mask = None, None
-            self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
+            self.num_pcp_pads[:num_reqs] = 0
 
         max_num_scheduled_tokens = max(tokens)
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -3050,7 +3050,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
-        self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
         tokens = np.array(tokens, dtype=np.int32)
         num_decode_reqs = (np.array(tokens) <= self.decode_threshold).sum()
         num_decode_tokens = sum(tokens[:num_decode_reqs])
@@ -3059,7 +3058,8 @@ class NPUModelRunner(GPUModelRunner):
             (2 * self.pcp_size)).astype(np.int32) * (2 * self.pcp_size)
         num_padded_scheduled_tokens[:num_decode_reqs] = (
             tokens[:num_decode_reqs] * self.pcp_size)
-        self.num_pcp_pads = torch.tensor(num_padded_scheduled_tokens - tokens)
+        self.num_pcp_pads[:num_reqs] = torch.tensor(
+            num_padded_scheduled_tokens - tokens)
         cu_padded_tokens, pcp_padded_arange = \
             self._get_cumsum_and_arange(num_padded_scheduled_tokens)
         unpad_mask = torch.from_numpy(
