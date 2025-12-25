@@ -245,23 +245,8 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     epRankId_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankId;
     auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
     epWinContext_ = (__gm__ HcclOpResParam *)contextGM0;
-    GlobalTensor<int32_t> selfDataStatusTensor;
     GM_ADDR statusDataSpaceGm = (GM_ADDR)epWinContext_->localWindowsExp;
-    selfDataStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + STATE_WIN_OFFSET));
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfDataStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
-    dataState_ = selfDataStatusTensor(coreIdx_ * UB_ALIGN);
-    if (dataState_ == 0) {
-        selfDataStatusTensor(coreIdx_ * UB_ALIGN) = 1;
-    } else {
-        selfDataStatusTensor(coreIdx_ * UB_ALIGN) = 0;
-    }
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfDataStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
+    dataState_ = 1;
     pipe_barrier(PIPE_ALL);
 
     workspaceGM_ = workspaceGM;
@@ -340,26 +325,8 @@ template <TemplateMC2TypeClass>
 __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::InitStatusTargetSum()
 {
     // ep state
-    GlobalTensor<int32_t> selfStatusTensor;
-    selfStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(epStatusSpaceGm_ + SELF_STATE_OFFSET));
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
-    int32_t state = selfStatusTensor(coreIdx_ * UB_ALIGN);
-    if (state == 0) {
-        sumTarget_ = static_cast<float>(1.0);
-        selfStatusTensor(coreIdx_ * UB_ALIGN) = 0x3F800000;  // 1.0f
-        epStateValue_ = 0x3F800000;                          // 1.0f
-    } else {
-        sumTarget_ = static_cast<float>(0.0);
-        selfStatusTensor(coreIdx_ * UB_ALIGN) = 0;
-        epStateValue_ = 0;
-    }
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
+    sumTarget_ = static_cast<float>(1.0);
+    epStateValue_ = 0x3F800000;      
 }
 
 template <TemplateMC2TypeClass>
@@ -661,6 +628,13 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
             SyncFunc<AscendC::HardEvent::V_S>();
             sumOfFlag = statusSumOutTensor.GetValue(0);
         }
+        TBuf<> zerosBuf;
+        tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendRankNum_);
+        LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
+        DataCopyParams zerosParams{static_cast<uint16_t>(sendRankNum_), 1,
+                                0, static_cast<uint16_t>((moeSendNum_ > 512) ? 7 : 15)};
+        Duplicate(zerosTensor, (int32_t)0, sendRankNum_ * UB_ALIGN / sizeof(int32_t));
+        DataCopy(windowInstatusTensor_[startRankId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
     }
 
     if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {

@@ -228,30 +228,14 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     tpipe_ = pipe;
     aivId_ = GetBlockIdx();
     epRankId_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankId;
-    GlobalTensor<int32_t> selfDataStatusTensor;
     GM_ADDR statusDataSpaceGm;
 
     winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
     winContext_[COMM_TP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<1>();
 
     statusDataSpaceGm = (GM_ADDR)(winContext_[COMM_EP_IDX]->localWindowsExp);
-    selfDataStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + STATE_WIN_OFFSET));
-
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfDataStatusTensor[aivId_ * UB_ALIGN]);
-    __asm__ __volatile__("");
-    dataState_ = selfDataStatusTensor(aivId_ * UB_ALIGN);
-    if (dataState_ == 0) {
-        selfDataStatusTensor(aivId_ * UB_ALIGN) = 1;
-    } else {
-        selfDataStatusTensor(aivId_ * UB_ALIGN) = 0;
-    }
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfDataStatusTensor[aivId_ * UB_ALIGN]);
-    __asm__ __volatile__("");
     pipe_barrier(PIPE_ALL);
+    dataState_ = 0;
     axisBS_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.bs;
     axisH_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
     epWorldSize_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankSize;
@@ -315,20 +299,15 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     selfStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusSpaceGm_ + SELF_STATE_OFFSET));
     DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
         selfStatusTensor[aivId_ * UB_ALIGN]);
-    int32_t state = selfStatusTensor(aivId_ * UB_ALIGN);
+    int32_t state = 0;
     stateOffset_ = (recvWinBlockNum_ > 512) ? (STATE_OFFSET / 2) : STATE_OFFSET;
     tpipe_->InitBuffer(statusBuf_, recvWinBlockNum_ * UB_ALIGN);  // expertNum * 32B
     statusTensor_ = statusBuf_.Get<int32_t>();  // Record token count and flag
     Duplicate<int32_t>(statusTensor_, 0, recvWinBlockNum_ * 8);  // 8 = UB_ALIGN / sizeof(int32_t)
-    if (state == 0) {
-        sumTarget_ = (float)1.0;
-        selfStatusTensor(aivId_ * UB_ALIGN) = 0x3F800000;
-        uint64_t mask[2] = {0x101010101010101, 0};  // set the first number of every 8 numbers as 0x3F800000(float 1.0)
-        Duplicate<int32_t>(statusTensor_, 0x3F800000, mask, recvWinBlockNum_ / 8, 1, 8);
-    } else {
-        sumTarget_ = 0.0;
-        selfStatusTensor(aivId_ * UB_ALIGN) = 0;
-    }
+    sumTarget_ = (float)1.0;
+    uint64_t mask[2] = {0x101010101010101, 0};  // set the first number of every 8 numbers as 0x3F800000(float 1.0)
+    PipeBarrier<PIPE_V>();
+    Duplicate<int32_t>(statusTensor_, 0x3F800000, mask, recvWinBlockNum_ / 8, 1, 8);
     DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
         selfStatusTensor[aivId_ * UB_ALIGN]);
     tpipe_->InitBuffer(xQueue_, BUFFER_NUM, hCommuSize_);
@@ -956,6 +935,13 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
     sendCountsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(sendCountsOutGM_));
     DataCopyPad(sendCountsGlobal[startExpertId_], outCountLocal, dataCopyOutParams);
     PipeBarrier<PIPE_MTE3>();
+    TBuf<> zerosBuf;
+    tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendExpertNum_);
+    LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
+    DataCopyParams zerosParams{static_cast<uint16_t>(sendExpertNum_), 1,
+                               0, static_cast<uint16_t>((recvWinBlockNum_ > 512) ? 7 : 15)};
+    Duplicate(zerosTensor, (int32_t)0, sendExpertNum_ * INT32_NUM_PER_BLOCK);
+    DataCopy(windowInstatusTensor_[startExpertId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
 }
 
 template <TemplateDispatchTypeClass>
