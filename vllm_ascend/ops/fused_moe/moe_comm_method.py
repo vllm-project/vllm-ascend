@@ -105,7 +105,6 @@ class MoECommMethod(ABC):
             dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
             log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
@@ -124,7 +123,8 @@ class MoECommMethod(ABC):
             topk_ids=topk_ids,
             expert_map=expert_map,
             log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
+            global_redundant_expert_num=self.moe_config.
+            global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
@@ -283,7 +283,6 @@ class FusedMC2CommImpl(MoECommMethod):
             dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
             log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
