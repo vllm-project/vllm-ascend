@@ -339,7 +339,7 @@ class TestAscendMLAImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('vllm_ascend.attention.mla_cp.get_pcp_group')
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    @patch("vllm_ascend.attention.mla_cp.maybe_npu_prefetch")
+    @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
     def test_mla_preprocess_pcp(self, magic_npu_fetch,
                                 mock_maybe_all_gather_and_maybe_unpad,
                                 mock_get_pcp_group,
@@ -578,14 +578,14 @@ class TestAscendMLAImpl(TestBase):
 
         def mock_reorg_kvcache(allgatered_kv_c_normed: torch.Tensor,
                                allgatered_k_pe: torch.Tensor,
-                               padded_local_chunk_seq_lens_lst: list[int],
-                               local_context_lens_allranks: list[list[int]],
-                               sum_seq_len: int, max_seq_len: int,
-                               chunk_size: int, chunk_idx: int, toks: int):
-            return torch.randn(sum_seq_len, allgatered_kv_c_normed.shape[1],
-                               allgatered_kv_c_normed.shape[2]), torch.randn(
-                                   sum_seq_len, allgatered_k_pe.shape[1],
-                                   allgatered_k_pe.shape[2])
+                               chunked_context: CPChunkedContextMetadata,
+                               chunk_idx: int, toks: int):
+            return torch.randn(
+                chunked_context.cu_seq_lens_lst[chunk_idx][-1],
+                allgatered_kv_c_normed.shape[1],
+                allgatered_kv_c_normed.shape[2]), torch.randn(
+                    chunked_context.cu_seq_lens_lst[chunk_idx][-1],
+                    allgatered_k_pe.shape[1], allgatered_k_pe.shape[2])
 
         # mock proj
         self.impl.kv_b_proj.side_effect = mock_kv_b_proj
