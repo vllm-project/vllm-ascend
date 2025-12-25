@@ -13,6 +13,7 @@ LOG_DIR="/root/.cache/tests/logs"
 OVERWRITE_LOGS=true
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+export VLLM_LOGGING_LEVEL="DEBUG"
 
 # Function to print section headers
 print_section() {
