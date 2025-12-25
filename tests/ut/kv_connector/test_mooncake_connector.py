@@ -370,7 +370,9 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_transfer_port": 7777,
             "offset": 0,
             "tp_num_need_pulls": 2,
-            "remote_port_send_num": {6666: 1},
+            "remote_port_send_num": {
+                6666: 1
+            },
             "all_task_done": False
         }
         self.thread.task_tracker = MagicMock()
@@ -1295,7 +1297,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_port = remote_port
             meta.remote_block_ids = remote_block_ids
             meta.local_block_ids = local_block_ids
-            meta.num_external_tokens = pcp_size * dcp_size * len(local_block_ids) * worker.block_size
+            meta.num_external_tokens = pcp_size * dcp_size * len(
+                local_block_ids) * worker.block_size
             meta.num_prompt_blocks = pcp_size * dcp_size * len(local_block_ids)
 
             remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
