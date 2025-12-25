@@ -1354,6 +1354,15 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states, aux_hidden_states)
         return draft_token_ids
 
+    @staticmethod
+    def get_finished_kv_transfer(
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
+        return None, None
+
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -2366,7 +2375,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.mtp_instance = mtp_instance
                     model_register(mtp_instance.model, self.vllm_config)
 
-                if self.drafter.name == SpecDcodeType.EAGLE3:
+                if self.use_aux_hidden_state_outputs:
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
 

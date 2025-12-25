@@ -145,7 +145,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.physics_num_experts,
-            "global_bs": 0,
+            "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
 
@@ -264,7 +264,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.physics_num_experts,
-            "global_bs": 0,
+            "global_bs": self.global_bs,
         }
 
         if self.with_quant:
