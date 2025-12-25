@@ -149,7 +149,8 @@ async def test_models(model: str, mode: str) -> None:
             metrics_text = (await client.get(server.url_for("metrics"))).text
 
     num_drafts, num_accepted_tokens_per_pos = analysis_metrics(
-        metrics_text, speculative_config["num_speculative_tokens"],
+        metrics_text,
+        2 if mode == "mtp2" else 3,
     )
 
     acceptance_per_pos = [
