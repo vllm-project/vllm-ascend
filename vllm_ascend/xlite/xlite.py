@@ -143,7 +143,7 @@ class LlamaXliteModel(XliteModel):
         config.moe_tp_size = 1
 
         config.attn_type = AttnMHA
-        config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ
+        config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len
@@ -257,8 +257,12 @@ class XliteWrapper:
         if not with_prefill or self.full_mode:
             batch = attn_metadata.num_prefills + attn_metadata.num_decodes
             seq_lens = attn_metadata.seq_lens[:batch]
-            query_lens = attn_metadata.query_start_loc_cpu[
-                1:] - attn_metadata.query_start_loc_cpu[:-1]
+            seq_tensor = torch.cat([
+                torch.tensor([0]),
+                torch.tensor(attn_metadata.actual_seq_lengths_q)
+            ],
+                                   dim=0)
+            query_lens = seq_tensor[1:] - seq_tensor[:-1]
             query_lens = query_lens[:batch]
             cached_lens = seq_lens - query_lens
 
