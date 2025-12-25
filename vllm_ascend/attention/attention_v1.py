@@ -44,6 +44,9 @@ from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
 
 
+# default max value of sliding window size
+SWA_INT_MAX = 2147483647
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -522,8 +525,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       key: torch.Tensor, value: torch.Tensor,
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
-        # default max value of sliding window size
-        SWA_INT_MAX = 2147483647
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             attn_output, num_tokens = self.full_graph_fia(
