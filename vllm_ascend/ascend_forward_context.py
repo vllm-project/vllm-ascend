@@ -102,8 +102,7 @@ def set_ascend_forward_context(
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
-        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
             forward_context.layer_idx is not None and \
             num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
