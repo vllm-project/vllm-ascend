@@ -295,7 +295,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         num_actual_tokens = (attn_metadata.num_actual_tokens_pcp_padded -
                              self.pcp_size * num_decode_tokens
                              ) // self.pcp_size + num_decode_tokens
-        prefill_kv_no_split = kv_no_split[num_decode_tokens:num_actual_tokens]
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
         prefill_q = self.q_proj(prefill_q_c)[0] \
             .view(-1, self.num_heads, self.qk_head_dim)
@@ -303,8 +302,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
         cos = attn_metadata.prefill.cos[:num_actual_tokens - num_decode_tokens]
         sin = attn_metadata.prefill.sin[:num_actual_tokens - num_decode_tokens]
-        prefill_slots = attn_metadata.slot_mapping[
-            num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
         kv_c, k_pe = prefill_kv_no_split.split(
