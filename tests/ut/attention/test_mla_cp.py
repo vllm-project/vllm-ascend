@@ -254,7 +254,7 @@ class TestAscendMLAImpl(TestBase):
 
     @patch('vllm_ascend.attention.mla_cp.get_dcp_group')
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    @patch("vllm_ascend.attention.mla_cp.maybe_npu_prefetch")
+    @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
     def test_mla_preprocess_dcp(self, magic_npu_fetch,
                                 mock_maybe_all_gather_and_maybe_unpad,
                                 mock_get_dcp_group):
@@ -543,7 +543,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl._v_up_proj.return_value = torch.randn(
             B, self.impl.v_head_dim)
 
-        result = self.impl._forward_decode_pcp_dcp(q_nope, q_pe, k_nope, k_pe,
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe,
                                                    BS, attn_metadata)
 
         self.assertEqual(result.shape[0], B)
@@ -731,13 +731,7 @@ class TestAscendMLAImpl(TestBase):
                 result_kv, result_k_pe = self.impl._reorg_kvcache(
                     allgatered_kv_c_normed,
                     allgatered_k_pe,
-                    padded_local_chunk_seq_lens_lst=chunked_context.
-                    padded_local_chunk_seq_lens[i],
-                    local_context_lens_allranks=chunked_context.
-                    local_context_lens_allranks,
-                    sum_seq_len=chunked_context.cu_seq_lens_lst[i][-1],
-                    max_seq_len=chunked_context.max_seq_lens[i],
-                    chunk_size=chunked_context.chunk_size,
+                    chunked_context,
                     chunk_idx=i,
                     toks=chunked_context.seq_tot[i],
                 )
@@ -1052,7 +1046,7 @@ class TestAscendMLAImpl(TestBase):
                 attn_metadata.prefill.pcp_metadata.pcp_prefill_mask = torch.triu(
                     torch.ones(10, 10, dtype=torch.float16), 1)
 
-                output = self.impl._forward_prefill_cp(q_nope, q_pe, k_nope,
+                output = self.impl._forward_prefill(q_nope, q_pe, k_nope,
                                                        k_pe, value,
                                                        kv_c_and_k_pe_cache,
                                                        attn_metadata)
