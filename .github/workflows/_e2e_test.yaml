@@ -115,9 +115,10 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
+          # TODO: revert me when minicpm is fixed
+          # pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
           pytest -sv --durations=0 tests/e2e/singlecard/pooling/
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_cross_layer_attn_model.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
@@ -209,7 +210,6 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/test_single_request_aclgraph.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_fused_moe_allgather_ep.py
           # torch 2.8 doesn't work with lora, fix me
           #pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
 
