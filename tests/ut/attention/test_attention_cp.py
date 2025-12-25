@@ -217,7 +217,9 @@ class TestAscendAttentionCPImpl(TestBase):
 
     @patch('vllm_ascend.attention.attention_cp.get_pcp_group')
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
-    def test_compute_prefill_context(self, mock_npu_attention, mock_pcp_group):
+    @patch('torch_npu.npu_attention_update')
+    def test_compute_prefill_context(self, mock_npu_attention_update,
+                                     mock_npu_attention, mock_pcp_group):
 
         block_num = 100
         block_size = 128
@@ -263,6 +265,10 @@ class TestAscendAttentionCPImpl(TestBase):
                                                       head_size), torch.randn(
                                                           batch_size,
                                                           num_heads, 1)
+
+        mock_npu_attention_update.return_value = torch.randn(
+            batch_size, self.impl.num_heads,
+            head_size), torch.randn(batch_size, self.impl.num_heads, 1)
 
         result_output, result_lse = self.impl._compute_prefill_context(
             query, kv_cache, attn_metadata)
@@ -509,11 +515,9 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertEqual(attn_lse.shape, (96, 8, 1))
 
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
-    @patch(
-        'vllm_ascend.attention.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
-    )
+    @patch('torch_npu.npu_attention_update')
     def test_attention_with_nomask_and_mask_chunk(
-            self, mock_update_out_and_lse,
+            self, mock_npu_attention_update,
             mock_npu_fused_infer_attention_score):
         # Mock input data
         q = torch.randn(self.q_total_tokens, self.impl.num_heads,
@@ -535,7 +539,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
             self.q_total_tokens, self.impl.num_heads,
             self.impl.head_size), torch.randn(self.q_total_tokens,
                                               self.impl.num_heads, 1)
-        mock_update_out_and_lse.return_value = torch.randn(
+        mock_npu_attention_update.return_value = torch.randn(
             self.q_total_tokens, self.impl.num_heads,
             self.impl.head_size), torch.randn(self.q_total_tokens,
                                               self.impl.num_heads, 1)
@@ -584,8 +588,12 @@ class TestUpdateNpuAttnOutLse(TestBase):
             self.q_total_tokens, self.impl.num_heads,
             self.impl.head_size), torch.randn(self.q_total_tokens,
                                               self.impl.num_heads, 1)
-        mock_npu_attn_out_lse_update.return_value = torch.randn(
-            self.q_total_tokens, self.impl.num_heads, self.impl.head_size)
+        mock_npu_attn_out_lse_update.return_value = (torch.randn(
+            self.q_total_tokens, self.impl.num_heads, self.impl.head_size),
+                                                     torch.randn(
+                                                         self.q_total_tokens,
+                                                         self.impl.num_heads,
+                                                         1))
 
         # Call the method under test
         output, attn_lse = self.impl._attention_with_nomask_and_mask(
@@ -657,11 +665,10 @@ class TestUpdateNpuAttnOutLse(TestBase):
                                                               128), None)
 
         # Call the method under test
-        output = self.impl._npu_attn_out_lse_update(attn_lse_mask,
-                                                    attn_lse_nomask,
-                                                    attn_out_mask,
-                                                    attn_out_nomask)
-
+        output, _ = self.impl._npu_attn_out_lse_update(attn_lse_mask,
+                                                       attn_lse_nomask,
+                                                       attn_out_mask,
+                                                       attn_out_nomask)
         # Assert the method call
         self.assertIsInstance(output, torch.Tensor)
         self.assertEqual(output.shape, (8, 128, 128))
@@ -695,9 +702,11 @@ class TestUpdateNpuAttnOutLse(TestBase):
     @patch('torch.distributed.all_gather')
     @patch('torch.stack')
     @patch('torch.split')
+    @patch('torch_npu.npu_attention_update')
     def test_update_chunk_attn_out_lse_dcp_pcp_both_greater_than_1(
-            self, mock_split, mock_stack, mock_all_gather,
-            mock_all_to_all_single, mock_cat, mock_pcp, mock_get_pcp_group):
+            self, mock_npu_attention_update, mock_split, mock_stack,
+            mock_all_gather, mock_all_to_all_single, mock_cat, mock_pcp,
+            mock_get_pcp_group):
         # Mock input data
         prefix_chunk_output = torch.randn(2, 4, 8)
         prefix_chunk_lse = torch.randn(2, 4, 1)
@@ -711,6 +720,10 @@ class TestUpdateNpuAttnOutLse(TestBase):
         mock_stack.return_value = torch.randn(6, 2, 2, 9)
         mock_split.return_value = (torch.randn(6, 2, 2,
                                                8), torch.randn(6, 2, 2, 1))
+
+        mock_npu_attention_update.return_value = (torch.randn(2, 2, 8),
+                                                  torch.randn(2, 2, 1))
+
         mock_pcp_group = MagicMock()
         mock_pcp_group.all_gather.return_value = torch.randn(6, 4, 9)
         mock_get_pcp_group.return_value = mock_pcp_group
@@ -737,9 +750,11 @@ class TestUpdateNpuAttnOutLse(TestBase):
     @patch('torch.split')
     @patch('torch.distributed.all_to_all_single')
     @patch('torch.distributed.all_gather')
+    @patch('torch_npu.npu_attention_update')
     def test_update_chunk_attn_out_lse_dcp_greater_than_1_only(
-            self, mock_all_gather, mock_all_to_all_single, mock_split,
-            mock_stack, mock_chunk, mock_cat, mock_pcp, mock_pcp_group):
+            self, mock_npu_attention_update, mock_all_gather,
+            mock_all_to_all_single, mock_split, mock_stack, mock_chunk,
+            mock_cat, mock_pcp, mock_pcp_group):
         # Mock input data
         prefix_chunk_output = torch.randn(2, 4, 8)
         prefix_chunk_lse = torch.randn(2, 4, 1)
@@ -758,6 +773,8 @@ class TestUpdateNpuAttnOutLse(TestBase):
             torch.randn(2, 2, 2, 8),
             torch.randn(2, 2, 2, 1)
         ]
+        mock_npu_attention_update.return_value = (torch.randn(2, 2, 8),
+                                                  torch.randn(2, 2, 1))
 
         # Call the method under test
         output, lse = self.impl._update_chunk_attn_out_lse(
@@ -780,11 +797,9 @@ class TestUpdateNpuAttnOutLse(TestBase):
     @patch('torch.split')
     @patch('torch.distributed.all_to_all_single')
     @patch('torch.distributed.all_gather')
-    @patch(
-        'vllm_ascend.attention.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
-    )
+    @patch('torch_npu.npu_attention_update')
     def test_update_chunk_attn_out_lse_pcp_greater_than_1_only(
-            self, mock_update_out_and_lse, mock_all_gather,
+            self, mock_npu_attention_update, mock_all_gather,
             mock_all_to_all_single, mock_split, mock_stack, mock_cat, mock_pcp,
             mock_get_pcp_group):
         # Mock input data
@@ -805,9 +820,9 @@ class TestUpdateNpuAttnOutLse(TestBase):
             torch.randn(2, 2, 4, 8),
             torch.randn(2, 2, 4, 1)
         ]
-        mock_update_out_and_lse.return_value = torch.randn(2, 4,
-                                                           8), torch.randn(
-                                                               2, 4, 1)
+        mock_npu_attention_update.return_value = torch.randn(2, 4,
+                                                             8), torch.randn(
+                                                                 2, 4, 1)
         # Call the method under test
         output, lse = self.impl._update_chunk_attn_out_lse(
             prefix_chunk_output, prefix_chunk_lse)
@@ -817,7 +832,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertIsInstance(lse, torch.Tensor)
         self.assertEqual(output.shape, (2, 4, 8))
         self.assertEqual(lse.shape, (2, 4, 1))
-        self.impl._update_out_and_lse.assert_called_once()
+        mock_npu_attention_update.assert_called_once()
 
         self.assertEqual(mock_cat.call_count, 1)
         mock_all_to_all_single.assert_not_called()
