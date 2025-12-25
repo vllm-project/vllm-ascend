@@ -702,8 +702,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.seq_lens.gpu[num_reqs:].fill_(0)
 
-        self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens,
                                 cu_num_tokens)
