@@ -119,7 +119,7 @@ def __post_init__(self):
                   "mlp_speculator"):
                 self.method = "mlp_speculator"
             elif (self.draft_model_config.hf_config.model_type
-                  in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp")):
+                  in ("deepseek_mtp", "mimo_mtp")):
                 self.method = "deepseek_mtp"
                 if self.num_speculative_tokens > 1:
                     logger.warning(
@@ -132,6 +132,15 @@ def __post_init__(self):
                 if self.num_speculative_tokens > 1:
                     logger.warning(
                             "All Ernie MTP models only have " \
+                            "one layer. Might need some code changes " \
+                            "to support multiple layers."
+                        )
+            elif (self.draft_model_config.hf_config.model_type ==
+                  "glm4_moe_mtp"):
+                self.method = "glm4_moe_mtp"
+                if self.num_speculative_tokens > 1:
+                    logger.warning(
+                            "All GLM4 MTP models only have " \
                             "one layer. Might need some code changes " \
                             "to support multiple layers."
                         )
