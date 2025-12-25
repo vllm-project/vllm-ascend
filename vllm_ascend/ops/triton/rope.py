@@ -35,6 +35,7 @@ def _triton_rope(
     cos_row_stride,
     sin,
     sin_row_stride,
+    pos_ptr,
     num_tokens,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
@@ -45,6 +46,7 @@ def _triton_rope(
     pad_rope_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
+    POS: tl.constexpr,
 ):
     """
     This triton kernel applies rotary embedding on q and k.
@@ -81,12 +83,17 @@ def _triton_rope(
         q_start_ptr = q_ptr + row_idx * q_row_stride
         k_start_ptr = k_ptr + row_idx * k_row_stride
 
+        if POS:
+            pos_idx = tl.load(pos_ptr + row_idx)
+        else:
+            pos_idx = row_idx
+        
         # ####################################################################
         # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
         # m of this program instance
         # ####################################################################
-        cos_start_ptr = cos + row_idx * cos_row_stride
-        sin_start_ptr = sin + row_idx * sin_row_stride
+        cos_start_ptr = cos + pos_idx * cos_row_stride
+        sin_start_ptr = sin + pos_idx * sin_row_stride
 
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
@@ -164,6 +171,7 @@ def rope_forward_triton(q,
                         k,
                         cos,
                         sin,
+                        position: torch.Tensor = None,
                         rope_dim: int = -1,
                         is_neox_style: bool = True):
     if not q.is_contiguous():
@@ -196,6 +204,7 @@ def rope_forward_triton(q,
         cos.stride(0),
         sin,
         sin.stride(0),
+        position,
         num_tokens,
         n_q_head,
         n_kv_head,
@@ -206,5 +215,6 @@ def rope_forward_triton(q,
         pad_rope_dim,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_NEOX_STYLE=is_neox_style,
+        POS=position is not None
     )
     return q, k

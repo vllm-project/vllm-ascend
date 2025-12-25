@@ -94,7 +94,7 @@ class QKNormRopeFusionPattern:
             k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight,
                                                        self.eps)
 
-            q_rope, k_rope = torch.ops.vllm.rope_detached(positions, q_norm_out, k_norm_out, cos_cache, sin_cache)
+            q_rope, k_rope = rope_forward_triton(q_normed, k_normed, cos_cache, sin_cache, positions, self.head_dim, True)
 
             return q_rope, k_rope, v
 
@@ -195,7 +195,7 @@ class QKNormRopeFusionPatternWithBias:
                                                        self.eps)
             k_normed = k_norm_out + k_bias
 
-            q_rope, k_rope = torch.ops.vllm.rope_detached(positions, q_normed, k_normed, cos_cache, sin_cache)
+            q_rope, k_rope = rope_forward_triton(q_normed, k_normed, cos_cache, sin_cache, positions, self.head_dim, True)
 
             return q_rope, k_rope, v
 

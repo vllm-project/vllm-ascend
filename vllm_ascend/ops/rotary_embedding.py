@@ -27,6 +27,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     YaRNScalingRotaryEmbedding)
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
+from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
                                get_ascend_device_type)
@@ -103,10 +104,7 @@ def _rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
-                -1] == 128 and self.cos_cache is not None and self.sin_cache is not None:
-            torch.ops.vllm.rope_detached(positions, query, key, self.cos_cache, self.sin_cache)
-        elif self.rotary_dim < self.head_size:
+        if self.rotary_dim < self.head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
             key = key.view(num_tokens, -1, self.head_size)
@@ -174,8 +172,15 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        return _rope_forward_oot(self, positions, query, key, is_neox_style,
-                                 offsets)
+        return rope_forward_triton(
+            query,
+            key,
+            self.cos_cache,
+            self.sin_cache,
+            positions,
+            self.rotary_dim,
+            is_neox_style
+        )
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
