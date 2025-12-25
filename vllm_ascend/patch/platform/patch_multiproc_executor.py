@@ -32,8 +32,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
             f"global world_size ({self.parallel_config.world_size}) must be "
             f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
+            f"({self.parallel_config.nnodes_within_dp}). ")
         self.local_world_size = self.parallel_config.local_world_size
         tp_size = self.parallel_config.tensor_parallel_size
         pp_size = self.parallel_config.pipeline_parallel_size
@@ -42,16 +41,16 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
             f"_parallel_size ({pp_size}) x prefill_context"
-            f"_parallel_size ({pcp_size}). "
-        )
+            f"_parallel_size ({pcp_size}). ")
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
-        # use the loopback address get_loopback_ip() for communication.
+        # Multiprocessing-based executor does not support multi-node setting.
+        # Since it only works for single node, we can use the loopback address
+        # get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+            get_loopback_ip(), get_open_port())
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -73,9 +72,8 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            global_start_rank = (
-                self.local_world_size * self.parallel_config.node_rank_within_dp
-            )
+            global_start_rank = (self.local_world_size *
+                                 self.parallel_config.node_rank_within_dp)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 unready_workers.append(
@@ -86,8 +84,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
-                    )
-                )
+                    ))
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -104,13 +101,13 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             if self.parallel_config.node_rank_within_dp == 0:
                 for rank in range(self.world_size):
                     if rank < self.local_world_size:
-                        local_message_queue = self.workers[rank].worker_response_mq
+                        local_message_queue = self.workers[
+                            rank].worker_response_mq
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
-                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
-                            rank
-                        ]
+                        remote_message_queue = self.workers[
+                            0].peer_worker_response_mqs[rank]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
 
@@ -131,7 +128,8 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
-                self._ensure_worker_termination([uw.proc for uw in unready_workers])
+                self._ensure_worker_termination(
+                    [uw.proc for uw in unready_workers])
 
         self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
