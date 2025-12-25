@@ -68,11 +68,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable fused_experts_allgather_ep. MoeInitRoutingV3 and
-    # GroupedMatmulFinalizeRouting operators are combined to implement EP.
-    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
-                 ),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
@@ -113,11 +108,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE":
     lambda: int(
         os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
-    # Whether to enable dense model and general optimizations for better performance.
-    # Since we modified the base parent class `linear`, this optimization is also applicable to other model types.
-    # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
-    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
