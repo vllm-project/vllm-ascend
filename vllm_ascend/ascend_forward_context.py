@@ -31,7 +31,6 @@ def set_ascend_forward_context(
         virtual_engine: int = 0,
         num_tokens: int = 0,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
-        with_prefill: bool = True,
         in_profile_run: bool = False,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -60,7 +59,6 @@ def set_ascend_forward_context(
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
-        forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
 
         forward_context.in_profile_run = in_profile_run
@@ -104,8 +102,7 @@ def set_ascend_forward_context(
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
-        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
             forward_context.layer_idx is not None and \
             num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
