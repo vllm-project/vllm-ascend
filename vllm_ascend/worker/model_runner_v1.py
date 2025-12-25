@@ -425,14 +425,7 @@ class NPUModelRunner(GPUModelRunner):
         decode_must_use_mc2 = needs_mc2(potential_max_tokens)
 
         # For prefill, use the scheduler's max_num_batched_tokens for a single
-        # batch. NOTE: if tensor parallelism is enabled, each TP rank only holds
-        # a fraction of the tokens, but the current MoE communication-selection
-        # logic does not account for TP. Therefore we intentionally use the
-        # total token count here.
-        # tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        # max_batched_tokens_per_rank = (
-        #      self.vllm_config.scheduler_config.max_num_batched_tokens // tp_size
-        # )
+        # batch.
         prefill_must_use_mc2 = needs_mc2(
             self.vllm_config.scheduler_config.max_num_batched_tokens)
 
