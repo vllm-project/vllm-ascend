@@ -484,6 +484,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 
 class SequenceRowParallelOp(CustomRowParallelOp):
 
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.unique_prefix = None
+
     def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -509,7 +513,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                              bias=bias_)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel,
-                                                      self.prefix)
+                                                      self.unique_prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -602,6 +606,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.reduce_results = self.layer.reduce_results
+        self.unique_prefix = self.layer.unique_prefix
 
 
 def _get_column_parallel_op(
