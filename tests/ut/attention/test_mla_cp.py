@@ -543,8 +543,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl._v_up_proj.return_value = torch.randn(
             B, self.impl.v_head_dim)
 
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe,
-                                                   BS, attn_metadata)
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
+                                           attn_metadata)
 
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.v_head_dim)
@@ -1046,10 +1046,9 @@ class TestAscendMLAImpl(TestBase):
                 attn_metadata.prefill.pcp_metadata.pcp_prefill_mask = torch.triu(
                     torch.ones(10, 10, dtype=torch.float16), 1)
 
-                output = self.impl._forward_prefill(q_nope, q_pe, k_nope,
-                                                       k_pe, value,
-                                                       kv_c_and_k_pe_cache,
-                                                       attn_metadata)
+                output = self.impl._forward_prefill(q_nope, q_pe, k_nope, k_pe,
+                                                    value, kv_c_and_k_pe_cache,
+                                                    attn_metadata)
                 self.assertEqual(
                     output.shape,
                     (seq_len_q, self.impl.num_heads * self.impl.v_head_dim))
