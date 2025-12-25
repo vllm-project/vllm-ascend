@@ -881,7 +881,7 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]], int] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, list[int], int]] = {}
         self._reqs_need_send: dict[str, float] = {}
 
         # master-slave meta information for cross-nodes
@@ -1315,8 +1315,8 @@ class MooncakeConnectorWorker:
                 return kv_head_groups
             if tp_size // self.num_key_value_heads > 1:
                 kv_head_groups = []
-                for kv_head_ids in range(self.num_key_value_heads):
-                    kv_head_groups.append(tuple([kv_head_ids]))
+                for kv_head_ids_ in range(self.num_key_value_heads):
+                    kv_head_groups.append(tuple([kv_head_ids_]))
                 return kv_head_groups
 
         def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
@@ -1442,7 +1442,7 @@ class MooncakeConnectorWorker:
 
         # make sure the last block (which may be unfull) of P nodes is put to the last block of D node
         remote_block_nums: list[int] = []
-        final_block_idx: int = None
+        final_block_idx: int | None = None
         local_cp_rank = self.dcp_rank + self.pcp_rank * self.dcp_size
         local_cp_size = self.dcp_size * self.pcp_size
         for cp_rank, block_num in enumerate(remote_block_nums_all):
@@ -1451,6 +1451,7 @@ class MooncakeConnectorWorker:
                     final_block_idx = len(remote_block_nums)
                 remote_block_nums.append(block_num)
 
+        assert local_remote_block_port_mapping is not None
         if final_block_idx is not None:
             final_block_num = remote_block_nums.pop(final_block_idx)
             remote_block_nums.append(final_block_num)
