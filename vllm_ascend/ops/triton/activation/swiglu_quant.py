@@ -10,6 +10,7 @@ def _swiglu_quant_kernel(
     group_list_ptr,
     out_ptr,
     scale_ptr,
+    n_rows,
     TOTAL_COLS: tl.constexpr,
     HALF_COLS: tl.constexpr,
     COL_BLOCK_SIZE: tl.constexpr,
@@ -23,12 +24,14 @@ def _swiglu_quant_kernel(
     # calc real total_rows
     if GROUP_LIST_TYPE == 0:  # cusum
         total_rows = tl.load(group_list_ptr + NUM_EXPERTS).to(tl.int32)
-    else:
+    elif GROUP_LIST_TYPE == 1:  # count
         gl_offsets = tl.arange(0, NUM_EXPERTS_ALGIN)
         gl_mask = gl_offsets < NUM_EXPERTS
         group_list = tl.load(group_list_ptr + gl_offsets, gl_mask,
                              other=0).to(tl.int32)
         total_rows = tl.sum(group_list)
+    else:  # none
+        total_rows = n_rows
 
     block_size = (total_rows - 1) // NUM_CORES + 1
     pid = tl.program_id(0)
@@ -78,24 +81,28 @@ def _swiglu_quant_kernel(
 
 
 def swiglu_quant(x, group_list, group_list_type, need_quant=True):
-    # group_list_type must be 0 cusum or 1 count
-    if group_list_type not in [0, 1]:
+    # group_list_type must be 0 cusum, 1 count or 2 none.
+    if group_list_type not in [0, 1, 2]:
         raise ValueError(
-            f"group_list_type must be 0 or 1, but got {group_list_type}")
+            f"group_list_type must be 0, 1 or 2, but got {group_list_type}")
     s, h = x.shape
     out_dtype = torch.int8 if need_quant else x.dtype
     out = torch.empty((s, h // 2), dtype=out_dtype, device=x.device)
     scale = torch.empty((s, ), dtype=torch.float32, device=x.device)
-    num_experts = group_list.shape[0]
-    # ub must be 32-byte aligned on npu
-    if group_list.dtype == torch.int64:
-        num_experts_algin = (num_experts + 7) // 8 * 8
-    elif group_list.dtype == torch.int32:
-        num_experts_algin = (num_experts + 15) // 16 * 16
+    if group_list is not None:
+        num_experts = group_list.shape[0]
+        # ub must be 32-byte aligned on npu
+        if group_list.dtype == torch.int64:
+            num_experts_algin = (num_experts + 7) // 8 * 8
+        elif group_list.dtype == torch.int32:
+            num_experts_algin = (num_experts + 15) // 16 * 16
+        else:
+            raise ValueError(
+                f"group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}"
+            )
     else:
-        raise ValueError(
-            f"group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}"
-        )
+        num_experts = 0
+        num_experts_algin = 0
 
     num_vectorcore = get_vectorcore_num()
     _swiglu_quant_kernel[(num_vectorcore, )](
@@ -103,6 +110,7 @@ def swiglu_quant(x, group_list, group_list_type, need_quant=True):
         group_list,
         out,
         scale,
+        n_rows=s,
         TOTAL_COLS=h,
         HALF_COLS=h // 2,
         COL_BLOCK_SIZE=1536,
