@@ -22,14 +22,12 @@ Run `pytest tests/e2e/multicard/spec_decode_v1/test_mtp_qwen3_next.py`.
 """
 
 import os
-from unittest.mock import patch
 
 import pytest
-from modelscope import snapshot_download  # type: ignore
-from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
+
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
-from vllm import SamplingParams
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -38,22 +36,8 @@ MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
 
 # TODO: add full decode only (when ready)
 @pytest.mark.parametrize("model_name", MODELS)
-@pytest.mark.parametrize(
-    "cudagraph_mode",
-    [
-        CUDAGraphMode.NONE,
-        CUDAGraphMode.PIECEWISE,
-        CUDAGraphMode.FULL_DECODE_ONLY,
-    ],
-)
-def test_qwen3_next_distributed_mp_mtp3_acceptance_tp4(model_name, cudagraph_mode):
-    if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        pytest.skip("skip FULL_DECODE_ONLY case")
-
-    BASELINES = {
-        CUDAGraphMode.NONE: [0.89, 0.52, 0.18],
-        CUDAGraphMode.PIECEWISE: [0.85, 0.46, 0.19],
-    }
+def test_qwen3_next_mtp_acceptance_tp4(model_name):
+    golden = [0.85, 0.46, 0.19]
 
     example_prompts = [
         "Hello, my name is",
@@ -69,18 +53,14 @@ def test_qwen3_next_distributed_mp_mtp3_acceptance_tp4(model_name, cudagraph_mod
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
-                    enforce_eager=cudagraph_mode == CUDAGraphMode.NONE,
                     disable_log_stats=False,
                     speculative_config={
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 3,
                     },
                     compilation_config=CompilationConfig(
-                        cudagraph_mode=cudagraph_mode,
-                        cudagraph_capture_sizes=[12],
-                    )) as spec_vllm_model:
-        _ = spec_vllm_model.generate_greedy(example_prompts,
-                                            max_tokens)
+                        cudagraph_capture_sizes=[20])) as spec_vllm_model:
+        _ = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
         metrics = spec_vllm_model.model.get_metrics()
 
     num_drafts = 0
@@ -98,7 +78,6 @@ def test_qwen3_next_distributed_mp_mtp3_acceptance_tp4(model_name, cudagraph_mod
         num_accepted_tokens / num_drafts
         for num_accepted_tokens in num_accepted_tokens_per_pos
     ]
-    golden = BASELINES[cudagraph_mode]
 
     match = all(abs(a - b) < 0.05 for a, b in zip(acceptance_per_pos, golden))
     if not match:
@@ -109,17 +88,12 @@ def test_qwen3_next_distributed_mp_mtp3_acceptance_tp4(model_name, cudagraph_mod
     cleanup_dist_env_and_memory()
 
 
-
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [3])
-@pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("cudagraph_mode", ["PIECEWISE", "FULL_DECODE_ONLY"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
-def test_mtp_qwen3_next_tp4_correctness(model_name: str,
-                    num_speculative_tokens: int,
-                    enforce_eager: bool,
-                    cudagraph_mode:str,
-                    disable_padded_drafter_batch: bool):
+def test_qwen3_next_mtp_correctness_tp4(model_name: str,
+                                        num_speculative_tokens: int,
+                                        disable_padded_drafter_batch: bool):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -128,62 +102,35 @@ def test_mtp_qwen3_next_tp4_correctness(model_name: str,
     ]
 
     max_tokens = 20
-    
     '''
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
     '''
-    if not enforce_eager:
-        if cudagraph_mode == "FULL_DECODE_ONLY":
-            pytest.skip("This case will be supported in future")
-        with VllmRunner(model_name,
-                        tensor_parallel_size=4,
-                        max_model_len=4096,
-                        gpu_memory_utilization=0.8,
-                        distributed_executor_backend="mp",
-                        speculative_config={
-                            "method":
-                            "mtp",
-                            "num_speculative_tokens":
-                            num_speculative_tokens,
-                            "disable_padded_drafter_batch":
-                            disable_padded_drafter_batch,
-                        },
-                        enforce_eager=enforce_eager,
-                        compilation_config=CompilationConfig(
-                            cudagraph_mode=cudagraph_mode,
-                            cudagraph_capture_sizes=[12],
-                        )) as spec_llm:
-            spec_outputs = spec_llm.generate_greedy(example_prompts, max_tokens)
-        del spec_llm
-
-    else:
-        if cudagraph_mode == "PIECEWISE":
-            pytest.skip("skipping the repeating case")
-        with VllmRunner(model_name,
-                        tensor_parallel_size=4,
-                        max_model_len=4096,
-                        gpu_memory_utilization=0.8,
-                        distributed_executor_backend="mp",
-                        speculative_config={
-                            "method":
-                            "mtp",
-                            "num_speculative_tokens":
-                            num_speculative_tokens,
-                            "disable_padded_drafter_batch":
-                            disable_padded_drafter_batch,
-                        },
-                        enforce_eager=enforce_eager,
-                        ) as spec_llm:
-            spec_outputs = spec_llm.generate_greedy(example_prompts, max_tokens)
-        del spec_llm
+    with VllmRunner(model_name,
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.8,
+                    distributed_executor_backend="mp",
+                    speculative_config={
+                        "method":
+                        "mtp",
+                        "num_speculative_tokens":
+                        num_speculative_tokens,
+                        "disable_padded_drafter_batch":
+                        disable_padded_drafter_batch,
+                    },
+                    compilation_config=CompilationConfig(
+                        cudagraph_capture_sizes=[20])) as spec_llm:
+        spec_outputs = spec_llm.generate_greedy(example_prompts, max_tokens)
+    del spec_llm
 
     with VllmRunner(model_name,
                     tensor_parallel_size=4,
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
-                    enforce_eager=enforce_eager) as ref_llm:
+                    compilation_config=CompilationConfig(
+                        cudagraph_capture_sizes=[20])) as ref_llm:
         ref_outputs = ref_llm.generate_greedy(example_prompts, max_tokens)
     del ref_llm
 

@@ -12,7 +12,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
