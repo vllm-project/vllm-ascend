@@ -669,16 +669,6 @@ export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
-
-**Hardware**: A3-752T, 4 node
-
-**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4
-
-**Input/Output**: 64k/3k
-
-**Performance**: 255tps, TPOT 23ms
-
 ## Function Call
 
 The function call feature is supported now. Please use the latest version.
