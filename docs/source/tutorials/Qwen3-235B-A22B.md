@@ -119,14 +119,16 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
---rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \
+--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
 ```
 
 **Notice:**
-- for vllm version below `v0.12.0` use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`
-- for vllm version `v0.12.0` use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \`
+- [Qwen3-235B-A22B](https://huggingface.co/Qwen/Qwen3-235B-A22B#processing-long-texts) originally only supports 40960 context(max_position_embeddings). If you want to use it and its related quantization weights to run long seqs (such as 128k context), it is required to use yarn rope-scaling technique.
+  - For vLLM version same as or new than `v0.12.0`, use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \`.
+  - For vllm version below `v0.12.0`, use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`.
+  If you are using weights like [Qwen3-235B-A22B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) which originally supports long contexts, there is no need to add this parameter.
 
 The parameters are explained as follows:
 - `--data-parallel-size` 1 and `--tensor-parallel-size` 8 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
@@ -313,13 +315,21 @@ vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random
 After about several minutes, you can get the performance evaluation result.
 
 
-## Best Performance Tutorial
+## Reproducing Performance Results
 
-In this section, we provide simple scripts to re-produce our latest performance.
+In this section, we provide simple scripts to re-produce our latest performance. It is also recommended to read instructions above to understand basic concepts or options in vLLM && vLLM-Ascend. 
 
-### Single Node A3
+### Environment
 
-On a single Atlas 800 A3（64G*16）server, the recommended parallel setup is `--data-parallel-size 4` && `--tensor-parallel-size 4` && `--enable-expert-parallel `. Example server scripts:
+- vLLM v0.13.0
+- vLLM-Ascend v0.13.0rc1
+- CANN 8.3.0 RC2
+- torch_npu 2.8.0
+- HDK/driver 25.3.RC1
+
+### Single Node A3 （64G*16）
+
+Example server scripts:
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
@@ -348,6 +358,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enable-expert-parallel \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
+--no-enable-prefix-caching \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling
 ```
@@ -362,16 +373,27 @@ vllm bench serve --model qwen \
 --random-output-len 1536 \
 --num-prompts 800 \
 --max-concurrency 160 \
---request-rate inf \
+--request-rate 24 \
 --host 0.0.0.0 \
 --port 8000 \
 ```
+
+Reference test results:
+
+| num_requests | concurrency | mean TTFT(ms) | mean TPOT(ms) | output token throughput (tok/s) |
+|----- | ----- | ----- | ----- | -----|
+| 720 | 144 | 4717.45 | 48.69 | 2761.72 |
+
+Note:
+1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization now.
+2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
 
 ### Three Node A3 -- PD disaggregation
 
 On three Atlas 800 A3（64G*16）server, we recommend to use one node as one prefill instance and two nodes as one decode instance. Example server scripts:
 Prefill Node 1
 ```shell
+#!/bin/sh
 export HCCL_IF_IP=prefill_node_1_ip
 
 ifname=""
@@ -380,7 +402,6 @@ export GLOO_SOCKET_IFNAME=${ifname}
 export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
-#!/bin/sh
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
