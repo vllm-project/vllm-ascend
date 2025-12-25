@@ -289,7 +289,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache,
                                attn_metadata):
         if not self.pcp_size > 1:
-            return super().mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
+            return super().mla_preprocess_prefill(q_c, kv_no_split, kv_cache,
+                                                  attn_metadata)
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = (attn_metadata.num_actual_tokens_pcp_padded -
                              self.pcp_size * num_decode_tokens
@@ -300,10 +301,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             .view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
         prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
-        cos = attn_metadata.prefill.cos[:num_actual_tokens -
-                                        num_decode_tokens]
-        sin = attn_metadata.prefill.sin[:num_actual_tokens -
-                                        num_decode_tokens]
+        cos = attn_metadata.prefill.cos[:num_actual_tokens - num_decode_tokens]
+        sin = attn_metadata.prefill.sin[:num_actual_tokens - num_decode_tokens]
         prefill_slots = attn_metadata.slot_mapping[
             num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
@@ -318,15 +317,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
             [num_actual_tokens, self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
         prefill_k_pe = k_pe
-        prefill_k_pe[
-            num_decode_tokens:num_actual_tokens] = self.rope_single(
-                prefill_k_pe[num_decode_tokens:num_actual_tokens], cos,
-                sin)
+        prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
+            prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin)
         prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
         prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe],
                                       dim=-1)
-        prefill_kv_c_k_pe = get_pcp_group().all_gather(
-            prefill_kv_c_k_pe, 0)
+        prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
         prefill_kv_c_k_pe = torch.index_select(
             prefill_kv_c_k_pe, 0,
             attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx)
@@ -360,7 +356,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = \
             self._q_proj_and_k_up_proj(decode_q_c)
-        decode_ql_nope, decode_q_pe = self.reorg_decode_q(decode_ql_nope, decode_q_pe)
+        decode_ql_nope, decode_q_pe = self.reorg_decode_q(
+            decode_ql_nope, decode_q_pe)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens *
                                                   self.pcp_size:self.pcp_size]
@@ -375,7 +372,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
         assert prefill_metadata.chunked_context is not None
-        assert isinstance(prefill_metadata.chunked_context, CPChunkedContextMetadata)
+        assert isinstance(prefill_metadata.chunked_context,
+                          CPChunkedContextMetadata)
         assert prefill_metadata.chunked_context.padded_chunk_seq_lens_npu is not None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         assert 0 <= index < iters
