@@ -346,11 +346,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_out_nomask = attn_out_nomask.to(torch.float32)
         attn_lse_mask = attn_lse_mask.to(torch.float32)
         attn_lse_nomask = attn_lse_nomask.to(torch.float32)
-        attn_output = [attn_out_nomask, attn_out_mask]
-        attn_lse = [attn_lse_nomask, attn_lse_mask]
+        attn_output_list = [attn_out_nomask, attn_out_mask]
+        attn_lse_list = [attn_lse_nomask, attn_lse_mask]
         update_type = 0
         attn_output, attn_lse = torch_npu.npu_attention_update(
-            attn_lse, attn_output, update_type)
+            attn_lse_list, attn_output_list, update_type)
         attn_output = attn_output.view(T, N, D)
         return attn_output, attn_lse
 
