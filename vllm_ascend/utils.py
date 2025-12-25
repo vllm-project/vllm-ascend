@@ -34,7 +34,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -52,6 +52,7 @@ ACL_FORMAT_FRACTAL_NZ = 29
 _CUSTOM_OP_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
@@ -64,6 +65,7 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
+_HAS_ROPE = None
 
 
 def _print_callback_on_stream(*args):
@@ -306,6 +308,18 @@ def prefetch_stream() -> torch.npu.Stream:
         # we return the default stream.
         _PREFETCH_STREAM = torch_npu.npu.Stream()
     return _PREFETCH_STREAM
+
+
+def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
+    global _WEIGHT_PREFETCH_METHOD
+    if _WEIGHT_PREFETCH_METHOD is None:
+        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
+    return _WEIGHT_PREFETCH_METHOD
+
+
+def get_weight_prefetch_method():
+    return _WEIGHT_PREFETCH_METHOD
 
 
 def global_stream() -> torch.npu.Stream:
@@ -650,9 +664,11 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
-        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
+        AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
+        AscendMRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -678,6 +694,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
+        "MMEncoderAttention": AscendMMEncoderAttention,
+        "ApplyRotaryEmb": AscendApplyRotaryEmb,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -754,10 +772,6 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-def dense_optim_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
-
-
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
@@ -823,9 +837,22 @@ def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
-        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        if "thinker_config" in hf_config:
+            # Qwen-Omni-thinker models
+            _IS_VL_MODEL = True
+        else:
+            _IS_VL_MODEL = "vision_config" in hf_config
     return _IS_VL_MODEL
+
+
+def has_rope(vllm_config: VllmConfig):
+    """Checks if the model uses rope."""
+    global _HAS_ROPE
+    if _HAS_ROPE is None and vllm_config and vllm_config.model_config:
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        _HAS_ROPE = "rope_parameters" in hf_config
+    return _HAS_ROPE
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -910,9 +937,6 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
-        "ep": {
-            "hccl_buffer_size": calculate_ep_buffer_size()
-        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -932,31 +956,6 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
-
-
-def calculate_ep_buffer_size() -> int:
-    """
-    formula of ep buffer size:
-    batch_size * hidden_size * topk * 4
-    """
-    ep_buffer_size = _DEFAULT_BUFFER_SIZE
-    try:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        hf_config = vllm_config.model_config.hf_config
-
-        hidden_size = hf_config.hidden_size
-        topk = getattr(hf_config, "num_experts_per_tok", 1)
-        batch_size = vllm_config.scheduler_config.max_num_batched_tokens // tp_size
-        int8_size = torch.iinfo(torch.int8).bits // 8
-        bf16_size = torch.finfo(torch.bfloat16).bits // 8
-        ep_buffer_size = math.ceil(
-            (batch_size * hidden_size * topk *
-             (int8_size + bf16_size) * 3) / (1024 * 1024))
-    except Exception:
-        pass
-    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
@@ -993,7 +992,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
 
     if not flashcomm2_enable():
         flashcomm2_oproj_shared = False
-        logger.info("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(

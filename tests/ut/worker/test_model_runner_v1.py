@@ -50,6 +50,7 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
 
     mock_runner.input_batch = MagicMock()
     mock_runner.input_batch.num_reqs = num_reqs
+    mock_runner.speculative_config = None
 
     num_computed_tokens = []
     num_prompt_tokens = []
@@ -169,23 +170,24 @@ def test_pcp_allgather_restore_idx_slicing():
 
 
 @pytest.mark.parametrize(
-    "tokens, num_reqs, num_computed_tokens, num_prompt_tokens, pcp_size, pcp_rank, expected_pcp_tokens",
+    "tokens, num_reqs, num_computed_tokens, num_prompt_tokens," \
+    "pcp_size, pcp_rank, decode_threshold, expected_pcp_tokens",
     [
         # Case 1: prefill only
-        ([8, 12, 16], 3, [0, 0, 0], [8, 12, 16], 4, 0, [2, 4, 4]),
+        ([8, 12, 16], 3, [0, 0, 0], [8, 12, 16], 4, 0, 1, [2, 4, 4]),
 
-        # Case 2: mix prefill and decode
-        ([8, 4, 12], 3, [8, 4, 0], [8, 4, 12], 4, 0, [8, 4, 4]),
+        # Case 2: mix prefill and decode (with spec decode)
+        ([8, 4, 12], 3, [8, 4, 0], [8, 4, 12], 4, 0, 8, [8, 4, 4]),
 
         # Case 3: request which need to be padded
-        ([3, 7, 9], 3, [0, 0, 0], [3, 7, 9], 4, 0, [2, 2, 4]),
+        ([3, 7, 9], 3, [0, 0, 0], [3, 7, 9], 4, 0, 1, [2, 2, 4]),
 
         # Case 4: single request
-        ([10], 1, [0], [10], 4, 0, [4]),
+        ([10], 1, [0], [10], 4, 0, 1, [4]),
     ])
 def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
                                      num_prompt_tokens, pcp_size, pcp_rank,
-                                     expected_pcp_tokens):
+                                     decode_threshold, expected_pcp_tokens):
     mock_runner = MagicMock(spec=NPUModelRunner)
     mock_runner.pcp_size = pcp_size
     mock_runner.pcp_rank = pcp_rank
@@ -201,6 +203,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
 
     mock_runner.num_pcp_pads = [0] * num_reqs
     mock_runner.arange_np = np.arange(10000)
+    mock_runner.decode_threshold = decode_threshold
 
     mock_runner._update_tokens_for_pcp = NPUModelRunner._update_tokens_for_pcp.__get__(
         mock_runner, NPUModelRunner)
@@ -243,6 +246,7 @@ def test_update_tokens_for_pcp_with_padding():
 
     mock_runner.num_pcp_pads = [0, 0, 0]
     mock_runner.pcp_allgather_restore_idx = torch.zeros(1000, dtype=torch.long)
+    mock_runner.decode_threshold = 1
 
     mock_runner._update_tokens_for_pcp = NPUModelRunner._update_tokens_for_pcp.__get__(
         mock_runner, NPUModelRunner)
@@ -279,6 +283,7 @@ def test_update_tokens_for_pcp_unpad_mask():
 
     mock_runner.num_pcp_pads = [0, 0]
     mock_runner.pcp_allgather_restore_idx = torch.zeros(1000, dtype=torch.long)
+    mock_runner.decode_threshold = 1
 
     mock_runner._update_tokens_for_pcp = NPUModelRunner._update_tokens_for_pcp.__get__(
         mock_runner, NPUModelRunner)
@@ -369,6 +374,9 @@ def pcp_mtp_mock_runner():
 
     mock_runner.input_ids_pcp_full = NPUModelRunner._make_buffer(
         mock_runner, max_num_tokens, dtype=torch.int32)
+    mock_runner.query_lens_pcp_full = NPUModelRunner._make_buffer(
+        mock_runner, max_num_reqs, dtype=torch.int32)
+    mock_runner.decode_threshold = 1
 
     mock_runner.arange_np = np.arange(max_model_len)
     mock_runner.input_batch = MagicMock()
