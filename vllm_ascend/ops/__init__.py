@@ -24,6 +24,7 @@ import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
+    import vllm_ascend.ops.triton.rope  # noqa
 
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
