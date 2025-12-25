@@ -611,7 +611,6 @@ class TestUpdateNpuAttnOutLse(TestBase):
         mock_npu_attn_out_lse_update.assert_called_once()
         self.assertEqual(mock_npu_fused_infer_attention_score.call_count, 2)
         self.assertIsNotNone(output)
-        self.assertEqual(attn_lse, None)
 
     @patch(
         'vllm_ascend.attention.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update'
@@ -674,25 +673,6 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertEqual(output.shape, (8, 128, 128))
 
         mock_npu_attention_update.assert_called_once()
-
-    def test_update_out_and_lse(self):
-        # Mock input data
-        out_list = torch.randn(3, 2, 4,
-                               8)  # [N, batch_size, num_heads, head_size]
-        lse_list = torch.randn(3, 2, 4, 1)  # [N, batch_size, num_heads, 1]
-
-        # Call the method under test
-        out_final, lse_final = self.impl._update_out_and_lse(
-            out_list, lse_list)
-
-        # Assert the method call
-        self.assertEqual(out_final.shape,
-                         (2, 4, 8))  # [batch_size, num_heads, head_size]
-        self.assertEqual(lse_final.shape,
-                         (2, 4, 1))  # [batch_size, num_heads, 1]
-
-        self.assertIsInstance(out_final, torch.Tensor)
-        self.assertIsInstance(lse_final, torch.Tensor)
 
     @patch('vllm_ascend.attention.attention_cp.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP',

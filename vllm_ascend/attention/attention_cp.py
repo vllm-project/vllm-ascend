@@ -331,8 +331,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         if k_nomask is not None:
             output, attn_lse = self._npu_attn_out_lse_update(
                 attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask)
-            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:
-                attn_lse = None
         return output, attn_lse
 
     def _npu_attn_out_lse_update(self, attn_lse_mask, attn_lse_nomask,
@@ -351,10 +349,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_output = [attn_out_nomask, attn_out_mask]
         attn_lse = [attn_lse_nomask, attn_lse_mask]
         update_type = 0
-        output, attn_lse_updated = torch_npu.npu_attention_update(
+        attn_output, attn_lse = torch_npu.npu_attention_update(
             attn_lse, attn_output, update_type)
-        output = output.view(T, N, D)
-        return output, attn_lse_updated
+        attn_output = attn_output.view(T, N, D)
+        return attn_output, attn_lse
 
     def _forward_prefill_cp(self, query: torch.Tensor, key: torch.Tensor,
                             value: torch.Tensor,
@@ -564,21 +562,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         attn_out = self._npu_attention_update(attn_out_lse)
         return attn_out
-
-    def _update_out_and_lse(self, out_list: torch.Tensor,
-                            lse_list: torch.Tensor) -> torch.Tensor:
-        """LSE_final = log(sum(exp(LSE_i))), O_final = sum(exp(LSE_i - LSE_final) * O_i)
-        Args:
-            out_list: shape = [N, batch_size, num_heads, head_size]
-            lse_list: shape = [N, batch_size, num_heads, 1]
-        Returns:
-            out_final: shape = [batch_size, num_heads, head_size]
-            lse_final: shape = [batch_size, num_heads, 1]
-        """
-        lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
-        out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list,
-                              dim=0)
-        return out_final, lse_final
 
     def _process_chunk_prefill(self, current_attn_output_prefill,
                                current_attn_lse_prefill, kv_cache,
