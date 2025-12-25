@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 import openai
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -166,30 +167,17 @@ async def test_models(model: str, mode: str) -> None:
 
 
 def analysis_metrics(metrics_text: str, mtp: int) -> tuple[float, list[float]]:
-    lines = metrics_text.splitlines()
-    num_drafts_lines = []
-    num_accepted_tokens_per_pos_lines = []
-    for line in lines:
-        if line.startswith("vllm:spec_decode_num_drafts_total"):
-            num_drafts_lines.append(line)
-        elif line.startswith(
-            "vllm:spec_decode_num_accepted_tokens_per_pos_total",
-        ):
-            num_accepted_tokens_per_pos_lines.append(line)
-    assert len(num_drafts_lines) == 2
-    assert len(num_accepted_tokens_per_pos_lines) == 2 * mtp
-
-    num_drafts = sum([
-        float(line.strip().split()[-1])
-        for line in num_drafts_lines
-    ])
-    num_accepted_tokens_per_pos = []
-    for index in range(mtp):
-        line_dp0 = num_accepted_tokens_per_pos_lines[index]
-        line_dp1 = num_accepted_tokens_per_pos_lines[index + mtp]
-        num_accepted_tokens_per_pos.append(sum([
-            float(line_dp0.strip().split()[-1]) +
-            float(line_dp1.strip().split()[-1])
-        ]))
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * mtp
+    for family in text_string_to_metric_families(metrics_text):
+        if family.name == "vllm:spec_decode_num_drafts":
+            assert family.type == "counter"
+            for sample in family.samples:
+                num_drafts += sample.value
+        elif family.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert family.type == "counter"
+            for sample in family.samples:
+                pos = int(sample.labels["position"])
+                num_accepted_tokens_per_pos[pos] += sample.value
 
     return num_drafts, num_accepted_tokens_per_pos
