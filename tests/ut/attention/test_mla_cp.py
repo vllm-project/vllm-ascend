@@ -679,10 +679,6 @@ class TestAscendMLAImpl(TestBase):
                              iters * (1 if dcp_size * pcp_size > 1 else 0))
             self.assertEqual(mock_load.call_count, iters)
             self.assertEqual(mock_ring.call_count, iters)
-            self.assertEqual(mock_dcp.all_gather.call_count,
-                             (1 if dcp_size > 1 else 0))
-            self.assertEqual(mock_pcp.all_gather.call_count,
-                             iters * (1 if pcp_size > 1 else 0))
             mock_reorg.reset_mock()
             mock_load.reset_mock()
             mock_ring.reset_mock()
@@ -691,7 +687,18 @@ class TestAscendMLAImpl(TestBase):
             self.assertEqual(out.shape, prefix_out.shape)
             self.assertEqual(lse.shape, prefix_lse.shape)
 
-    def test_reorg_kvcache_with_dcp_pcp(self):
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    def test_reorg_kvcache_with_dcp_pcp(self, mock_dcp, mock_get_dcp_group,
+                                        mock_pcp, mock_get_pcp_group):
+
+        def mock_all_gather(ws):
+            return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
+
         BLOCK_SIZE = 128  # fixed
         max_model_len = 4096
         max_num_seqs = 25
@@ -706,6 +713,12 @@ class TestAscendMLAImpl(TestBase):
             pcp_size, dcp_size, nums_tokens_per_rank, nums_all_rank_context, num_prefills, num_decodes, num_seqs, cp_local_block_size, num_computed_tokens_of_pcp_dcp = test_case
             if pcp_size * dcp_size == 1:
                 continue
+            self.impl.dcp_size = dcp_size
+            self.impl.pcp_size = pcp_size
+            mock_dcp.all_gather = MagicMock(
+                side_effect=mock_all_gather(dcp_size))
+            mock_pcp.all_gather = MagicMock(
+                side_effect=mock_all_gather(pcp_size))
             chunked_prefill_workspace_size = min(
                 max(8 * max_model_len, 4 * max_num_seqs * BLOCK_SIZE),
                 128 * 1024)
@@ -723,11 +736,11 @@ class TestAscendMLAImpl(TestBase):
 
             for i in range(len(chunked_context.seq_tot)):
                 allgatered_kv_c_normed = torch.randn(
-                    chunked_context.seq_tot[i] * pcp_size * dcp_size,
-                    self.impl.num_heads, self.impl.v_head_dim)
-                allgatered_k_pe = torch.randn(
-                    chunked_context.seq_tot[i] * pcp_size * dcp_size,
-                    self.impl.num_heads, self.impl.qk_rope_head_dim)
+                    chunked_context.seq_tot[i], self.impl.num_heads,
+                    self.impl.kv_lora_rank)
+                allgatered_k_pe = torch.randn(chunked_context.seq_tot[i],
+                                              self.impl.num_heads,
+                                              self.impl.qk_rope_head_dim)
                 result_kv, result_k_pe = self.impl._reorg_kvcache(
                     allgatered_kv_c_normed,
                     allgatered_k_pe,
@@ -737,7 +750,7 @@ class TestAscendMLAImpl(TestBase):
                 )
                 self.assertEqual(result_kv.shape,
                                  (chunked_context.cu_seq_lens_lst[i][-1],
-                                  self.impl.num_heads, self.impl.v_head_dim))
+                                  self.impl.num_heads, self.impl.kv_lora_rank))
                 self.assertEqual(
                     result_k_pe.shape,
                     (chunked_context.cu_seq_lens_lst[i][-1],
@@ -747,6 +760,11 @@ class TestAscendMLAImpl(TestBase):
                                  chunked_context.cu_seq_lens_lst[i][-1])
                 self.assertEqual(result_k_pe.shape[0],
                                  chunked_context.cu_seq_lens_lst[i][-1])
+
+                self.assertEqual(mock_dcp.all_gather.call_count,
+                                 (1 if dcp_size > 1 else 0))
+                self.assertEqual(mock_pcp.all_gather.call_count,
+                                 (1 if pcp_size > 1 else 0))
 
     def test_out_lse_reshape(self):
         test_cases = [10, 1, 128, 512]
