@@ -55,7 +55,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
     server_cmd: >
@@ -92,7 +92,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -130,7 +130,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -167,7 +167,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"multistream_overlap_shared_expert":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 benchmarks:
   perf:
     case_type: performance
