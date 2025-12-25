@@ -34,14 +34,12 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             f"divisible by nnodes_within_dp "
             f"({self.parallel_config.nnodes_within_dp}). ")
         self.local_world_size = self.parallel_config.local_world_size
-        tp_size = self.parallel_config.tensor_parallel_size
-        pp_size = self.parallel_config.pipeline_parallel_size
-        pcp_size = self.parallel_config.prefill_context_parallel_size
-        assert self.world_size == tp_size * pp_size * pcp_size, (
+        tensor_parallel_size = self.parallel_config.tensor_parallel_size
+        pp_parallel_size = self.parallel_config.pipeline_parallel_size
+        assert self.world_size == tensor_parallel_size * pp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tp_size}) x pipeline"
-            f"_parallel_size ({pp_size}) x prefill_context"
-            f"_parallel_size ({pcp_size}). ")
+            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
+            f"_parallel_size ({pp_parallel_size}). ")
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
