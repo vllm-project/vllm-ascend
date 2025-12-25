@@ -41,8 +41,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
             f"_parallel_size ({pp_size}) x prefill_context"
-            f"_parallel_size ({pcp_size}). "
-        )
+            f"_parallel_size ({pcp_size}). ")
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
