@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
