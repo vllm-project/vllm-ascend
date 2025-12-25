@@ -649,7 +649,7 @@ The performance result is:
 
 **Input/Output**: 64k/3k
 
-**Performance**: 255tps, TPOT 23ms
+**Performance**: 533tps, TPOT 32ms
 
 ### Using vLLM Benchmark
 
