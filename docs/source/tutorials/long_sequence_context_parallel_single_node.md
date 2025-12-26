@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports long-sequence context parallel. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use vllm-ascend:0.12.0rc2 (with vLLM v0.13.0) 1 Atlas 800 A3 (64G × 16) server to deploy the single node "long sequence" architecture.
+Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use vllm-ascend:0.12.0rc2 (with vLLM v0.13.0) 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
 
 ## Environment Preparation
 
