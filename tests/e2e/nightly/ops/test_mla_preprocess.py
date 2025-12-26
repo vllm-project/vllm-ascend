@@ -1,5 +1,6 @@
 import gc
 
+import pytest
 import torch
 import torch_npu
 
