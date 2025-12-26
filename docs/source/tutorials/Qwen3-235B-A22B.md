@@ -314,22 +314,31 @@ vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random
 
 After about several minutes, you can get the performance evaluation result.
 
-
 ## Reproducing Performance Results
 
-In this section, we provide simple scripts to re-produce our latest performance. It is also recommended to read instructions above to understand basic concepts or options in vLLM && vLLM-Ascend. 
+In this section, we provide simple scripts to re-produce our latest performance. It is also recommended to read instructions above to understand basic concepts or options in vLLM && vLLM-Ascend.
 
 ### Environment
 
 - vLLM v0.13.0
 - vLLM-Ascend v0.13.0rc1
-- CANN 8.3.0 RC2
+- CANN 8.3.RC2
 - torch_npu 2.8.0
 - HDK/driver 25.3.RC1
+- triton_ascend 3.2.0.dev2025110717
+
+**Notice:**
+triton_ascend is required for reproducing best performance of Qwen3-235B in vLLM-Ascend. If it is not installed in your environment, please follow the instructions bellow:
+
+```bash
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+```
 
 ### Single Node A3 （64G*16）
 
 Example server scripts:
+
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
@@ -364,6 +373,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 ```
 
 Benchmark scripts:
+
 ```shell
 vllm bench serve --model qwen \
 --tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 \
@@ -385,17 +395,19 @@ Reference test results:
 | 720 | 144 | 4717.45 | 48.69 | 2761.72 |
 
 Note:
-1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization now.
+1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community.
 2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
 
 ### Three Node A3 -- PD disaggregation
 
 On three Atlas 800 A3（64G*16）server, we recommend to use one node as one prefill instance and two nodes as one decode instance. Example server scripts:
 Prefill Node 1
+
 ```shell
 #!/bin/sh
 export HCCL_IF_IP=prefill_node_1_ip
 
+# Set ifname according to your network setting
 ifname=""
 
 export GLOO_SOCKET_IFNAME=${ifname}
@@ -417,16 +429,16 @@ export TASK_QUEUE_ENABLE=1
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --host 0.0.0.0 \
 --port 8000 \
---tensor-parallel-size 4 \
---data-parallel-size 8 \
---data-parallel-size-local 4 \
+--tensor-parallel-size 8 \
+--data-parallel-size 2 \
+--data-parallel-size-local 8 \
 --data-parallel-start-rank 0 \
 --data-parallel-address prefill_node_1_ip \
 --data-parallel-rpc-port prefill_node_dp_port \
 --seed 1024 \
 --quantization ascend \
 --served-model-name qwen3 \
---max-num-seqs 32 \
+--max-num-seqs 24 \
 --max-model-len 40960 \
 --max-num-batched-tokens 16384 \
 --enable-expert-parallel \
@@ -454,7 +466,9 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 }
 }'
 ```
+
 Decode Node 1
+
 ```shell
 #!/bin/sh
 export HCCL_IF_IP=decode_node_1_ip
@@ -516,7 +530,9 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 }
 }'
 ```
+
 Decode Node 2
+
 ```shell
 #!/bin/sh
 export HCCL_IF_IP=decode_node_2_ip
@@ -579,12 +595,15 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 }
 }'
 ```
+
 PD proxy:
+
 ```
 python load_balance_proxy_server_example.py --port 12347 --prefiller-hosts prefill_node_1_ip --prefiller-port 8000 --decoder-hosts decode_node_1_ip --decoder-ports 8000
 ```
 
 Benchmark scripts:
+
 ```shell
 vllm bench serve --model qwen \
 --tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 \
@@ -598,3 +617,9 @@ vllm bench serve --model qwen \
 --host 0.0.0.0 \
 --port 12347 \
 ```
+
+Reference test results:
+
+| num_requests | concurrency | mean TTFT(ms) | mean TPOT(ms) | output token throughput (tok/s) |
+|----- | ----- | ----- | ----- | -----|
+| 2880 | 576 | 3735.98 | 52.07 | 8593.44 |
