@@ -164,7 +164,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.supports_eplb = self.quant_method.supports_eplb
         ascend_config = get_ascend_config()
         # flashcommon3 gate stream
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.multistream_overlap_gate = self.ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
@@ -211,7 +211,7 @@ class AscendFusedMoE(FusedMoE):
             moe_quant_params["intermediate_size_full"] = intermediate_size
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        self.enable_shared_expert_dp = self.ascend_config.enable_shared_expert_dp
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
