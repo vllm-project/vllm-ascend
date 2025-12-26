@@ -60,6 +60,7 @@ def test_deepseek_multistream_moe_tp2():
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             distributed_executor_backend="mp",
             additional_config={
                 "enable_multistream_moe": True,
@@ -80,6 +81,7 @@ def test_qwen3_w4a8_dynamic_tp2(model):
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
@@ -120,6 +122,7 @@ def test_deepseek_w4a8_accuracy_tp2(model):
     with VllmRunner(snapshot_download(model),
                     dtype="auto",
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     quantization="ascend",
                     enable_expert_parallel=True) as vllm_model:
         vllm_quant_outputs = vllm_model.model.generate(prompts,
@@ -190,6 +193,7 @@ def test_qwen3_dense_fc1_tp2(model):
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -208,6 +212,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
