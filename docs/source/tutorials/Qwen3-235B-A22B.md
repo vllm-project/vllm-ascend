@@ -328,7 +328,7 @@ In this section, we provide simple scripts to re-produce our latest performance.
 - triton_ascend 3.2.0.dev2025110717
 
 **Notice:**
-triton_ascend is required for reproducing best performance of Qwen3-235B in vLLM-Ascend. If it is not installed in your environment, please follow the instructions bellow:
+triton_ascend is required for reproducing best performance of Qwen3-235B in vLLM-Ascend. If it is not installed in your environment, please follow the instructions below:
 
 ```bash
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
@@ -623,3 +623,6 @@ Reference test results:
 | num_requests | concurrency | mean TTFT(ms) | mean TPOT(ms) | output token throughput (tok/s) |
 |----- | ----- | ----- | ----- | -----|
 | 2880 | 576 | 3735.98 | 52.07 | 8593.44 |
+
+Note:
+1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator.
