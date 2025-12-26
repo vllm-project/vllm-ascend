@@ -99,7 +99,7 @@ JSON
      --enforce-eager \
      --host 0.0.0.0 \
      --port 8000 \
-     --additional-config '{"dump_config": "/data/msprobe_config.json"}' &
+     --additional-config '{"dump_config_path": "/data/msprobe_config.json"}' &
    ```
 
 ## 3. Send requests and collect dumps

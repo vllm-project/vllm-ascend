@@ -62,6 +62,6 @@ def test_qwen3_exponential_overlap() -> None:
                     max_model_len=8192,
                     gpu_memory_utilization=0.7,
                     additional_config={
-                        "enable_async_exponential": 1,
+                        "enable_async_exponential": True,
                     }) as runner:
         runner.generate(example_prompts, sampling_params)
