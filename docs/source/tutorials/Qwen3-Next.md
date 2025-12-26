@@ -211,5 +211,3 @@ The performance result is:
 **Concurrency**: 32
 
 **Performance**: 580tps, TPOT 54ms
-
-
