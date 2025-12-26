@@ -16,6 +16,7 @@
 
 import os
 
+import vllm_ascend.patch.platform.patch_compile_backend  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_ec_connector  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
