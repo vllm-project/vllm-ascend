@@ -109,7 +109,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
@@ -210,7 +210,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/test_single_request_aclgraph.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
