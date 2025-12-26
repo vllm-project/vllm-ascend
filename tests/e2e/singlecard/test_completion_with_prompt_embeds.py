@@ -55,6 +55,7 @@ def test_mixed_prompt_embeds_and_text(model_name):
     with VllmRunner(
             model_name,
             enable_prompt_embeds=True,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as vllm_runner:
         # Test prompt embeddings
         embeds_output = vllm_runner.model.generate({
