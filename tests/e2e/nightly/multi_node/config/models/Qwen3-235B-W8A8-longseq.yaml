@@ -63,6 +63,7 @@ deployment:
         --decode-context-parallel-size 2
         --prefill-context-parallel-size 1
         --tensor-parallel-size 8
+        --cp-kv-cache-interleave-size 128
         --seed 1024
         --quantization ascend
         --max-num-seqs 16
