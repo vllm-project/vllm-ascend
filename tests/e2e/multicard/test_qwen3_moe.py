@@ -28,7 +28,7 @@ from unittest.mock import patch
 import openai
 import pytest
 from modelscope import snapshot_download  # type: ignore
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
 
