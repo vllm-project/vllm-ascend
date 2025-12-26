@@ -78,6 +78,9 @@ jobs:
           - name: multi-node-deepseek-dp
             config_file_path: DeepSeek-R1-W8A8-A2.yaml
             size: 2
+          - name: multi-node-qwen3-235b-dp
+            config_file_path: Qwen3-235B-A22B-A2.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
