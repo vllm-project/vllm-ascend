@@ -23,6 +23,7 @@ import math
 import os
 from contextlib import contextmanager, nullcontext
 from enum import Enum
+from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
@@ -981,22 +982,20 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def flashcomm2_o_shared_enabled() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
-
-
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-    flashcomm2_oproj_shared = flashcomm2_o_shared_enabled()
 
     if not flashcomm2_enable():
-        flashcomm2_oproj_shared = False
-        return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
+        return 0
 
     logger.info(
-        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size} and oproj_shared_enabled = {flashcomm2_oproj_shared}"
+        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}"
     )
+    if "o_proj" in ascend_config.layer_sharding:
+        logger.info_once(
+            "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
+        )
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
@@ -1019,13 +1018,10 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
         )
     if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, "
-            "with additional support for hybrid deployment scenarios. "
-            "It is not applicable in D-scenario environments.")
-    if flashcomm2_oproj_shared:
-        logger.info("Enable FLASHCOMM2 with oproj_shared.")
+            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support for hybrid deployment scenarios. It is not applicable in D-scenario environments."
+        )
 
-    return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
+    return flashcomm2_oproj_tp_size
 
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
@@ -1084,3 +1080,18 @@ def dispose_layer(layer: Any):
 def replace_layer(original_layer: Any, new_layer: Any):
     original_layer.__class__ = new_layer.__class__
     original_layer.__dict__ = new_layer.__dict__
+
+
+@lru_cache(maxsize=1)
+def get_current_model_config():
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    return vllm_config.model_config
+
+
+#TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
+@lru_cache(maxsize=1)
+def enable_dsa_cp() -> bool:
+    current_model_config = get_current_model_config()
+    is_ds_v32 = hasattr(current_model_config.hf_config, "index_topk")
+    return is_ds_v32 and enable_sp()

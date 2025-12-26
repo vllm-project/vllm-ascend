@@ -31,8 +31,8 @@ from vllm_ascend.attention.common_cp import AscendPCPMetadata, CPChunkedContextM
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.ops.shared_weight_layer import (
-    is_hidden_layer, reach_layer_for_shared_weight_series)
+from vllm_ascend.ops.layer_shard_linear import (
+    is_hidden_layer, reach_layer_for_shard_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -410,9 +410,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            if self.fc2_o_shared_enable and is_hidden_layer(
-                    self.vllm_config, self.o_proj):
-                reach_layer_for_shared_weight_series(self.o_proj)
+
+            # enable shard linear weight series reach dummmy_run
+            for layer in (self.layer_sharding_kwargs or []):
+                if is_hidden_layer(layer):
+                    reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
         forward_context = get_forward_context()
@@ -535,9 +537,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
 
-        if self.fc2_o_shared_enable and is_hidden_layer(
-                self.vllm_config, self.o_proj):
-            reach_layer_for_shared_weight_series(self.o_proj)
+        # process for shard linear weight series reach
+        for layer in (self.layer_sharding_kwargs or []):
+            if is_hidden_layer(layer):
+                reach_layer_for_shard_weight_series(layer)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
