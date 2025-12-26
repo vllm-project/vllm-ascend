@@ -1,7 +1,7 @@
 import itertools
 import random
 
-import numpy
+import numpy as np
 import torch
 from torch_npu.testing.testcase import TestCase, run_tests
 
@@ -12,7 +12,7 @@ enable_custom_op()
 # random.seed(450)
 seed = 45
 random.seed(seed)
-numpy.random.seed(seed)
+np.random.seed(seed)
 torch.manual_seed(seed)
 torch.npu.manual_seed_all(seed)  # 如果你用 GPU
 
@@ -20,23 +20,22 @@ torch.npu.manual_seed_all(seed)  # 如果你用 GPU
 def softmax_func(x, axis=None):
     # print("before softmax:",x)
     if "float16" in x.dtype.name:
-        x = x.astype(numpy.float32)
+        x = x.astype(np.float32)
     x_max = x.max(axis=axis, keepdims=True)
     x_sub = x - x_max
-    y = numpy.exp(x_sub)
+    y = np.exp(x_sub)
     x_sum = y.sum(axis=axis, keepdims=True)
     # print(" x_sum:",x_sum)
-    ans = y / x_sum
-    # print(" ans:",ans)
-    return ans, x_max, x_sum
+    softmax_output = y / x_sum
+    return softmax_output, x_max, x_sum
 
 
 class TestNpuMoeGatingTopK(TestCase):
 
-    def moe_gating_top_k_numpy(self,
+    def moe_gating_top_k_np(self,
                                x: np.ndarray,
                                k: int,
-                               bias: numpy.ndarray,
+                               bias: np.ndarray,
                                k_group: int = 1,
                                group_count: int = 1,
                                group_select_mode: int = 0,
@@ -50,16 +49,16 @@ class TestNpuMoeGatingTopK(TestCase):
         if dtype != np.float32:
             x = x.astype(np.float32)
             if bias is not None:
-               bias = bias.astype(np.float32)
+                bias = bias.astype(np.float32)
 
-        x = x.numpy()
+        x = x.np()
         if bias is not None:
-            bias = bias.numpy()
+            bias = bias.np()
 
         if norm_type == 0:  # softmax
             x, _, _ = softmax_func(x, -1)
         else:
-            x = 1 / (1 + numpy.exp(-x))  # sigmoid
+            x = 1 / (1 + np.exp(-x))  # sigmoid
 
         original_x = x
         if bias is not None:
@@ -68,36 +67,36 @@ class TestNpuMoeGatingTopK(TestCase):
         if group_count > 1:
             x = x.reshape(x.shape[0], group_count, -1)
             if group_select_mode == 0:
-                group_x = numpy.amax(x, axis=-1)
+                group_x = np.amax(x, axis=-1)
             else:
-                group_x = numpy.partition(x, -2, axis=-1)[...,
+                group_x = np.partition(x, -2, axis=-1)[...,
                                                           -2:].sum(axis=-1)
-            indices = numpy.argsort(
+            indices = np.argsort(
                 -group_x, axis=-1,
                 kind='stable')[:, :k_group]  # Indices of top-k_group
 
-            mask = numpy.ones((x.shape[0], group_count), dtype=bool)
-            mask[numpy.arange(x.shape[0])[:, None], indices] = False
-            x = numpy.where(mask[..., None], float('-inf'), x)
+            mask = np.ones((x.shape[0], group_count), dtype=bool)
+            mask[np.arange(x.shape[0])[:, None], indices] = False
+            x = np.where(mask[..., None], float('-inf'), x)
             x = x.reshape(x.shape[0], -1)
 
-        _, indices = torch.sort(torch.from_numpy(x),
+        _, indices = torch.sort(torch.from_np(x),
                                 dim=-1,
                                 stable=True,
                                 descending=True)
-        indices = numpy.asarray(indices[:, :k])
+        indices = np.asarray(indices[:, :k])
 
-        y = numpy.take_along_axis(original_x, indices, axis=1)
+        y = np.take_along_axis(original_x, indices, axis=1)
 
         if norm_type == 1 or renorm == 1:
-            y /= (numpy.sum(y, axis=-1, keepdims=True) + eps)
+            y /= (np.sum(y, axis=-1, keepdims=True) + eps)
         y *= routed_scaling_factor
         if y2_flag:
             y2 = original_x
         else:
             y2 = None
         y = torch.tensor(y, dtype=dtype)
-        return y, indices.astype(numpy.int32), y2
+        return y, indices.astype(np.int32), y2
 
     def test_npu_moe_gating_topk_multi(self, device="npu"):
 
@@ -124,8 +123,8 @@ class TestNpuMoeGatingTopK(TestCase):
                 continue
 
             # ---- 构造输入 ----
-            x = numpy.random.uniform(-2, 2, (dim0, dim1)).astype(numpy.float32)
-            bias = numpy.random.uniform(-2, 2, (dim1, )).astype(numpy.float32)
+            x = np.random.uniform(-2, 2, (dim0, dim1)).astype(np.float32)
+            bias = np.random.uniform(-2, 2, (dim1, )).astype(np.float32)
 
             x_tensor = torch.tensor(x, dtype=torch.float32)
             bias_tensor = torch.tensor(bias, dtype=torch.float32)
@@ -138,16 +137,16 @@ class TestNpuMoeGatingTopK(TestCase):
             # ---- error debug ----
 
             # k = 4
-            # x = numpy.random.uniform(-2, 2, (1, 256)).astype(numpy.float32)
-            # bias = numpy.random.uniform(-2, 2, (256,)).astype(numpy.float32)
+            # x = np.random.uniform(-2, 2, (1, 256)).astype(np.float32)
+            # bias = np.random.uniform(-2, 2, (256,)).astype(np.float32)
 
             # x_tensor = torch.tensor(x, dtype=torch.float32)
             # bias_tensor = torch.tensor(bias, dtype=torch.float32)
 
             # k_group = 1
 
-            # ---- numpy 结果 ----
-            y, expert_idx, out = self.moe_gating_top_k_numpy(
+            # ---- np 结果 ----
+            y, expert_idx, out = self.moe_gating_top_k_np(
                 x_tensor,
                 k,
                 bias=bias_tensor,
@@ -190,7 +189,7 @@ class TestNpuMoeGatingTopK(TestCase):
             print(y - y_npu.cpu())
             # ---- 校验 ----
             self.assertRtolEqual(y, y_npu.cpu())
-            self.assertRtolEqual(expert_idx, expert_idx_npu.cpu().numpy())
+            self.assertRtolEqual(expert_idx, expert_idx_npu.cpu().np())
             print("ok\n")
 
 
