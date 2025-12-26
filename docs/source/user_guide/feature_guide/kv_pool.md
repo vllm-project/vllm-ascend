@@ -95,7 +95,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "master_server_address": "xx.xx.xx.xx:50088",
     "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
 }
-``` 
+```
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
