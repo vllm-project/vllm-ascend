@@ -17,8 +17,10 @@
 import json
 from typing import Any
 
+import httpx
 import openai
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -59,6 +61,11 @@ aisbench_aime = [{
     "baseline": 86.67,
     "threshold": 7
 }]
+
+BASELINES = {
+    "mtp2": [0.85, 0.60],
+    "mtp3": [0.83, 0.34, 0.10],
+}
 
 
 @pytest.mark.asyncio
@@ -138,3 +145,40 @@ async def test_models(model: str, mode: str) -> None:
                            port,
                            aisbench_cases,
                            server_args=server_args)
+        async with httpx.AsyncClient() as client:
+            metrics_text = (await client.get(server.url_for("metrics"))).text
+
+    num_drafts, num_accepted_tokens_per_pos = analysis_metrics(
+        metrics_text,
+        2 if mode == "mtp2" else 3,
+    )
+
+    acceptance_per_pos = [
+        num_accepted_tokens / num_drafts
+        for num_accepted_tokens in num_accepted_tokens_per_pos
+    ]
+    golden = BASELINES[mode]
+
+    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
+def analysis_metrics(metrics_text: str, mtp: int) -> tuple[int, list[int]]:
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * mtp
+    for family in text_string_to_metric_families(metrics_text):
+        if family.name == "vllm:spec_decode_num_drafts":
+            assert family.type == "counter"
+            for sample in family.samples:
+                num_drafts += sample.value
+        elif family.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert family.type == "counter"
+            for sample in family.samples:
+                pos = int(sample.labels["position"])
+                num_accepted_tokens_per_pos[pos] += sample.value
+
+    return num_drafts, num_accepted_tokens_per_pos
