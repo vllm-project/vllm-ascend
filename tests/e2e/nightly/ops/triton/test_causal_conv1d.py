@@ -1,8 +1,10 @@
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
 from vllm_ascend.ops.triton.mamba.causal_conv1d import (PAD_SLOT_ID,
                                                         causal_conv1d_fn)
@@ -228,3 +230,62 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
 
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
+
+
+def test_causal_conv1d_metadata_path():
+    torch.random.manual_seed(1)
+
+    device = "npu"
+    dim = 32
+    width = 3
+    seq_len = [4, 12]
+    state_len = width - 1
+    cu_seqlen, num_seq = sum(seq_len), len(seq_len)
+    dtype = torch.float32
+
+    x = torch.randn(cu_seqlen, dim, device=device, dtype=dtype).transpose(0, 1)
+    weight = torch.randn(dim, width, device=device, dtype=dtype)
+    bias = torch.randn(dim, device=device, dtype=dtype)
+    query_start_loc = torch.cumsum(torch.tensor([0] + seq_len,
+                                                device=device,
+                                                dtype=torch.int32),
+                                   dim=0)
+    cache_indices = torch.arange(num_seq, device=device, dtype=torch.int32)
+    has_initial_state_tensor = torch.tensor([True, False],
+                                            device=device,
+                                            dtype=torch.bool)
+
+    conv_states = torch.randn((num_seq, state_len, dim),
+                              device=device,
+                              dtype=dtype).transpose(-1, -2)
+    conv_states_ref = conv_states.clone()
+
+    nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+        query_start_loc)
+    metadata = SimpleNamespace(nums_dict=nums_dict,
+                               batch_ptr=batch_ptr,
+                               token_chunk_offset_ptr=token_chunk_offset_ptr)
+
+    out_ref = causal_conv1d_fn_pytorch(
+        x,
+        weight,
+        bias=bias,
+        activation="silu",
+        conv_states=conv_states_ref,
+        has_initial_state=has_initial_state_tensor,
+        cache_indices=cache_indices,
+        query_start_loc=query_start_loc)
+    out = causal_conv1d_fn(
+        x,
+        weight,
+        bias=bias,
+        activation="silu",
+        conv_states=conv_states,
+        has_initial_state=has_initial_state_tensor,
+        cache_indices=cache_indices,
+        query_start_loc=query_start_loc,
+        metadata=metadata,
+    )
+
+    validate_cmp(out, out_ref, dtype)
+    validate_cmp(conv_states, conv_states_ref, dtype)
