@@ -33,6 +33,7 @@ def test_qwen2_5_w8a8_external_quantized_tp2():
     with VllmRunner(
             snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             max_model_len=4096,
             gpu_memory_utilization=0.8,
     ) as vllm_model:
