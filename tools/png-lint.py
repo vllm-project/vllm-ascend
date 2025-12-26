@@ -27,11 +27,10 @@ from pathlib import Path
 def is_git_ignored(file_path):
     """Check if a file is ignored by git."""
     try:
-        result = subprocess.run(
-            ['git', 'check-ignore', '-q', str(file_path)],
-            capture_output=True,
-            check=False
-        )
+        result = subprocess.run(['git', 'check-ignore', '-q',
+                                 str(file_path)],
+                                capture_output=True,
+                                check=False)
         return result.returncode == 0
     except (subprocess.SubprocessError, FileNotFoundError):
         # If git is not available or command fails, assume not ignored
@@ -51,26 +50,28 @@ def check_excalidraw_metadata(file_path):
 def main():
     """Main function to check all excalidraw PNG files."""
     errors = []
-    
+
     # Find all .excalidraw.png files
     for root, dirs, files in os.walk('.'):
         # Skip .git directory
         if '.git' in root:
             continue
-            
+
         for file in files:
             if file.lower().endswith('.excalidraw.png'):
                 file_path = Path(root) / file
-                
+
                 # Skip if git-ignored
                 if is_git_ignored(file_path):
                     continue
-                
+
                 # Check for excalidraw metadata
                 if not check_excalidraw_metadata(file_path):
                     errors.append(str(file_path))
-                    print(f"{file_path} was not exported from excalidraw with 'Embed Scene' enabled.")
-    
+                    print(
+                        f"{file_path} was not exported from excalidraw with 'Embed Scene' enabled."
+                    )
+
     if errors:
         sys.exit(1)
     else:
@@ -79,4 +80,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

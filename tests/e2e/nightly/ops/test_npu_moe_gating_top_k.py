@@ -34,7 +34,7 @@ def softmax_func(x, axis=None):
 class TestNpuMoeGatingTopK(TestCase):
 
     def moe_gating_top_k_numpy(self,
-                               x: numpy.ndarray,
+                               x: np.ndarray,
                                k: int,
                                bias: numpy.ndarray,
                                k_group: int = 1,
@@ -47,9 +47,10 @@ class TestNpuMoeGatingTopK(TestCase):
                                eps: float = 1e-20) -> tuple:
 
         dtype = x.dtype
-        if dtype != torch.float32:
-            x = x.to(dtype=torch.float32)
-            bias = bias.to(dtype=torch.float32)
+        if dtype != np.float32:
+            x = x.astype(np.float32)
+            if bias is not None:
+               bias = bias.astype(np.float32)
 
         x = x.numpy()
         if bias is not None:
