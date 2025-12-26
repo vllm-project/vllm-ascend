@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os
 
 import lm_eval
 import pytest
@@ -88,7 +87,6 @@ MODEL_KWARGS_NPUGRAPH_EX = [
     },
 ]
 
-NUM_CONCURRENT = 500
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
@@ -119,20 +117,18 @@ def run_test(model_name: str, model_args: dict):
             ), f"Expected: {expected_value} |  Measured: {measured_value}"
 
 
-# @pytest.mark.parametrize("model_args", MODEL_KWARGS)
-# def test_lm_eval_accuracy_with_piecewise(model_args):
-#     run_test(model_args["pretrained"], model_args)
+@pytest.mark.parametrize("model_args", MODEL_KWARGS)
+def test_lm_eval_accuracy_with_piecewise(model_args):
+    run_test(model_args["pretrained"], model_args)
 
 
 @pytest.mark.parametrize("model_args", MODEL_KWARGS_FULL_FRAPH)
-def test_lm_eval_accuracy_with_full_decode_only(model_args):
-    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
-        del os.environ['HCCL_OP_EXPANSION_MODE']
+def test_lm_eval_accuracy_with_full_decode_only(model_args, monkeypatch):
+    monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
     run_test(model_args["pretrained"], model_args)
 
 
 @pytest.mark.parametrize("model_args", MODEL_KWARGS_NPUGRAPH_EX)
-def test_lm_eval_with_fullgraph_npugraph_ex(model_args):
-    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
-        del os.environ['HCCL_OP_EXPANSION_MODE']
+def test_lm_eval_with_fullgraph_npugraph_ex(model_args, monkeypatch):
+    monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
     run_test(model_args["pretrained"], model_args)
