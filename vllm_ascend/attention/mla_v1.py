@@ -1163,28 +1163,35 @@ class AscendMLAImpl(MLAAttentionImpl):
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.DecodeOnly,
         ] and self.speculative_config is not None:
-            # Input shape: [num_tokens, num_heads, dim]
-            # Output shape: [num_heads, num_tokens, dim]
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose
             # operation after attention.
             input_layout = "TND_NTD"
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
+            # Input shape: [num_tokens, num_heads, dim]
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
+            # Output shape: [num_heads, num_tokens, dim]
             attn_output_shape = (self.num_heads, num_tokens, self.kv_lora_rank)
             sparse_mode = 3
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
-            # Input shape: [num_reqs, num_heads, seq_len, dim]
-            # Output shape: [num_heads, num_reqs, seq_len, dim]
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
-            input_layout = "BSND_NBSD"
-            q_nope = q_nope.view(num_tokens, 1, self.num_heads,
-                                 -1).contiguous()
-            q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
+            if self.enable_kv_nz:
+                # Input shape: [num_tokens, seq_len, num_heads, dim]
+                input_layout = "BSND_NBSD"
+                q_nope = q_nope.view(num_tokens, 1, self.num_heads,
+                                    -1).contiguous()
+                q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
+            else:
+                # Input shape: [num_tokens, num_heads, seq_len, dim]
+                input_layout = "BNSD_NBSD"
+                q_nope = q_nope.view(num_tokens, self.num_heads, 1,
+                                    -1).contiguous()
+                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+            # Output shape: [num_heads, num_tokens, seq_len, dim]
             attn_output_shape = (self.num_heads, num_tokens, 1,
                                  self.kv_lora_rank)
             sparse_mode = 0
