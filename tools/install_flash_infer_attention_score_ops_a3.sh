@@ -20,8 +20,8 @@
 
 cd /vllm-workspace
 # download fused_infer_attention_score related source files
-wget fused_infer_attention_score_a3_$(uname -i).tar
-tar -xvf a.tar ./fused_infer_attention_score_a3_$(uname -i)
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/fused_infer_attention_score_a3_$(uname -i).tar.gz
+tar -zxvf ./fused_infer_attention_score_a3_$(uname -i).tar.gz
 
 # replace fused_infer_attention_score operation files
 cd $ASCEND_TOOLKIT_HOME/opp/built-in/op_impl/ai_core/tbe/kernel/ascend910_93
