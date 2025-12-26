@@ -64,6 +64,7 @@ def test_bge_m3_correctness():
     with VllmRunner(
             model_name,
             runner="pooling",
+            cudagraph_capture_sizes=[4],
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
