@@ -457,7 +457,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
         forward_context = get_forward_context()
         moe_comm_type = forward_context.moe_comm_type
-        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_ALLTOALL} \
+        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
             and not shared_expert_dp_enabled() and shared_out is not None:
             shared_out = tensor_model_parallel_all_reduce(shared_out)
         if shared_out is None:

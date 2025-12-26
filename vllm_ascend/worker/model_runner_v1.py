@@ -49,16 +49,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
-from vllm.model_executor.models.interfaces import (SupportsMultiModal,
-                                                   supports_mrope,
-                                                   supports_transcription)
-from vllm.model_executor.models.interfaces_base import (
-    VllmModelForPooling, is_pooling_model, is_text_generation_model)
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv
@@ -200,11 +190,17 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group
-        self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group(
-        ).rank_in_group if self.pcp_size > 1 else 0
+        try:
+            self.dcp_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+            self.pcp_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group(
+            ).rank_in_group if self.pcp_size > 1 else 0
+        except Exception:
+            self.dcp_size = 1
+            self.dcp_rank = 0
+            self.pcp_size = 1
+            self.pcp_rank = 0
         decode_max_num_seqs = getattr(self.scheduler_config,
                                       'decode_max_num_seqs', 0)
         self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
@@ -1362,117 +1358,6 @@ class NPUModelRunner(GPUModelRunner):
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
         return None, None
-
-    def _pool(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        kv_connector_output: Optional["KVConnectorOutput"] = None,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
-
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        pooling_metadata = self.input_batch.get_pooling_metadata()
-        pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
-                                              device=hidden_states.device)
-        seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
-
-        model = cast(VllmModelForPooling, self.model)
-        raw_pooler_output = model.pooler(
-            hidden_states=hidden_states,
-            pooling_metadata=pooling_metadata,
-        )
-        raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
-            raw_pooler_output,
-        )
-        torch.npu.synchronize()
-
-        pooler_output: list[Optional[torch.Tensor]] = []
-        for raw_output, seq_len, prompt_len in zip(
-                raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
-            output = raw_output if seq_len == prompt_len else None
-            pooler_output.append(output)
-
-        return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-            kv_connector_output=kv_connector_output,
-        )
-
-    def _select_moe_comm_method(self,
-                                num_tokens: int) -> Optional[MoECommType]:
-        """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
-        are designed for expert parallelism.
-        2. If expert parallel is enabled, we need to consider the soc version and the
-        number of tokens. This is based on the observation that all-gather is more
-        efficient than all-to-all when running on A2.
-
-            a. For A2, we choose from MC2 and all-gather.
-
-            b. For A3, we choose from MC2 and all-to-all.
-
-            In both cases, we use MC2 when the number of tokens is smaller than
-            a its capacity threshold.
-
-        Args:
-            num_tokens (int): The number of tokens in the current batch.
-
-        Raises:
-            ValueError: If the soc version is unsupported.
-
-        Returns:
-            MoECommType: The selected MoE communication method.
-        """
-        if not is_moe_model(self.vllm_config):
-            return None
-
-        soc_version = get_ascend_device_type()
-        quant_type = getattr(
-            self.vllm_config.model_config.hf_config, 'moe_quantize',
-            getattr(self.vllm_config.model_config.hf_config, 'quantize', None))
-        model_type = self.vllm_config.model_config.hf_config.model_type
-
-        if not self.parallel_config.enable_expert_parallel:
-            moe_comm_type = MoECommType.ALLGATHER
-        elif soc_version in {AscendDeviceType._910B}:
-            if (num_tokens <= self.mc2_tokens_capacity
-                    and self.parallel_config.world_size_across_dp /
-                    self.parallel_config.pipeline_parallel_size >= 16):
-                moe_comm_type = MoECommType.MC2
-            else:
-                # Currently, w4a8_dynamic does not support allgatherep
-                if quant_type == "w4a8_dynamic":
-                    moe_comm_type = MoECommType.ALLTOALL
-                else:
-                    moe_comm_type = MoECommType.ALLGATHER
-
-        elif soc_version in {AscendDeviceType._910_93}:
-            # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-            moe_comm_type = (
-                MoECommType.MC2 if num_tokens <= self.mc2_tokens_capacity else
-                MoECommType.ALLTOALL)
-        else:
-            raise ValueError(f"Unsupported soc_version: {soc_version}")
-
-        # PanguProMoE only supports allgather
-        if model_type == "PanguProMoE":
-            moe_comm_type = MoECommType.ALLGATHER
-
-        if is_global_first_rank():
-            logger.debug(f"num_tokens: {num_tokens}, "
-                         f"moe_comm_type: {moe_comm_type}")
-        return moe_comm_type
 
     @torch.inference_mode()
     def execute_model(
