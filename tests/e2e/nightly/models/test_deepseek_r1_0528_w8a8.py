@@ -76,10 +76,7 @@ async def test_models(model: str, mode: str) -> None:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
     }
     speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
-    additional_config = {
-        "chunked_prefill_for_mla": True,
-        "enable_weight_nz_layout": True
-    }
+    additional_config = {"enable_weight_nz_layout": True}
     server_args = [
         "--quantization", "ascend", "--data-parallel-size", "2",
         "--tensor-parallel-size", "8", "--enable-expert-parallel", "--port",
