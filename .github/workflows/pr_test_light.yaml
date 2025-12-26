@@ -130,7 +130,10 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251121.run"
+          BISHENG_URL="https://sglang-ascend.obs.cn-east-3.myhuaweicloud.com/sglang/triton_ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
           python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20251225
 
       - name: Run unit test
