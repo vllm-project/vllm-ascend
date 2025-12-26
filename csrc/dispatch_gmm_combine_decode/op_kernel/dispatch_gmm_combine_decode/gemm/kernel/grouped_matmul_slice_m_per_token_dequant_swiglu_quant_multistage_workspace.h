@@ -24,8 +24,8 @@
 constexpr uint32_t STATE_OFFSET = 512;
 constexpr uint64_t WIN_STATE_OFFSET = 512 * 1024;
 constexpr uint64_t STATE_WIN_OFFSET = 900 * 1024;
-constexpr uint64_t GROUP_TOKEN_NUM_OFFSET = 452 * 1024 + 16;
-constexpr uint64_t SOFT_SYNC_OFFSET = 476 * 1024 + 16;
+constexpr uint64_t GROUP_TOKEN_NUM_OFFSET = 452 * 1024 + EXP_BUFFER_OFFSET;
+constexpr uint64_t SOFT_SYNC_OFFSET = 476 * 1024 + EXP_BUFFER_OFFSET;
 constexpr uint32_t SELF_STATE_OFFSET = 256 * 1024;
 constexpr uint32_t SUM_TMP_TENSOR_SIZE = 1024;
 constexpr uint32_t UB_ALIGN = 32;
@@ -48,7 +48,7 @@ constexpr uint32_t QUANT_SPACE_FACTOR = 176 * 1024 / 11;  // up to 176KB for qua
     (((epRankId == rankId)                                                                                        \
           ? ((GM_ADDR)(winContext_->localWindowsExp))                                                             \
           : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsExp))) + \
-     dataState * WIN_STATE_OFFSET + 16)
+     dataState * WIN_STATE_OFFSET + EXP_BUFFER_OFFSET)
 #define GET_WIND_ADDR_BY_RANK_ID(rankId)                                                                         \
     (((epRankId == rankId)                                                                                       \
           ? ((GM_ADDR)(winContext_->localWindowsIn))                                                             \
@@ -741,7 +741,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
 
         AscendC::GlobalTensor<int32_t> rankGMTensor;
-        DataCopyParams flagParams{1, 8, 0, 0};
+        AscendC::DataCopyParams flagParams{1, 8, 0, 0};
         uint32_t offset = stateOffset * epRankId;
         for (uint32_t rankIndex = startExpertId; rankIndex < endExpertId; ++rankIndex) {
             uint32_t dstRankId = rankIndex;
@@ -1430,7 +1430,7 @@ public:
 
             uint32_t recStatusNumPerCore = isShareExpert ? epRankSize : expertCntUp;
             uint32_t startStatusIndex = 0;
-            AscendC::DataCopyParams zerosParams{static_cast<uint16_t>(recStatusNumPerCore), 8, 0, static_cast<uint16_t>(15) * 32 + 24};
+            AscendC::DataCopyParams zerosParams{static_cast<uint16_t>(recStatusNumPerCore), 2 * sizeof(int32_t), 0, static_cast<uint16_t>(15 * UB_ALIGN + UB_ALIGN - 2 * sizeof(int32_t))};
             AscendC::GlobalTensor<int32_t> windowInstatusInt32Tensor;
             windowInstatusInt32Tensor.SetGlobalBuffer((__gm__ int32_t *)GET_WIND_STATE_ADDR_BY_RANK_ID(epRankId));
 
@@ -1441,7 +1441,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
             AscendC::DataCopy(groupTokenNumStateTensor, tmpZeroLocalTensor, GROUP_INFO_SIZE * localExpertNum);
-            AscendC::DataCopy(windowInstatusInt32Tensor[startStatusIndex * stateOffset / sizeof(int32_t)], tmpZeroLocalTensor, 
+            AscendC::DataCopyPad(windowInstatusInt32Tensor[startStatusIndex * stateOffset / sizeof(int32_t)], tmpZeroLocalTensor, 
                             zerosParams);
         }
 

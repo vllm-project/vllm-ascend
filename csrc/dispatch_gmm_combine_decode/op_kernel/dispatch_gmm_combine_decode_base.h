@@ -18,4 +18,7 @@
     typename XType, typename ExpandXOutType, bool StaticQuant, bool DynamicQuant, bool IsSmoothScaleExist, \
         bool IsNeedAllgater, uint32_t EXEC_FLAG
 #define TemplateDispatchTypeFunc XType, ExpandXOutType, StaticQuant, DynamicQuant, IsSmoothScaleExist, IsNeedAllgater, EXEC_FLAG
+
+constexpr uint32_t EXP_BUFFER_OFFSET = 16;
+
 #endif  // DISPATCH_GMM_COMBINE_DECODE_BASE_H

@@ -117,7 +117,7 @@ private:
                                  ? epWinContext_->localWindowsExp
                                  : ((HcclRankRelationResV2 *)(epWinContext_->remoteRes[rankId].nextDevicePtr))
                                        ->windowsExp) +
-                   dataState_ * WIN_STATE_OFFSET + 16;
+                   dataState_ * WIN_STATE_OFFSET + EXP_BUFFER_OFFSET;
         } else {
             return (GM_ADDR)((tpRankId_ == rankId)
                                  ? tpWinContext_->localWindowsExp
@@ -327,7 +327,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::InitStatusT
 {
     // ep state
     sumTarget_ = static_cast<float>(1.0);
-    epStateValue_ = 0x3F800000;      
+    epStateValue_ = 0x3F800000;
 }
 
 template <TemplateMC2TypeClass>
@@ -633,8 +633,8 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
         TBuf<> zerosBuf;
         tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendRankNum_);
         LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
-        DataCopyParams zerosParams{static_cast<uint16_t>(sendRankNum_), 4,
-                                0, static_cast<uint16_t>((moeSendNum_ > 512) ? 7 : 15) * 32 + 28};
+        DataCopyParams zerosParams{static_cast<uint16_t>(sendRankNum_), sizeof(int32_t),
+                                0, static_cast<uint16_t>(((moeSendNum_ > 512) ? 7 : 15) * UB_ALIGN + UB_ALIGN - sizeof(int32_t))};
         Duplicate(zerosTensor, (int32_t)0, sendRankNum_ * UB_ALIGN / sizeof(int32_t));
         SyncFunc<AscendC::HardEvent::V_MTE3>();
         DataCopyPad(epStatusSpaceInt32GlobalTensor_[startRankId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);

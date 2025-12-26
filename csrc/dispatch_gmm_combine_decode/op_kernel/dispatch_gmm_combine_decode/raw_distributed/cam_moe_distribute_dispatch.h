@@ -94,11 +94,11 @@ private:
     {
         uint32_t curRankId = ctxIdx == COMM_EP_IDX ? epRankId_ : tpRankId_;
         if (curRankId == rankId) {
-            return (GM_ADDR)(winContext_[ctxIdx]->localWindowsExp) + dataState_ * WIN_STATE_OFFSET + 16;
+            return (GM_ADDR)(winContext_[ctxIdx]->localWindowsExp) + dataState_ * WIN_STATE_OFFSET + EXP_BUFFER_OFFSET;
         }
         return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))
                              ->windowsExp) +
-               dataState_ * WIN_STATE_OFFSET;
+               dataState_ * WIN_STATE_OFFSET + EXP_BUFFER_OFFSET;
     }
 
     __aicore__ inline uint32_t MIN(uint32_t x, uint32_t y)
@@ -293,10 +293,6 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     recvWinBlockNum_ = epWorldSize_ * moeExpertNumPerRank_;
     isShareExpertRank_ = (epRankId_ < sharedExpertRankNum_) ? true : false;
     windyquantOffset_ = epWorldSize_ * axisMaxBS_ * hOutSize_;
-    GlobalTensor<int32_t> selfStatusTensor;
-    selfStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusSpaceGm_ + SELF_STATE_OFFSET));
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfStatusTensor[aivId_ * UB_ALIGN]);
     int32_t state = 0;
     stateOffset_ = (recvWinBlockNum_ > 512) ? (STATE_OFFSET / 2) : STATE_OFFSET;
     tpipe_->InitBuffer(statusBuf_, recvWinBlockNum_ * UB_ALIGN);  // expertNum * 32B
@@ -306,8 +302,6 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     uint64_t mask[2] = {0x101010101010101, 0};  // set the first number of every 8 numbers as 0x3F800000(float 1.0)
     PipeBarrier<PIPE_V>();
     Duplicate<int32_t>(statusTensor_, 0x3F800000, mask, recvWinBlockNum_ / 8, 1, 8);
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfStatusTensor[aivId_ * UB_ALIGN]);
     tpipe_->InitBuffer(xQueue_, BUFFER_NUM, hCommuSize_);
     if (isQuant_) {
         QuantInit(scales);
@@ -937,8 +931,8 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
     TBuf<> zerosBuf;
     tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendExpertNum_);
     LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
-    DataCopyParams zerosParams{static_cast<uint16_t>(sendExpertNum_), 8,
-                               0, static_cast<uint16_t>((recvWinBlockNum_ > 512) ? 7 : 15) * 32 + 24};
+    DataCopyParams zerosParams{static_cast<uint16_t>(sendExpertNum_), 2 * sizeof(int32_t),
+                               0, static_cast<uint16_t>(((recvWinBlockNum_ > 512) ? 7 : 15) * UB_ALIGN + UB_ALIGN - 2 * sizeof(int32_t))};
     Duplicate(zerosTensor, (int32_t)0, sendExpertNum_ * INT32_NUM_PER_BLOCK);
     SyncFunc<AscendC::HardEvent::V_MTE3>();
     DataCopyPad(windowInstatusTensor_[startExpertId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
