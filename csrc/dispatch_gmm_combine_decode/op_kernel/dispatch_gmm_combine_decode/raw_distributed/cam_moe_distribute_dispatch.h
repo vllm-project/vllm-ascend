@@ -94,7 +94,7 @@ private:
     {
         uint32_t curRankId = ctxIdx == COMM_EP_IDX ? epRankId_ : tpRankId_;
         if (curRankId == rankId) {
-            return (GM_ADDR)(winContext_[ctxIdx]->localWindowsExp) + dataState_ * WIN_STATE_OFFSET;
+            return (GM_ADDR)(winContext_[ctxIdx]->localWindowsExp) + dataState_ * WIN_STATE_OFFSET + 16;
         }
         return (GM_ADDR)(((HcclRankRelationResV2 *)(winContext_[ctxIdx]->remoteRes[rankId].nextDevicePtr))
                              ->windowsExp) +
@@ -228,12 +228,10 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     tpipe_ = pipe;
     aivId_ = GetBlockIdx();
     epRankId_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankId;
-    GM_ADDR statusDataSpaceGm;
 
     winContext_[COMM_EP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
     winContext_[COMM_TP_IDX] = (__gm__ HcclOpResParam *)AscendC::GetHcclContext<1>();
 
-    statusDataSpaceGm = (GM_ADDR)(winContext_[COMM_EP_IDX]->localWindowsExp);
     pipe_barrier(PIPE_ALL);
     dataState_ = 0;
     axisBS_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.bs;
@@ -649,6 +647,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SetSt
         return;
     }
     GlobalTensor<int32_t> rankGMTensor;
+    DataCopyParams flagParams{1, 8, 0, 0};
     uint32_t offset = stateOffset_ * epRankId_;
     for (uint32_t rankIndex = startExpertId_; rankIndex < endExpertId_; ++rankIndex) {
         uint32_t dstRankId = rankIndex;
@@ -659,7 +658,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SetSt
         }
         GM_ADDR rankGM = (__gm__ uint8_t *)(GetWindStateAddrByRankId(COMM_EP_IDX, dstRankId) + offset);
         rankGMTensor.SetGlobalBuffer((__gm__ int32_t *)rankGM);
-        DataCopy<int32_t>(rankGMTensor, statusTensor_[rankIndex * 8], 8UL);
+        DataCopyPad<int32_t>(rankGMTensor, statusTensor_[rankIndex * 8], flagParams);
     }
     SyncFunc<AscendC::HardEvent::MTE3_MTE2>();
 }
@@ -938,10 +937,11 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
     TBuf<> zerosBuf;
     tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendExpertNum_);
     LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
-    DataCopyParams zerosParams{static_cast<uint16_t>(sendExpertNum_), 1,
-                               0, static_cast<uint16_t>((recvWinBlockNum_ > 512) ? 7 : 15)};
+    DataCopyParams zerosParams{static_cast<uint16_t>(sendExpertNum_), 8,
+                               0, static_cast<uint16_t>((recvWinBlockNum_ > 512) ? 7 : 15) * 32 + 24};
     Duplicate(zerosTensor, (int32_t)0, sendExpertNum_ * INT32_NUM_PER_BLOCK);
-    DataCopy(windowInstatusTensor_[startExpertId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
+    SyncFunc<AscendC::HardEvent::V_MTE3>();
+    DataCopyPad(windowInstatusTensor_[startExpertId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
 }
 
 template <TemplateDispatchTypeClass>

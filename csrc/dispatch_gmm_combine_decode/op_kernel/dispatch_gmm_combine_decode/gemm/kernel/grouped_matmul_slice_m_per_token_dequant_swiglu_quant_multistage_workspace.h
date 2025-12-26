@@ -48,7 +48,7 @@ constexpr uint32_t QUANT_SPACE_FACTOR = 176 * 1024 / 11;  // up to 176KB for qua
     (((epRankId == rankId)                                                                                        \
           ? ((GM_ADDR)(winContext_->localWindowsExp))                                                             \
           : ((GM_ADDR)(((HcclRankRelationResV2 *)(winContext_->remoteRes[rankId].nextDevicePtr))->windowsExp))) + \
-     dataState * WIN_STATE_OFFSET)
+     dataState * WIN_STATE_OFFSET + 16)
 #define GET_WIND_ADDR_BY_RANK_ID(rankId)                                                                         \
     (((epRankId == rankId)                                                                                       \
           ? ((GM_ADDR)(winContext_->localWindowsIn))                                                             \
@@ -741,6 +741,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
 
         AscendC::GlobalTensor<int32_t> rankGMTensor;
+        DataCopyParams flagParams{1, 8, 0, 0};
         uint32_t offset = stateOffset * epRankId;
         for (uint32_t rankIndex = startExpertId; rankIndex < endExpertId; ++rankIndex) {
             uint32_t dstRankId = rankIndex;
@@ -751,7 +752,7 @@ public:
             }
             GM_ADDR rankGM = (__gm__ uint8_t *)(GET_WIND_STATE_ADDR_BY_RANK_ID(dstRankId) + offset);
             rankGMTensor.SetGlobalBuffer((__gm__ int32_t *)rankGM);
-            AscendC::DataCopy<int32_t>(rankGMTensor, statusTensor_[rankIndex * 8], 8UL);
+            AscendC::DataCopyPad<int32_t>(rankGMTensor, statusTensor_[rankIndex * 8], flagParams);
         }
     }
 
@@ -1429,19 +1430,19 @@ public:
 
             uint32_t recStatusNumPerCore = isShareExpert ? epRankSize : expertCntUp;
             uint32_t startStatusIndex = 0;
-            AscendC::DataCopyParams intriParams{static_cast<uint16_t>(recStatusNumPerCore), 1, 0, static_cast<uint16_t>(15)};
+            AscendC::DataCopyParams zerosParams{static_cast<uint16_t>(recStatusNumPerCore), 8, 0, static_cast<uint16_t>(15) * 32 + 24};
             AscendC::GlobalTensor<int32_t> windowInstatusInt32Tensor;
             windowInstatusInt32Tensor.SetGlobalBuffer((__gm__ int32_t *)GET_WIND_STATE_ADDR_BY_RANK_ID(epRankId));
 
             AscendC::LocalTensor<int32_t> tmpZeroLocalTensor = resource.ubBuf.template GetBufferByByte<int32_t>(0);
             int32_t zerosNum = expertCntUp * INT32_COUNT_PER_BLOCK > GROUP_INFO_SIZE * localExpertNum ? \
-                                expertCntUp * INT32_COUNT_PER_BLOCK : GROUP_INFO_SIZE * localExpertNum
+                                expertCntUp * INT32_COUNT_PER_BLOCK : GROUP_INFO_SIZE * localExpertNum;
             AscendC::Duplicate(tmpZeroLocalTensor, (int32_t)0, zerosNum);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
             AscendC::DataCopy(groupTokenNumStateTensor, tmpZeroLocalTensor, GROUP_INFO_SIZE * localExpertNum);
             AscendC::DataCopy(windowInstatusInt32Tensor[startStatusIndex * stateOffset / sizeof(int32_t)], tmpZeroLocalTensor, 
-                            intriParams);
+                            zerosParams);
         }
 
         if (isRecvCore && recvCoreIdx == (recvCoreNum - 1)) {
