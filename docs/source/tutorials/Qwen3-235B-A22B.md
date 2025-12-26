@@ -375,7 +375,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 Benchmark scripts:
 
 ```shell
-vllm bench serve --model qwen \
+vllm bench serve --model qwen3 \
 --tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --ignore-eos \
 --dataset-name random \
@@ -425,13 +425,14 @@ export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export TASK_QUEUE_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --host 0.0.0.0 \
 --port 8000 \
 --tensor-parallel-size 8 \
 --data-parallel-size 2 \
---data-parallel-size-local 8 \
+--data-parallel-size-local 2 \
 --data-parallel-start-rank 0 \
 --data-parallel-address prefill_node_1_ip \
 --data-parallel-rpc-port prefill_node_dp_port \
@@ -445,10 +446,10 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enforce-eager \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling \
+--enforce-eager \
+--no-enable-prefix-caching \
 --kv-transfer-config \
-'{"kv_connector": "MooncakeConnector",
+'{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_producer",
 "kv_port": "30000",
 "engine_id": "0",
@@ -490,6 +491,7 @@ export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export TASK_QUEUE_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --host 0.0.0.0 \
@@ -554,6 +556,7 @@ export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export TASK_QUEUE_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --host 0.0.0.0 \
@@ -605,7 +608,7 @@ python load_balance_proxy_server_example.py --port 12347 --prefiller-hosts prefi
 Benchmark scripts:
 
 ```shell
-vllm bench serve --model qwen \
+vllm bench serve --model qwen3 \
 --tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --ignore-eos \
 --dataset-name random \
