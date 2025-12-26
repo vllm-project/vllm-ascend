@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports long-sequence context parallel. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use vllm-ascend:|vllm_ascend_version| 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
+Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
 
 ## Environment Preparation
 
@@ -80,6 +80,7 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --host 0.0.0.0 \
@@ -97,7 +98,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --trust-remote-code \
   --gpu-memory-utilization 0.95 \
   --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,8]}' \
   --async-scheduling
 ```
 
@@ -136,7 +137,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen3-235B-A22B-w8a8` in vllm-ascend:|vllm_ascend_version| for reference only.
+2. After execution, you can get the result, here is the result of `Qwen3-235B-A22B-w8a8` for reference only.
 
 | dataset  | version | metric | mode | vllm-api-general-chat |
 |----------| ----- | ----- | ----- |-----------------------|
@@ -163,12 +164,12 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 131072 --num-prompt 1 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
 
 
-| dataset | version | metric      | mode | vllm-api-stream-chat |
-|---------| ----- |-------------|------|----------------------|
-| random  | - | performance | perf | 17.36                |
+| dataset | version | metric      | mode | ttft   |
+|---------| ----- |-------------|------|--------|
+| random  | - | performance | perf | 17.36s |
