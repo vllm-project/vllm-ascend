@@ -540,7 +540,7 @@ def split_qkv_gated_rmsnorm_rope_impl(
                            dtype=input.dtype)
 
     num_vectorcore = get_vectorcore_num()
-    grid = (num_vectorcore, )
+    grid = (min(num_vectorcore, bs), )
     split_qkv_gated_rmsnorm_rope_kernel[grid](
         input,
         sin,
