@@ -32,7 +32,7 @@ from vllm_ascend.utils import refresh_block_size
 # isort: off
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
                                COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_vl_model,
+                               enable_sp, get_ascend_device_type,
                                update_aclgraph_sizes,
                                update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes)
@@ -319,14 +319,6 @@ class NPUPlatform(Platform):
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
             )
-
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
-               bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
-                raise ValueError(
-                    "Currently, VL models doesn't support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
     @classmethod
     def import_kernels(cls) -> None:
