@@ -611,8 +611,8 @@ vllm bench serve --model qwen \
 --dataset-name random \
 --random-input-len 3584 \
 --random-output-len 1536 \
---num-prompts 800 \
---max-concurrency 160 \
+--num-prompts 2880 \
+--max-concurrency 576 \
 --request-rate inf \
 --host 0.0.0.0 \
 --port 12347 \
