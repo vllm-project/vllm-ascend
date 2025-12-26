@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports long-sequence context parallel. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use vllm-ascend:0.12.0rc2 (with vLLM v0.13.0) 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
+Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use vllm-ascend:|vllm_ascend_version| 1 Atlas 800 A3 (64G × 16) server to deploy the single node "pd co-locate" architecture.
 
 ## Environment Preparation
 
@@ -14,61 +14,50 @@ Using the `Qwen3-235B-A22B-w8a8`(Quantized version) model as an example, use vll
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-### Installation
-
-:::::{tab-set}
-::::{tab-item} Use docker image
-
-For example, using images `quay.io/ascend/vllm-ascend:v0.12.0rc2`(for Atlas 800 A3).
-
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+### Run with Docker
+Start a Docker container on each node.
 
 ```{code-block} bash
-  :substitutions:
-  # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-  # Update the vllm-ascend image according to your environment.
-  # Note you should download the weight to /root/.cache in advance.
-  # Update the vllm-ascend image
-  export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-  export NAME=vllm-ascend
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export NAME=vllm-ascend
 
-  # Run the container using the defined variables
-  # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-  docker run --rm \
-  --name $NAME \
-  --net=host \
-  --shm-size=1g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -it $IMAGE bash
+# Run the container using the defined variables
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+docker run --rm \
+--name $NAME \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci8 \
+--device /dev/davinci9 \
+--device /dev/davinci10 \
+--device /dev/davinci11 \
+--device /dev/davinci12 \
+--device /dev/davinci13 \
+--device /dev/davinci14 \
+--device /dev/davinci15 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /etc/hccn.conf:/etc/hccn.conf \
+-v /mnt/sfs_turbo/.cache:/root/.cache \
+-it $IMAGE bash
 ```
-
-::::
-::::{tab-item} Build from source
-
-You can build all from source.
-
-- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
-
-::::
-:::::
-
-If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## Deployment
 
@@ -93,23 +82,23 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
---host 0.0.0.0 \
---port 8000 \
---tensor-parallel-size 8 \
---prefill-context-parallel-size 2 \
---decode-context-parallel-size 2 \
---seed 1024 \
---quantization ascend \
---served-model-name qwen3 \
---max-num-seqs 1 \
---max-model-len 133000 \
---max-num-batched-tokens 133000 \
---enable-expert-parallel \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
---compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 8 \
+  --prefill-context-parallel-size 2 \
+  --decode-context-parallel-size 2 \
+  --seed 1024 \
+  --quantization ascend \
+  --served-model-name qwen3 \
+  --max-num-seqs 1 \
+  --max-model-len 133000 \
+  --max-num-batched-tokens 133000 \
+  --enable-expert-parallel \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.95 \
+  --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --async-scheduling
 ```
 
 **Notice:**
@@ -147,7 +136,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen3-235B-A22B-w8a8` in `vllm-ascend:0.12.0rc2` for reference only.
+2. After execution, you can get the result, here is the result of `Qwen3-235B-A22B-w8a8` in vllm-ascend:|vllm_ascend_version| for reference only.
 
 | dataset  | version | metric | mode | vllm-api-general-chat |
 |----------| ----- | ----- | ----- |-----------------------|
@@ -178,3 +167,8 @@ vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random
 ```
 
 After about several minutes, you can get the performance evaluation result.
+
+
+| dataset | version | metric      | mode | vllm-api-stream-chat |
+|---------| ----- |-------------|------|----------------------|
+| random  | - | performance | perf | 17.36                |
