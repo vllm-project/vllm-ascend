@@ -252,13 +252,45 @@ jobs:
         - name: Stream logs
           run: |
             set -euo pipefail
+
+            size="${{ inputs.size }}"
+            pids=()
+
+            cleanup() {
+              echo "Cleaning up background log streams..."
+              for pid in "${pids[@]}"; do
+                kill "$pid" 2>/dev/null || true
+              done
+            }
+            trap cleanup EXIT
+
+            for i in $(seq 1 $((size - 1))); do
+              POD="vllm-0-${i}"
+
+              echo "==== Collecting logs from worker pod: $POD ===="
+              kubectl logs -f "$POD" -n "$NAMESPACE" \
+                > "/tmp/${POD}_logs.txt" 2>&1 &
+
+              pids+=($!)
+            done
+
+            echo "==== Streaming logs from leader pod: $LEADER_POD ===="
             echo "Looking for logs containing: $FAIL_TAG"
-            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while read -r line; do
+
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while IFS= read -r line; do
               echo "$line"
               if echo "$line" | grep -q "$FAIL_TAG"; then
-                exit 1   # workflow step failed
+                exit 1
               fi
             done
+
+        - name: Upload logs
+          if: always()
+          uses: actions/upload-artifact@v4
+          with:
+            name: pod-logs
+            path: /tmp/vllm*_logs.txt
+            retention-days: 7
 
         - name: Post process
           if: always()
