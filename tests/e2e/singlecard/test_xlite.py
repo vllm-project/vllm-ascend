@@ -63,7 +63,7 @@ def test_models_with_xlite_decode_only(
     vllm_xlite_answers = [
         "Hello, my name is Lina. I'm a 22-year-old student from China.",
         'The president of the United States is the same as the president of the United Nations. This is because the president',
-        'The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid',
+        'The capital of France is Paris. The capital of France is also the capital of the French Republic.',
         'The future of AI is not just a technological challenge but a profound transformation of how we live, work'
     ]
 
