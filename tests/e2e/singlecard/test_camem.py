@@ -37,7 +37,9 @@ def test_end_to_end():
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
-    with VllmRunner("Qwen/Qwen3-0.6B", enable_sleep_mode=True) as runner:
+    with VllmRunner("Qwen/Qwen3-0.6B",
+                    enable_sleep_mode=True,
+                    cudagraph_capture_sizes=[1, 2, 4, 8]) as runner:
 
         output = runner.model.generate(prompt, sampling_params)
         # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
