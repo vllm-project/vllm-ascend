@@ -17,6 +17,7 @@
 
 ### Environment Variable Configuration
 To guarantee uniform hash generation, it is required to synchronize the PYTHONHASHSEED environment variable across all nodes upon enabling KV Pool.
+
 ```bash
 export PYTHONHASHSEED=0
 ```
@@ -96,6 +97,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
 }
 ```
+
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
@@ -256,6 +258,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 ```
 
 #### 2.Start proxy_server.
+
 ```
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
     --host localhost\
@@ -264,6 +267,7 @@ python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_e
     --decoder-hosts localhost\
     --decoder-ports 8200 \
 ```
+
 Change localhost to your actual IP address.
 
 #### 3.Run Inference
