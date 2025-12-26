@@ -23,9 +23,10 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ## Environment Preparation
 
 ### Model Weight
-- `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1)
+- `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
 - `DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-w8a8).
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
+- `DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to `bfloat16` in `config.json`.
+- `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
 - `Method of Quantify`: [msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -105,6 +106,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
@@ -116,22 +118,25 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --seed 1024 \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
+--async-scheduling \
 --max-num-seqs 16 \
 --max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
+--compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 **Notice:**
 The parameters are explained as follows:
 - Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
+- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
 ### Multi-node Deployment
 
@@ -169,6 +174,7 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
@@ -184,14 +190,15 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --seed 1024 \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
---max-num-seqs 20 \
+--async-scheduling \
+--max-num-seqs 16 \
 --max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.94 \
---speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--gpu-memory-utilization 0.92 \
+--speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
+--compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 **Node 1**
@@ -223,6 +230,7 @@ export OMP_NUM_THREADS=10
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 
@@ -240,14 +248,15 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --seed 1024 \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
---max-num-seqs 20 \
+--async-scheduling \
+--max-num-seqs 16 \
 --max-model-len 16384 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.94 \
+--gpu-memory-utilization 0.92 \
 --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 ### Prefill-Decode Disaggregation
