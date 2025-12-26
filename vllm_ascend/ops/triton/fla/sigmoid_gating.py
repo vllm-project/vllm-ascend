@@ -360,7 +360,7 @@ def fused_sigmoid_gating_delta_rule_update(
     if not initial_state_indices.is_contiguous():
         initial_state_indices = initial_state_indices.contiguous()
     if not initial_state_source.is_contiguous():
-        initial_state_source_contiguous = initial_state_source.contiguous()
+        initial_state_source = initial_state_source.contiguous()
     if not cu_seqlens.is_contiguous():
         cu_seqlens = cu_seqlens.contiguous()
 
@@ -375,7 +375,7 @@ def fused_sigmoid_gating_delta_rule_update(
         v=v,
         b=b,
         o=o,
-        h0_source=initial_state_source_contiguous,
+        h0_source=initial_state_source,
         h0_indices=initial_state_indices,
         cu_seqlens=cu_seqlens,
         scale=scale,
@@ -391,7 +391,5 @@ def fused_sigmoid_gating_delta_rule_update(
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    initial_state_source.copy_(
-        initial_state_source_contiguous.view_as(initial_state_source))
     o = o.squeeze(0)
     return o
