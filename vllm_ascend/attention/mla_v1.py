@@ -1183,13 +1183,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 # Input shape: [num_tokens, seq_len, num_heads, dim]
                 input_layout = "BSND_NBSD"
                 q_nope = q_nope.view(num_tokens, 1, self.num_heads,
-                                    -1).contiguous()
+                                     -1).contiguous()
                 q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
             else:
                 # Input shape: [num_tokens, num_heads, seq_len, dim]
                 input_layout = "BNSD_NBSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1,
-                                    -1).contiguous()
+                                     -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             # Output shape: [num_heads, num_tokens, seq_len, dim]
             attn_output_shape = (self.num_heads, num_tokens, 1,

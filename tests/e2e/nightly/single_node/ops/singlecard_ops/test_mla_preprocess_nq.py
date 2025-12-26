@@ -1,11 +1,13 @@
 import gc
 
+import pytest
 import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
+
 
 @pytest.mark.parametrize("cache_mode", ["krope_ctkv", "nzcache"])
 @torch.inference_mode()
