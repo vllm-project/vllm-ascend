@@ -20,8 +20,7 @@ Its main objective is to eliminate duplicated storage of the KV cache by shardin
 DCP primarily influences the Decode logic, as well as the logic for chunked prefill and cached prefill.
 
 ## How to Use CP?
-<!--TODO(qcs): change cross-reference target to user_guide-->
-Please refer to the CP section of the user guide for detailed information: [How to Use CP]
+Please refer to the [context parallel user guide](../../user_guide/feature_guide/context_parallel.md) for detailed information.
 
 ## How It Works?
 
