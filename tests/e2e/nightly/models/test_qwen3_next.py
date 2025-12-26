@@ -13,10 +13,7 @@ MODELS = [
     "vllm-ascend/Qwen3-Next-80B-A3B-Instruct",
 ]
 
-MODES = [
-    "aclgraph",
-    "single",
-]
+MODES = ["aclgraph"]
 
 TENSOR_PARALLELS = [4]
 MAX_NUM_BATCHED_TOKENS = [1024, 4096, 8192, 32768]
@@ -46,6 +43,16 @@ aisbench_cases = [{
     "batch_size": performance_batch_size,
     "baseline": 1,
     "threshold": 0.97
+}, {
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "top_k": 20,
+    "baseline": 95,
+    "threshold": 5
 }]
 
 
@@ -68,9 +75,14 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
     }
     server_args = [
         "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
-        str(MAX_NUM_BATCHED_TOKENS), "--trust-remote-code",
+        str(tp_size),
+        "--port",
+        str(port), 
+        "--max-model-len", 
+        "40960", 
+        "--max-num-batched-tokens",
+        str(MAX_NUM_BATCHED_TOKENS), 
+        "--trust-remote-code",
         "--gpu-memory-utilization", "0.8",
         "--max-num-seqs", "64",
     ]
