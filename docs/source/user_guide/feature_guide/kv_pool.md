@@ -18,7 +18,7 @@
 ### Environment Variable Configuration
 To guarantee uniform hash generation, it is required to synchronize the PYTHONHASHSEED environment variable across all nodes upon enabling KV Pool.
 ```bash
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 ```
 
 ## Example of using Mooncake as a KV Pool backend
@@ -98,7 +98,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 ``` 
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
-**device_name**: ""    
+**device_name**: ""
 **master_server_address**: Configured with the IP and port of the master service.  
 **global_segment_size**: Registered memory size per card to the KV Pool.
 
