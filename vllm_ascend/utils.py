@@ -1088,8 +1088,10 @@ def replace_layer(original_layer: Any, new_layer: Any):
 
 def singleton(cls):
     instances = {}
+
     def get_instance(*args, **kwargs):
         if cls not in instances:
             instances[cls] = cls(*args, **kwargs)
         return instances[cls]
+
     return get_instance

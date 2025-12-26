@@ -439,7 +439,8 @@ class AscendMLAMetadataBuilder:
             num_decodes=self.num_decodes,
             num_decode_tokens=self.num_decode_tokens,
             num_prefills=self.num_prefills,
-            attn_mask=self.attn_mask_builder.get_final_mla_mask(self.model_config, common_attn_metadata.attn_state),
+            attn_mask=self.attn_mask_builder.get_final_mla_mask(
+                self.model_config, common_attn_metadata.attn_state),
             attn_state=common_attn_metadata.attn_state,
             prefill=prefill_metadata,
             decode=decode_metadata,
@@ -548,7 +549,8 @@ class AscendMLAMetadataBuilder:
             prefill_input_positions].unsqueeze(  # type: ignore
                 1).unsqueeze(2)
         return AscendMLAPrefillMetadata(
-            attn_mask=self.attn_mask_builder.get_final_mla_mask(self.model_config, common_attn_metadata.attn_state),
+            attn_mask=self.attn_mask_builder.get_final_mla_mask(
+                self.model_config, common_attn_metadata.attn_state),
             query_lens=self.query_lens[reqs_start:].to(torch.int32),
             seq_lens=self.seq_lens,
             context_lens=self.seq_lens[reqs_start:],
@@ -657,7 +659,8 @@ class AscendMLAMetadataBuilder:
                 seq_lens=self.seq_lens,
                 seq_lens_list=seq_lens_list,
                 max_seq_lens=max_seq_lens,
-                attn_mask=self.attn_mask_builder.get_final_mla_mask(self.model_config, common_attn_metadata.attn_state),
+                attn_mask=self.attn_mask_builder.get_final_mla_mask(
+                    self.model_config, common_attn_metadata.attn_state),
                 actual_seq_lengths_q=actual_seq_lengths_q,
                 sin=sin,
                 cos=cos,
@@ -677,7 +680,8 @@ class AscendMLAMetadataBuilder:
                 seq_lens=self.seq_lens,
                 seq_lens_list=seq_lens_list,
                 max_seq_lens=max_seq_lens,
-                attn_mask=self.attn_mask_builder.get_final_mla_mask(self.model_config, common_attn_metadata.attn_state),
+                attn_mask=self.attn_mask_builder.get_final_mla_mask(
+                    self.model_config, common_attn_metadata.attn_state),
                 actual_seq_lengths_q=actual_seq_lengths_q,
                 sin=sin[:self.num_decode_tokens, ...],
                 cos=cos[:self.num_decode_tokens, ...],
@@ -1238,8 +1242,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
                  weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
                  self.num_heads, self.num_kv_heads, input_layout,
-                 weak_ref_tensors(attn_mask) if attn_mask is not None
-                 else None, sparse_mode, self.scale, decode_meta.block_table,
+                 weak_ref_tensors(attn_mask) if attn_mask is not None else
+                 None, sparse_mode, self.scale, decode_meta.block_table,
                  block_size, decode_meta.seq_lens_list, actual_seq_lengths,
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
 

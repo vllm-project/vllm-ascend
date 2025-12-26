@@ -250,7 +250,8 @@ class AscendAttentionMetadataBuilder:
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
-            attn_mask=self.attn_mask_builder.get_attention_mask(self.model_config),
+            attn_mask=self.attn_mask_builder.get_attention_mask(
+                self.model_config),
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,

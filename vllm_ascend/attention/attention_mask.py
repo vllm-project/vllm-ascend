@@ -86,7 +86,8 @@ class AttentionMaskBuilder:
 
         return self.get_splitfuse_attn_mask()
 
-    def get_final_mla_mask(self, model_config: ModelConfig, attn_state: AscendAttentionState):
+    def get_final_mla_mask(self, model_config: ModelConfig,
+                           attn_state: AscendAttentionState):
         if get_pcp_group().world_size > 1:
             return self.get_pcp_mla_mask(model_config.dtype)
         if attn_state != AscendAttentionState.DecodeOnly:
