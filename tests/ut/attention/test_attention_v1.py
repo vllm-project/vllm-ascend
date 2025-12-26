@@ -113,8 +113,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
-            attn_mask=torch.ones((15, 15)),
-            spec_attn_mask=None,
             attn_state=AscendAttentionState.ChunkedPrefill,
             num_computed_tokens_cpu=None,
             seq_lens=None,
