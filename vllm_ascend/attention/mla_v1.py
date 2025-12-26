@@ -1178,8 +1178,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
-            # Input shape: [num_tokens, num_heads, seq_len, dim]
-            # Output shape: [num_heads, num_tokens, seq_len, dim]
+            # Input shape: [num_reqs, num_heads, seq_len, dim]
+            # Output shape: [num_heads, num_reqs, seq_len, dim]
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
             input_layout = "BNSD_NBSD"
