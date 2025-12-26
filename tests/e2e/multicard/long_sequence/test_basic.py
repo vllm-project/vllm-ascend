@@ -122,6 +122,7 @@ def test_models_pcp_dcp_piece_wise():
                     decode_context_parallel_size=2,
                     max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
 
@@ -132,6 +133,7 @@ def test_models_pcp_dcp_piece_wise():
                     prefill_context_parallel_size=2,
                     decode_context_parallel_size=1,
                     enable_expert_parallel=True,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     block_size=128,
                     quantization="ascend") as runner:
         runner.model.generate(prompts, sampling_params)

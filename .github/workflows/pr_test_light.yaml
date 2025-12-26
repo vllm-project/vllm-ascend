@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: bc0a5a0c089844b17cb93f3294348f411e523586
+      vllm: 254f6b986720c92ddf97fbb1a6a6465da8e87e29
   changes:
     runs-on: linux-aarch64-a2-0
     outputs:
@@ -90,7 +90,7 @@ jobs:
         SOC_VERSION: ascend910b1
     strategy:
       matrix:
-        vllm_version: [bc0a5a0c089844b17cb93f3294348f411e523586, v0.13.0]
+        vllm_version: [254f6b986720c92ddf97fbb1a6a6465da8e87e29, v0.13.0]
 
     steps:
       - name: Free up disk space
@@ -160,7 +160,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [bc0a5a0c089844b17cb93f3294348f411e523586, v0.13.0]
+        vllm_version: [254f6b986720c92ddf97fbb1a6a6465da8e87e29, v0.13.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
