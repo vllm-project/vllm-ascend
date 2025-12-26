@@ -50,7 +50,7 @@ If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | bc0a5a0c089844b17cb93f3294348f411e523586, v0.13.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
+|     main    | 254f6b986720c92ddf97fbb1a6a6465da8e87e29, v0.13.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
 
 ## Release cadence
 
