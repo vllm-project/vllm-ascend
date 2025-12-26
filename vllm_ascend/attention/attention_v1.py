@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendMetadataForDecode,
                                          AscendMetadataForPrefill, enable_cp,
@@ -208,6 +209,7 @@ class AscendAttentionMetadataBuilder:
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+        self.attn_mask_builder = AttentionMaskBuilder()
 
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -232,7 +234,6 @@ class AscendAttentionMetadataBuilder:
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
-        attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
@@ -249,7 +250,7 @@ class AscendAttentionMetadataBuilder:
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
-            attn_mask=attn_mask,
+            attn_mask=self.attn_mask_builder.get_attention_mask(self.model_config),
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,

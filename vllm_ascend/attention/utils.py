@@ -50,7 +50,6 @@ class AscendMetadataForPrefill:
         head_attn_nomask_seqlens: torch.Tensor = None
         tail_attn_nomask_seqlens: torch.Tensor = None
         q_full_idx: torch.Tensor = None
-        pcp_prefill_mask: torch.Tensor = None
 
     @dataclass
     class ChunkedContextMetadata:
@@ -138,10 +137,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     positions: torch.Tensor = None
 
-    attn_mask: torch.Tensor = None
-
-    spec_attn_mask: torch.Tensor = None
-
     attn_state: Any = None
 
     graph_pad_size: int = -1
@@ -173,8 +168,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions[:num_actual_tokens],
-            attn_mask=self.attn_mask,
-            spec_attn_mask=self.spec_attn_mask,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,

@@ -1084,3 +1084,12 @@ def dispose_layer(layer: Any):
 def replace_layer(original_layer: Any, new_layer: Any):
     original_layer.__class__ = new_layer.__class__
     original_layer.__dict__ = new_layer.__dict__
+
+
+def singleton(cls):
+    instances = {}
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+    return get_instance
