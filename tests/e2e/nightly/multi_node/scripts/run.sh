@@ -13,6 +13,7 @@ LOG_DIR="/root/.cache/tests/logs"
 OVERWRITE_LOGS=true
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+export VLLM_LOGGING_LEVEL="DEBUG"
 
 # Function to print section headers
 print_section() {
@@ -124,27 +125,18 @@ kill_npu_processes() {
   sleep 4
 }
 
-upgrade_vllm_ascend_scr() {
-    # Fix me(Potabk): Remove this once our image build use 
-    # The separate architecture build process currently suffers from errors during cross-compilation
-    # causing the image to fail to build correctly. 
-    # This results in the nightly test code not being the latest version.
-    cd "$WORKSPACE/vllm-ascend"
-    git pull origin main
-    
-}
-
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/test_multi_node.py
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed!"
+            print_failure "Some tests failed, please check the error stack above for details.\
+            If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
 }
@@ -156,7 +148,6 @@ main() {
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi
-    upgrade_vllm_ascend_scr
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
