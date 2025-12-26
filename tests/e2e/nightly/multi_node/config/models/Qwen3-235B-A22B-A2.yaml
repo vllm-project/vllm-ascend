@@ -9,6 +9,7 @@ env_common:
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128
+  TASK_QUEUE_ENABLE: 1
 
 deployment:
   -
@@ -29,6 +30,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+        --async-scheduling
   -
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
@@ -47,6 +49,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+        --async-scheduling
 benchmarks:
   acc:
     case_type: accuracy
