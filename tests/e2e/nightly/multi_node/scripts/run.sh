@@ -128,14 +128,15 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/test_multi_node.py
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed!"
+            print_failure "Some tests failed, please check the error stack above for details.\
+            If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
 }

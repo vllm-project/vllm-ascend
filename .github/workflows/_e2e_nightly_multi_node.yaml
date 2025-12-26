@@ -280,7 +280,6 @@ jobs:
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while IFS= read -r line; do
               echo "$line"
               if echo "$line" | grep -q "$FAIL_TAG"; then
-                echo "FAIL_TAG found in leader pod logs"
                 exit 1
               fi
             done
