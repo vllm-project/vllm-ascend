@@ -287,29 +287,30 @@ class QKNormRopeFusionPatternWithGate:
             q_norm, _ = torch.ops.npu.npu_rms_norm(
                 q.view(-1, self.num_heads, self.head_dim), 1.0 + q_weight,
                 self.eps)
-            q_norm = q_norm.view(-1, self.num_heads * self.head_dim)
+            q = q_norm.view(-1, self.num_heads * self.head_dim)
             k_norm, _ = torch.ops.npu.npu_rms_norm(
                 k.view(-1, self.num_kv_heads, self.head_dim), 1.0 + k_weight,
                 self.eps)
-            k_norm = k_norm.view(-1, self.num_kv_heads * self.head_dim)
+            k = k_norm.view(-1, self.num_kv_heads * self.head_dim)
 
             # q rope & k rope
-            q_shape, k_shape = q_norm.shape, k_norm.shape
-            q_norm = q_norm.view(q_norm.shape[0], -1, self.head_dim)
-            k_norm = k_norm.view(k_norm.shape[0], -1, self.head_dim)
-            q_rope, k_rope = torch.ops.vllm.rope_forward(q_norm,
-                                                         k_norm,
-                                                         cos,
-                                                         sin,
-                                                         self.rope_dim,
-                                                         is_neox_style=True)
-
-            return q_rope.view(q_shape), gate, k_rope.view(k_shape), v
+            q_shape, k_shape = q.shape, k.shape
+            q = q.view(q.shape[0], -1, self.head_dim)
+            k = k.view(k.shape[0], -1, self.head_dim)
+            q, k = torch.ops.vllm.rope_forward(q,
+                                               k,
+                                               cos,
+                                               sin,
+                                               self.rope_dim,
+                                               is_neox_style=True)
+            q = q.view(q_shape)
+            k = k.view(k_shape)
+            return q, gate, k, v
 
         def replacement(qkv: torch.Tensor, q_weight: torch.Tensor,
                         k_weight: torch.Tensor, cos: torch.Tensor,
                         sin: torch.Tensor):
-            results = torch.ops.vllm.qkv_gated_rmsnorm_rope(
+            q, gate, k, v = torch.ops.vllm.qkv_gated_rmsnorm_rope(
                 input=qkv,
                 sin=sin,
                 cos=cos,
@@ -322,8 +323,7 @@ class QKNormRopeFusionPatternWithGate:
                 head_dim=self.head_dim,
                 rope_dim=self.rope_dim,
                 eps=self.eps)
-
-            return results
+            return q, gate, k, v
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
