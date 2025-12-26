@@ -28,20 +28,15 @@ class VllmbenchRunner:
     def _run_vllm_bench_task(self):
         vllm_bench_cmd = [
             'vllm', 'bench', 'serve', '--backend', 'openai-chat',
-            '--dataset-name', 'random', '--trust-remote-code',
-            '--served-model-name',
-            str(self.model_name), '--model', self.model_path,
-            '--random-input-len',
-            str(self.input_len), '--random-output-len',
-            str(self.output_len), '--num-prompts',
-            str(self.num_prompts), '--max-concurrency',
-            str(self.max_concurrency), '--request-rate',
-            str(self.request_rate), '--ignore-eos', '--metric-percentiles',
-            '50,90,99', '--host', self.host_ip, '--port',
+            '--trust-remote-code', '--served-model-name',
+            str(self.model_name), '--model', self.model_path, '--tokenizer',
+            self.model_path, '--metric-percentiles', '50,90,99', '--host',
+            self.host_ip, '--port',
             str(self.port), '--save-result', '--result-filename',
             self.result_filename, '--endpoint', '/v1/chat/completions',
-            '--temperature', '0', '--ready-check-timeout-sec', '0'
+            '--ready-check-timeout-sec', '0'
         ]
+        self._concat_config_args(vllm_bench_cmd)
         print(f"running vllm_bench cmd: {' '.join(vllm_bench_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(vllm_bench_cmd,
                                                        stdout=subprocess.PIPE,
@@ -49,29 +44,36 @@ class VllmbenchRunner:
                                                        text=True)
 
     def __init__(self,
-                 model: str,
+                 model_name: str,
                  port: int,
                  config: dict,
+                 model_path: str = "",
                  host_ip: str = "localhost"):
-        self.model_name = model
-        self.model_path = config.get("model_path")
+        self.model_name = model_name
+        self.model_path = model_path
         if not self.model_path:
-            self.model_path = maybe_download_from_modelscope(model)
+            self.model_path = maybe_download_from_modelscope(model_name)
         assert self.model_path is not None, \
             f"Failed to download model: model={self.model_path}"
         self.port = port
         self.host_ip = host_ip
-        self.input_len = config["input_len"]
-        self.output_len = config["output_len"]
-        self.max_concurrency = config["max_concurrency"]
-        self.num_prompts = config.get("num_prompts", self.max_concurrency * 4)
-        self.request_rate = config["request_rate"]
         curr_time = datetime.now().strftime('%Y%m%d%H%M%S')
         self.result_filename = f"result_vllm_bench_{curr_time}.json"
+        self.config = config
 
         self._run_vllm_bench_task()
         self._wait_for_task()
         self._get_result()
+
+    def _concat_config_args(self, vllm_bench_cmd):
+        if "ignore_eos" in self.config:
+            if self.config["ignore_eos"]:
+                self.config["ignore_eos"] = ""
+            else:
+                self.config.pop("ignore_eos")
+        for key, value in self.config.items():
+            key = "--" + key.replace("_", "-")
+            vllm_bench_cmd += [key, str(value)]
 
     def __enter__(self):
         return self
@@ -103,9 +105,16 @@ class VllmbenchRunner:
             self.result = json.load(f)
 
 
-def run_vllm_bench_case(model, port, config, host_ip="localhost"):
+def run_vllm_bench_case(model_name,
+                        port,
+                        config,
+                        model_path="",
+                        host_ip="localhost"):
     try:
-        with VllmbenchRunner(model, port, config,
+        with VllmbenchRunner(model_name,
+                             port,
+                             config,
+                             model_path=model_path,
                              host_ip=host_ip) as vllm_bench:
             vllm_bench_result = vllm_bench.result
     except Exception as e:
