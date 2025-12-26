@@ -788,9 +788,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
-        self.num_actual_tokens = 0
-        self.context_seq_len_npu = None
-
     def _v_up_proj(self, x):
         if x.dtype in [torch.float16, torch.bfloat16] \
                 and hasattr(torch.ops._C_ascend, "batch_matmul_transpose"):
@@ -954,7 +951,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
-    def set_context_seq_len_npu(self, index: int,
+    def get_context_seq_len_npu(self, index: int,
                                 attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
@@ -962,8 +959,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert prefill_metadata.chunked_context.chunk_seq_lens_npu is not None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         assert 0 <= index < iters
-        self.context_seq_len_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
-            index]
+        return prefill_metadata.chunked_context.chunk_seq_lens_npu[index]
 
     def _reorg_kvcache(
         self,
@@ -1004,7 +1000,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
                 i]
             seq_len = torch.stack([current_seq_len, context_seq_len])
-            self.set_context_seq_len_npu(i, attn_metadata)
+            context_seq_len_npu = self.get_context_seq_len_npu(
+                i, attn_metadata)
             kv_c_normed = torch.empty(toks,
                                       num_heads,
                                       latent_kv_dim,
@@ -1020,7 +1017,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                self.context_seq_len_npu,
+                context_seq_len_npu,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
@@ -1450,8 +1447,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_c, kv_no_split, kv_cache, attn_metadata)
         return decode_preprocess_res, prefill_preprocess_res
 
-    def set_num_actual_tokens(self, attn_metadata: M):
-        self.num_actual_tokens = attn_metadata.num_actual_tokens
+    def get_num_actual_tokens(self, attn_metadata: M):
+        return attn_metadata.num_actual_tokens
 
     def forward(
         self,
@@ -1471,7 +1468,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return output.fill_(0)
 
         forward_context = get_forward_context()
-        self.set_num_actual_tokens(attn_metadata)
+        num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert attn_metadata.num_decodes is not None and \
                attn_metadata.num_prefills is not None and \
                attn_metadata.num_decode_tokens is not None
@@ -1516,8 +1513,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_preprocess_res.k_nope, prefill_preprocess_res.k_pe,
                 prefill_preprocess_res.value, kv_cache, attn_metadata)
 
-            o_proj_input[num_decode_tokens:self.
-                         num_actual_tokens] = output_prefill
+            o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
         maybe_npu_prefetch(inputs=self.o_proj.weight,

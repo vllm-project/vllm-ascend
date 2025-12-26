@@ -277,6 +277,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.dcp_group = get_dcp_group(
         ).device_group if self.dcp_size > 1 else None
 
+    def get_num_actual_tokens(self, attn_metadata: M):
+        if self.pcp_size > 1:
+            return attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
+        else:
+            return attn_metadata.num_actual_tokens
+
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -364,7 +370,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         return DecodeMLAPreprocessResult(decode_ql_nope, decode_q_pe,
                                          decode_k_nope, decode_k_pe)
 
-    def set_context_seq_len_npu(self, index: int,
+    def get_context_seq_len_npu(self, index: int,
                                 attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
@@ -374,7 +380,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         assert prefill_metadata.chunked_context.padded_chunk_seq_lens_npu is not None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         assert 0 <= index < iters
-        self.context_seq_len_npu = prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[
+        return prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[
             index]
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
