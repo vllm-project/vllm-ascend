@@ -117,8 +117,8 @@ def mock_dist_env(mocker: MockerFixture):
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
-        patch('vllm_ascend.ops.fused_moe.fused_moe.determine_expert_map',
-            return_value=(3, torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]))), \
+        patch('vllm_ascend.ops.fused_moe.fused_moe.init_eplb_config',
+            return_value=(torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]), None, 0)), \
         patch('vllm_ascend.ops.fused_moe.fused_moe.get_forward_context',
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
