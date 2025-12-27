@@ -169,7 +169,6 @@ vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random
 
 After about several minutes, you can get the performance evaluation result.
 
-
 | dataset | version | metric      | mode | ttft   |
 |---------| ----- |-------------|------|--------|
 | random  | - | performance | perf | 17.36s |
