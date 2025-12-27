@@ -17,6 +17,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+set -euo pipefail
 
 cd /vllm-workspace
 # download fused_infer_attention_score related source files
