@@ -14,41 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional
-from uuid import uuid4
 
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
-
-
-def check_kv_extra_config(vllm_config):
-
-    def _check(name: str, config: dict):
-        tp_key = "tp_size"
-        dp_key = "dp_size"
-        if tp_key in config:
-            config_tp = config[tp_key]
-            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
-            if config_tp != vllm_tp:
-                raise ValueError(
-                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
-                    f"Expected {vllm_tp}, but got {config_tp}.")
-        if dp_key in config:
-            config_dp = config[dp_key]
-            vllm_dp = vllm_config.parallel_config.data_parallel_size
-            if config_dp != vllm_dp:
-                raise ValueError(
-                    f"KV transfer '{name}' config has a conflicting data parallel size. "
-                    f"Expected {vllm_dp}, but got {config_dp}.")
-
-    if vllm_config.kv_transfer_config.is_kv_producer:
-        _check(
-            "prefill",
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "prefill", {}))
-    if vllm_config.kv_transfer_config.is_kv_consumer:
-        _check(
-            "decode",
-            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
 
 
 class AscendConfig:
@@ -74,8 +42,7 @@ class AscendConfig:
             finegrained_tp_config, vllm_config)
 
         # Dump / PrecisionDebugger configuration
-        dump_config_path = additional_config.get("dump_config", None)
-        self.dump_config = DumpConfig(dump_config_path)
+        self.dump_config_path = additional_config.get("dump_config_path", None)
 
         weight_prefetch_config = additional_config.get(
             "weight_prefetch_config", {})
@@ -96,8 +63,6 @@ class AscendConfig:
         self.gate_eplb = additional_config.get("gate_eplb", False)
         self.num_wait_worker_iterations = additional_config.get(
             "num_wait_worker_iterations", 30)
-        self.chunked_prefill_for_mla = additional_config.get(
-            "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp",
             False) and vllm_config.parallel_config.enable_expert_parallel
@@ -113,9 +78,6 @@ class AscendConfig:
             "recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
-
-        if vllm_config.kv_transfer_config is not None:
-            check_kv_extra_config(vllm_config)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -156,16 +118,8 @@ class AscendConfig:
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
 
-        kv_cfg = vllm_config.kv_transfer_config
-        if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
-                                              False):
-            kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
-            kv_cfg._engine_id_patched = True
-        self.enable_async_exponential = additional_config.get(
-            "enable_async_exponential", 0)
-        if self.enable_async_exponential not in (0, 1):
-            raise AssertionError(
-                "Enable async exponential can only be set to 0 or 1.")
+        self.enable_async_exponential = bool(
+            additional_config.get("enable_async_exponential", False))
 
 
 class FinegrainedTPConfig:
@@ -272,18 +226,6 @@ class XliteGraphConfig:
                 raise RuntimeError(
                     "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
                 )
-
-
-class DumpConfig:
-    """
-    Configuration object for dump/PrecisionDebugger settings.
-    """
-
-    def __init__(self, dump_config_path: Optional[str] = None):
-        # enable_dump is True when dump_cfg exists and config_path is not empty
-        self.enable_dump: bool = bool(dump_config_path)
-        # Path to msprobe config json; may be None.
-        self.config_path: Optional[str] = dump_config_path
 
 
 class WeightPrefetchConfig:

@@ -89,6 +89,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
         max_tokens=500,
         structured_outputs=StructuredOutputsParams(json=sample_json_schema))
     runner_kwargs = {
+        "cudagraph_capture_sizes": [1, 2, 4, 8],
         "seed": 0,
         "structured_outputs_config": {
             "backend": guided_decoding_backend
@@ -128,6 +129,7 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
         top_p=0.95,
         structured_outputs=StructuredOutputsParams(regex=sample_regex))
     runner_kwargs = {
+        "cudagraph_capture_sizes": [1, 2, 4, 8],
         "seed": 0,
         "structured_outputs_config": {
             "backend": guided_decoding_backend

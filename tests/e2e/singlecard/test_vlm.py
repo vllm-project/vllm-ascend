@@ -47,6 +47,7 @@ def test_multimodal_vl(vl_config):
     with VllmRunner(vl_config["model"],
                     mm_processor_kwargs=vl_config["mm_processor_kwargs"],
                     max_model_len=8192,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     limit_mm_per_prompt={"image": 1}) as vllm_model:
         outputs = vllm_model.generate_greedy(
             prompts=prompts,
@@ -89,6 +90,7 @@ def test_multimodal_audio():
                     max_num_seqs=5,
                     dtype="bfloat16",
                     limit_mm_per_prompt={"audio": 2},
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     gpu_memory_utilization=0.9) as runner:
         outputs = runner.generate(inputs, sampling_params=sampling_params)
 
