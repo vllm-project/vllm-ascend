@@ -78,12 +78,22 @@ def set_ascend_forward_context(
         else:
             sp_enabled = enable_sp(vllm_config) and \
                 num_tokens is not None and num_tokens > 1000
+
+        spec_cfg = getattr(vllm_config, "speculative_config", None)
+        method = getattr(spec_cfg, "method", None) if spec_cfg else None
+        is_eagle = method in ("eagle", "eagle3")
+        if is_eagle:
+            sp_enabled = False
+
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.sp_enabled = sp_enabled
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         forward_context.flashcomm_v2_enabled = flashcomm2_enable(
         ) and tp_world_size > 1 and num_tokens is not None
+        
+        if is_eagle:
+            forward_context.flashcomm_v2_enabled = False
 
         if (forward_context.sp_enabled
                 or forward_context.flashcomm_v2_enabled):
