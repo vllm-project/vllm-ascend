@@ -1200,7 +1200,7 @@ class NPUModelRunner(GPUModelRunner):
             if pad_size > 0:
                 hidden_states = hidden_states[:-pad_size, :]
 
-        if self.pcp_size > 1:
+        if self.pcp_size > 1 and get_pp_group().is_last_rank:
             hidden_states = get_pcp_group().all_gather(
                 hidden_states[:self.num_actual_tokens_pcp_padded //
                               self.pcp_size], 0)
@@ -2105,19 +2105,24 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
                 # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
-                actual_tokens = num_tokens
+                intermediate_tokens = num_tokens_padded
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
-                    actual_tokens = num_tokens // tp_size
+                    intermediate_tokens = (num_tokens_padded + tp_size -
+                                           1) // tp_size
                 if self.intermediate_tensors is None:
+                    max_actual_tokens = self.max_num_tokens
+                    if enable_sp():
+                        max_actual_tokens = (self.max_num_tokens + tp_size -
+                                             1) // tp_size
                     self.intermediate_tensors = (
                         self.model.make_empty_intermediate_tensors(
-                            batch_size=actual_tokens,
+                            batch_size=max_actual_tokens,
                             dtype=self.dtype,
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
                     k:
-                    v[:num_tokens_padded]
+                    v[:intermediate_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
 
