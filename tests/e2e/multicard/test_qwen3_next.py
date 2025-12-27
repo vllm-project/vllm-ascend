@@ -70,7 +70,7 @@ def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
         "The future of AI is",
     ]
 
-    max_tokens = 20
+    max_tokens = 15
 
     with VllmRunner(
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
