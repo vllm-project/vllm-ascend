@@ -9,7 +9,7 @@ from vllm.v1.sample.rejection_sampler import generate_uniform_probs
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 
 PLACEHOLDER_TOKEN_ID = -1
-GREEDY_TEMPERATURE = -1
+GREEDY_TEMPERATURE = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 32
