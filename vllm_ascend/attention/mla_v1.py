@@ -30,7 +30,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import (AscendRotaryEmbedding,
+                                              get_cos_and_sin_mla)
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
@@ -237,8 +238,8 @@ class AscendMLAMetadataBuilder:
                 device=device,
             )
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
+        self.cos_cache: torch.Tensor = None
+        self.sin_cache: torch.Tensor = None
 
         self.chunk_seq_lens: torch.Tensor = None
         self.cu_seq_lens_cpu: torch.Tensor = None
@@ -401,10 +402,22 @@ class AscendMLAMetadataBuilder:
                                                               num_actual_tokens]
 
         if self.cos_cache is None:
-            self.cos_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.sin_cached
+            start_rotary_emb = model.model.layers[
+                model.model.start_layer].self_attn.rotary_emb
+            if hasattr(start_rotary_emb, 'cos_cached') and hasattr(
+                    start_rotary_emb, 'sin_cached'):
+                self.cos_cache = start_rotary_emb.cos_cached
+                self.sin_cache = start_rotary_emb.sin_cached
+            elif isinstance(start_rotary_emb, AscendRotaryEmbedding):
+                last_dim = start_rotary_emb.cos_sin_cache.shape[-1]
+                self.cos_cache, self.sin_cache = start_rotary_emb.cos_sin_cache.reshape(
+                    -1, 2, last_dim // 2).repeat(1, 1, 2).chunk(2, dim=1)
+                self.cos_cache = self.cos_cache.reshape(-1, last_dim)
+                self.sin_cache = self.sin_cache.reshape(-1, last_dim)
+            else:
+                raise ValueError(
+                    f"Rotary embedding cache not found in {type(start_rotary_emb)}"
+                )
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
