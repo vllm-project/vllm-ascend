@@ -146,10 +146,16 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             if self.use_aclgraph:
                 # replay
                 if self.connector_name == "camconnector":
-                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size) * (self.attn_size // self.ffn_size)
+                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size)
+                    print(f'[CAM FFN Replay] Calculated max_num_tokens={max_num_tokens}')
                 else:
                     max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
                 acl_graph_info = self._acl_graphs_full.get(max_num_tokens)
+                if acl_graph_info is None:
+                    raise ValueError(
+                        f"ACL graph not found for max_num_tokens={max_num_tokens}. "
+                        f"Available keys: {list(self._acl_graphs_full.keys())}, "
+                        f"connector={self.connector_name}, attn_size={self.attn_size}, ffn_size={self.ffn_size}")
                 graph = acl_graph_info['graph']
                 graph.replay()
                 self.replay_cnt += 1
