@@ -97,7 +97,7 @@ class SizedDict(OrderedDict):
 
 class KVCacheTaskTracker:
 
-    def __init__(self):
+    def __init__(self, vllm_config: VllmConfig):
         super().__init__()
 
         self.done_task_lock = threading.Lock()
@@ -106,8 +106,8 @@ class KVCacheTaskTracker:
         # intentionally delayed. Each entry is a tuple of (request_id,
         # timestamp). If a request remains in this queue for too long, it will
         # be force-freed.
-        self.record_finished_requests: set[str] = set()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
 
     def add_not_transfer_request(self, request_id: str):
         with self.done_task_lock:
@@ -115,11 +115,12 @@ class KVCacheTaskTracker:
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
-            self.finished_requests.add(request_id)
-            if request_id in self.delayed_free_requests:
-                self._remove_delayed_requests(request_id)
+            if self.is_kv_producer:
+                if request_id in self.delayed_free_requests:
+                    self.finished_requests.add(request_id)
+                    self._remove_delayed_requests(request_id)
             else:
-                self.record_finished_requests.add(request_id)
+                self.finished_requests.add(request_id)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -137,10 +138,7 @@ class KVCacheTaskTracker:
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         """Add a delayed free request."""
         with self.done_task_lock:
-            if request_id not in self.record_finished_requests:
-                self.delayed_free_requests[request_id] = delay_start_time
-            else:
-                self.record_finished_requests.discard(request_id)
+            self.delayed_free_requests[request_id] = delay_start_time
 
     def _retrieve_expired_requests(self):
         """Retrieve all expired delayed requests."""
@@ -185,7 +183,7 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
 
-        self.task_tracker = KVCacheTaskTracker()
+        self.task_tracker = KVCacheTaskTracker(vllm_config)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -303,7 +301,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=32)
 
-        self.task_tracker = KVCacheTaskTracker()
+        self.task_tracker = KVCacheTaskTracker(vllm_config)
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
