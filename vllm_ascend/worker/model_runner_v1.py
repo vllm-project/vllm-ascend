@@ -57,7 +57,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata)
@@ -192,6 +191,7 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -216,13 +216,12 @@ class NPUModelRunner(GPUModelRunner):
         self.ascend_config = get_ascend_config()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
-        dump_cfg = self.ascend_config.dump_config
-        self.dump_enable = dump_cfg.enable_dump
+        dump_cfg = self.ascend_config.dump_config_path
         self.debugger = None
-        if self.dump_enable:
+        if dump_cfg is not None:
             if self.model_config.enforce_eager:
                 from msprobe.pytorch import PrecisionDebugger
-                self.debugger = PrecisionDebugger(dump_cfg.config_path)
+                self.debugger = PrecisionDebugger(dump_cfg)
             else:
                 raise RuntimeError(
                     "Dumping/debugging only works in eager mode.")
@@ -399,24 +398,41 @@ class NPUModelRunner(GPUModelRunner):
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.mode == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
 
     def _skip_all_reduce_acorss_dp_group(self) -> bool:
-        # NOTE: We can skip the all_reduce operation and avoid paading tokens
-        # to max_tokens_acrodd_dp in D nodes. In MoE models, we must ensure that
-        # num_tokens DOES NOT exceed mc2_tokens_capacity which means that moe_comm_method
-        # of each rank is MC2. For dense models, skipping all_reduce is not necessary
-        # since collective-communication is not time-consuming since dp_size in dense
-        # model deployments is always small and can be overlapped by async scheduling.
-        if not is_moe_model(self.vllm_config):
+        """
+        Decide whether to skip the all-reduce across the data-parallel (DP) group.
+
+        Skipping is only applicable for MoE models and only on ranks that act as
+        KV consumers. We skip the DP all-reduce when either:
+        - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+        - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+        """
+        # Only applicable to MoE models and KV consumer ranks.
+        if not is_moe_model(self.vllm_config) or not self.is_kv_consumer:
             return False
+
+        def needs_mc2(num_tokens: int) -> bool:
+            return select_moe_comm_method(num_tokens, self.vllm_config) in {
+                MoECommType.MC2, MoECommType.FUSED_MC2
+            }
+
+        # Determine whether decode must use MC2. Use max cudagraph capture size
+        # if available, otherwise use the maximal uniform decode token count.
         if self.compilation_config.cudagraph_capture_sizes:
-            potential_max_num_tokens = self.compilation_config.max_cudagraph_capture_size
+            potential_max_tokens = self.compilation_config.max_cudagraph_capture_size
         else:
-            potential_max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        # To ensure skipping all_reduce across dp group is valid, we need to ensure that
-        # moe_comm_method of each rank is MC2 and recomputation would never happen in D
-        # nodes. So here we check whether recompute_scheduler_enable is True.
-        return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
-            potential_max_num_tokens,
-            self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+            potential_max_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+
+        # For prefill, use the scheduler's max_num_batched_tokens for a single
+        # batch.
+        prefill_must_use_mc2 = needs_mc2(
+            self.vllm_config.scheduler_config.max_num_batched_tokens)
+
+        # Skip all-reduce if decode requires MC2 and either prefill also
+        # requires MC2 or recompute-based scheduler is enabled.
+        return decode_must_use_mc2 and (
+            prefill_must_use_mc2
+            or self.ascend_config.recompute_scheduler_enable)
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
@@ -575,10 +591,10 @@ class NPUModelRunner(GPUModelRunner):
                 tokens)
             num_scheduled_tokens = np.array(tokens, dtype=np.int32)
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-            total_num_pcp_pads = torch.sum(self.num_pcp_pads).item()
+            total_num_pcp_pads = torch.sum(self.num_pcp_pads[:num_reqs]).item()
         else:
             position_pcp, pcp_unpad_mask = None, None
-            self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
+            self.num_pcp_pads[:num_reqs] = 0
 
         max_num_scheduled_tokens = max(tokens)
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -1195,10 +1211,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
-        if self.shared_kv_cache_layers is not None:
-            # sharing kv across layers need to read the kvcache,
-            # directly return chunked prefill in this scenario
-            return AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
@@ -1392,9 +1404,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.eplb_updator.take_update_info_from_eplb_process()
 
         # prevent debugger is None
-        need_dump = self.dump_enable and self.debugger is not None
-        if need_dump:
-            assert self.debugger is not None
+        if self.debugger is not None:
             dbg_cfg = getattr(self.debugger, "config", None)
             dump_level = str(
                 getattr(dbg_cfg, "level",
@@ -1411,7 +1421,7 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if self.ascend_config.enable_async_exponential != 0:
+        if self.ascend_config.enable_async_exponential:
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
                 head_dim=self.model_config.get_vocab_size(),
@@ -1461,8 +1471,7 @@ class NPUModelRunner(GPUModelRunner):
                 if not broadcast_pp_output:
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-                    if need_dump:
-                        assert self.debugger is not None
+                    if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
                     return hidden_states
@@ -1476,8 +1485,7 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states,
                         scheduler_output.total_num_scheduled_tokens,
                         num_scheduled_tokens_np)
-                    if need_dump:
-                        assert self.debugger is not None
+                    if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
                     return pool_output
@@ -1533,7 +1541,6 @@ class NPUModelRunner(GPUModelRunner):
             output.kv_connector_output = kv_connector_output
             return output
 
-        need_dump = self.dump_enable and self.debugger is not None
         # Unpack ephemeral state.
         (
             scheduler_output,
@@ -1632,13 +1639,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
         if not self.use_async_scheduling:
-            if need_dump:
+            if self.debugger is not None:
                 assert self.debugger is not None
                 self.debugger.stop()
                 self.debugger.step()
             return model_runner_output
 
-        if need_dump:
+        if self.debugger is not None:
             assert self.debugger is not None
             self.debugger.stop()
             self.debugger.step()
@@ -2198,7 +2205,14 @@ class NPUModelRunner(GPUModelRunner):
             self._dummy_run(mc2_tokens_capacity,
                             with_prefill=True,
                             is_profile=True)
+        origin_max_num_tokens = self.max_num_tokens
+        # in the pcp scenario, the split sequence needs to be used for profile run
+        # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
+        if self.pcp_size > 1:
+            self.max_num_tokens = math.ceil(self.max_num_tokens /
+                                            (self.pcp_size * 2)) * 2
         super().profile_run()
+        self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -2537,6 +2551,7 @@ class NPUModelRunner(GPUModelRunner):
                     ) % kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel(
                     ) // kv_cache_spec.page_size_bytes
+                    assert num_blocks >= kv_cache_config.num_blocks
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -2545,27 +2560,22 @@ class NPUModelRunner(GPUModelRunner):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
-                    storage_offset_bytes = 0
-                    for (shape, dtype) in zip(kv_cache_spec.shapes,
-                                              kv_cache_spec.dtypes):
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size)
+                    target_idx = 0
+                    start_idx = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes,
+                                            kv_cache_spec.dtypes):
+                        # normally, there is conv state and ssm state in this loop. And there is only
+                        # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
-                        tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
-                        )
+
+                        target_idx += torch.prod(
+                            torch.tensor(target_shape)).item()
+                        tensor = raw_tensor.view(
+                            dtype)[start_idx:target_idx].view(target_shape)
+                        start_idx = target_idx
                         state_tensors.append(tensor)
-                        storage_offset_bytes += stride[0] * dtype_size
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")
@@ -3054,7 +3064,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
-        self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
         tokens = np.array(tokens, dtype=np.int32)
         num_decode_reqs = (np.array(tokens) <= self.decode_threshold).sum()
         num_decode_tokens = sum(tokens[:num_decode_reqs])
@@ -3063,7 +3072,8 @@ class NPUModelRunner(GPUModelRunner):
             (2 * self.pcp_size)).astype(np.int32) * (2 * self.pcp_size)
         num_padded_scheduled_tokens[:num_decode_reqs] = (
             tokens[:num_decode_reqs] * self.pcp_size)
-        self.num_pcp_pads = torch.tensor(num_padded_scheduled_tokens - tokens)
+        self.num_pcp_pads[:num_reqs] = torch.tensor(
+            num_padded_scheduled_tokens - tokens)
         cu_padded_tokens, pcp_padded_arange = \
             self._get_cumsum_and_arange(num_padded_scheduled_tokens)
         unpad_mask = torch.from_numpy(

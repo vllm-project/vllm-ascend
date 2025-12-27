@@ -51,6 +51,7 @@ def test_ilama_lora(ilama_lora_files):
             dtype="half",
             max_loras=4,
             max_model_len=1024,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             max_num_seqs=16,
     ) as vllm_model:
 

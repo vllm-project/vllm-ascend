@@ -102,8 +102,7 @@ def set_ascend_forward_context(
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
-        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
             forward_context.layer_idx is not None and \
             num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
@@ -227,7 +226,8 @@ def select_moe_comm_method(num_tokens: int,
         vllm_config.model_config.hf_config, 'moe_quantize',
         getattr(vllm_config.model_config.hf_config, 'quantize', None))
 
-    if not vllm_config.parallel_config.enable_expert_parallel:
+    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
+    ).world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
         if (num_tokens <= mc2_tokens_capacity

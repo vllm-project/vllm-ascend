@@ -103,6 +103,7 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
 
+          pytest -sv --durations=0 tests/e2e/nightly/ops/triton/
           pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
@@ -114,9 +115,9 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
           pytest -sv --durations=0 tests/e2e/singlecard/pooling/
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_cross_layer_attn_model.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
@@ -208,7 +209,6 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/test_single_request_aclgraph.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_fused_moe_allgather_ep.py
           # torch 2.8 doesn't work with lora, fix me
           #pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
 
