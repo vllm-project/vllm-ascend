@@ -369,4 +369,4 @@ After about several minutes, you can get the performance evaluation result.
 
 | dataset | version | metric      | mode | ttft   |
 |---------| ----- |-------------|------|--------|
-| random  | - | performance | perf | 15.6s |
+| random  | - | performance | perf | 20.7s |
