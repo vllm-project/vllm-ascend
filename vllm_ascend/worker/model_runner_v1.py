@@ -1131,7 +1131,8 @@ class NPUModelRunner(GPUModelRunner):
             if pad_size > 0:
                 hidden_states = hidden_states[:-pad_size, :]
         if self.pcp_size > 1 and get_pp_group().is_last_rank:
-            hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
+            hidden_states = self.pcp_manager.get_restore_hidden_states(
+                hidden_states)
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
@@ -2041,11 +2042,13 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tokens = num_tokens_padded
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
-                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
+                    intermediate_tokens = (num_tokens_padded + tp_size -
+                                           1) // tp_size
                 if self.intermediate_tensors is None:
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
-                        max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                        max_actual_tokens = (self.max_num_tokens + tp_size -
+                                             1) // tp_size
                     self.intermediate_tensors = (
                         self.model.make_empty_intermediate_tensors(
                             batch_size=max_actual_tokens,
