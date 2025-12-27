@@ -93,6 +93,7 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
@@ -104,21 +105,24 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --gpu-memory-utilization 0.92 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 **Notice:**
 The parameters are explained as follows:
 - Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a fusion operator that can significantly improve performance, though it requires more NPU memory. It is therefore recommended to enable this option when sufficient NPU memory is available.
+- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
 ::::
 ::::{tab-item} DeepSeek-R1-W8A8 A2 series
@@ -143,6 +147,7 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 export VLLM_USE_MODELSCOPE=True
@@ -159,13 +164,14 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --gpu-memory-utilization 0.94 \
   --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' 
+  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 **Node 1**
@@ -187,6 +193,7 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 export VLLM_USE_MODELSCOPE=True
@@ -205,13 +212,14 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --gpu-memory-utilization 0.94 \
   --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 ::::

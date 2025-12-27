@@ -16,11 +16,11 @@
 #
 
 import pytest
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
-from tools.send_request import send_text_request
+from tools.send_request import send_v1_chat_completions
 
 MODELS = [
     "vllm-ascend/Qwen3-32B-W8A8",
@@ -90,9 +90,9 @@ async def test_models(model: str, tp_size: int) -> None:
                             server_port=port,
                             env_dict=env_dict,
                             auto_port=False) as server:
-        send_text_request(prompts[0],
-                          model,
-                          server,
-                          request_args=api_keyword_args)
+        send_v1_chat_completions(prompts[0],
+                                 model,
+                                 server,
+                                 request_args=api_keyword_args)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
