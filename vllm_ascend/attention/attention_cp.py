@@ -348,10 +348,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_lse_nomask = attn_lse_nomask.to(torch.float32)
         attn_output_list = [attn_out_nomask, attn_out_mask]
         attn_lse_list = [attn_lse_nomask, attn_lse_mask]
-        update_type = 0
+        update_type = 1
         attn_output, attn_lse = torch_npu.npu_attention_update(
             attn_lse_list, attn_output_list, update_type)
         attn_output = attn_output.view(T, N, D)
+        attn_lse = attn_lse.view(T, N, 1)
         return attn_output, attn_lse
 
     def _forward_prefill_cp(self, query: torch.Tensor, key: torch.Tensor,
