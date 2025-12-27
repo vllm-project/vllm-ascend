@@ -413,6 +413,8 @@ class AscendMLAMetadataBuilder:
                     -1, 2, last_dim // 2).repeat(1, 1, 2).chunk(2, dim=1)
                 self.cos_cache = self.cos_cache.reshape(-1, last_dim)
                 self.sin_cache = self.sin_cache.reshape(-1, last_dim)
+            else:
+                raise ValueError("Rotary embedding cache not found")
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
