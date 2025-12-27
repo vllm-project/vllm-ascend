@@ -54,3 +54,8 @@ class GraphFusionPassManager:
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
             self.passes.append(QKNormRopeFusionPass(config))
+
+        if self.ascend_compilation_config.get("fuse_swiglu_quant", True):
+            from .passes.swiglu_quant_fusion_pass import SwigluQuantFusionPass
+            self.passes.append(SwigluQuantFusionPass(config))
+
