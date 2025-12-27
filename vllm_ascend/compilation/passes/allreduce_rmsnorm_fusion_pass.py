@@ -24,6 +24,7 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
+
 class MatmulAllReduceAddRMSNormPattern:
 
     def __init__(self, vllm_config, eps=1e-6):
@@ -56,8 +57,9 @@ class MatmulAllReduceAddRMSNormPattern:
 
         def replacement(x, weight, residual, rms_norm_weight):
             out0, out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
-                x, weight, residual, rms_norm_weight, self.tp_group_name, 0, 0,
-                self.eps, True, True)
+                x, weight, residual, rms_norm_weight, self.tp_group_name,
+                get_tp_group().world_size, self.local_rank, self.eps, True,
+                True)
             return out0, out1
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
@@ -76,7 +78,11 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
+        logger.info("before pass")
+        logger.info(graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
+        logger.info("after pass")
+        logger.info(graph)
         pattern_idx = 0
         for pattern_entry in self.pattern_match_passes.patterns.values():
             for p in pattern_entry:
