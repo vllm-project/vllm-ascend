@@ -2038,10 +2038,10 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
                 # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
-                actual_tokens = num_tokens_padded
+                intermediate_tokens = num_tokens_padded
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
-                    actual_tokens = (num_tokens_padded + tp_size - 1) // tp_size
+                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
@@ -2053,7 +2053,7 @@ class NPUModelRunner(GPUModelRunner):
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
                     k:
-                    v[:actual_tokens]
+                    v[:intermediate_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
 
