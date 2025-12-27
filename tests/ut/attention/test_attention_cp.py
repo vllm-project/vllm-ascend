@@ -660,8 +660,8 @@ class TestUpdateNpuAttnOutLse(TestBase):
         attn_out_nomask = torch.randn(8, 128, 128)
 
         # Mock output
-        mock_npu_attention_update.return_value = (torch.randn(8 * 128,
-                                                              128), None)
+        mock_npu_attention_update.return_value = (torch.randn(8 * 128, 128),
+                                                  torch.randn(8 * 128, 1))
 
         # Call the method under test
         output, _ = self.impl._npu_attn_out_lse_update(attn_lse_mask,
