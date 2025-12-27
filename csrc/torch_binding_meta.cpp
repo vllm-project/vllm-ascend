@@ -283,13 +283,54 @@ std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
         return {output, add_out};
     }
 
+std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
+    const at::Tensor& x,
+    int64_t k,
+    int64_t kGroup,
+    int64_t groupCount,
+    int64_t groupSelectMode,
+    int64_t renorm,
+    int64_t normType,
+    bool outFlag,
+    double routedScalingFactor,
+    double eps,
+    const c10::optional<at::Tensor>& biasOptional
+  
+    )
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
+
+    auto x_size = x.sizes();
+    auto rows = x_size[0];
+    auto expert_num = x_size[1];
+    const at::Tensor &bias = c10::value_or_else(biasOptional, [] { return at::Tensor(); });
+    if (bias.defined()) {
+        TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
+        TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+        auto bias_size = bias.sizes();
+        TORCH_CHECK(bias_size[0] == expert_num, "The bias first dim should be same as x second dim");
+    }
+    at::Tensor yOut = at::empty({rows, k}, x.options());
+    at::Tensor expertIdxOut = at::empty({rows, k}, x.options().dtype(at::kInt));
+    at::Tensor outOut = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(outOut,expertIdxOut, yOut);
+}
+
 } // namespace meta
+
 } // namespace vllm_ascend
 
 namespace {
 // Register the meta implementations of the custom kernels for symbolic tracing, this will also
 // the custom kernel been captured into aclgraph
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+    // Moe_gating_top_k
+    ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Rotary embedding meta implementation
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
