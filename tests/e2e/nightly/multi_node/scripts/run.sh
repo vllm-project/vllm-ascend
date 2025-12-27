@@ -164,8 +164,8 @@ upgrade_vllm_ascend_scr() {
     # This results in the nightly test code not being the latest version.
     cd "$WORKSPACE/vllm-ascend"
     #git pull origin main
-    git fetch origin pull/5386/head:pr-5386
-    git checkout pr-5386
+    git fetch origin pull/5442/head:pr-5442
+    git checkout pr-5442
     
 }
 
