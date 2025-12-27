@@ -126,18 +126,18 @@ def rejection_sample(
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    if HAS_TRITON:
+        vec_len = batch_size
+        n = cu_num_draft_tokens.numel()
+        BLOCK_SIZE = 2
+        grid = triton.cdiv(n, BLOCK_SIZE)
+        if n >= vectorcore_num:
+            grid = vectorcore_num  # Empirically tuned value
+            BLOCK_SIZE = triton.next_power_of_2(triton.cdiv(n, grid))
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
         if HAS_TRITON:
-            vec_len = batch_size
-            n = cu_num_draft_tokens.numel()
-            BLOCK_SIZE = 2
-            grid = triton.cdiv(n, BLOCK_SIZE)
-            if n >= vectorcore_num:
-                grid = vectorcore_num  # Empirically tuned value
-                BLOCK_SIZE = triton.next_power_of_2(triton.cdiv(n, grid))
-
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
                 rejection_greedy_sample_spec_len_1_triton[(grid, )](
@@ -207,7 +207,7 @@ def rejection_sample(
 
     # Rejection sampling for random sampling requests.
     if HAS_TRITON:
-        rejection_random_sample_kernel[(batch_size, )](
+        rejection_random_sample_kernel[(grid, )](
             output_token_ids,
             cu_num_draft_tokens,
             draft_token_ids,
@@ -217,9 +217,11 @@ def rejection_sample(
             recovered_token_ids,
             uniform_probs.to(torch.float32),
             is_greedy,
-            max_spec_len,
             vocab_size,
+            vec_len,
             NO_DRAFT_PROBS=draft_probs is None,
+            max_spec_len=max_spec_len,
+            BLOCK_SIZE=BLOCK_SIZE,
         )
     else:
         rejection_random_sample_pytorch(
@@ -679,62 +681,81 @@ def rejection_greedy_sample_triton(
 
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
-    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
-    cu_num_draft_tokens_ptr,  # [batch_size]
-    draft_token_ids_ptr,  # [num_tokens]
-    draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
-    bonus_token_ids_ptr,  # [batch_size]
-    recovered_token_ids_ptr,  # [num_tokens]
-    uniform_probs_ptr,  # [num_tokens]
-    is_greedy_ptr,  # [batch_size]
-    max_spec_len,
-    vocab_size,
-    NO_DRAFT_PROBS: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    is_greedy = tl.load(is_greedy_ptr + req_idx)
-    if is_greedy:
-        # Early exost for greedy sampling requests
-        return
+        output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+        cu_num_draft_tokens_ptr,  # [batch_size]
+        draft_token_ids_ptr,  # [num_tokens]
+        draft_probs_ptr,  # [num_tokens, vocab_size] or None
+        target_probs_ptr,  # [num_tokens, vocab_size]
+        bonus_token_ids_ptr,  # [batch_size]
+        recovered_token_ids_ptr,  # [num_tokens]
+        uniform_probs_ptr,  # [num_tokens]
+        is_greedy_ptr,  # [batch_size]
+        vocab_size,
+        vec_len,
+        NO_DRAFT_PROBS: tl.constexpr,
+        max_spec_len: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr):
+    block_idx = tl.program_id(0)
+    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < vec_len
+    is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
+    not_greedy_mask = is_greedy == 0
+    start_idxs = tl.where(
+        offsets == 0, 0,
+        tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
+    end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
 
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr +
-                                               req_idx - 1)
-    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
-    num_draft_tokens = end_idx - start_idx
+    n_num_draft_tokens = end_idxs - start_idxs
+    token_start_idx = tl.get_element(start_idxs, (0, ))
+    block_token_len = tl.sum(mask.to(tl.int8))
+    token_end_idx = tl.get_element(end_idxs, (block_token_len - 1, ))
 
-    rejected = False
-    for pos in range(num_draft_tokens):
-        if not rejected:
-            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            if NO_DRAFT_PROBS:
-                draft_prob = 1
-            else:
-                draft_prob = tl.load(draft_probs_ptr +
-                                     (start_idx + pos) * vocab_size +
-                                     draft_token_id)
-            target_prob = tl.load(target_probs_ptr +
-                                  (start_idx + pos) * vocab_size +
-                                  draft_token_id)
-            uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-            if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
-                # Accept
-                token_id = draft_token_id
-            else:
-                # Reject. Use recovered token
-                rejected = True
-                token_id = tl.load(recovered_token_ids_ptr + start_idx + pos)
-            tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
-                     token_id)
+    token_offset = token_start_idx + tl.arange(0, max_spec_len * BLOCK_SIZE)
+    valid = token_offset < token_end_idx
+    draft_token_ids = tl.load(draft_token_ids_ptr + token_offset, mask=valid)
+    uniform_probs = tl.load(uniform_probs_ptr + token_offset, mask=valid)
 
-    if not rejected:
-        # If all tokens are accepted, append the bonus token
-        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
-        tl.store(
-            output_token_ids_ptr + req_idx * (max_spec_len + 1) +
-            num_draft_tokens,
-            bonus_token_id,
-        )
+    for req_i in range(BLOCK_SIZE):
+        not_greedy = tl.get_element(not_greedy_mask, (req_i, ))
+        if not_greedy:
+            rejected = False
+            start_idx = tl.get_element(start_idxs, (req_i, ))
+            req_idx = block_idx * BLOCK_SIZE + req_i
+            num_draft_tokens = tl.get_element(n_num_draft_tokens, (req_i, ))
+            for token_i in range(num_draft_tokens):
+                pos = start_idx + token_i
+                cache_pos = pos - token_start_idx
+                if not rejected:
+                    draft_token_id = tl.get_element(draft_token_ids,
+                                                    (cache_pos, ))
+                    if NO_DRAFT_PROBS:
+                        draft_prob = 1
+                    else:
+                        draft_prob = tl.load(draft_probs_ptr +
+                                             pos * vocab_size + draft_token_id)
+                    target_prob = tl.load(target_probs_ptr + pos * vocab_size +
+                                          draft_token_id)
+                    uniform_prob = tl.get_element(uniform_probs, (cache_pos, ))
+                    # NOTE(woosuk): While the draft probability should never be 0,
+                    # we check it to avoid NaNs. If it happens to be 0, we reject.
+                    if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
+                        # Accept.
+                        token_id = draft_token_id
+                    else:
+                        # Reject. Use recovered token.
+                        rejected = True
+                        token_id = tl.load(recovered_token_ids_ptr + pos)
+                    tl.store(
+                        output_token_ids_ptr + req_idx * (max_spec_len + 1) +
+                        token_i, token_id)
+            if not rejected:
+                # If all tokens are accepted, append the bonus token.
+                bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+                tl.store(
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) +
+                    num_draft_tokens,
+                    bonus_token_id,
+                )
 
 
 @triton.jit(do_not_specialize=["replace_from", "replace_to"])
