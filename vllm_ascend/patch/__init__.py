@@ -106,6 +106,20 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 7. File: platform/patch_compile_backend.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.compilation.backends.PiecewiseCompileInterpreter`
+#      `vllm.compilation.piecewise_backend.PiecewiseBackend`
+#    Why:
+#       vllm removed the compile graph for general shape, which caused operator fusion to fail.
+#       This issue affects the performance of model inference on Ascend.
+#    How：
+#       recover the compiled graph for dynamic_shape in PiecewiseBackend.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/24252
+#    Future Plan:
+#       Remove this patch when fix the problem.
+#
 # * Worker Patch:
 # ===============
 #

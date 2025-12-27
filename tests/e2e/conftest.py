@@ -258,7 +258,7 @@ class RemoteOpenAIServer:
                 except RequestException:
                     all_ready = False
                     if should_log:
-                        logger.info(f"[WAIT] {url}: connection failed")
+                        logger.debug(f"[WAIT] {url}: connection failed")
 
                     # check unexpected exit
                     result = self._poll()
@@ -781,11 +781,6 @@ PROMPT_CONFIGS = {
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-    },
-    "hunyuan-vl": {
-        "model": "Tencent-Hunyuan/HunyuanOCR",
-        "prompt_fn": hunyuan_prompt,
-        "mm_processor_kwargs": {},
     },
 }
 

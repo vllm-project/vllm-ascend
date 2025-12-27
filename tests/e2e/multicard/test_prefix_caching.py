@@ -64,6 +64,7 @@ def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
     with VllmRunner(model,
                     max_model_len=2048,
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     gpu_memory_utilization=0.7) as vllm_model:
         prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
@@ -72,6 +73,7 @@ def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
                     enable_prefix_caching=False,
                     max_model_len=2048,
                     tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
