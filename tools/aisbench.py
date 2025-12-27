@@ -28,7 +28,7 @@ import huggingface_hub
 import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
-BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("."))
+BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
                                 "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
@@ -74,9 +74,13 @@ class AisbenchRunner:
                  host_ip: str = "localhost",
                  verify=True):
         self.model = model
-        self.dataset_path = maybe_download_from_modelscope(
-            aisbench_config["dataset_path"], repo_type="dataset")
-        self.model_path = maybe_download_from_modelscope(model)
+        self.dataset_path = aisbench_config.get("dataset_path_local")
+        if not self.dataset_path:
+            self.dataset_path = maybe_download_from_modelscope(
+                aisbench_config["dataset_path"], repo_type="dataset")
+        self.model_path = aisbench_config.get("model_path")
+        if not self.model_path:
+            self.model_path = maybe_download_from_modelscope(model)
         assert self.dataset_path is not None and self.model_path is not None, \
             f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         self.port = port
