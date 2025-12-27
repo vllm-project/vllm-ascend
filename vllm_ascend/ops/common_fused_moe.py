@@ -680,13 +680,39 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             topk_weights: Optional[torch.Tensor] = None,
             topk_ids: Optional[torch.Tensor] = None,
             row_idx: Optional[torch.Tensor] = None,
+            x_active_mask:Optional[torch.Tensor] = None,
             connector_name: Optional[str] = "",
+            cam_p2p_ep_name: Optional[str] = "",
         ):
         use_int8_w8a8, use_int4_w4a8, w1_scale, w2_scale, w1_scale_bias, w2_scale_bias = \
             self._detect_quantization_and_get_params(layer)
         #TODO(yxj):move to p2p
         # hidden_states是dispatch之后的，shape第一维是group_list[-1],self.max_num_token*8*2
         shared_out = self._shared_experts(hidden_states)
+
+        if connector_name == "camp2pconnector" :
+            w1 = layer.w13_weight.to(torch.int8)
+            w2 = layer.w2_weight.to(torch.int8)
+            gmm1_weight = torch_npu.npu_format_cast(w1, torch_npu.Format.FRACTAL_NZ)
+            gmm2_weight = torch_npu.npu_format_cast(w2, torch_npu.Format.FRACTAL_NZ)
+            w1_scale = w1_scale.float()
+            w2_scale = w2_scale.float()
+            from vllm_ascend.ops.moe.moe_mlp import fused_experts
+            mlp_output = fused_experts(
+                hidden_states=hidden_states,
+                w1=gmm1_weight,
+                w1_scale=w1_scale,
+                w2=gmm2_weight,
+                w2_scale=w2_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                x_active_mask=x_active_mask,
+                group_ep=cam_p2p_ep_name,
+                ep_rank_size=self.ep_size,
+                ep_rank_id=self.ep_rank,
+                moe_expert_num=self.global_num_experts
+            )
+            return shared_out,mlp_output
         from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
         if connector_name == "m2nconnector":
             group_list_type = 0

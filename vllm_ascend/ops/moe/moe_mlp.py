@@ -23,6 +23,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import dispose_tensor, is_310p
+import umdk_cam_op_lib
+from umdk_cam_operator import dispatch_gmm_combine_decode
 
 
 def cumsum_group_list(group_list: torch.Tensor,
@@ -256,3 +258,37 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                  group_list_type=group_list_type,
                                  topk_scales=topk_scales,
                                  need_trans=need_trans)
+
+def fused_experts(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w1_scale: torch.Tensor,
+        w2: torch.Tensor,
+        w2_scale: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        x_active_mask: torch.Tensor,
+        group_ep: str,
+        ep_rank_size: int,
+        ep_rank_id: int,
+        moe_expert_num:int,
+    ):
+    output, _ = torch.ops.umdk_cam_op_lib.dispatch_gmm_combine_decode(
+        x=hidden_states,
+        expert_ids=topk_ids,
+        gmm1_permuted_weight=w1,
+        gmm1_permuted_weight_scale=w1_scale,
+        gmm2_weight=w2,
+        gmm2_weight_scale=w2_scale,
+        expert_scales=topk_weights,
+        expert_smooth_scales=None,
+        x_active_mask=x_active_mask,
+        group_ep=group_ep,
+        ep_rank_size=ep_rank_size,
+        ep_rank_id=ep_rank_id,
+        moe_expert_num=moe_expert_num,
+        shared_expert_num=1,
+        shared_expert_rank_num=0,
+        quant_mode=0,
+        global_bs=0)
+    return output

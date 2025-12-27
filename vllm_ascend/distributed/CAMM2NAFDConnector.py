@@ -19,7 +19,7 @@ from torch.distributed.distributed_c10d import _update_default_pg, _get_default_
 from vllm.distributed.parallel_state import init_afd_process_group
 from vllm.logger import init_logger
 from vllm.config import VllmConfig
-from vllm.distributed.afd_transfer.afd_connector.metadata import (CAMAFDConnectorMetadata)
+from vllm.distributed.afd_transfer.afd_connector.metadata import (CAMM2NAFDConnectorMetadata)
 from vllm.config import VllmConfig, CUDAGraphMode, CompilationLevel
 
 logger = init_logger(__name__)
@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 
 # # TODO(yxj):move to ascend ,use kwargs
 # @dataclass
-# class CAMAFDConnectorMetadata:
+# class CAMM2NAFDConnectorMetadata:
 #     def __init__(self):
 #         self.topk_idx = None
 #         self.topk_weights = None
@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 #         self.h = 0
 #         self.k = 0
 
-class CAMAFDConnector(AFDConnectorBase):
+class CAMM2NAFDConnector(AFDConnectorBase):
     def __init__(self,
                  rank: int,
                  local_rank: int,
@@ -55,7 +55,7 @@ class CAMAFDConnector(AFDConnectorBase):
         self.ffn_size = 0
         self.use_aclgraph = self._use_aclgraph()
         self.dst_list = []
-        print(f'self.use_aclgraph in CAMAFDConnector is {self.use_aclgraph}')
+        print(f'self.use_aclgraph in CAMM2NAFDConnector is {self.use_aclgraph}')
 
     def _use_aclgraph(self) -> bool:
         return self.config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.config.compilation_config.level == CompilationLevel.PIECEWISE and not self.config.model_config.enforce_eager
@@ -158,13 +158,13 @@ class CAMAFDConnector(AFDConnectorBase):
                                        group=self.p2p_pg)
                 print(f'attn_src_rank: {self.rank} send_attn_output metadata success')
 
-        batch_size = metadata.cam_afdconnector_data.batch_size
-        h = metadata.cam_afdconnector_data.h
-        k = metadata.cam_afdconnector_data.k
-        moe_expert_num = metadata.cam_afdconnector_data.moe_expert_num
-        shared_expert_num = metadata.cam_afdconnector_data.shared_expert_num
-        quant_mode = metadata.cam_afdconnector_data.quant_mode
-        aiv_num = metadata.cam_afdconnector_data.aiv_num
+        batch_size = metadata.cam_m2n_afdconnector_data.batch_size
+        h = metadata.cam_m2n_afdconnector_data.h
+        k = metadata.cam_m2n_afdconnector_data.k
+        moe_expert_num = metadata.cam_m2n_afdconnector_data.moe_expert_num
+        shared_expert_num = metadata.cam_m2n_afdconnector_data.shared_expert_num
+        quant_mode = metadata.cam_m2n_afdconnector_data.quant_mode
+        aiv_num = metadata.cam_m2n_afdconnector_data.aiv_num
         expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
 
         handle_out = torch_npu.cam_a2e(expandX=hidden_states, expertIds=topk_idx,
@@ -183,13 +183,13 @@ class CAMAFDConnector(AFDConnectorBase):
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata) -> torch.Tensor:
-        batch_size = metadata.cam_afdconnector_data.batch_size
-        h = metadata.cam_afdconnector_data.h
-        k = metadata.cam_afdconnector_data.k
-        moe_expert_num = metadata.cam_afdconnector_data.moe_expert_num
-        shared_expert_num = metadata.cam_afdconnector_data.shared_expert_num
-        aiv_num = metadata.cam_afdconnector_data.aiv_num
-        handle = metadata.cam_afdconnector_data.handle
+        batch_size = metadata.cam_m2n_afdconnector_data.batch_size
+        h = metadata.cam_m2n_afdconnector_data.h
+        k = metadata.cam_m2n_afdconnector_data.k
+        moe_expert_num = metadata.cam_m2n_afdconnector_data.moe_expert_num
+        shared_expert_num = metadata.cam_m2n_afdconnector_data.shared_expert_num
+        aiv_num = metadata.cam_m2n_afdconnector_data.aiv_num
+        handle = metadata.cam_m2n_afdconnector_data.handle
 
         output2 = torch_npu.cam_e2a(expandXOut=hidden_states, simulateExpertIds=handle[0],
                                     simulateExpertScales=handle[1], expandIdx=handle[2],
@@ -209,7 +209,7 @@ class CAMAFDConnector(AFDConnectorBase):
         return output2
 
     # MOE发给ATTN(MOE发送) 
-    def send_ffn_output(self, ffn_output: torch.Tensor, metadata: CAMAFDConnectorMetadata):
+    def send_ffn_output(self, ffn_output: torch.Tensor, metadata: CAMM2NAFDConnectorMetadata):
         batch_size = metadata.batch_size
         h = metadata.h
         k = metadata.k
@@ -236,7 +236,7 @@ class CAMAFDConnector(AFDConnectorBase):
         return
 
     # ATTN发给MOE(MOE接收)
-    def recv_attn_output(self, metadata: CAMAFDConnectorMetadata) -> Any:
+    def recv_attn_output(self, metadata: CAMM2NAFDConnectorMetadata) -> Any:
         afdmetadata = None
         if not self.use_aclgraph and self.rank < self.ffn_size:
             local_ffn_rank = self.rank
