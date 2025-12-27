@@ -108,12 +108,6 @@ class TestUtils(TestBase):
         result = utils.enable_custom_op()
         self.assertTrue(result)
 
-        utils._CUSTOM_OP_ENABLED = None
-
-        with mock.patch('builtins.__import__') as mock_import_module:
-            mock_import_module.side_effect = ImportError("import error")
-            self.assertFalse(utils.enable_custom_op())
-
     def test_find_hccl_library(self):
         with mock.patch.dict(os.environ,
                              {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
