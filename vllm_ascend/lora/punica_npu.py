@@ -3,8 +3,8 @@
 from typing import Callable, Optional, Tuple, Union
 
 import torch
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.config.lora import LoRAConfig
+from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
