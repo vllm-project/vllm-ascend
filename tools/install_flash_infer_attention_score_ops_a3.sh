@@ -17,6 +17,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+set -euo pipefail
+trap 'echo "Error on line $LINENO: command \`$BASH_COMMAND\` failed with exit code $?" >&2' ERR
 
 cd /vllm-workspace
 # download fused_infer_attention_score related source files
