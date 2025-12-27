@@ -22,6 +22,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |         PyTorch/torch_npu       |
 |-------------|-------------------|-----------------|-------------|---------------------------------|
+| v0.13.0rc1  | v0.13.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |
 | v0.11.0     | v0.11.0           | >= 3.9 , < 3.12 | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
 | v0.12.0rc1  | v0.12.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |
 | v0.11.0rc3  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
