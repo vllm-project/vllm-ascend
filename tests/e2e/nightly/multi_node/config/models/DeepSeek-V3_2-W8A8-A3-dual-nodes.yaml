@@ -23,11 +23,11 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
       --host 0.0.0.0
       --port $SERVER_PORT
-      --data-parallel-size 2
-      --data-parallel-size-local 1
+      --data-parallel-size 4
+      --data-parallel-size-local 2
       --data-parallel-address $LOCAL_IP
       --data-parallel-rpc-port 13399
-      --tensor-parallel-size 16
+      --tensor-parallel-size 8
       --quantization ascend
       --seed 1024
       --enable-expert-parallel
@@ -43,12 +43,12 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
       --headless
-      --data-parallel-size 2
+      --data-parallel-size 4
       --data-parallel-rpc-port 13399
-      --data-parallel-size-local 1
-      --data-parallel-start-rank 1
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 2
       --data-parallel-address $MASTER_IP
-      --tensor-parallel-size 16
+      --tensor-parallel-size 8
       --quantization ascend
       --seed 1024
       --enable-expert-parallel
@@ -70,7 +70,7 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 2800
     max_out_len: 1500
-    batch_size: 700
+    batch_size: 64
     request_rate: 11.2
     baseline: 1
     threshold: 0.97
@@ -80,6 +80,6 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 32768
-    batch_size: 512
+    batch_size: 64
     baseline: 95
     threshold: 5

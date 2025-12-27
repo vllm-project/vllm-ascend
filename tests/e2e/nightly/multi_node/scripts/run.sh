@@ -142,6 +142,7 @@ main() {
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-W8A8*.yaml" ]]; then
         install_extra_components
     fi
+    upgrade_vllm_ascend_scr
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
