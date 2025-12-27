@@ -238,8 +238,8 @@ class AscendMLAMetadataBuilder:
                 device=device,
             )
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
+        self.cos_cache: torch.Tensor = None
+        self.sin_cache: torch.Tensor = None
 
         self.chunk_seq_lens: torch.Tensor = None
         self.cu_seq_lens_cpu: torch.Tensor = None
@@ -415,7 +415,9 @@ class AscendMLAMetadataBuilder:
                 self.cos_cache = self.cos_cache.reshape(-1, last_dim)
                 self.sin_cache = self.sin_cache.reshape(-1, last_dim)
             else:
-                raise ValueError("Rotary embedding cache not found")
+                raise ValueError(
+                    f"Rotary embedding cache not found in {type(start_rotary_emb)}"
+                )
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
