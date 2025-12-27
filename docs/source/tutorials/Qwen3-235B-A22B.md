@@ -99,7 +99,6 @@ export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
-export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -171,7 +170,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve vllm-ascend/Qwen3-235B-A22B \
 --host 0.0.0.0 \
@@ -217,7 +215,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve vllm-ascend/Qwen3-235B-A22B \
 --host 0.0.0.0 \
@@ -484,7 +481,7 @@ export HCCL_SOCKET_IFNAME=${ifname}
 export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=512
+export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -513,6 +510,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling \
+--no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_consumer",
@@ -549,7 +547,7 @@ export HCCL_SOCKET_IFNAME=${ifname}
 export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=512
+export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -579,6 +577,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling \
+--no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_consumer",
@@ -616,7 +615,7 @@ vllm bench serve --model qwen3 \
 --random-output-len 1536 \
 --num-prompts 2880 \
 --max-concurrency 576 \
---request-rate inf \
+--request-rate 8 \
 --host 0.0.0.0 \
 --port 12347 \
 ```
