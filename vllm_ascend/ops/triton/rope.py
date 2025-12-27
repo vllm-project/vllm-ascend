@@ -14,10 +14,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from vllm.triton_utils import HAS_TRITON, tl, triton
-
-if HAS_TRITON:
-    import torch_npu._inductor  # noqa: F401
+import torch
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -160,12 +159,13 @@ def _triton_rope(
                  mask=second_k_mask)
 
 
-def rope_forward_triton(q,
-                        k,
-                        cos,
-                        sin,
-                        rope_dim: int = -1,
-                        is_neox_style: bool = True):
+def rope_forward_triton(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        rope_dim: int = -1,
+        is_neox_style: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
@@ -208,3 +208,20 @@ def rope_forward_triton(q,
         IS_NEOX_STYLE=is_neox_style,
     )
     return q, k
+
+
+def rope_forward_triton_fake(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        rope_dim: int = -1,
+        is_neox_style: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+    return q, k
+
+
+direct_register_custom_op(op_name="rope_forward",
+                          op_func=rope_forward_triton,
+                          fake_impl=rope_forward_triton_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
