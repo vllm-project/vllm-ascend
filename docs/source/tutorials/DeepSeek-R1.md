@@ -88,12 +88,14 @@ local_ip="xxxx"
 
 # AIV
 export HCCL_OP_EXPANSION_MODE="AIV"
+
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
@@ -139,12 +141,13 @@ Run the following scripts on two nodes respectively.
 nic_name="xxxx"
 local_ip="xxxx"
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
@@ -169,8 +172,8 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
+  --gpu-memory-utilization 0.92 \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
@@ -185,12 +188,13 @@ nic_name="xxxx"
 local_ip="xxxx"
 node0_ip="xxxx" # same as the local_IP address in node 0
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
@@ -217,8 +221,8 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
+  --gpu-memory-utilization 0.92 \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
@@ -227,7 +231,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./pd_disaggregation_mooncake_multi_node.md).
+We recommend using DeepSeek-V3.1 for deployment: [DeepSeek-V3.1](./DeepSeek-V3.1.md).
 
 This solution has been tested and demonstrates excellent performance.
 
