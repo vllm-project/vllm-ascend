@@ -168,7 +168,8 @@ class AscendMetadata:
     causal: bool = True
     # runner_type in model_config.
     model_runner_type: str = ""
-
+    # prefill reshape_and_cache event
+    reshape_cache_event: torch.npu.Event = None
 
 class AscendAttentionMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
@@ -312,6 +313,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,
@@ -619,6 +621,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
 
         if len(kv_cache) > 1:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
@@ -639,6 +643,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots[:attn_metadata.num_actual_tokens])
+            if self.vllm_config.kv_transfer_config.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
         return key, value
 
     def forward_impl(
