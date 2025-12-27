@@ -230,7 +230,12 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     using BlockEpilogue1 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy1, CType, PerTokenScaleType,
         D1Type, TileElemWiseMuls, TileCopy1>;
 
-    using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
+    // using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
+    // using TileCopy2 = Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
+    // using BlockEpilogue2 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
+    //     D2Type, TileCopy2>;
+
+    using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequantV2<ubStages>;
     using TileCopy2 = Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
     using BlockEpilogue2 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
         D2Type, TileCopy2>;
@@ -250,8 +255,8 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
 
     GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
 
-    uint32_t epilogueCoreNum = aivNum / 2;
-    uint32_t epilogueGranularity = expertPerRank - 1;
+    uint32_t epilogueCoreNum = aivNum;
+    uint32_t epilogueGranularity = expertPerRank - 3;
 
     typename MatmulKernel::Params params{
         problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),

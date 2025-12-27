@@ -140,7 +140,7 @@ public:
     {
         params = params_;
     }
-    // Each tile is 1x7168, and each block covers all tokens for one expert = [group[i], 7168]
+    // 每个tile就是1*7168，每个block是一个expert的所有token=[group[i], 7168]
     CATLASS_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
@@ -200,39 +200,39 @@ public:
             auto gmTileD = gmD[loopIdx * ChunkTileLen];
             LayoutC layoutUbC{1, blockN};
 
-            // Move C from GM workspace to UB
+            // 把C从GM workspace搬到UB
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             copyGmToUbC(ubC, gmTileC, layoutUbC, layoutUbC);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
-            // Cast C to FP32 in UB
+            // 在UB上做把C cast成FP32
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
             AscendC::Cast(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, blockN);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
-            // Get per-token scale from row loopIdx of gmPerTokenScale
+            // 获取pertoken scale值，gmPerTokenScale的第loopIdx行
             ElementPerTokenScale perTokenScale = gmPerTokenScale1(loopIdx);
 
             AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            // Multiply FP32 C by the per-token scale
+            // pertoken scale值与FP32的C做Muls乘法
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
             AscendC::PipeBarrier<PIPE_V>();
 
-            // Swiglu computation process
+            //swiglue计算过程
             AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Exp(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Adds(ubCFp32ChunkN, ubCFp32ChunkN, 1.0f, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
-            // TODO: confirm whether the division impacts subsequent data
+            //TODO除的时候是否会对之后的数据有影响；
             AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
             
-            // Quantization process; difference between the two approaches
+            //quant过程，两种方式区别；
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Abs(ubAbs, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
@@ -243,7 +243,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
             AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
 
-            // TODO: compare the efficiency of the two calculation methods
+            //TODO两种计算方法的效率比较
             ElementPerTokenScale GMubDequantScale = ubReduceMax.GetValue(0);
             AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
 
