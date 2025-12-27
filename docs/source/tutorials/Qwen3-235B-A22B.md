@@ -514,7 +514,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling \
 --kv-transfer-config \
-'{"kv_connector": "MooncakeConnector",
+'{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_consumer",
 "kv_port": "30100",
 "engine_id": "1",
@@ -580,7 +580,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --async-scheduling \
 --kv-transfer-config \
-'{"kv_connector": "MooncakeConnector",
+'{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_consumer",
 "kv_port": "30100",
 "engine_id": "1",
