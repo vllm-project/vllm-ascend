@@ -265,6 +265,7 @@ class TestEagleProposerGenerateTokenIds(TestBase):
             2: MagicMock(get_token_id=lambda x: 102),
         }
         self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
