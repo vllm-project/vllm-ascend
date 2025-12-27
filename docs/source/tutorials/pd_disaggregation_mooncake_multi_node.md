@@ -373,7 +373,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
+  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -433,7 +433,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
+  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -622,7 +622,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
+  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
@@ -682,7 +682,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --quantization ascend \
   --no-enable-prefix-caching \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"lm_head_tensor_parallel_size":16}' \
+  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
