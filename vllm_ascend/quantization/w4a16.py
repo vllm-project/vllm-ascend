@@ -19,11 +19,28 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from compressed_tensors.quantization.quant_args import QuantizationArgs
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+
+
+def get_quant_description(
+    vllm_config: VllmConfig,
+    weight_quant: QuantizationArgs,
+) -> Dict[str, Any]:
+    quant_method = vllm_config.quant_config.quant_description.get(
+        "quant_method", "ascend")
+
+    if quant_method == "ascend":
+        return vllm_config.quant_config.quant_description
+    if quant_method == "compressed-tensors":
+        return weight_quant.__dict__
+
+    raise NotImplementedError(
+        f"`quant_method` {quant_method} is not supported.")
 
 
 def unpack_from_int32(
@@ -108,14 +125,19 @@ class AscendW4A16FusedMoEMethod:
     """FusedMoe method for Ascend W4A16.
     """
 
-    def __init__(self) -> None:
+    def __init__(self,
+                 weight_quant: Optional[QuantizationArgs] = None) -> None:
+        self.weight_quant = weight_quant if weight_quant else QuantizationArgs(
+        )
         self.transpose_weight = True
         self.num_bits = 4  # dtype = torch.int4
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32
 
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get(
-            "group_size", 32)
+        quant_description = get_quant_description(vllm_config,
+                                                  self.weight_quant)
+        self.group_size = quant_description.get("group_size", 32)
+        self.symmetric = quant_description.get("symmetric", True)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
 
@@ -172,16 +194,22 @@ class AscendW4A16FusedMoEMethod:
         param_dict["w2_weight_shape"] = torch.empty(num_experts,
                                                     2,
                                                     dtype=torch.int32)
-        param_dict["w13_weight_offset"] = torch.zeros(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_sizes // self.group_size,
-            dtype=torch.bfloat16)
-        param_dict["w2_weight_offset"] = torch.zeros(
-            num_experts,
-            hidden_sizes,
-            intermediate_size_per_partition // self.group_size,
-            dtype=torch.bfloat16)
+        if self.symmetric:
+            param_dict["w13_weight_offset"] = torch.zeros(1,
+                                                          dtype=torch.bfloat16)
+            param_dict["w2_weight_offset"] = torch.zeros(1,
+                                                         dtype=torch.bfloat16)
+        else:
+            param_dict["w13_weight_offset"] = torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_sizes // self.group_size,
+                dtype=torch.bfloat16)
+            param_dict["w2_weight_offset"] = torch.empty(
+                num_experts,
+                hidden_sizes,
+                intermediate_size_per_partition // self.group_size,
+                dtype=torch.bfloat16)
 
         return param_dict
 
@@ -250,6 +278,9 @@ class AscendW4A16FusedMoEMethod:
             mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        del layer.w13_weight_shape
+        del layer.w2_weight_shape
+
         if self.transpose_weight:
             w13_shape = layer.w13_weight_packed.data.shape
             w2_shape = layer.w2_weight_packed.data.shape
@@ -278,7 +309,19 @@ class AscendW4A16FusedMoEMethod:
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(
                 1, 2).contiguous()
 
-            layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(
-                1, 2).contiguous()
-            layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(
-                1, 2).contiguous()
+            if self.symmetric:
+                layer.w13_weight_offset.data = layer.w13_weight_offset.data.expand_as(
+                    layer.w13_weight_scale.data)
+                layer.w2_weight_offset.data = layer.w2_weight_offset.data.expand_as(
+                    layer.w2_weight_scale.data)
+            else:
+                layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(
+                    1, 2).contiguous()
+                layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(
+                    1, 2).contiguous()
+
+        if self.symmetric:
+            layer.w13_weight_offset.data = layer.w13_weight_offset.data.expand_as(
+                layer.w13_weight_scale.data)
+            layer.w2_weight_offset.data = layer.w2_weight_offset.data.expand_as(
+                layer.w2_weight_scale.data)

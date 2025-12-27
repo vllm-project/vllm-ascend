@@ -166,7 +166,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=w2_scale[0].dtype)[0]
-    elif w1_offset is not None:
+    elif w1_offset is not None and w2_offset is not None:
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[unquantized_hidden_states],
