@@ -6,6 +6,7 @@ from vllm.logger import logger
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
+from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
 from .w4a16 import AscendW4A16FusedMoEMethod
@@ -23,6 +24,9 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W4A8_DYNAMIC": {
         "linear": AscendW4A8DynamicLinearMethod,
         "moe": AscendW4A8DynamicFusedMoEMethod,
+    },
+    "W4A4_DYNAMIC": {
+        "linear": AscendW4A4LaosDynamicLinearMethod,
     },
     "W4A4_FLATQUANT_DYNAMIC": {
         "linear": AscendW4A4FlatQuantDynamicLinearMethod,
@@ -106,6 +110,9 @@ def get_quant_method_modelslim(
         method_map = ASCEND_QUANTIZATION_METHOD_MAP[quant_type]
         if layer_type in method_map.keys():
             method_cls = method_map[layer_type]
+            if quant_type == "W4A4_DYNAMIC" and layer_type == "linear":
+                metadata = quant_description.get("metadata")
+                return method_cls(prefix, metadata)
             return method_cls()
         else:
             raise NotImplementedError(
