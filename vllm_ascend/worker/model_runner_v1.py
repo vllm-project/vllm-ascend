@@ -511,13 +511,13 @@ class NPUModelRunner(GPUModelRunner):
         self.cp_kv_recover_idx_for_chunk = [[] for _ in range(self.pcp_size)]
 
         for i, req_id in enumerate(self.input_batch.req_ids):
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+            num_scheduled_token = scheduler_output.num_scheduled_tokens[
                 req_id]
-            is_prefill = self.input_batch.num_computed_tokens_cpu[
-                i] < self.input_batch.num_prompt_tokens[i]
+            is_prefill = num_scheduled_token > self.decode_threshold
+
             if is_prefill:
                 num_cp_padded_scheduled_tokens = cdiv(
-                    num_scheduled_tokens,
+                    num_scheduled_token,
                     2 * self.pcp_size) * (2 * self.pcp_size)
                 full_indices = list(
                     range(self.max_num_tokens * self.pcp_size * self.dcp_size +
