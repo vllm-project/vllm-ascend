@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (ReplicatedLinear,
                                                UnquantizedLinearMethod)
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -31,7 +32,6 @@ from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
                                enable_sp, maybe_trans_nz, replace_layer)
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -154,7 +154,7 @@ class AscendSFAMetadataBuilder:
             == CUDAGraphMode.FULL_DECODE_ONLY
         ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
 
-    def reorder_batch(self, input_batch: "NPUInputBatch",
+    def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
         return False
@@ -225,12 +225,14 @@ class AscendSFAMetadataBuilder:
                 sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
 
             pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
+            # NOTE: torch_npu._npu_reshape_and_cache only support slot_mapping with int32 dtype,
+            # but the default dtype of slot_mapping is int64 in vLLM, thus must convert dtype here
             if pad_size_slot > 0:
                 slot_mapping = nn.functional.pad(slot_mapping,
                                                  (0, pad_size_slot),
-                                                 value=-1)
+                                                 value=-1).to(torch.int32)
             else:
-                slot_mapping = slot_mapping[:num_tokens_pad]
+                slot_mapping = slot_mapping[:num_tokens_pad].to(torch.int32)
 
             cos = cos[local_start:local_end_with_pad]
             sin = sin[local_start:local_end_with_pad]
