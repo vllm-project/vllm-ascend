@@ -9,7 +9,7 @@ This is the first release candidate of v0.13.0 for vLLM Ascend. We landed lots o
 
 ### Features
 - Support PanguUltraMoE [4615](https://github.com/vllm-project/vllm-ascend/pull/4615)
-- A new quantization method W4A16 is supported now. [#4541](https://github.com/vllm-project/vllm-ascend/pull/4541)
+- A new quantization method W8A16 is supported now. [#4541](https://github.com/vllm-project/vllm-ascend/pull/4541)
 - Cross-machine Disaggregated Prefill is supported now. [#5008](https://github.com/vllm-project/vllm-ascend/pull/5008)
 - Add UCMConnector for KV Cache Offloading. [#4411](https://github.com/vllm-project/vllm-ascend/pull/4411)
 - Support async_scheduler and disable_padded_drafter_batch in eagle. [#4893](https://github.com/vllm-project/vllm-ascend/pull/4893)
