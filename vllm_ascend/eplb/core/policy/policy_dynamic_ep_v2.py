@@ -202,7 +202,6 @@ class DynamicEplbV2(EplbPolicy):
             for index, target_weight in enumerate(sorted_weights):
                 expert_id, original_weight = target_weight
                 if original_weight == -1:
-                    print("Error:Redundant expert failure re-occurred")
                     redundancy_successful = True
                     break
                 redundancy_successful = False
@@ -712,7 +711,6 @@ class DynamicEplbV2(EplbPolicy):
         max_heat_per_layer_after = np.zeros([layer_num])
         sum_num = 0
         for layer in range(layer_num):
-            # print(f"Load imbalance ratio of layer {layer} under the new workload", layer_initial_imbalance[layer])
             if layer_initial_imbalance[layer] < 1.01:
                 global_deployment[layer] = info.placement_table[layer]
                 continue
@@ -734,13 +732,11 @@ class DynamicEplbV2(EplbPolicy):
                 layer_workloads[layer], info.placement_table[layer],
                 expert_from_device[layer], num_node, is_node_redundant,
                 rendun_pos)
-            # print(layer, f"Imbalance Ratio after Redundancy Adjustment:", self.safe_divide(max_workload, ave_workload))
 
             global_deployment[layer], new_max_workload = self.exchange_experts(
                 result, com_between_devices, num_node, num_npus,
                 is_node_redundant, ave_workload, increment,
                 num_redundancy_expert, info.placement_table[layer])
-            # print(layer, f"Imbalance Ratio after Swap Adjustment:", self.safe_divide(new_max_workload, ave_workload))
 
             for device_id in range(num_npus):
                 com_between_devices[device_id] = {

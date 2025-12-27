@@ -68,11 +68,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable fused_experts_allgather_ep. MoeInitRoutingV3 and
-    # GroupedMatmulFinalizeRouting operators are combined to implement EP.
-    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
-                 ),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
@@ -113,17 +108,15 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE":
     lambda: int(
         os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
-    # Whether to enable dense model and general optimizations for better performance.
-    # Since we modified the base parent class `linear`, this optimization is also applicable to other model types.
-    # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
-    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
-    # Whether to enable transpose weight and cast format to FRACTAL_NZ.
+    # Whether to enable weight cast format to FRACTAL_NZ.
+    # 0: close nz;
+    # 1: only quant case enable nz;
+    # 2: enable nz as long as possible.
     "VLLM_ASCEND_ENABLE_NZ":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
@@ -132,6 +125,18 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable fused mc2(`dispatch_gmm_combine_decode`/`dispatch_ffn_combine` operator)
+    # 0, or not set: default ALLTOALL and MC2 will be used.
+    # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
+    # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=16, non-mtp, non-dynamic-eplb.
+    # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
+    # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
+    # with W8A8, non-dynamic-eplb. And MTP layer must be W8A8.
+    "VLLM_ASCEND_ENABLE_FUSED_MC2":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
+    # Whether to anbale balance scheduling
+    "VLLM_ASCEND_BALANCE_SCHEDULING":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
 }
 
 # end-env-vars-definition

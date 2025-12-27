@@ -42,6 +42,7 @@ def test_models_pp2(model: str, tp_size: int, pp_size: int,
     with VllmRunner(model,
                     tensor_parallel_size=tp_size,
                     pipeline_parallel_size=pp_size,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     distributed_executor_backend=distributed_executor_backend,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate_greedy(prompts, 64)

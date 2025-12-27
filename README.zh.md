@@ -20,6 +20,7 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
+- [2025/12] 我们发布了新的正式版本 [v0.11.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.11.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.11.0-dev/)开始在Ascend上部署vLLM Ascend Plugin。
 - [2025/09] 我们发布了新的正式版本 [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! 请按照[官方指南](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html)开始在Ascend上部署大型专家并行 (EP)。
 - [2025/08] 我们与vLLM和腾讯合作举办了[vLLM北京Meetup](https://mp.weixin.qq.com/s/7n8OYNrCC_I9SJaybHA_-Q)，！请在[这里](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF)找到演讲材料。
 - [2025/06] [用户案例](https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html)现已上线！展示了LLaMA-Factory/verl/TRL/GPUStack等用户案例，展示了vLLM Ascend如何帮助昇腾用户在模型微调、评估、强化学习 (RL) 以及部署等场景中提升体验。
@@ -54,7 +55,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
 |v0.12.0rc1| 最新RC版本 |请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多|
-|v0.9.1| 最新正式/稳定版本 |[快速开始](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [安装指南](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html)了解更多|
+|v0.11.0| 最新正式/稳定版本 |[快速开始](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev/quick_start.html) and [安装指南](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev/installation.html)了解更多|
 
 ## 贡献
 请参考 [CONTRIBUTING]((https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution/index.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
@@ -73,7 +74,7 @@ vllm-ascend有主干分支和开发分支。
 
 | 分支         | 状态         | 备注                  |
 |------------|------------|---------------------|
-| main       | Maintained | 基于vLLM main分支和vLLM最新版本（v0.12.0）CI看护   |
+| main       | Maintained | 基于vLLM main分支和vLLM最新版本（v0.13.0）CI看护   |
 | v0.7.1-dev | Unmaintained | 只允许文档修复 |
 | v0.7.3-dev | Maintained | 基于vLLM v0.7.3版本CI看护, 只允许Bug修复，不会再发布新版本 |
 | v0.9.1-dev | Maintained | 基于vLLM v0.9.1版本CI看护 |

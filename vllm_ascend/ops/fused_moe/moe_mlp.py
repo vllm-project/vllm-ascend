@@ -20,10 +20,12 @@ import torch
 import torch_npu
 from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
-                               enable_custom_op, get_ascend_device_type)
+                               enable_custom_op, get_ascend_device_type,
+                               get_weight_prefetch_method)
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -99,7 +101,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype
 
-    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
             hidden_states)
@@ -243,9 +245,17 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            hidden_states = torch_npu.npu_swiglu(hidden_states)
-            hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
-                hidden_states)
+            if HAS_TRITON:
+                from vllm_ascend.ops.triton.activation.swiglu_quant import \
+                    swiglu_quant
+                hidden_states, swiglu_out_scale = swiglu_quant(
+                    hidden_states,
+                    group_list=group_list,
+                    group_list_type=group_list_type)
+            else:
+                hidden_states = torch_npu.npu_swiglu(hidden_states)
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
+                    hidden_states)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],

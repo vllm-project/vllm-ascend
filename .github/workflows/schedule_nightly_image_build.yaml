@@ -1,4 +1,4 @@
-name: 'image / nightly / Ubuntu / test'
+name: Nightly Image Build Schedule
 
 on:
   schedule:

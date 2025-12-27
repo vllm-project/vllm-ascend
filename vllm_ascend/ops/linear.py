@@ -24,7 +24,6 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
@@ -37,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
@@ -45,11 +44,8 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if "conv1d" not in layer.prefix and (
-                is_enable_nz() and layer.weight.data.dtype
-                in [torch.float16, torch.bfloat16]):
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        if "conv1d" not in layer.prefix:
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
@@ -113,7 +109,9 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        v_head_size: int | None = None,
     ):
+        self.v_head_size = v_head_size if v_head_size is not None else head_size
         self.custom_op, _, tp_size = get_parallel_op(disable_tp, prefix, self,
                                                      "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
@@ -221,6 +219,9 @@ class AscendRowParallelLinear(RowParallelLinear):
     and the original TP group in other modules.
     """
 
+    # NOTE: Globally unique prefix identifier used in SP scenarios
+    unique_prefix_idx = 0
+
     def __init__(
         self,
         input_size: int,
@@ -236,14 +237,15 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        compilation_config = get_current_vllm_config().compilation_config
-        # TODO(shaopeng-666): Remove the visual check after the mm model reconstruction is complete.
-        # TODO(MengqingCao): Remove the empty string check, after specifying the prefix in linear layers of some models in the vLLM.
-        if prefix in compilation_config.static_forward_context and \
-            prefix != "" and \
-            "visual" not in prefix:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
+        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
+        if enable_sp():
+            compilation_config = get_current_vllm_config().compilation_config
+            unique_prefix = prefix
+            if prefix in compilation_config.static_forward_context:
+                unique_prefix = f"{prefix}.unique_prefix{AscendRowParallelLinear.unique_prefix_idx}"
+                AscendRowParallelLinear.unique_prefix_idx += 1
+            self.unique_prefix = unique_prefix
+            compilation_config.static_forward_context[unique_prefix] = self
 
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "row")

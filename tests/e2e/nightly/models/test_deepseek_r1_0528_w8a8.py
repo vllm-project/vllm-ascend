@@ -19,7 +19,7 @@ from typing import Any
 
 import openai
 import pytest
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
@@ -76,10 +76,7 @@ async def test_models(model: str, mode: str) -> None:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
     }
     speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
-    additional_config = {
-        "chunked_prefill_for_mla": True,
-        "enable_weight_nz_layout": True
-    }
+    additional_config = {"enable_weight_nz_layout": True}
     server_args = [
         "--quantization", "ascend", "--data-parallel-size", "2",
         "--tensor-parallel-size", "8", "--enable-expert-parallel", "--port",

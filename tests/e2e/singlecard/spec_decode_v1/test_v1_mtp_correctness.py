@@ -41,6 +41,7 @@ def mtp_correctness(sampling_config: SamplingParams,
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
+                    cudagraph_capture_sizes=[12],
                     enforce_eager=enforce_eager) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
