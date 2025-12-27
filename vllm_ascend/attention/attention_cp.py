@@ -908,10 +908,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             assert attn_metadata.prefill is not None
             # chunked prefill vars init
             has_chunked_context = attn_metadata.prefill.chunked_context is not None
+            # Note(qcs): we use multi-stream for computation-communication overlap 
+            # when enabling chunked prefill.
+            # current part
+            # current_stream: init -- pre -- head attn ------------------ tail attn -- post -- update
+            # context part                                                                     -/
+            # current_stream: -----                    -- context attn --                     -/
+            # COMM_STREAM:         \-- all_gather Q --/                  \-- a2a ag output --/
             global COMM_STREAM
             if COMM_STREAM is None:
                 COMM_STREAM = torch_npu.npu.Stream(device=torch.npu.current_device())
 
+            # qkv init
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
             prefill_query = query[
                 num_decode_tokens:num_actual_tokens_pcp_padded].contiguous()
@@ -919,6 +927,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             value = value[self.pcp_size * num_decode_tokens:].contiguous()
 
             if has_chunked_context:
+                # all_gather q for chunked prefill // overlap the computation inner current chunk
                 COMM_STREAM.wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(COMM_STREAM):
                     prefill_query_all = self._prefill_query_all_gather(
@@ -926,6 +935,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP
+                # prepare qkv and compute the head part // overlap the communication of all gather q
                 data_head, data_tail = self._forward_prefill_cp_pre(
                     query, key, value, attn_metadata
                 )
@@ -952,17 +962,20 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 
             if has_chunked_context:
                 torch.npu.current_stream().wait_stream(COMM_STREAM)
+                # computation of context
                 context_output = self._compute_prefill_context(prefill_query_all, kv_cache,
                                                   attn_metadata)
                 # Note(qcs): (output, lse) -> [Seq, Head_num, Head_dim+1] -> [Head_num, Head_dim+1, Seq]
                 local_context_output = torch.cat(context_output, dim=-1).permute([1, 2,
                                                                          0]).contiguous()
 
+                # all2all and all_gather output&lse // overlap the computation inner current chunk
                 COMM_STREAM.wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(COMM_STREAM):
                     global_context_output = self._gather_global_context_output(local_context_output)
 
             if self.pcp_size > 1:
+                # compute the tail part and reorg output&lse // overlap the communication of output
                 output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
 
                 attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp_post(
@@ -972,6 +985,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 )
 
             if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is not None:
+                # update the output of current chunk with context part
                 torch.npu.current_stream().wait_stream(COMM_STREAM)
                 global_context_output = global_context_output.permute([2, 0, 1]).contiguous()
                 context_output, context_lse = self._update_global_context_output(global_context_output)
