@@ -1,5 +1,5 @@
 # Release Notes
-## v0.13.0rc1 - 2025.12.25
+## v0.13.0rc1 - 2025.12.27
 This is the first release candidate of v0.13.0 for vLLM Ascend. We landed lots of bug fix, performance improvement and feature support in this release. Any feedback is welcome to help us to improve vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/latest) to get started.
 
 ### Highlights
@@ -19,6 +19,7 @@ This is the first release candidate of v0.13.0 for vLLM Ascend. We landed lots o
 Some general performance improvement:
 - Add new pattern for AddRmsnormQuant with SP, which could only take effect in graph mode. [#5077](https://github.com/vllm-project/vllm-ascend/pull/5077)
 - Add async exponential while model executing. [#4501](https://github.com/vllm-project/vllm-ascend/pull/4501)
+- To optimize the performance in small batch size scenario, an attention operator with flash decoding function is offered, please refer to item 22 in [FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) to enable it.
 
 ### Upgrade Note
 - `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE` is removed and `VLLM_ASCEND_ENABLE_PREFETCH_MLP` is recommend to replace as they always be enabled together. [#5272](https://github.com/vllm-project/vllm-ascend/pull/5272)
