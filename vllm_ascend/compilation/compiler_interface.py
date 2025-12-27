@@ -45,8 +45,9 @@ def fusion_pass_compile(
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
     compile_range: Range,
-    key: str | None = None,
-) -> tuple[Callable | None, Any | None]:
+    key: Optional[str] = None,
+) -> tuple[Optional[Callable], Optional[Any]]:
+
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph)
