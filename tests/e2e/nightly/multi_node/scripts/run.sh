@@ -88,7 +88,9 @@ check_npu_info() {
 
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
+    # Fix me(Potabk): Currently, there have some issues with accessing GitHub via https://gh-proxy.test.osinfra.cn in certain regions.
+    # We should switch to a more stable proxy for now until the network proxy is stable enough.
+    git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
