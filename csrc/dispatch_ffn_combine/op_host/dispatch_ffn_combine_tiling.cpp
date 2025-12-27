@@ -27,12 +27,11 @@ using namespace AscendC;
 using namespace ge;
 
 namespace {
-    // 1. Constant definitions
+    // 1. 常量定义
     const char *K_INNER_DEBUG = "DispatchFFNCombine Tiling Debug";
     constexpr uint32_t ATTR_GROUP_INDEX = 0;
-    constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
-    constexpr uint32_t ATTR_IS_TRANS_B = 2;
-    constexpr uint32_t ATTR_WEIGHT_NZ = 3;
+    constexpr uint32_t ATTR_IS_TRANS_B = 1;
+    constexpr uint32_t ATTR_WEIGHT_NZ = 2;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
     constexpr uint64_t TILINGKEY_WEIGHT_NZ = 10;
@@ -42,6 +41,7 @@ namespace {
     constexpr uint32_t EXPERTID_INDEX = 3;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
+    constexpr uint64_t MB_SIZE = 1024 * 1024;
 }
 
 namespace optiling {
@@ -54,15 +54,14 @@ static int32_t CeilDev(int32_t num, int32_t div)
     return (num + div - 1) / div;
 }
 
-// Parse and validate rankId, group, worldSize, and isTransB attributes
+// 解析并校验 rankId, group, worldSize, isTransB 属性值
 static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo& info)
 {
     auto attrs = context->GetAttrs();
     OP_TILING_CHECK(attrs == nullptr, OP_LOGE(K_INNER_DEBUG, "attrs is null."), return ge::GRAPH_FAILED);
 
-    // TODO: set, validate, and print tiling data related to attributes
+    // todo：Attr相关tilingdata的设置、校验、打印
     auto groupPtr = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
-    auto maxOutputSizePtr = attrs->GetAttrPointer<int>(ATTR_MAX_OUTPUT_SIZE_INDEX);
     auto is_trans_b = attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B);
     auto weight_nz = attrs->GetAttrPointer<bool>(ATTR_WEIGHT_NZ);
     OP_TILING_CHECK(groupPtr == nullptr || strlen(groupPtr) == 0,
@@ -73,7 +72,6 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     OP_TILING_CHECK(weight_nz == nullptr,
         OP_LOGE(K_INNER_DEBUG, "weight_nz is invalid."), return GRAPH_FAILED);
 
-    info.maxOutputSize = *maxOutputSizePtr;
     info.isTransposeB = *is_trans_b;
     info.isWeightNz = *weight_nz;
 
@@ -81,13 +79,12 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     (void)ge::HcomTopoInfo::Instance().GetGroupRankSize(groupPtr, rankSize);
     info.worldSize = rankSize;
 
-    OP_LOGD(K_INNER_DEBUG, "maxOutputSize=%d ", info.maxOutputSize);
     OP_LOGD(K_INNER_DEBUG, "rankSize=%d ", info.worldSize);
 
     return ge::GRAPH_SUCCESS;
 }
 
-// Extract shapes of input tensors A and B to compute M, K, N
+// 提取输入张量 A 和 B 的形状，计算出 M、K、N 值
 static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo &info)
 {
     const char *nodeName = context->GetNodeName();
@@ -116,7 +113,7 @@ static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingCont
     return ge::GRAPH_SUCCESS;
 }
 
-// Get hardware info such as AI Core count and UB capacity for the current chip platform.
+// 获取当前芯片平台的 AI Core 数目、UB 容量等硬件信息。
 static ge::graphStatus DispatchFFNCombineGetPlatformInfoAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo& info)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -146,9 +143,9 @@ void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
     cocTilingData.lenPerLoop = cocTilingData.m0 * cocTilingData.n0 / 2;
 }
 
-// Main scheduling function:
-// Get tilingData ➝ check Attr ➝ check Shape ➝ get platform info 
-// ➝ call SetTilingData (based on rank count) ➝ set blockDim ➝ set tilingKey ➝ set workspace ➝ configure communication parameters
+// 主调度函数：
+// 获取 tilingData ➝ 检查 Attr ➝ 检查 Shape ➝ 获取平台信息 
+// ➝ 调用 SetTilingData（根据rank数目） ➝ 设置 blockDim ➝ 设置 tilingKey ➝ 设置 workspace ➝ 配置通信参数
 
 static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *context)
 {
@@ -225,11 +222,28 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
 
+    info.maxOutputSize = info.M * info.topK * 4;
+
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
+                            info.maxOutputSize * info.N * sizeof(int16_t) +
+                            info.maxOutputSize * n2 * sizeof(int16_t) +
+                            info.maxOutputSize * info.K * sizeof(int8_t) +
+                            info.maxOutputSize * k2 * sizeof(int8_t);
+
+    if (cocWorkspace > 1024 * MB_SIZE) {
+        cocWorkspace = 1024 * MB_SIZE;
+        info.maxOutputSize = (cocWorkspace -
+                             (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) -
+                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3) /
+                             (sizeof(float) * 2 +
+                              info.N * sizeof(int16_t) +
+                              n2 * sizeof(int16_t) +
+                              info.K * sizeof(int8_t) +
+                              k2 * sizeof(int8_t));
+                              
+    }
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 
