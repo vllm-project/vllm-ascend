@@ -20,9 +20,9 @@ DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-R1.md
 Kimi-K2-Thinking
-long_sequence_context_parallel_single_node
 pd_disaggregation_mooncake_single_node
 pd_disaggregation_mooncake_multi_node
+long_sequence_context_parallel_single_node
 long_sequence_context_parallel_multi_node
 ray
 310p
