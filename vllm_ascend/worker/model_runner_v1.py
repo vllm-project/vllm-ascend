@@ -216,13 +216,12 @@ class NPUModelRunner(GPUModelRunner):
         self.ascend_config = get_ascend_config()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
-        dump_cfg = self.ascend_config.dump_config
-        self.dump_enable = dump_cfg.enable_dump
+        dump_cfg = self.ascend_config.dump_config_path
         self.debugger = None
-        if self.dump_enable:
+        if dump_cfg is not None:
             if self.model_config.enforce_eager:
                 from msprobe.pytorch import PrecisionDebugger
-                self.debugger = PrecisionDebugger(dump_cfg.config_path)
+                self.debugger = PrecisionDebugger(dump_cfg)
             else:
                 raise RuntimeError(
                     "Dumping/debugging only works in eager mode.")
@@ -399,24 +398,41 @@ class NPUModelRunner(GPUModelRunner):
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.mode == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
 
     def _skip_all_reduce_acorss_dp_group(self) -> bool:
-        # NOTE: We can skip the all_reduce operation and avoid paading tokens
-        # to max_tokens_acrodd_dp in D nodes. In MoE models, we must ensure that
-        # num_tokens DOES NOT exceed mc2_tokens_capacity which means that moe_comm_method
-        # of each rank is MC2. For dense models, skipping all_reduce is not necessary
-        # since collective-communication is not time-consuming since dp_size in dense
-        # model deployments is always small and can be overlapped by async scheduling.
-        if not is_moe_model(self.vllm_config):
+        """
+        Decide whether to skip the all-reduce across the data-parallel (DP) group.
+
+        Skipping is only applicable for MoE models and only on ranks that act as
+        KV consumers. We skip the DP all-reduce when either:
+        - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+        - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+        """
+        # Only applicable to MoE models and KV consumer ranks.
+        if not is_moe_model(self.vllm_config) or not self.is_kv_consumer:
             return False
+
+        def needs_mc2(num_tokens: int) -> bool:
+            return select_moe_comm_method(num_tokens, self.vllm_config) in {
+                MoECommType.MC2, MoECommType.FUSED_MC2
+            }
+
+        # Determine whether decode must use MC2. Use max cudagraph capture size
+        # if available, otherwise use the maximal uniform decode token count.
         if self.compilation_config.cudagraph_capture_sizes:
-            potential_max_num_tokens = self.compilation_config.max_cudagraph_capture_size
+            potential_max_tokens = self.compilation_config.max_cudagraph_capture_size
         else:
-            potential_max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        # To ensure skipping all_reduce across dp group is valid, we need to ensure that
-        # moe_comm_method of each rank is MC2 and recomputation would never happen in D
-        # nodes. So here we check whether recompute_scheduler_enable is True.
-        return self.is_kv_consumer and self.ascend_config.recompute_scheduler_enable and select_moe_comm_method(
-            potential_max_num_tokens,
-            self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+            potential_max_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+
+        # For prefill, use the scheduler's max_num_batched_tokens for a single
+        # batch.
+        prefill_must_use_mc2 = needs_mc2(
+            self.vllm_config.scheduler_config.max_num_batched_tokens)
+
+        # Skip all-reduce if decode requires MC2 and either prefill also
+        # requires MC2 or recompute-based scheduler is enabled.
+        return decode_must_use_mc2 and (
+            prefill_must_use_mc2
+            or self.ascend_config.recompute_scheduler_enable)
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
@@ -1388,9 +1404,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.eplb_updator.take_update_info_from_eplb_process()
 
         # prevent debugger is None
-        need_dump = self.dump_enable and self.debugger is not None
-        if need_dump:
-            assert self.debugger is not None
+        if self.debugger is not None:
             dbg_cfg = getattr(self.debugger, "config", None)
             dump_level = str(
                 getattr(dbg_cfg, "level",
@@ -1407,7 +1421,7 @@ class NPUModelRunner(GPUModelRunner):
         aclgraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
 
-        if self.ascend_config.enable_async_exponential != 0:
+        if self.ascend_config.enable_async_exponential:
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
                 head_dim=self.model_config.get_vocab_size(),
@@ -1457,8 +1471,7 @@ class NPUModelRunner(GPUModelRunner):
                 if not broadcast_pp_output:
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-                    if need_dump:
-                        assert self.debugger is not None
+                    if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
                     return hidden_states
@@ -1472,8 +1485,7 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states,
                         scheduler_output.total_num_scheduled_tokens,
                         num_scheduled_tokens_np)
-                    if need_dump:
-                        assert self.debugger is not None
+                    if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
                     return pool_output
@@ -1529,7 +1541,6 @@ class NPUModelRunner(GPUModelRunner):
             output.kv_connector_output = kv_connector_output
             return output
 
-        need_dump = self.dump_enable and self.debugger is not None
         # Unpack ephemeral state.
         (
             scheduler_output,
@@ -1628,13 +1639,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
         if not self.use_async_scheduling:
-            if need_dump:
+            if self.debugger is not None:
                 assert self.debugger is not None
                 self.debugger.stop()
                 self.debugger.step()
             return model_runner_output
 
-        if need_dump:
+        if self.debugger is not None:
             assert self.debugger is not None
             self.debugger.stop()
             self.debugger.step()
@@ -1852,10 +1863,11 @@ class NPUModelRunner(GPUModelRunner):
                 # QUESTION: Why do we separately set query_start_loc for spec in the first place?
                 # While in _prepare_inputs we don't?
                 if self.speculative_config:
-                    self.query_start_loc.gpu[:num_reqs + 1] = torch.tensor(
+                    self.query_start_loc.cpu[:num_reqs + 1] = torch.tensor(
                         [0] + self.actual_seq_lengths_q[:num_reqs],
-                        device=self.device,
+                        device="cpu",
                         dtype=torch.int32)
+                    self.query_start_loc.copy_to_gpu()
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
                     query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
