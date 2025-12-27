@@ -19,9 +19,16 @@ from vllm_ascend.distributed.kvpool.config_data import (
 
 class KVTransferThread(threading.Thread):
 
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int,
-                 ready_event: threading.Event, name: str):
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        ready_event: threading.Event,
+        name: str
+    ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
         self.ready_event = ready_event
@@ -97,16 +104,25 @@ class KVTransferThread(threading.Thread):
 
 class KVCacheStoreSendingThread(KVTransferThread):
 
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int, put_step: int,
-                 ready_event: threading.Event):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheSendingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        put_step: int,
+        ready_event: threading.Event
+    ):
+        super().__init__(
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheSendingThread"
+        )
         self.put_step = put_step
 
     def _handle_request(self, req_meta: ReqMeta):
@@ -179,16 +195,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
 class KVCacheStoreRecvingThread(KVTransferThread):
 
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int,
-                 ready_event: threading.Event):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheStoreRecvingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        ready_event: threading.Event
+    ):
+        super().__init__(
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreRecvingThread"
+        )
 
     def _handle_request(self, req_meta: ReqMeta):
         req_id = req_meta.req_id
@@ -205,15 +229,18 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = key_list[self.tp_rank %
-                              len(key_list):] + key_list[:self.tp_rank %
-                                                         len(key_list)]
-        addr_list_c = addr_list[self.tp_rank %
-                                len(addr_list):] + addr_list[:self.tp_rank %
-                                                             len(addr_list)]
-        size_list_c = size_list[self.tp_rank %
-                                len(size_list):] + size_list[:self.tp_rank %
-                                                             len(size_list)]
+        key_list_c = (
+            key_list[self.tp_rank % len(key_list):]
+            + key_list[:self.tp_rank % len(key_list)]
+        )
+        addr_list_c = (
+            addr_list[self.tp_rank % len(addr_list):]
+            + addr_list[:self.tp_rank % len(addr_list)]
+        )
+        size_list_c = (
+            size_list[self.tp_rank % len(size_list):]
+            + size_list[:self.tp_rank % len(size_list)]
+        )
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -221,25 +248,39 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
 class KVCacheStoreLayerSendingThread(KVTransferThread):
 
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int, put_step: int,
-                 ready_event: threading.Event, num_layers: int):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheStoreLayerSendingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        put_step: int,
+        ready_event: threading.Event,
+        num_layers: int
+    ):
+        super().__init__(
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreLayerSendingThread"
+        )
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
 
     def add_request(  # type: ignore[override]
-            self, req_meta: ReqMeta) -> torch.Tensor:
+        self,
+        req_meta: ReqMeta
+    ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta):
+        self, 
+        req_meta: LasyerMultiBlockReqMeta
+    ):
         starts = req_meta.starts
         ends = req_meta.ends
         keys = req_meta.keys
@@ -300,24 +341,37 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
-    def __init__(self, m_store: Backend, token_database: ChunkedTokenDatabase,
-                 block_size: int, tp_rank: int, dcp_size: int,
-                 ready_event: threading.Event, get_event: threading.Event):
-        super().__init__(m_store,
-                         token_database,
-                         block_size,
-                         tp_rank,
-                         dcp_size,
-                         ready_event,
-                         name="KVCacheStoreLayerRecvingThread")
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        dcp_size: int,
+        ready_event: threading.Event,
+        get_event: threading.Event
+    ):
+        super().__init__(
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreLayerRecvingThread"
+        )
         self.get_event = get_event
 
     def add_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:
+        self,
+        req_meta: LasyerMultiBlockReqMeta
+    ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta):
+        self,
+        req_meta: LasyerMultiBlockReqMeta
+    ):
         addr_list = []
         size_list = []
         key_list = []
@@ -328,15 +382,18 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = key_list[self.tp_rank %
-                              len(key_list):] + key_list[:self.tp_rank %
-                                                         len(key_list)]
-        addr_list_c = addr_list[self.tp_rank %
-                                len(addr_list):] + addr_list[:self.tp_rank %
-                                                             len(addr_list)]
-        size_list_c = size_list[self.tp_rank %
-                                len(size_list):] + size_list[:self.tp_rank %
-                                                             len(size_list)]
+        key_list_c = (
+            key_list[self.tp_rank % len(key_list):]
+            + key_list[:self.tp_rank % len(key_list)]
+        )
+        addr_list_c = (
+            addr_list[self.tp_rank % len(addr_list):]
+            + addr_list[:self.tp_rank % len(addr_list)]
+        )
+        size_list_c = (
+            size_list[self.tp_rank % len(size_list):]
+            + size_list[:self.tp_rank % len(size_list)]
+        )
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
         self.request_queue.task_done()
