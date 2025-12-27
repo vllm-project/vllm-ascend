@@ -64,7 +64,7 @@ aisbench_cases = [{
     "top_p": 1,
     "repetition_penalty": 1,
     "request_rate": 0,
-    "baseline": 1,
+    "baseline": 1454.8686,
     "threshold": 0.97
 }]
 
