@@ -28,6 +28,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Quantization                  | 🟢 Functional  | W8A8 available; working on more quantization method support (W4A8, etc) |
 | Graph Mode                    | 🔵 Experimental| Experimental, see detailed note: [vllm-ascend#767][graph_mode]           |
 | Sleep Mode                    | 🟢 Functional  |                                                                        |
+| Context Parallel              | 🔵 Experimental|                                                                        |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
