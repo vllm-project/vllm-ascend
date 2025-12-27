@@ -2,6 +2,10 @@
 
 ## Getting Start
 
+:::{note}
+Context parallel feature currently is only supported on Atlas A3 device, and will be supported on Atlas A2 in the future.
+:::
+
 vLLM-Ascend now supports long sequence with context parallel options. This guide takes one-by-one steps to verify these features with constrained resources.
 
 Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers to deploy the “1P1D” architecture. Node p is deployed across multiple machines, while node d is deployed on a single machine. Assume the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1). On each server, use 8 NPUs 16 chips to deploy one service instance.In the current example, we will enable the context parallel feature on node p to improve TTFT. Although enabling the DCP feature on node d can reduce memory usage, it would introduce additional communication and small operator overhead. Therefore, we will not enable the DCP feature on node d.
@@ -26,10 +30,7 @@ Select an image based on your machine type and start the docker image on your no
 
 ```{code-block} bash
    :substitutions:
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
-# Note you should download the weight to /root/.cache in advance.
-# Update the vllm-ascend image
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
@@ -320,6 +321,7 @@ The parameters are explained as follows:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 - `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 optimization is enabled. Currently, this optimization is only supported for MoE in scenarios where tensor-parallel-size > 1.
+- `export VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL=1` indicates that context parallel is enabled. This environment variable is required in the PD architecture but not needed in the pd co-locate deployment scenario. It will be removed in the future.
 
 **Notice:**
 - tensor-parallel-size needs to be divisible by decode-context-parallel-size.
@@ -333,11 +335,11 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `DeepSeek-V3.1-w8a8` in `vllm-ascend:0.12.0rc1` for reference only.
+2. After execution, you can get the result, here is the result of `DeepSeek-V3.1-w8a8` for reference only.
 
-| dataset  | version | metric | mode | ttft |
+| dataset  | version | metric | mode | vllm-api-general-chat |
 |----------| ----- | ----- | ----- |-----------------------|
-| aime2024 | - | accuracy | gen | 15.8s |
+| aime2024 | - | accuracy | gen | 86.67 |
 
 ## Performance
 
@@ -364,3 +366,7 @@ vllm bench serve --model /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp  --dataset-na
 ```
 
 After about several minutes, you can get the performance evaluation result.
+
+| dataset | version | metric      | mode | ttft   |
+|---------| ----- |-------------|------|--------|
+| random  | - | performance | perf | 15.6s |
