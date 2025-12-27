@@ -20,20 +20,20 @@ def validate_cmp(y_cal, y_ref, dtype, device='npu'):
     if dtype == torch.float16:
         torch.testing.assert_close(y_ref,
                                    y_cal,
-                                   rtol=3e-03,
-                                   atol=1e-02,
+                                   rtol=5e-03,
+                                   atol=5e-03,
                                    equal_nan=True)
     elif dtype == torch.bfloat16:
         torch.testing.assert_close(y_ref,
                                    y_cal,
-                                   rtol=1e-02,
-                                   atol=1e-02,
+                                   rtol=5e-03,
+                                   atol=5e-03,
                                    equal_nan=True)
     elif dtype == torch.float32:
         torch.testing.assert_close(y_ref,
                                    y_cal,
                                    rtol=1e-03,
-                                   atol=4e-03,
+                                   atol=1e-03,
                                    equal_nan=True)
     elif dtype == torch.int32 or dtype == torch.int64 or dtype == torch.int16 or dtype == torch.int8 or dtype == torch.uint32:
         assert torch.equal(y_cal, y_ref)
