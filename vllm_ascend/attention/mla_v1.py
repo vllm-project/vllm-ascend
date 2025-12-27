@@ -30,7 +30,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                get_mtp_graph_params,
                                                update_graph_params_workspaces)
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import (AscendRotaryEmbedding,
+                                              get_cos_and_sin_mla)
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
@@ -407,17 +408,12 @@ class AscendMLAMetadataBuilder:
                     start_rotary_emb, 'sin_cached'):
                 self.cos_cache = start_rotary_emb.cos_cached
                 self.sin_cache = start_rotary_emb.sin_cached
-            elif hasattr(start_rotary_emb, 'cos_sin_cache'):
-                last_dim = start_rotary_emb.cos_sin_cache.shape[
-                    -1]  # type: ignore
+            elif isinstance(start_rotary_emb, AscendRotaryEmbedding):
+                last_dim = start_rotary_emb.cos_sin_cache.shape[-1]
                 self.cos_cache, self.sin_cache = start_rotary_emb.cos_sin_cache.reshape(
-                    -1, 2,
-                    last_dim // 2).repeat(1, 1, 2).chunk(2,
-                                                         dim=1)  # type: ignore
-                self.cos_cache = self.cos_cache.reshape(
-                    -1, last_dim)  # type: ignore
-                self.sin_cache = self.sin_cache.reshape(
-                    -1, last_dim)  # type: ignore
+                    -1, 2, last_dim // 2).repeat(1, 1, 2).chunk(2, dim=1)
+                self.cos_cache = self.cos_cache.reshape(-1, last_dim)
+                self.sin_cache = self.sin_cache.reshape(-1, last_dim)
             else:
                 raise ValueError("Rotary embedding cache not found")
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
