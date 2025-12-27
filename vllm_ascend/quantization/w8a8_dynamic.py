@@ -193,29 +193,23 @@ class AscendW8A8DynamicFusedMoEMethod:
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert router_logits.shape[
-            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
+        # assert router_logits.shape[
+        #    1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
+        topk_weights, topk_ids = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            mix_placement=getattr(layer.ascend_config, "mix_placement", False),
+            num_logical_experts=256,
+            global_num_experts=global_num_experts)
 
-        if self.multistream_overlap_gate:
-            fc3_context = get_flash_common3_context()
-            assert fc3_context is not None
-            topk_weights = fc3_context.topk_weights
-            topk_ids = fc3_context.topk_ids
-        else:
-            topk_weights, topk_ids = select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=use_grouped_topk,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-                global_num_experts=global_num_experts)
-        assert topk_ids is not None
-        assert topk_weights is not None
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.

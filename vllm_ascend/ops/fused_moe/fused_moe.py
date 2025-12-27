@@ -33,7 +33,8 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
+from vllm_ascend.eplb.core.eplb_utils import (determine_default_log2phy_map,
+                                              generate_experts_map)
 from vllm_ascend.eplb.utils import moe_load_async_stream
 from vllm_ascend.flash_common3_context import (get_flash_common3_context,
                                                set_flash_common3_context)
@@ -164,13 +165,13 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
-        self.expert_map_path = ascend_config.expert_map_path
-        self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+        self.ascend_config = get_ascend_config()
+        self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
+        self.expert_map_path = self.ascend_config.expert_map_path
+        self.global_redundant_expert_num = self.ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         # flashcommon3 gate stream
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.multistream_overlap_gate = self.ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
@@ -179,11 +180,12 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe.
-        self.local_num_experts, self._expert_map, _ = determine_expert_map(
-            self.ep_size, self.ep_rank, self.global_num_experts)
+        self.local_num_experts, self.expert_map = generate_experts_map(
+            self.ep_size, self.ep_rank, num_experts, self.global_redundant_expert_num)
         # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
         # workaround to bypass a quantization check that fails with float weights.
         init_eplb_enable = False
+        num_experts+=1 if getattr(self.ascend_config,"mix_placement",False) else 0
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -250,7 +252,7 @@ class AscendFusedMoE(FusedMoE):
             moe_quant_params["intermediate_size_full"] = intermediate_size
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.enable_shared_expert_dp = self.ascend_config.enable_shared_expert_dp
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
@@ -393,14 +395,14 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
 
-                moe_load_stream = moe_load_async_stream()
-                cur_stream = torch.npu.current_stream()
+                #moe_load_stream = moe_load_async_stream()
+                #cur_stream = torch.npu.current_stream()
 
-                moe_load_stream.wait_stream(cur_stream)
-                with npu_stream_switch(moe_load_stream):
-                    self.moe_load += expert_tokens if group_list_type == 1 else \
+                #moe_load_stream.wait_stream(cur_stream)
+                #with npu_stream_switch(moe_load_stream):
+                self.moe_load += expert_tokens if group_list_type == 1 else \
                         torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-                cur_stream.wait_stream(moe_load_stream)
+                #cur_stream.wait_stream(moe_load_stream)
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
@@ -424,9 +426,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
-        ascend_config = get_ascend_config()
-        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.ascend_config = get_ascend_config()
+        self.multistream_overlap_shared_expert = self.ascend_config.multistream_overlap_shared_expert
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
@@ -454,51 +455,53 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared_out, fused_out = AscendFusedMoE.forward(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        if self._shared_experts is None:
+            fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            shared_out = None
+        else:
+            shared_out, fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
         return shared_out, fused_out
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
-        shared_out = None
-        if not self.multistream_overlap_gate:
-            # Make sure the shared experts stream begins after hidden_states are ready.
-            if self.multistream_overlap_shared_expert:
-                shared_experts_calculation_stream(
-                ).wait_stream(  # type: ignore
-                    torch.npu.current_stream())
-            with npu_stream_switch(
-                    shared_experts_calculation_stream(),
-                    enabled=self.multistream_overlap_shared_expert):
-                # Use a separate stream to run shared experts.
+        # Make sure the shared experts stream begins after hidden_states are ready.
+        if self.multistream_overlap_shared_expert:
+            shared_experts_calculation_stream().wait_stream(  # type: ignore
+                torch.npu.current_stream())
+        with npu_stream_switch(shared_experts_calculation_stream(),
+                               enabled=self.multistream_overlap_shared_expert):
+            # Use a separate stream to run shared experts.
+            # Note that currently we only support calculations in separate streams with aclgraph.
+            # Communication operations in another stream might cause unknown errors.
+            if self._shared_experts is None:
+                shared_out = None
+            else:
                 shared_out = self._shared_experts(hidden_states)
-        else:
-            set_flash_common3_context(shared_experts=self._shared_experts)
 
         fused_output = AscendFusedMoE.forward_impl(
             self,
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-
-        if not self.multistream_overlap_gate:
-            # Make sure the default stream waits for the shared experts stream to finish.
-            if self.multistream_overlap_shared_expert:
-                torch.npu.current_stream().wait_stream(
-                    shared_experts_calculation_stream())
-
-            # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-            forward_context = get_forward_context()
-            moe_comm_type = forward_context.moe_comm_type
-            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
-                    and not shared_expert_dp_enabled():
-                shared_out = tensor_model_parallel_all_reduce(shared_out)
+        # Make sure the default stream waits for the shared experts stream to finish.
+        if self.multistream_overlap_shared_expert:
+            torch.npu.current_stream().wait_stream(
+                shared_experts_calculation_stream())
+        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+        forward_context = get_forward_context()
+        moe_comm_type = forward_context.moe_comm_type
+        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
+            and not shared_expert_dp_enabled() and shared_out is not None:
+            shared_out = tensor_model_parallel_all_reduce(shared_out)
+        if shared_out is None:
+            return fused_output
         else:
-            fc3_context = get_flash_common3_context()
-            assert fc3_context is not None
-            shared_out = fc3_context.shared_out
-
-        return shared_out, fused_output
+            return shared_out, fused_output
