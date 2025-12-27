@@ -58,6 +58,8 @@ deployment:
         --port $SERVER_PORT
         --data-parallel-size 2
         --data-parallel-size-local 2
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
         --tensor-parallel-size 8
         --seed 1024
         --max-num-seqs 16
