@@ -1,0 +1,47 @@
+Description:
+
+    Update and clarify the installation workflow for new users of ops‑math, especially in Ascend‑NPU environments.
+
+    Add detailed steps for environment setup (dependencies, CANN/Ascend toolkit, Python paths), so users don’t keep “stumbling on” path/config issues.
+
+    Add example usage snippet for PyTorch (or similar) so users can verify the module is imported correctly.
+
+    No changes to the core C++/算子 logic — purely documentation enhancements.
+
+Changes:
+
+    Expanded the “Getting Started” section in README.md to break down:
+
+        Clone repo, select branch
+
+        Create build folder, run cmake and ninja appropriately
+
+        Ensure correct Ascend environment (source /usr/local/Ascend/set_env.sh)
+
+        Ensure Python path includes generated module or wheel install.
+
+    Added a “Troubleshooting” subsection for common issues (e.g., ModuleNotFoundError: No module named 'ops_math').
+
+    Added an example Python snippet using PyTorch to validate correct import and operator call (add).
+
+    Cleaned up wording, fixed typos and standardised command formatting.
+
+Rationale:
+
+    Many users encounter issues such as “ModuleNotFoundError: No module named 'ops_math'” or “missing CMakeCache.txt” which stem from unclear initial setup instructions.
+
+    By improving the documentation, we reduce onboarding friction and improve the developer experience.
+
+    Focusing purely on documentation keeps the scope safe and review‑friendly.
+
+Test Plan:
+
+    Not applicable (no code change).
+
+    Verified that following the updated installation steps allows successful import of ops_math in a clean Ascend environment.
+
+Impact:
+
+    Low risk — only docs change.
+
+    Improves clarity and decreases user support load.
