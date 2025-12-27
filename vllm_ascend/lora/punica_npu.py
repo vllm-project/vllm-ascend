@@ -4,7 +4,7 @@ from typing import Callable, Optional, Tuple, Union
 
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
-
+from vllm.config.lora import LoRAConfig
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -20,10 +20,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
                  device: Union[torch.device,
-                               str], max_lora_rank: int, **kwargs):
+                               str], lora_config: LoRAConfig, **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
         refresh_all_lora_classes()
+        max_lora_rank = lora_config.max_lora_rank
         if get_ascend_device_type(
         ) == AscendDeviceType._310P or max_lora_rank >= 128:
             from vllm.lora.ops.torch_ops import (bgmv_expand,
