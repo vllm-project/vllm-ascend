@@ -708,12 +708,10 @@ public:
         ubOffset += CEIL_UP(CEIL(expertCntUp, INT32_COUNT_PER_BLOCK) * INT32_COUNT_PER_BLOCK * UB_BLOCK_SIZE);
         AscendC::Duplicate(statusTensor_, (int32_t)0,
                            expertCntUp * INT32_COUNT_PER_BLOCK);
-        if (state == 0) {
-            // set the first number of every 8 numbers as 0x3F800000(float 1.0)
-            uint64_t mask[2] = {0x101010101010101, 0};
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Duplicate<int32_t>(statusTensor_, 0x3F800000, mask, CEIL(expertCntUp, 8), 1, 8);
-        }
+        // set the first number of every 8 numbers as 0x3F800000(float 1.0)
+        uint64_t mask[2] = {0x101010101010101, 0};
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Duplicate<int32_t>(statusTensor_, 0x3F800000, mask, CEIL(expertCntUp, 8), 1, 8);
 
         AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
         AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
@@ -741,7 +739,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0);
 
         AscendC::GlobalTensor<int32_t> rankGMTensor;
-        AscendC::DataCopyParams flagParams{1, 8, 0, 0};
+        AscendC::DataCopyParams flagParams{1, 2 * sizeof(int32_t), 0, 0};
         uint32_t offset = stateOffset * epRankId;
         for (uint32_t rankIndex = startExpertId; rankIndex < endExpertId; ++rankIndex) {
             uint32_t dstRankId = rankIndex;
@@ -1430,7 +1428,10 @@ public:
 
             uint32_t recStatusNumPerCore = isShareExpert ? epRankSize : expertCntUp;
             uint32_t startStatusIndex = 0;
-            AscendC::DataCopyParams zerosParams{static_cast<uint16_t>(recStatusNumPerCore), 2 * sizeof(int32_t), 0, static_cast<uint16_t>(15 * UB_ALIGN + UB_ALIGN - 2 * sizeof(int32_t))};
+            AscendC::DataCopyParams zerosParams{static_cast<uint16_t>(recStatusNumPerCore),
+                                                2 * sizeof(int32_t),
+                                                0,
+                                                static_cast<uint16_t>(stateOffset - 2 * sizeof(int32_t))};
             AscendC::GlobalTensor<int32_t> windowInstatusInt32Tensor;
             windowInstatusInt32Tensor.SetGlobalBuffer((__gm__ int32_t *)GET_WIND_STATE_ADDR_BY_RANK_ID(epRankId));
 
@@ -1441,8 +1442,8 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(0);
             AscendC::DataCopy(groupTokenNumStateTensor, tmpZeroLocalTensor, GROUP_INFO_SIZE * localExpertNum);
-            AscendC::DataCopyPad(windowInstatusInt32Tensor[startStatusIndex * stateOffset / sizeof(int32_t)], tmpZeroLocalTensor, 
-                            zerosParams);
+            AscendC::DataCopyPad(windowInstatusInt32Tensor[startStatusIndex * stateOffset / sizeof(int32_t)],
+                                tmpZeroLocalTensor, zerosParams);
         }
 
         if (isRecvCore && recvCoreIdx == (recvCoreNum - 1)) {

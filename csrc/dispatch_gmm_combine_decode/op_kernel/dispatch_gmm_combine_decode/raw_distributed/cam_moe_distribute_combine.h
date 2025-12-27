@@ -589,7 +589,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::SetStatus()
 
     LocalTensor<int32_t> statusFlagUb = readStateBuf_.Get<int32_t>();
     statusFlagUb.SetValue(0, epStateValue_);
-    DataCopyParams flagParams{1, 4, 0, 0};
+    DataCopyParams flagParams{1, sizeof(int32_t), 0, 0};
     SyncFunc<AscendC::HardEvent::S_MTE3>();
 
     for (uint32_t epIdx = startRankId_; epIdx < endRankId_; epIdx++) {
@@ -613,7 +613,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
         uint32_t mask = 1;  // gatherMask + sum
         uint64_t rsvdCnt = 0;
         DataCopyParams intriParams{static_cast<uint16_t>(sendRankNum_), 1,
-                                   static_cast<uint16_t>((moeSendNum_ > 512) ? 7 : 15), 0};  // srcStride is 15 blocks
+                                   static_cast<uint16_t>(stateOffset_ / UB_ALIGN - 1), 0};  // srcStride is 15 blocks
         float sumOfFlag = static_cast<float>(-1.0);
         float minTarget = (sumTarget_ * sendRankNum_) - (float)0.5;
         float maxTarget = (sumTarget_ * sendRankNum_) + (float)0.5;
@@ -634,10 +634,11 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
         tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendRankNum_);
         LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
         DataCopyParams zerosParams{static_cast<uint16_t>(sendRankNum_), sizeof(int32_t),
-                                0, static_cast<uint16_t>(((moeSendNum_ > 512) ? 7 : 15) * UB_ALIGN + UB_ALIGN - sizeof(int32_t))};
+                                0, static_cast<uint16_t>(stateOffset_ - sizeof(int32_t))};
         Duplicate(zerosTensor, (int32_t)0, sendRankNum_ * UB_ALIGN / sizeof(int32_t));
         SyncFunc<AscendC::HardEvent::V_MTE3>();
-        DataCopyPad(epStatusSpaceInt32GlobalTensor_[startRankId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
+        DataCopyPad(epStatusSpaceInt32GlobalTensor_[startRankId_ * stateOffset_ / sizeof(int32_t)],
+                    zerosTensor, zerosParams);
     }
 
     if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {

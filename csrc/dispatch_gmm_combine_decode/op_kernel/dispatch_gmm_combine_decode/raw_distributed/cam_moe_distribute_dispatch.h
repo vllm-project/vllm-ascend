@@ -184,6 +184,7 @@ private:
     uint32_t totalExpertNum_{0};
     uint32_t bufferSizePerRank_{0};
     uint32_t recvWinBlockNum_{0};
+    uint32_t countFlagBlockStride_{0};
     uint32_t hSize_{0};
     uint32_t hOutSize_{0};
     uint32_t hCommuSize_{0};
@@ -221,9 +222,9 @@ private:
 
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
-    GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut,
-    GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut, GM_ADDR outputRecvCount, GM_ADDR tpSendCountsOut,
-    GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData)
+    GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut,
+    GM_ADDR expandIdxOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut, GM_ADDR outputRecvCount,
+    GM_ADDR tpSendCountsOut, GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData)
 {
     tpipe_ = pipe;
     aivId_ = GetBlockIdx();
@@ -295,6 +296,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     windyquantOffset_ = epWorldSize_ * axisMaxBS_ * hOutSize_;
     int32_t state = 0;
     stateOffset_ = (recvWinBlockNum_ > 512) ? (STATE_OFFSET / 2) : STATE_OFFSET;
+    countFlagBlockStride_ = stateOffset_ / UB_ALIGN - 1;
     tpipe_->InitBuffer(statusBuf_, recvWinBlockNum_ * UB_ALIGN);  // expertNum * 32B
     statusTensor_ = statusBuf_.Get<int32_t>();  // Record token count and flag
     Duplicate<int32_t>(statusTensor_, 0, recvWinBlockNum_ * 8);  // 8 = UB_ALIGN / sizeof(int32_t)
@@ -641,7 +643,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SetSt
         return;
     }
     GlobalTensor<int32_t> rankGMTensor;
-    DataCopyParams flagParams{1, 8, 0, 0};
+    DataCopyParams flagParams{1, 2 * sizeof(int32_t), 0, 0};
     uint32_t offset = stateOffset_ * epRankId_;
     for (uint32_t rankIndex = startExpertId_; rankIndex < endExpertId_; ++rankIndex) {
         uint32_t dstRankId = rankIndex;
@@ -753,7 +755,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::WaitD
     float minTarget = (sumTarget_ * recStatusNumPerCore) - (float)0.5;
     float maxTarget = (sumTarget_ * recStatusNumPerCore) + (float)0.5;
     DataCopyParams intriParams{static_cast<uint16_t>(recStatusNumPerCore), 1,
-                               static_cast<uint16_t>((recvWinBlockNum_ > 512) ? 7 : 15), 0};
+                               static_cast<uint16_t>(countFlagBlockStride_), 0};
     SyncFunc<AscendC::HardEvent::S_V>();
     while ((sumOfFlag < minTarget) || (sumOfFlag > maxTarget)) {
         DataCopy(statusFp32Tensor_, windowInstatusFp32Tensor_[startStatusIndex * stateOffset_ / sizeof(float)],
@@ -777,7 +779,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::GetCu
 {
     statusFp32Tensor_ = statusTensor_.ReinterpretCast<float>();
     DataCopyParams intriParams{static_cast<uint16_t>(recvWinBlockNum_), 1,
-                               static_cast<uint16_t>((recvWinBlockNum_ > 512) ? 7 : 15), 0};
+                               static_cast<uint16_t>(countFlagBlockStride_), 0};
     DataCopy(statusTensor_, windowInstatusTensor_, intriParams);
     SyncFunc<AscendC::HardEvent::MTE2_S>();
     if (isShareExpertRank_) {
@@ -931,8 +933,11 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
     TBuf<> zerosBuf;
     tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendExpertNum_);
     LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
-    DataCopyParams zerosParams{static_cast<uint16_t>(sendExpertNum_), 2 * sizeof(int32_t),
-                               0, static_cast<uint16_t>(((recvWinBlockNum_ > 512) ? 7 : 15) * UB_ALIGN + UB_ALIGN - 2 * sizeof(int32_t))};
+    DataCopyParams zerosParams{
+        static_cast<uint16_t>(sendExpertNum_),
+        2 * sizeof(int32_t),
+        0,
+        static_cast<uint16_t>(stateOffset_ - 2 * sizeof(int32_t))};
     Duplicate(zerosTensor, (int32_t)0, sendExpertNum_ * INT32_NUM_PER_BLOCK);
     SyncFunc<AscendC::HardEvent::V_MTE3>();
     DataCopyPad(windowInstatusTensor_[startExpertId_ * stateOffset_ / sizeof(int32_t)], zerosTensor, zerosParams);
