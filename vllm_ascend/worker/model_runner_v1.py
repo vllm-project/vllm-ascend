@@ -511,8 +511,7 @@ class NPUModelRunner(GPUModelRunner):
         self.cp_kv_recover_idx_for_chunk = [[] for _ in range(self.pcp_size)]
 
         for i, req_id in enumerate(self.input_batch.req_ids):
-            num_scheduled_token = scheduler_output.num_scheduled_tokens[
-                req_id]
+            num_scheduled_token = scheduler_output.num_scheduled_tokens[req_id]
             is_prefill = num_scheduled_token > self.decode_threshold
 
             if is_prefill:
