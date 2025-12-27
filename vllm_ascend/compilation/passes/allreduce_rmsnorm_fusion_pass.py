@@ -73,7 +73,7 @@ class MatmulAllReduceAddRMSNormPass(VllmInductorPass):
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(
             pass_name="allreduce_rmsnorm_fusion_pass")
 
-        MatmulAllReduceAddRMSNormPattern(vllm_config, ).register(
+        MatmulAllReduceAddRMSNormPattern(vllm_config).register(
             self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
