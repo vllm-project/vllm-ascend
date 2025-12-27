@@ -139,8 +139,6 @@ Run the following scripts on two nodes respectively.
 nic_name="xxxx"
 local_ip="xxxx"
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -185,8 +183,6 @@ nic_name="xxxx"
 local_ip="xxxx"
 node0_ip="xxxx" # same as the local_IP address in node 0
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
