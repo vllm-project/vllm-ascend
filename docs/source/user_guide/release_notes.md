@@ -3,7 +3,7 @@
 This is the first release candidate of v0.13.0 for vLLM Ascend. We landed lots of bug fix, performance improvement and feature support in this release. Any feedback is welcome to help us to improve vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/latest) to get started.
 
 ### Highlights
-- Improved the performance of DeepSeek V3.2 [#3995](https://github.com/vllm-project/vllm-ascend/pull/3995), please refer to [tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/DeepSeek-V3.2.html)
+- Improved the performance of DeepSeek V3.2, please refer to [tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/DeepSeek-V3.2.html)
 - Qwen3-Next MTP with chunked prefill is supported now [#4770](https://github.com/vllm-project/vllm-ascend/pull/4770), please refer to [tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/Qwen3-Next.html)
 - [Experimental] Prefill Context Parallel and Decode Context Parallel are supported, but notice that it is an experimental feature now, welcome any feedback. please refer to [context parallel feature guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)
 
