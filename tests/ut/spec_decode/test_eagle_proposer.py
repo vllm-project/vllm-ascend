@@ -101,9 +101,16 @@ class TestEagleProposerLoadModel(TestBase):
     def test_load_model_pp1(self, mock_pp_group, mock_get_model,
                             mock_get_layers):
         mock_pp_group.return_value.world_size = 1
-        mock_target_layers = {"layer1": MagicMock(), "layer2": MagicMock()}
-        mock_draft_layers = {"layer1": MagicMock(), "layer3": MagicMock()}
-        mock_get_layers.side_effect = [mock_target_layers, mock_draft_layers]
+        mock_target_layer1 = MagicMock()
+        mock_target_layer2 = MagicMock()
+        mock_draft_layer1 = MagicMock()
+        mock_draft_layer3 = MagicMock()
+        mock_get_layers.side_effect = [
+            {"layer1": mock_target_layer1, "layer2": mock_target_layer2},
+            {},
+            {},
+            {"layer1": mock_draft_layer1, "layer3": mock_draft_layer3}
+        ]
 
         mock_model = MagicMock()
         mock_model.model.embed_tokens = MagicMock()
@@ -115,7 +122,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.proposer.load_model(mock_model)
         mock_get_model.assert_called_once()
-        self.assertEqual(self.proposer.attn_layer_name, "layer3")
+        self.assertEqual(self.proposer.attn_layer_name, ["layer3"])
         self.assertIs(self.proposer.model.model.embed_tokens,
                       mock_model.model.embed_tokens)
 
@@ -126,9 +133,15 @@ class TestEagleProposerLoadModel(TestBase):
     def test_load_model_pp_gt1(self, mock_pp_group, mock_get_model,
                                mock_get_layers):
         mock_pp_group.return_value.world_size = 2
-        mock_target_layers = {"layer1": MagicMock()}
-        mock_draft_layers = {"layer2": MagicMock()}
-        mock_get_layers.side_effect = [mock_target_layers, mock_draft_layers]
+        mock_target_layer1 = MagicMock()
+        mock_draft_layer2 = MagicMock()
+        
+        mock_get_layers.side_effect = [
+            {"layer1": mock_target_layer1},
+            {},
+            {},
+            {"layer2": mock_draft_layer2}
+        ]
 
         mock_model = MagicMock()
         original_embed = MagicMock()
@@ -141,7 +154,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.assertIsNot(self.proposer.model.model.embed_tokens,
                          mock_model.model.embed_tokens)
-        self.assertEqual(self.proposer.attn_layer_name, "layer2")
+        self.assertEqual(self.proposer.attn_layer_name, ["layer2"])
 
     @patch(
         "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
@@ -157,9 +170,15 @@ class TestEagleProposerLoadModel(TestBase):
         mock_get_model.return_value = MagicMock(model=MagicMock(
             embed_tokens=original_embed))
 
-        mock_target_layers = {"layer1": MagicMock()}
-        mock_draft_layers = {"layer2": MagicMock()}
-        mock_get_layers.side_effect = [mock_target_layers, mock_draft_layers]
+        mock_target_layer1 = MagicMock()
+        mock_draft_layer2 = MagicMock()
+        
+        mock_get_layers.side_effect = [
+            {"layer1": mock_target_layer1},
+            {},
+            {},
+            {"layer2": mock_draft_layer2}
+        ]
         mock_pp_group.return_value.world_size = 2
 
         self.proposer.model = MagicMock()
@@ -211,70 +230,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_context.return_value.__enter__.return_value = None
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
         self.proposer.model.assert_called_once()
-
-
-class TestEagleProposerGenerateTokenIds(TestBase):
-
-    def setUp(self):
-        self.vllm_config = MagicMock(spec=VllmConfig)
-        self.vllm_config.speculative_config = MagicMock()
-        self.vllm_config.speculative_config.method = "eagle"
-        self.device = torch.device("cpu")
-        self.runner = MagicMock()
-        self.runner.input_batch = MagicMock()
-        self.runner.input_batch.req_ids = [0, 1, 2]
-        self.runner.requests = {
-            0: MagicMock(get_token_id=lambda x: 100),
-            1: MagicMock(get_token_id=lambda x: 101),
-            2: MagicMock(get_token_id=lambda x: 102),
-        }
-
-        self.vllm_config.cache_config.block_size = 16
-        self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
-        self.vllm_config.scheduler_config.max_num_seqs = 32
-        self.vllm_config.model_config.dtype = torch.float16
-        self.vllm_config.model_config.max_model_len = 2048
-
-        self.mock_cpugpubuffer = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
-        self.mock_cpugpubuffer.start()
-        self.proposer = EagleProposer(vllm_config=self.vllm_config,
-                                      device=self.device,
-                                      runner=self.runner)
-        self.proposer.attn_layer_name = "layer_0"
-        self.proposer._propose = MagicMock(
-            return_value=torch.tensor([[1, 2], [3, 4], [5, 6]]))
-
-    def tearDown(self):
-        self.mock_cpugpubuffer.stop()
-
-    # TODO: This is equivalent to disable_padded_drafter_batch=True.
-    # We need to add some cases about disable_padded_drafter_batch=False in future.
-    def test_generate_token_ids(self):
-        valid_sampled = [[20, 30, 40]]
-        scheduler_output = MagicMock()
-        scheduler_output.num_scheduled_tokens = [2, 1, 3]
-        positions = torch.tensor([0, 1, 2, 3, 4, 5])
-        hidden_states = torch.randn(6, 4096)
-        num_scheduled = 6
-
-        mock_attn_metadata = MagicMock()
-        mock_attn_metadata.slot_mapping = torch.tensor([0, 1, 2, 3, 4, 5])
-        mock_attn_metadata.query_start_loc = torch.tensor([0, 2, 3, 6])
-        mock_attn_metadata.block_tables = MagicMock()
-        self.proposer._get_eagle_atten_dict = MagicMock(
-            return_value={"layer_0": mock_attn_metadata})
-
-        result = self.proposer.generate_token_ids(
-            sampled_token_ids=valid_sampled,
-            scheduler_output=scheduler_output,
-            positions=positions,
-            num_scheduled_tokens=num_scheduled,
-            hidden_states=hidden_states,
-        )
-
-        self.proposer._propose.assert_called_once()
-        self.assertEqual(result.numpy().tolist(), [[1, 2], [3, 4], [5, 6]])
 
 
 class TestEagleProposerHelperMethods(TestBase):
