@@ -168,7 +168,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
@@ -214,7 +214,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 

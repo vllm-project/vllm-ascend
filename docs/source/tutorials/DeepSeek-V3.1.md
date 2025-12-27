@@ -249,7 +249,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
 --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
