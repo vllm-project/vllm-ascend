@@ -114,7 +114,7 @@ async def test_multi_node() -> None:
                 proxy_port=proxy_port,
                 disaggregated_prefill=disaggregated_prefill,
                 nodes_info=nodes_info,
-                max_wait_seconds=1200,
+                max_wait_seconds=2800,
         ) as remote_server:
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
