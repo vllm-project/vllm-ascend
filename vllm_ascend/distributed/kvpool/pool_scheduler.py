@@ -26,8 +26,7 @@ class KVPoolScheduler:
             "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
-        self.client = LookupKeyClient(
-            vllm_config) if self.kv_role != "kv_consumer" else None
+        self.client = LookupKeyClient(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config,
@@ -75,8 +74,8 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(  # type: ignore[union-attr]
-            token_len, request.block_hashes)
+        num_external_hit_tokens = self.client.lookup(token_len,
+                                                     request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
