@@ -138,9 +138,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         if is_reshaped:
             context_layer = einops.rearrange(context_layer,
                                              "(b s) h d -> b s h d",
-                                             b=bsz)
+                                             b=bsz).contiguous()
         else:
             context_layer = einops.rearrange(context_layer,
                                              "(b s) h d -> b s (h d)",
-                                             b=bsz)
+                                             b=bsz).contiguous()
         return context_layer
