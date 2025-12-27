@@ -146,7 +146,6 @@ class AscendMetadata:
     actual_seq_lengths_q: List[int] = None  # type: ignore
 
     query_start_loc: torch.Tensor = None
-    query_start_loc_list: Optional[List[int]] = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: Optional[int] = None
 

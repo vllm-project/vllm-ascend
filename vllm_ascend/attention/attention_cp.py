@@ -239,7 +239,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
             block_tables=block_table,
             query_start_loc=query_start_loc,
-            query_start_loc_list=query_start_loc_cpu[1:].tolist(),
             seq_lens=seq_lens,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
@@ -285,8 +284,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         ) if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group(
         ).device_group if self.dcp_size > 1 else None
-        self.comm_stream = torch_npu.npu.Stream(
-            device=torch.npu.current_device())
 
     def _attention_with_nomask_and_mask(self, q: torch.Tensor,
                                         q_seqlens: List[int],
@@ -658,15 +655,13 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 current_attn_output_prefill.dtype)
 
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
-        # Note(qcs): we need let communication continuous.
         if self.pcp_size > 1:
             prefill_query = get_pcp_group().all_gather(prefill_query, 0)
-        if self.dcp_size > 1:
-            prefill_query = get_dcp_group().all_gather(prefill_query, 1)
-        if self.pcp_size > 1:
             prefill_query = torch.index_select(
                 prefill_query, 0, attn_metadata.prefill.chunked_context.
                 cp_kv_recover_idx_for_chunk)
+        if self.dcp_size > 1:
+            prefill_query = get_dcp_group().all_gather(prefill_query, 1)
         return prefill_query
 
     def _compute_prefill_context(self, query: torch.Tensor,
@@ -717,47 +712,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                            prefix_chunk_lse)
 
         return prefix_chunk_output, prefix_chunk_lse
-
-    def _update_chunk_attn_out_lse(self, prefix_chunk_output,
-                                   prefix_chunk_lse):
-        # CP dimension all_gather and fusion
-        chunk_attn_out_lse = torch.cat([prefix_chunk_output, prefix_chunk_lse],
-                                       dim=-1)
-
-        if self.dcp_size > 1:
-            chunk_attn_out_lse = chunk_attn_out_lse.permute([1, 2,
-                                                             0]).contiguous()
-            attn_out_lse_all2all = torch.empty_like(chunk_attn_out_lse)
-            dist.all_to_all_single(attn_out_lse_all2all,
-                                   chunk_attn_out_lse,
-                                   group=self.dcp_group)
-            chunk_attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
-
-        if self.pcp_size > 1:
-            # AllGather out&lse within CP group
-            chunk_attn_out_lse = get_pcp_group().all_gather(
-                chunk_attn_out_lse.contiguous(), dim=0)
-
-        B_total, H_total, D_plus_1 = chunk_attn_out_lse.shape
-        S = B_total // self.pcp_size
-        H = H_total // self.dcp_size
-        D = self.head_size
-        assert D_plus_1 == D + 1
-        # [PCP, S, DCP, H, D+1]
-        x = chunk_attn_out_lse.view(self.pcp_size, S, self.dcp_size, H,
-                                    D_plus_1)
-        # [PCP, DCP, S, H, D+1]
-        x = x.permute(0, 2, 1, 3, 4).contiguous()
-        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
-        x = x.view(-1, S, H, D_plus_1)
-        # Split out lse.
-        # [N, S, H, D], [N, S, H, 1]
-        attn_out_allgather, attn_lse_allgather = torch.split(x, [D, 1], dim=-1)
-
-        prefix_output, prefix_lse = self._update_out_and_lse(
-            attn_out_allgather, attn_lse_allgather)
-
-        return prefix_output, prefix_lse
 
     def _load_kv_for_chunk(self, attn_metadata, kv_cache,
                            local_chunked_kv_lens_rank, query, total_toks):
@@ -843,13 +797,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                                  slot_indices=slot_mapping)
 
         return key, value
-
-    def _compute_local_context(self, prefill_query, kv_cache, attn_metadata):
-        prefill_query_all = self._prefill_query_all_gather(
-            attn_metadata, prefill_query)
-        output, lse = self._compute_prefill_context(prefill_query_all,
-                                                    kv_cache, attn_metadata)
-        return torch.cat([output, lse], dim=-1)
 
     def _gather_global_context_output(self, local_context_attn_output):
         if self.dcp_size > 1:
