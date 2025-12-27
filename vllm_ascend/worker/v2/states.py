@@ -1,8 +1,9 @@
 from contextlib import contextmanager
 
 import torch
+import vllm
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.states import RequestState, UvaBuffer
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class AscendRequestState(RequestState):
@@ -18,16 +19,15 @@ class AscendRequestState(RequestState):
         device: torch.device,
         pin_memory: bool,
     ):
-        with uva_wrapper():
-            super().__init__(
-                max_num_reqs,
-                max_model_len,
-                max_num_batched_tokens,
-                num_speculative_steps,
-                vocab_size,
-                device,
-                pin_memory,
-            )
+        super().__init__(
+            max_num_reqs,
+            max_model_len,
+            max_num_batched_tokens,
+            num_speculative_steps,
+            vocab_size,
+            device,
+            pin_memory,
+        )
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.prefill_token_ids
@@ -78,11 +78,9 @@ def uva_wrapper():
         def __init__(self, *args, **kwargs):
             pass
 
-    # TODO(Ronald1995): rectify this when NPU support uva.
-    global UvaBuffer
-    ori_class = UvaBuffer
     try:
-        UvaBuffer = UvaBufferWrapper
+        # TODO(Ronald1995): rectify this when NPU support uva.
+        vllm.v1.worker.gpu.states.UvaBuffer = UvaBufferWrapper
         yield
     finally:
-        UvaBuffer = ori_class
+        pass

@@ -19,7 +19,8 @@ from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
                                               build_attn_state,
                                               make_attention_mask)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.states import AscendRequestState
+from vllm_ascend.worker.v2.sample.sampler import AscendSampler
+from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 logger = init_logger(__name__)
@@ -29,7 +30,7 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with torch_cuda_wrapper():
+        with (torch_cuda_wrapper(), uva_wrapper()):
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -37,6 +38,7 @@ class NPUModelRunner(GPUModelRunner):
         del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
+        del self.sampler
 
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
@@ -65,6 +67,10 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
             pin_memory=self.pin_memory,
         )
+        # we need to adjust triton operators in sampler,
+        # so reinitialize sampler here.
+        self.sampler: AscendSampler = AscendSampler(
+            logprobs_mode=self.model_config.logprobs_mode, )
 
         # actual seq lengths for query (used in attention backends).
         self.actual_seq_lengths_q: list[int] = []
@@ -206,7 +212,9 @@ class NPUModelRunner(GPUModelRunner):
             self.req_states.next_prefill_tokens,
             idx_mapping_npu,
             query_start_loc_gpu,
-            self.req_states.prefill_token_ids.gpu,
+            # use prefill_token_ids.copy_to_gpu() because npu doesn't
+            # support uva buffer.
+            self.req_states.prefill_token_ids.copy_to_gpu(),
             self.req_states.prefill_len.gpu,
             self.req_states.num_computed_tokens,
         )
@@ -255,7 +263,9 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_tokens_cpu=self.req_states.
             num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
-            slot_mappings=slot_mappings,
+            # torch_npu._reshape_and_cache operator requires slot_mappings to
+            # be torch.int32.
+            slot_mappings=slot_mappings.to(torch.int32),
             kv_cache_config=self.kv_cache_config,
             decode_token_per_req=self.decode_token_per_req,
             attn_mask=attn_mask,
@@ -344,3 +354,8 @@ class NPUModelRunner(GPUModelRunner):
                 req_index]
             self.input_buffers.seq_lens_cpu[
                 i] = num_computed_tokens + num_scheduled_tokens[req_id]
+
+    def eplb_warmup(self):
+        # TODO(Ronald1995): just define the method in case calling error in
+        # worker, implement it in the future.
+        pass
