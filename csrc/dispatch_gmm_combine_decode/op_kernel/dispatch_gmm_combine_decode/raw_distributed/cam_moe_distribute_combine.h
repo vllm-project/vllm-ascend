@@ -117,7 +117,7 @@ private:
                                  ? epWinContext_->localWindowsExp
                                  : ((HcclRankRelationResV2 *)(epWinContext_->remoteRes[rankId].nextDevicePtr))
                                        ->windowsExp) +
-                   dataState_ * WIN_STATE_OFFSET;
+                   dataState_ * WIN_STATE_OFFSET + EXP_BUFFER_OFFSET;
         } else {
             return (GM_ADDR)((tpRankId_ == rankId)
                                  ? tpWinContext_->localWindowsExp
@@ -150,6 +150,7 @@ private:
     GlobalTensor<ExpandXType> rankWindow_;
     GlobalTensor<int32_t> rankStates_;
     GlobalTensor<float> epStatusSpaceGlobalTensor_;
+    GlobalTensor<int32_t> epStatusSpaceInt32GlobalTensor_;
     GlobalTensor<float> tpStatusSpaceGlobalTensor_;
     GlobalTensor<ExpandXType> tpRankWindow_;
     GlobalTensor<ExpandXType> rowTmpGlobal_;
@@ -245,23 +246,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     epRankId_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankId;
     auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
     epWinContext_ = (__gm__ HcclOpResParam *)contextGM0;
-    GlobalTensor<int32_t> selfDataStatusTensor;
-    GM_ADDR statusDataSpaceGm = (GM_ADDR)epWinContext_->localWindowsExp;
-    selfDataStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(statusDataSpaceGm + STATE_WIN_OFFSET));
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfDataStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
-    dataState_ = selfDataStatusTensor(coreIdx_ * UB_ALIGN);
-    if (dataState_ == 0) {
-        selfDataStatusTensor(coreIdx_ * UB_ALIGN) = 1;
-    } else {
-        selfDataStatusTensor(coreIdx_ * UB_ALIGN) = 0;
-    }
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfDataStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
+    dataState_ = 1;
     pipe_barrier(PIPE_ALL);
 
     workspaceGM_ = workspaceGM;
@@ -298,6 +283,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     epWindowGM_ = GetWinAddrByRankId(epRankId_, EP_DOMAIN);
     epStatusSpaceGm_ = GetWinStateAddrByRankId(epRankId_, EP_DOMAIN);
     epStatusSpaceGlobalTensor_.SetGlobalBuffer((__gm__ float *)epStatusSpaceGm_);
+    epStatusSpaceInt32GlobalTensor_.SetGlobalBuffer((__gm__ int32_t *)epStatusSpaceGm_);
     epDataOffsetOnWin_ = epRankId_ * moeExpertPerRankNum_ * static_cast<uint32_t>(expertPerSizeOnWin_);
     epStateOffsetOnWin_ = epRankId_ * stateOffset_;
     isShardExpert_ = (epRankId_ < sharedExpertRankNum_);
@@ -340,26 +326,8 @@ template <TemplateMC2TypeClass>
 __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::InitStatusTargetSum()
 {
     // ep state
-    GlobalTensor<int32_t> selfStatusTensor;
-    selfStatusTensor.SetGlobalBuffer((__gm__ int32_t *)(epStatusSpaceGm_ + SELF_STATE_OFFSET));
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
-    int32_t state = selfStatusTensor(coreIdx_ * UB_ALIGN);
-    if (state == 0) {
-        sumTarget_ = static_cast<float>(1.0);
-        selfStatusTensor(coreIdx_ * UB_ALIGN) = 0x3F800000;  // 1.0f
-        epStateValue_ = 0x3F800000;                          // 1.0f
-    } else {
-        sumTarget_ = static_cast<float>(0.0);
-        selfStatusTensor(coreIdx_ * UB_ALIGN) = 0;
-        epStateValue_ = 0;
-    }
-    __asm__ __volatile__("");
-    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-        selfStatusTensor[coreIdx_ * UB_ALIGN]);
-    __asm__ __volatile__("");
+    sumTarget_ = static_cast<float>(1.0);
+    epStateValue_ = 0x3F800000;
 }
 
 template <TemplateMC2TypeClass>
@@ -621,12 +589,13 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::SetStatus()
 
     LocalTensor<int32_t> statusFlagUb = readStateBuf_.Get<int32_t>();
     statusFlagUb.SetValue(0, epStateValue_);
+    DataCopyParams flagParams{1, sizeof(int32_t), 0, 0};
     SyncFunc<AscendC::HardEvent::S_MTE3>();
 
     for (uint32_t epIdx = startRankId_; epIdx < endRankId_; epIdx++) {
         stateGM_ = GetWinStateAddrByRankId(epIdx, EP_DOMAIN) + epStateOffsetOnWin_;
         rankStates_.SetGlobalBuffer((__gm__ int32_t *)stateGM_);
-        DataCopy(rankStates_, statusFlagUb, 8);
+        DataCopyPad(rankStates_, statusFlagUb, flagParams);
     }
 }
 
@@ -644,7 +613,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
         uint32_t mask = 1;  // gatherMask + sum
         uint64_t rsvdCnt = 0;
         DataCopyParams intriParams{static_cast<uint16_t>(sendRankNum_), 1,
-                                   static_cast<uint16_t>((moeSendNum_ > 512) ? 7 : 15), 0};  // srcStride is 15 blocks
+                                   static_cast<uint16_t>(stateOffset_ / UB_ALIGN - 1), 0};  // srcStride is 15 blocks
         float sumOfFlag = static_cast<float>(-1.0);
         float minTarget = (sumTarget_ * sendRankNum_) - (float)0.5;
         float maxTarget = (sumTarget_ * sendRankNum_) + (float)0.5;
@@ -661,6 +630,15 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
             SyncFunc<AscendC::HardEvent::V_S>();
             sumOfFlag = statusSumOutTensor.GetValue(0);
         }
+        TBuf<> zerosBuf;
+        tpipe_->InitBuffer(zerosBuf, UB_ALIGN * sendRankNum_);
+        LocalTensor<int32_t> zerosTensor = zerosBuf.Get<int32_t>();
+        DataCopyParams zerosParams{static_cast<uint16_t>(sendRankNum_), sizeof(int32_t),
+                                0, static_cast<uint16_t>(stateOffset_ - sizeof(int32_t))};
+        Duplicate(zerosTensor, (int32_t)0, sendRankNum_ * UB_ALIGN / sizeof(int32_t));
+        SyncFunc<AscendC::HardEvent::V_MTE3>();
+        DataCopyPad(epStatusSpaceInt32GlobalTensor_[startRankId_ * stateOffset_ / sizeof(int32_t)],
+                    zerosTensor, zerosParams);
     }
 
     if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {
