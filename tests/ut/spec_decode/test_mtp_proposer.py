@@ -46,7 +46,6 @@ class TestMtpProposer:
         config.model_config.max_model_len = 2048
         config.model_config.uses_mrope = False
         config.model_config.hf_config = None
-        config.model_config.uses_mrope = False
 
         config.load_config = None
 
