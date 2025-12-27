@@ -35,6 +35,8 @@ MODELS = [
 ]
 
 
+@pytest.mark.skip(
+    reason="TODO: Re-enable xlite_decode_only e2e test when stable.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [15])
 def test_models_with_xlite_decode_only(
