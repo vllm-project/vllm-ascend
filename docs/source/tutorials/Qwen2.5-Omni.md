@@ -21,9 +21,16 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 Following examples use the 7B version deafultly.
 
+### Verify Multi-node Communication(Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+
 ### Installation
 
-You can using our official docker image to run `Qwen2.5-Omni` directly.
+:::::{tab-set}
+::::{tab-item} Use docker image
+
+For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas 800 A3).
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -61,6 +68,18 @@ docker run --rm \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
 ```
+
+::::
+::::{tab-item} Build from source
+
+You can build all from source.
+
+- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
+
+::::
+:::::
+
+If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## Deployment
 
@@ -100,6 +119,8 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 `--gpu-memory-utilization` should not be set manually only if yous know what this parameter aims to.
 
 #### Multiple NPU (Qwen2.5-Omni-7B)
+
+Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to deploy the `Qwen2.5-Omni-7B` model across multiple nodes.
 
 ```bash
 export VLLM_USE_MODELSCOPE=true
