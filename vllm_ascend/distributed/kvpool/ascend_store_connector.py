@@ -55,7 +55,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
             )
 
             assert self.connector_worker is not None
-            if vllm_config.parallel_config.rank == 0 and self.kv_role != "kv_consumer":
+            if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker,
                                                      vllm_config,
                                                      self.use_layerwise)
