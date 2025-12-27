@@ -167,7 +167,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_config.hidden_size
+        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
         for name, param in model.named_parameters():
             if 'w2_weight' in name and param.shape[2] == hidden_size:

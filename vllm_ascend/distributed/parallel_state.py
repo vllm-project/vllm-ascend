@@ -167,7 +167,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
 
     global _SHARED_WEIGHT
     # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
-    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
+    is_ds_v32 = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
     if enable_sp() and is_ds_v32 and _SHARED_WEIGHT is None:
         _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
     # TODO: Extract and unify the logic across different communication group.
