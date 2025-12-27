@@ -254,3 +254,4 @@ bash tools/install_flash_infer_attention_score_ops_a2.sh
 ```
 
 **NOTE**: Don't set `additional_config.pa_shape_list` when using this method, otherwise it will lead to another attention operator.
+**Important**: Please make sure you're using the **official image** of vllm-ascend, otherwise you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own or create one. If you're not in root user, you need `sudo` permission to run this script.
