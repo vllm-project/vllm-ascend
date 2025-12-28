@@ -5,7 +5,6 @@ from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
 import numpy as np
 import torch
 import torch_npu
-from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -13,6 +12,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
@@ -177,7 +177,7 @@ class AscendMLAMetadata:
 M = TypeVar("M", bound=AscendMLAMetadata)
 
 
-class AscendMLAMetadataBuilder:
+class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_BATCH
@@ -186,14 +186,17 @@ class AscendMLAMetadataBuilder:
     understand this class
     """
 
-    def __init__(self,
-                 kv_cache_spec: MLAAttentionSpec,
-                 layer_names: list[str],
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 metadata_cls: Optional[AscendMLAMetadata] = None):
-        self.metadata_cls: Optional[AscendMLAMetadata] = metadata_cls \
-            if metadata_cls is not None else AscendMLAMetadata  # type: ignore
+    def __init__(
+        self,
+        kv_cache_spec: MLAAttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendMLAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        self.metadata_cls = (metadata_cls if metadata_cls is not None else
+                             AscendMLAMetadata)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
@@ -384,7 +387,7 @@ class AscendMLAMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        fast_build: bool = False,
     ) -> AscendMLAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
@@ -400,17 +403,6 @@ class AscendMLAMetadataBuilder:
         self.slot_mapping = common_attn_metadata.slot_mapping[:self.
                                                               num_actual_tokens]
 
-        if self.cos_cache is None:
-            self.cos_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.sin_cached
-        if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
-            self.cos_cache = self.cos_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-            self.sin_cache = self.sin_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
         self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
@@ -420,12 +412,12 @@ class AscendMLAMetadataBuilder:
         prefill_metadata = None
         if self.num_prefills > 0:
             prefill_metadata = self.build_prefill_metadata(
-                common_prefix_len, common_attn_metadata, model)
+                common_prefix_len, common_attn_metadata)
 
         decode_metadata = None
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(
-                common_prefix_len, common_attn_metadata, model)
+                common_prefix_len, common_attn_metadata)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=self.num_actual_tokens,
@@ -450,7 +442,6 @@ class AscendMLAMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
     ):
         if not self.chunked_prefill_enabled:
             return None
@@ -519,7 +510,6 @@ class AscendMLAMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
     ) -> AscendMLAPrefillMetadata:
         query_start_loc = common_attn_metadata.query_start_loc
 
@@ -529,7 +519,7 @@ class AscendMLAMetadataBuilder:
                                                          )
 
         chunked_context_metadata = self.build_chunked_metadata(
-            common_prefix_len, common_attn_metadata, model)
+            common_prefix_len, common_attn_metadata)
         reqs_start = self.num_decodes  # prefill_start
         tokens_start = self.num_decode_tokens
         max_query_len = self.query_lens[reqs_start:].max().item()
@@ -538,12 +528,7 @@ class AscendMLAMetadataBuilder:
             reqs_start:] - query_start_loc[reqs_start]
 
         prefill_input_positions = input_positions[tokens_start:]
-        cos = self.cos_cache[
-            prefill_input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
-        sin = self.sin_cache[
-            prefill_input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
+        cos, sin = get_cos_and_sin_mla(prefill_input_positions)
         return AscendMLAPrefillMetadata(
             attn_mask=common_attn_metadata.attn_mask,
             query_lens=self.query_lens[reqs_start:].to(torch.int32),
@@ -563,7 +548,6 @@ class AscendMLAMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
     ) -> AscendMLADecodeMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -572,7 +556,6 @@ class AscendMLAMetadataBuilder:
                                                          num_actual_tokens].long(
                                                          )
 
-        cos, sin = get_cos_and_sin_mla()
         # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
         actual_seq_lengths_q = query_start_loc_cpu[1:self.num_decodes +
                                                    1].tolist()
@@ -639,54 +622,25 @@ class AscendMLAMetadataBuilder:
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q,
                     common_attn_metadata)
 
-        # TODO: After the fullgraph supports MTP, the if branch needs to deleted
-        assert self.cos_cache is not None
-        assert self.sin_cache is not None
-        if cos is None and sin is None:
-            cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
-            sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
-
-            decode_metadata = AscendMLADecodeMetadata(
-                input_positions=input_positions,
-                block_table=self.block_table,
-                seq_lens=self.seq_lens,
-                seq_lens_list=seq_lens_list,
-                max_seq_lens=max_seq_lens,
-                attn_mask=common_attn_metadata.spec_attn_mask,
-                actual_seq_lengths_q=actual_seq_lengths_q,
-                sin=sin,
-                cos=cos,
-                cp_seq_len=cp_seq_len,
-                batch_seq_mask=batch_seq_mask)
-        else:
-            cos[:self.num_decode_tokens,
-                ...] = self.cos_cache[input_positions].unsqueeze(1).unsqueeze(
-                    2)
-            sin[:self.num_decode_tokens,
-                ...] = self.sin_cache[input_positions].unsqueeze(1).unsqueeze(
-                    2)
-
-            decode_metadata = AscendMLADecodeMetadata(
-                input_positions=input_positions,
-                block_table=self.block_table,
-                seq_lens=self.seq_lens,
-                seq_lens_list=seq_lens_list,
-                max_seq_lens=max_seq_lens,
-                attn_mask=common_attn_metadata.spec_attn_mask,
-                actual_seq_lengths_q=actual_seq_lengths_q,
-                sin=sin[:self.num_decode_tokens, ...],
-                cos=cos[:self.num_decode_tokens, ...],
-                cp_seq_len=cp_seq_len,
-                batch_seq_mask=batch_seq_mask)
+        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+        decode_metadata = AscendMLADecodeMetadata(
+            input_positions=input_positions,
+            block_table=self.block_table,
+            seq_lens=self.seq_lens,
+            seq_lens_list=seq_lens_list,
+            max_seq_lens=max_seq_lens,
+            attn_mask=common_attn_metadata.spec_attn_mask,
+            actual_seq_lengths_q=actual_seq_lengths_q,
+            sin=sin[:self.num_decode_tokens, ...],
+            cos=cos[:self.num_decode_tokens, ...],
+            cp_seq_len=cp_seq_len,
+            batch_seq_mask=batch_seq_mask)
         return decode_metadata
 
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
-        model: Optional[nn.Module] = None,
     ):
         if attn_state in {
                 AscendAttentionState.DecodeOnly,
@@ -695,7 +649,6 @@ class AscendMLAMetadataBuilder:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
-                model=model,
             )
         else:
             raise NotImplementedError(
@@ -789,22 +742,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
     def _v_up_proj(self, x):
-        if x.dtype in [torch.float16, torch.bfloat16] \
-                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose"):
-            x = x.view(-1, self.num_heads, self.kv_lora_rank)
-            b, _, _ = x.shape
-            res = torch.empty((b, self.num_heads, self.v_head_dim),
-                              dtype=x.dtype,
-                              device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.num_heads * self.v_head_dim)
-        else:
-            # Convert from (B, N, L) to (N, B, L)
-            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            x = torch.bmm(x, self.W_UV)
-            # Convert from (N, B, V) to (B, N * V)
-            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
+        x = x.view(self.num_heads, -1, self.kv_lora_rank)
+        # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
+        x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_y=(1, 0, 2))
+        # Convert from (B, N, V) to (B, N * V)
+        x = x.reshape(-1, self.num_heads * self.v_head_dim)
         return x
 
     # Return `ql_nope`, `q_pe`
@@ -1194,16 +1137,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                              self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
                          self.qk_rope_head_dim)
-        input_layout = "BNSD"
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.DecodeOnly,
         ] and self.speculative_config is not None:
-            # Use TND layout for pure SpecDecoding and SpecDecoding in ChunkedPrefill
-            input_layout = "TND"
-            # [bs * q_seq_len, num_heads_per_rank, dim]
+            # Input shape: [num_tokens, num_heads, dim]
+            # Output shape: [num_heads, num_tokens, dim]
+            # The right part layout indicates the layout of the attention
+            # output. It is set to NTD to avoid the need for a transpose
+            # operation after attention.
+            input_layout = "TND_NTD"
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
@@ -1211,6 +1156,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
+            # Input shape: [num_reqs, num_heads, seq_len, dim]
+            # Output shape: [num_heads, num_reqs, seq_len, dim]
+            # The output layout is set to NBSD to eliminate the need for a
+            # transpose operation after attention.
+            input_layout = "BNSD_NBSD"
             q_nope = q_nope.view(num_tokens, self.num_heads, 1,
                                  -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
@@ -1252,7 +1202,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_nope, k_nope, k_nope, **common_kwargs)
                 update_graph_params_workspaces(num_tokens, workspace)
 
-            attn_output = torch.empty_like(q_nope)
+            attn_output = torch.empty(
+                (q_nope.shape[1], q_nope.shape[0], *q_nope.shape[2:]),
+                dtype=q_nope.dtype,
+                device=q_nope.device)
             softmax_lse = torch.empty(num_tokens,
                                       dtype=q_nope.dtype,
                                       device=q_nope.device)

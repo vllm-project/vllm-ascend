@@ -66,13 +66,6 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-      - name: Sync from vllm-Ascend main branch
-        working-directory: /vllm-workspace/vllm-ascend
-        run: |
-          git config --global --add safe.directory "$(pwd)"
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-          git pull origin main
-
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace
         run: |

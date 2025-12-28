@@ -93,6 +93,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
+        is_reshaped = query.dim() == 4
 
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
@@ -134,7 +135,12 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         if enable_pad:
             context_layer = context_layer[..., :origin_shape]
 
-        context_layer = einops.rearrange(context_layer,
-                                         "(b s) h d -> b s h d",
-                                         b=bsz).contiguous()
+        if is_reshaped:
+            context_layer = einops.rearrange(context_layer,
+                                             "(b s) h d -> b s h d",
+                                             b=bsz).contiguous()
+        else:
+            context_layer = einops.rearrange(context_layer,
+                                             "(b s) h d -> b s (h d)",
+                                             b=bsz).contiguous()
         return context_layer
