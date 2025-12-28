@@ -158,7 +158,6 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
-        print("layer is }", layer)
 
     @property
     def comm_group(self):
