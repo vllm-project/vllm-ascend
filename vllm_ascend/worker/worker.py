@@ -60,7 +60,8 @@ from vllm_ascend.utils import (
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
+from vllm_ascend.worker.fault_tolerance import FaultTolerance
+from vllm_ascend.worker.common import FaultToleranceLevel
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
@@ -314,6 +315,16 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+        additional_config = self.vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        level = additional_config.get("fault_tolerance_level",
+                                      0) if additional_config else 0
+        if level != FaultToleranceLevel.OFF.value:
+            self.fault_tolerance = FaultTolerance(
+                vllm_config = self.vllm_config,
+                model_runner = self.model_runner,
+            )
+            self.execute_model = self.fault_tolerance.fault_tolerance_decorator(self.execute_model,3)
+            self.execute_dummy_batch = self.fault_tolerance.fault_tolerance_decorator(self.execute_dummy_batch,3)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
