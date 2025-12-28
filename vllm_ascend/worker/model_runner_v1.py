@@ -228,9 +228,6 @@ class NPUModelRunner(GPUModelRunner):
                                                dtype=torch.int32)
             self.positions = self._make_buffer(max_buffer_num_tokens,
                                                dtype=torch.int64)
-        # Ascend-specific configurations
-        self.ascend_config = get_ascend_config()
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         self.sampler = AscendSampler()
         self.attn_mask = None
         self.attn_state = None
@@ -1132,10 +1129,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
-        if self.shared_kv_cache_layers is not None:
-            # sharing kv across layers need to read the kvcache,
-            # directly return chunked prefill in this scenario
-            return AscendAttentionState.ChunkedPrefill
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
