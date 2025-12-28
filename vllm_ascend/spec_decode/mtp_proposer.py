@@ -34,6 +34,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
                                shared_expert_dp_enabled)
@@ -279,8 +280,7 @@ class MtpProposer(Proposer):
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
                 attn_metadata_mtp = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.SpecDecoding,
-                    self.runner.get_model())
+                    common_attn_metadata, AscendAttentionState.SpecDecoding)
                 attn_metadata = {}
                 for layer_name in self.attn_layer_name:
                     attn_metadata[layer_name] = attn_metadata_mtp
@@ -945,10 +945,8 @@ class MtpProposer(Proposer):
                             graph_pad_size - batch_size,
                             batch_size,
                             decode_metadata.actual_seq_lengths_q)
-                decode_metadata.cos = builder.cos_cache[
-                    positions[:batch_size]].unsqueeze(1).unsqueeze(2)
-                decode_metadata.sin = builder.sin_cache[
-                    positions[:batch_size]].unsqueeze(1).unsqueeze(2)
+                decode_metadata.cos, decode_metadata.sin = get_cos_and_sin_mla(
+                    positions[:batch_size])
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
             # to remove such requests from the batch, we keep them in the batch
