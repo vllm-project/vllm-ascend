@@ -276,13 +276,6 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 #### 2、Start proxy_server.
 
 ```
-bash proxy.sh
-```
-
-proxy.sh content:
-Change localhost to your actual IP address.
-
-```
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
     --host localhost\
     --prefiller-hosts localhost \
