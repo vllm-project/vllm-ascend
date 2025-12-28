@@ -1,4 +1,52 @@
 # Release Notes
+## v0.13.0rc1 - 2025.12.27
+This is the first release candidate of v0.13.0 for vLLM Ascend. We landed lots of bug fix, performance improvement and feature support in this release. Any feedback is welcome to help us to improve vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/latest) to get started.
+
+### Highlights
+- Improved the performance of DeepSeek V3.2, please refer to [tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/DeepSeek-V3.2.html)
+- Qwen3-Next MTP with chunked prefill is supported now [#4770](https://github.com/vllm-project/vllm-ascend/pull/4770), please refer to [tutorials](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/Qwen3-Next.html)
+- [Experimental] Prefill Context Parallel and Decode Context Parallel are supported, but notice that it is an experimental feature now, welcome any feedback. please refer to [context parallel feature guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)
+
+### Features
+- Support openPangu Ultra MoE [4615](https://github.com/vllm-project/vllm-ascend/pull/4615)
+- A new quantization method W8A16 is supported now. [#4541](https://github.com/vllm-project/vllm-ascend/pull/4541)
+- Cross-machine Disaggregated Prefill is supported now. [#5008](https://github.com/vllm-project/vllm-ascend/pull/5008)
+- Add UCMConnector for KV Cache Offloading. [#4411](https://github.com/vllm-project/vllm-ascend/pull/4411)
+- Support async_scheduler and disable_padded_drafter_batch in eagle. [#4893](https://github.com/vllm-project/vllm-ascend/pull/4893)
+- Support pcp + mtp in full graph mode. [#4572](https://github.com/vllm-project/vllm-ascend/pull/4572)
+- Enhance all-reduce skipping logic for MoE models in NPUModelRunner [#5329](https://github.com/vllm-project/vllm-ascend/pull/5329)
+
+### Performance
+Some general performance improvement:
+- Add l2norm triton kernel [#4595](https://github.com/vllm-project/vllm-ascend/pull/4595)
+- Add new pattern for AddRmsnormQuant with SP, which could only take effect in graph mode. [#5077](https://github.com/vllm-project/vllm-ascend/pull/5077)
+- Add async exponential while model executing. [#4501](https://github.com/vllm-project/vllm-ascend/pull/4501)
+- Remove the transpose step after attention and switch to transpose_batchmatmul [#5390](https://github.com/vllm-project/vllm-ascend/pull/5390)
+- To optimize the performance in small batch size scenario, an attention operator with flash decoding function is offered, please refer to item 22 in [FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) to enable it.
+
+### Other
+- OOM error on VL models is fixed now. We're keeping observing it, if you hit OOM problem again, please submit an issue. [#5136](https://github.com/vllm-project/vllm-ascend/pull/5136)
+- Fixed an accuracy bug of Qwen3-Next-MTP when batched inferring. [#4932](https://github.com/vllm-project/vllm-ascend/pull/4932)
+- Fix npu-cpu offloading interface change bug. [#5290](https://github.com/vllm-project/vllm-ascend/pull/5290)
+- Fix MHA model runtime error in aclgraph mode [#5397](https://github.com/vllm-project/vllm-ascend/pull/5397)
+- Fix unsuitable moe_comm_type under ep=1 scenario [#5388](https://github.com/vllm-project/vllm-ascend/pull/5388)
+
+### Deprecation & Breaking Changes
+- `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE` is removed and `VLLM_ASCEND_ENABLE_PREFETCH_MLP` is recommend to replace as they always be enabled together. [#5272](https://github.com/vllm-project/vllm-ascend/pull/5272)
+- `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` is dropped now. [#5270](https://github.com/vllm-project/vllm-ascend/pull/5270)
+- `VLLM_ASCEND_ENABLE_NZ` is disabled for float weight case, since we notice that the performance is not good in some float case. Feel free to set it to 2 if you make sure it works for your case. [#4878](https://github.com/vllm-project/vllm-ascend/pull/4878)
+- `chunked_prefill_for_mla` in `additional_config` is dropped now. [#5296](https://github.com/vllm-project/vllm-ascend/pull/5296)
+- `dump_config` in `additional_config` is renamed to `dump_config_path` and the type is change from `dict` to `string`. [#5296](https://github.com/vllm-project/vllm-ascend/pull/5296)
+
+### Dependencies
+- vLLM version has been upgraded to 0.13.0 and drop 0.12.0 support. [#5146](https://github.com/vllm-project/vllm-ascend/pull/5146)
+- Transformer version has been upgraded >= 4.57.3 [#5250](https://github.com/vllm-project/vllm-ascend/pull/5250)
+
+### Known Issues
+- Qwen3-Next doesn't support long sequence scenario, and we should limit `gpu-memory-utilization` according to the doc to run Qwen3-Next. We'll improve it in the next release
+- The functional break on Qwen3-Next when the input/output is around 3.5k/1.5k is fixed, but it introduces a regression on performance. We'll fix it in next release. [#5357](https://github.com/vllm-project/vllm-ascend/issues/5357)
+- There is a precision issue with curl on ultra-short sequences in DeepSeek-V3.2. We'll fix it in next release. [#5370](https://github.com/vllm-project/vllm-ascend/issues/5370)
+
 ## v0.11.0 - 2025.12.16
 We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the official release for v0.11.0. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev) to get started. We'll consider to release post version in the future if needed. This release note will only contain the important change and note from v0.11.0rc3.
 

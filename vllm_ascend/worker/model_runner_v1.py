@@ -397,7 +397,7 @@ class NPUModelRunner(GPUModelRunner):
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.mode == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
 
-    def _skip_all_reduce_acorss_dp_group(self) -> bool:
+    def _skip_all_reduce_across_dp_group(self) -> bool:
         """
         Decide whether to skip the all-reduce across the data-parallel (DP) group.
 
@@ -446,7 +446,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, with_prefill
 
-        if self._skip_all_reduce_acorss_dp_group():
+        if self._skip_all_reduce_across_dp_group():
             num_tokens_after_padding = torch.tensor([num_tokens] *
                                                     self.dp_size,
                                                     device="cpu",
@@ -1122,21 +1122,10 @@ class NPUModelRunner(GPUModelRunner):
                             num_decode_draft_tokens_cpu=self.
                             num_decode_draft_tokens.cpu[:num_reqs],
                         )
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
-                elif self.model_config.runner_type == "pooling":
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
-                else:
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        model=self.get_model(),
-                        **extra_attn_metadata_args)
+                attn_metadata_i = builder.build(
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata,
+                    **extra_attn_metadata_args)
 
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
@@ -1918,7 +1907,7 @@ class NPUModelRunner(GPUModelRunner):
                             common_metadata)
                     else:
                         attn_metadata_full_attention = builder.build_for_graph_capture(
-                            common_attn_metadata, attn_state, self.get_model())
+                            common_attn_metadata, attn_state)
                     for layer_name in kv_cache_group_spec.layer_names:
                         if "linear_attn" in layer_name:
                             attn_metadata[

@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.11.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/4808)
-- [[v0.12.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/4984)
+- [[v0.13.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/5333)
 
 ## General FAQs
 
@@ -243,3 +243,15 @@ Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) 
 
 ### 21. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted".
 When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
+
+### 22. How to achieve low latency in a small batch scenario?
+The performance of `torch_npu.npu_fused_infer_attention_score` in small batch scenario is not satisfactory, mainly due to the lack of flash decoding function. We offer an alternative operator in `tools/install_flash_infer_attention_score_ops_a2.sh` and `tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it by the following instruction:
+
+```bash
+bash tools/install_flash_infer_attention_score_ops_a2.sh
+## change to run the following instruction if you're using A3 machine
+# bash tools/install_flash_infer_attention_score_ops_a3.sh
+```
+
+**NOTE**: Don't set `additional_config.pa_shape_list` when using this method, otherwise it will lead to another attention operator.
+**Important**: Please make sure you're using the **official image** of vllm-ascend, otherwise you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own or create one. If you're not in root user, you need `sudo` permission to run this script.

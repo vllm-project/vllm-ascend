@@ -62,10 +62,6 @@ jobs:
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
             size: 2
-          # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
-          # - name: multi-node-dpsk3.2-exp-2node
-          #   config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
-          #   size: 2
           - name: multi-node-deepseek-r1-w8a8-eplb
             config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
             size: 4
