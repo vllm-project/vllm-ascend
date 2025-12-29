@@ -27,8 +27,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
 from vllm_ascend.attention.common_cp import (AscendPCPMetadata,
                                              CPChunkedContextMetadata)
 from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,
-                                               get_graph_params,
-                                               update_graph_params_workspaces)
+                                               get_graph_params)
 from vllm_ascend.utils import weak_ref_tensors
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
@@ -565,13 +564,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             event.wait(stream)
             event.reset(stream)
             graph_params.events[num_tokens].append(event)
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu.atb._npu_multi_head_latent_attention_get_workspace(
-                    q_nope, q_pe, k_nope, k_pe, decode_meta.block_table,
-                    seq_len, num_heads, self.scale, self.num_kv_heads,
-                    **common_kwargs)
-                update_graph_params_workspaces(num_tokens, workspace)
+
+            workspace = torch_npu.atb._npu_multi_head_latent_attention_get_workspace(
+                q_nope, q_pe, k_nope, k_pe, decode_meta.block_table, seq_len,
+                num_heads, self.scale, self.num_kv_heads, **common_kwargs)
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty((num_tokens, num_heads, 1),
                                       dtype=q_nope.dtype,
@@ -581,7 +577,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                  weak_ref_tensors(k_nope), weak_ref_tensors(k_pe),
                  decode_meta.block_table, seq_len, num_heads, self.scale,
                  self.num_kv_heads, weak_ref_tensors(attn_output),
-                 weak_ref_tensors(softmax_lse)))
+                 weak_ref_tensors(softmax_lse), weak_ref_tensors(workspace)))
             torch.npu.graph_task_group_begin(stream)
             torch_npu.atb.npu_multi_head_latent_attention(
                 q_nope,

@@ -38,8 +38,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendMetadataForPrefill,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import get_graph_params
 from vllm_ascend.utils import weak_ref_tensors
 
 
@@ -513,12 +512,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             event.reset(stream)
             graph_params.events[num_tokens].append(event)
 
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                    query, k_nope, value, **common_kwargs)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                query, k_nope, value, **common_kwargs)
             attn_out = torch.empty_like(query)
             attn_lse = torch.empty((num_tokens, num_heads, 1),
                                    dtype=torch.float,
@@ -533,7 +528,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                                                self.dcp_rank],
                 attn_metadata.actual_seq_lengths_q[:attn_metadata.num_decodes],
                 weak_ref_tensors(attn_out), weak_ref_tensors(attn_lse),
-                self.dcp_size, self.pcp_rank, self.dcp_rank))
+                self.dcp_size, self.pcp_rank, self.dcp_rank,
+                weak_ref_tensors(workspace)))
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
                 query,

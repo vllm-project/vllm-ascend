@@ -206,17 +206,8 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
                 graph_params.handles[runtime_shape],
                 graph_params.events[runtime_shape],
         ):
-            (
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                num_heads,
-                scale,
-                block_table,
-                seq_lens,
-                output,
-            ) = param
+            (query, key_cache, value_cache, num_kv_heads, num_heads, scale,
+             block_table, seq_lens, output, _) = param
             seq_lens = forward_context.attn_metadata[key].seq_lens
 
             # When using FULL_DECODE_ONLY, there are some rare bugs for FULL_DECODE_ONLY
@@ -271,7 +262,7 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
         ):
             (query, key_cache, value, block_tables, attn_mask, block_size,
              seq_lens, query_start_loc, num_kv_heads, num_heads, scale,
-             attn_output, softmax_lse) = param
+             attn_output, softmax_lse, workspace) = param
 
             seq_lens = forward_context.attn_metadata[key].seq_lens_list
             actual_seq_lengths_q = forward_context.attn_metadata[
@@ -291,7 +282,7 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
                 num_heads=num_heads,
                 scale=scale,
                 sparse_mode=3,
-                workspace=graph_params.workspaces.get(runtime_shape),
+                workspace=workspace,
                 out=[attn_output, softmax_lse],
             )
             torch.npu.graph_task_update_end(update_stream)
@@ -324,8 +315,8 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
         ):
             (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
              spec_attn_mask, sparse_mode, scale, block_table, block_size,
-             seq_lens_list, actual_seq_lengths, attn_output,
-             softmax_lse) = param
+             seq_lens_list, actual_seq_lengths, attn_output, softmax_lse,
+             workspace) = param
             seq_lens_list = forward_context.attn_metadata[
                 key].decode.seq_lens_list
             if speculative_config and speculative_config.method == "mtp" \
@@ -372,7 +363,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 block_size=block_size,
                 actual_seq_lengths_kv=seq_lens_list,
                 actual_seq_lengths=actual_seq_lengths,
-                workspace=graph_params.workspaces.get(runtime_shape),
+                workspace=workspace,
                 out=[attn_output, softmax_lse])
             torch.npu.graph_task_update_end(update_stream)
 
@@ -393,7 +384,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
             (q_nope, k_nope, value, num_heads, num_kv_heads, scale,
              block_table, block_size, actual_seq_lengths_kv,
              actual_seq_lengths_q, attn_output, softmax_lse, dcp_size,
-             pcp_rank, dcp_rank) = param
+             pcp_rank, dcp_rank, workspace) = param
             attn_metadata = forward_context.attn_metadata[key]
             actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:,
                                                                                              pcp_rank,
@@ -434,7 +425,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
                 block_size=block_size,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
                 actual_seq_lengths=actual_seq_lengths_q,
-                workspace=graph_params.workspaces.get(runtime_shape),
+                workspace=workspace,
                 out=[attn_output, softmax_lse])
             torch.npu.graph_task_update_end(update_stream)
 
@@ -457,7 +448,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                 graph_params.events[runtime_shape],
         ):
             (q_nope, q_pe, k_nope, k_pe, block_table, seq_len, num_heads,
-             scale, num_kv_heads, attn_output, softmax_lse) = param
+             scale, num_kv_heads, attn_output, softmax_lse, workspace) = param
 
             decode_meta = forward_context.attn_metadata[key].decode
             seq_len = decode_meta.cp_seq_len
@@ -485,7 +476,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                 num_kv_heads,
                 return_lse=True,
                 calc_type="calc_type_ring",
-                workspace=graph_params.workspaces.get(runtime_shape),
+                workspace=workspace,
                 output=attn_output,
                 lse=softmax_lse)
             torch.npu.graph_task_update_end(update_stream)
@@ -496,7 +487,6 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
 @dataclass
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
 
@@ -511,19 +501,11 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     _graph_params = GraphParams(
         {size: []
          for size in aclgraph_capture_sizes},
-        {size: None
-         for size in aclgraph_capture_sizes},
         {size: []
          for size in aclgraph_capture_sizes},
         {size: []
          for size in aclgraph_capture_sizes},
     )
-
-
-def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
-    global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
 
 
 def get_graph_params():
@@ -540,19 +522,11 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     _draft_graph_params = GraphParams(
         {size: []
          for size in aclgraph_capture_sizes},
-        {size: None
-         for size in aclgraph_capture_sizes},
         {size: []
          for size in aclgraph_capture_sizes},
         {size: []
          for size in aclgraph_capture_sizes},
     )
-
-
-def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_params
-    if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
 
 
 def get_draft_graph_params():

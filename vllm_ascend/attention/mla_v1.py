@@ -27,9 +27,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params, get_graph_params,
-    update_draft_graph_params_workspaces, update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,
+                                               get_graph_params)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
@@ -1196,14 +1195,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             event.reset(stream)
             graph_params.events[num_tokens].append(event)
 
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                    q_nope, k_nope, k_nope, **common_kwargs)
-                if forward_context.is_draft_model:
-                    update_draft_graph_params_workspaces(num_tokens, workspace)
-                else:
-                    update_graph_params_workspaces(num_tokens, workspace)
+            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                q_nope, k_nope, k_nope, **common_kwargs)
 
             attn_output = torch.empty(
                 (q_nope.shape[1], q_nope.shape[0], *q_nope.shape[2:]),
@@ -1220,7 +1213,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                  weak_ref_tensors(spec_attn_mask) if spec_attn_mask is not None
                  else None, sparse_mode, self.scale, decode_meta.block_table,
                  block_size, decode_meta.seq_lens_list, actual_seq_lengths,
-                 weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
+                 weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse),
+                 weak_ref_tensors(workspace)))
 
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(

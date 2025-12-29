@@ -26,10 +26,10 @@ from vllm_ascend.attention.attention_v1 import (AscendMetadata,
                                                 AscendMetadataForDecode)
 from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
-from vllm_ascend.compilation.acl_graph import (
+from vllm_ascend.compilation.acl_graph import (  # isort: skip
     ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
     set_draft_graph_params, set_graph_params, update_attn_dcp_pcp_params,
-    update_draft_graph_params_workspaces, update_mla_attn_dcp_pcp_params)
+    update_mla_attn_dcp_pcp_params)
 
 
 class TestACLGraphEntry(TestBase):
@@ -723,13 +723,6 @@ class TestDraftGraphParams(TestBase):
             self.assertIsNotNone(_draft_graph_params)
 
     @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
-    def test_update_draft_graph_params_workspaces(self,
-                                                  draft_graph_params_mock):
-        draft_graph_params_mock.workspaces = {4: 5}
-        update_draft_graph_params_workspaces(4, 6)
-        self.assertEqual(draft_graph_params_mock.workspaces[4], 6)
-
-    @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
     def test_get_draft_graph_params(self, draft_graph_params_mock):
         graph_params = get_draft_graph_params()
         self.assertIs(draft_graph_params_mock, graph_params)
@@ -765,6 +758,7 @@ class TestPCPDCPGraphParams(TestBase):
         slot_mapping = torch.zeros(8, dtype=torch.long)
         query_start_loc = torch.tensor([0, 4])
         block_tables = torch.zeros(2, 5, dtype=torch.long)
+        workspace = torch.randn(2, 16, 128)
 
         decode = AscendMLADecodeMetadata(input_positions,
                                          block_table,
@@ -802,7 +796,7 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
             (q_nope, q_pe, k_nope, k_pe, block_table, seq_lens, num_heads,
-             scale, num_kv_heads, out, lse))
+             scale, num_kv_heads, out, lse, workspace))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
             update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
@@ -827,6 +821,7 @@ class TestPCPDCPGraphParams(TestBase):
         actual_seq_lengths_q = np.array([1, 1])
         out = torch.randn(2, 16, 128)
         lse = torch.randn(2, 16, 8)
+        workspace = torch.randn(2, 16, 128)
 
         num_computed_tokens_of_pcp_dcp = np.array([[[1, 1], [1, 1]],
                                                    [[1, 1], [1, 1]]])
@@ -843,7 +838,7 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.attn_params[4].append(
             (q_nope, k_nope, k_nope, num_heads, num_kv_heads, scale,
              block_table, 128, actual_seq_lengths_kv, actual_seq_lengths_q,
-             out, lse, 2, 0, 0))
+             out, lse, 2, 0, 0, workspace))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
             update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
