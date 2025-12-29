@@ -213,7 +213,7 @@ def _select_experts_with_fusion_ops(
         e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(
             router_logits.dtype)
-    _, topk_weights, topk_ids = torch.ops._C_ascend.moe_gating_top_k(
+    _, topk_ids,topk_weights = torch.ops._C_ascend.moe_gating_top_k(
         router_logits,
         k=top_k,
         kGroup=topk_group,
