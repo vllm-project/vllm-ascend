@@ -30,6 +30,8 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               update_attn_dcp_pcp_params,
+                                               update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -65,6 +67,24 @@ class MtpProposer(EagleProposer):
 
     # TODO: Find out why ModelRunner does not this explicit typing?
     model: Union[nn.Module, ACLGraphWrapper]
+
+    # update full-graph params for one spec token
+    def _update_full_graph_params(self, forward_context, num_tokens):
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size * self.dcp_size > 1:
+                update_mla_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context, num_tokens)
+            else:
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       num_tokens,
+                                       self.vllm_config.speculative_config)
+        else:
+            if self.pcp_size * self.dcp_size > 1:
+                update_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           num_tokens)
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   num_tokens, self.vllm_config)
 
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
@@ -141,7 +161,7 @@ class MtpProposer(EagleProposer):
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
-        if self.use_async_scheduling:
+        if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
             # synchronization overhead.
@@ -185,8 +205,10 @@ class MtpProposer(EagleProposer):
                             :num_reqs * self.decode_threshold]
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
+                # `AscendAttentionState.SpecDecoding` is only designed for mla, `AscendAttentionState.ChunkedPrefill` is used in self-attention.
+                attn_state = AscendAttentionState.SpecDecoding if self.vllm_config.model_config.use_mla else AscendAttentionState.ChunkedPrefill
                 attn_metadata_mtp = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.SpecDecoding)
+                    common_attn_metadata, attn_state)
                 attn_metadata = {}
                 for layer_name in self.attn_layer_name:
                     attn_metadata[layer_name] = attn_metadata_mtp
@@ -222,17 +244,9 @@ class MtpProposer(EagleProposer):
                            hidden_states=previous_hidden_states)
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
-                    not forward_context.capturing:
-                    if self.vllm_config.model_config.use_mla and not self.use_sparse:
-                        if self.pcp_size * self.dcp_size > 1:
-                            update_mla_attn_dcp_pcp_params(
-                                self.update_stream, forward_context,
-                                num_tokens)
-                        else:
-                            update_mla_attn_params(
-                                self.update_stream, forward_context,
-                                num_tokens,
-                                self.vllm_config.speculative_config)
+                    not forward_context.capturing and not self.use_sparse:
+                    self._update_full_graph_params(forward_context, num_tokens)
+
                 if self.enable_shared_expert_dp:
                     positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         positions, True)
@@ -654,7 +668,7 @@ class MtpProposer(EagleProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-        if self.use_async_scheduling:
+        if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
             # synchronization overhead.
@@ -708,7 +722,7 @@ class MtpProposer(EagleProposer):
                     for layer_name in self.attn_layer_name:
                         decode_metadata = getattr(attn_metadata[layer_name],
                                                   "decode", None)
-                        if self.use_async_scheduling and decode_metadata is not None:
+                        if not self.use_cuda_graph and decode_metadata is not None:
                             actual_size = len(
                                 decode_metadata.actual_seq_lengths_q)
 
@@ -721,17 +735,9 @@ class MtpProposer(EagleProposer):
                                                positions=positions,
                                                hidden_states=hidden_states)
                     forward_context = get_forward_context()
-                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                        if self.vllm_config.model_config.use_mla and not self.use_sparse:
-                            if self.pcp_size * self.dcp_size > 1:
-                                update_mla_attn_dcp_pcp_params(
-                                    self.update_stream, forward_context,
-                                    num_input_tokens)
-                            else:
-                                update_mla_attn_params(
-                                    self.update_stream, forward_context,
-                                    num_input_tokens,
-                                    self.vllm_config.speculative_config)
+                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
+                        self._update_full_graph_params(forward_context,
+                                                       num_input_tokens)
 
                     if self.enable_shared_expert_dp:
                         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
