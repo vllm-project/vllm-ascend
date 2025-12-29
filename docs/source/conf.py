@@ -65,19 +65,19 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    'vllm_version': 'v0.12.0',
+    'vllm_version': 'v0.13.0',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    'vllm_ascend_version': 'v0.12.0rc1',
+    'vllm_ascend_version': 'v0.13.0rc1',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "0.12.0rc1",
-    'pip_vllm_version': "0.12.0",
+    'pip_vllm_ascend_version': "0.13.0rc1",
+    'pip_vllm_version': "0.13.0",
     # CANN image tag
     'cann_image_tag': "8.3.rc2-910b-ubuntu22.04-py3.11",
     # vllm version in ci
-    'ci_vllm_version': 'release/v0.13.0',
+    'ci_vllm_version': 'v0.13.0',
 }
 
 # For cross-file header anchors
