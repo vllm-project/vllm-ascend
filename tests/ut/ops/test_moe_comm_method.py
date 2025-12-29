@@ -213,7 +213,7 @@ class TestMoECommMethod(TestBase):
                                          activation="silu")
 
         # Verify result shape
-        self.assertEqual(result.shape, (4, 8))
+        self.assertEqual(result.routed_out.shape, (4, 8))
 
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()
