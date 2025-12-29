@@ -18,6 +18,7 @@
 import gc
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
+from uuid import uuid4
 
 import torch
 from vllm.logger import logger
@@ -30,12 +31,11 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_vl_model,
-                               update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes,
-                               update_default_aclgraph_sizes)
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+    enable_sp, get_ascend_device_type, is_vl_model, update_aclgraph_sizes,
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes,
+    check_kv_extra_config)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -152,6 +152,12 @@ class NPUPlatform(Platform):
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+            if not getattr(vllm_config.kv_transfer_config,
+                           "_engine_id_patched", False):
+                vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
+                vllm_config.kv_transfer_config._engine_id_patched = True
         from vllm.config import CompilationMode  # noqa: E402
 
         compilation_config = vllm_config.compilation_config
