@@ -21,6 +21,7 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.registry import (AttentionBackendEnum,
@@ -54,7 +55,10 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
@@ -535,7 +539,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.capturing:
+        # we inherit ForwardContext in model runner v2, when enable model
+        # runner v2, there is not capturing attribute in forward_context,
+        # just use getattr to avoid attribute error.
+        if getattr(forward_context, "capturing", False):
             attn_output, num_tokens = self.full_graph_fia(
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
