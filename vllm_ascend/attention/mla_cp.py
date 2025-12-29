@@ -15,7 +15,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 # isort: off
-from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,def _attention_with_mask_and_nomask(
+from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
                                           AscendMLAPrefillMetadata,
