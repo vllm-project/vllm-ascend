@@ -28,7 +28,7 @@ from unittest.mock import patch
 import openai
 import pytest
 from modelscope import snapshot_download  # type: ignore
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
 
@@ -43,6 +43,7 @@ def test_qwen3_moe_distributed_mp_tp2_ep():
             "Qwen/Qwen3-30B-A3B",
             tensor_parallel_size=2,
             enable_expert_parallel=True,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -57,6 +58,7 @@ def test_qwen3_moe_w8a8_distributed_tp2():
             snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
             max_model_len=8192,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -73,6 +75,7 @@ def test_qwen3_moe_distributed_aiv_tp2():
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
