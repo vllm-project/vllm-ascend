@@ -1,20 +1,13 @@
-from typing import Optional
-from einops import rearrange
 import pytest
 import torch
-import torch.nn.functional as F
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from einops import rearrange
+from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
 
-import unittest
-from unittest import mock
-from unittest.mock import MagicMock, patch
-from vllm.model_executor.models.qwen3_next import  Qwen3NextGatedDeltaNet
 
-
-def validate_cmp(y_cal, y_ref, dtype, device='npu'): 
+def validate_cmp(y_cal, y_ref, dtype, device='npu'):
     y_cal = y_cal.to(device)
     y_ref = y_ref.to(device)
     if dtype == torch.float16:
@@ -44,7 +37,7 @@ def validate_cmp(y_cal, y_ref, dtype, device='npu'):
             'Invalid parameter \"dtype\" is found : {}'.format(dtype))
 
 
-@pytest.mark.parametrize("seq_len", [1,  16, 64, 128, 256, 1024, 2048, 3567])
+@pytest.mark.parametrize("seq_len", [1, 16, 64, 128, 256, 1024, 2048, 3567])
 @pytest.mark.parametrize("num_heads_qk", [2, 4, 8, 16])
 @pytest.mark.parametrize("num_heads_v", [2, 4, 8])
 @pytest.mark.parametrize("head_qk_dim", [64, 128, 256])
@@ -59,34 +52,22 @@ def test_fused_qkvzba_split_reshape_cat(
     head_v_dim,
     dtype,
 ):
-    if num_heads_v % num_heads_qk != 0 :
+    if num_heads_v % num_heads_qk != 0:
         pytest.skip("num_heads_v must be divisible by num_heads_qk")
 
     torch.random.manual_seed(0)
     device = "npu"
 
-    hidden_size= 2048
+    projected_states_qkvz = torch.randn(seq_len,
+                                        2 * head_qk_dim * num_heads_qk +
+                                        2 * head_v_dim * num_heads_v,
+                                        dtype=dtype,
+                                        device=device)
 
-    hidden_states = torch.randn(
-        seq_len,
-        hidden_size,
-        dtype=dtype,
-        device=device  
-    )
-
-    projected_states_qkvz = torch.randn(
-        seq_len,
-        2 * head_qk_dim * num_heads_qk + 2 * head_v_dim  * num_heads_v,
-        dtype=dtype,
-        device=device  
-    )
-
-    projected_states_ba = torch.randn(
-        seq_len,
-        2 * num_heads_v,
-        dtype=dtype,
-        device=device  
-    )
+    projected_states_ba = torch.randn(seq_len,
+                                      2 * num_heads_v,
+                                      dtype=dtype,
+                                      device=device)
 
     projected_states_qkvz_copy = projected_states_qkvz.clone()
     projected_states_ba_copy = projected_states_ba.clone()
@@ -108,7 +89,7 @@ def test_fused_qkvzba_split_reshape_cat(
     gdn.tp_size = 1
 
     query, key, value, z_ref, b_ref, a_ref = gdn.fix_query_key_value_ordering(
-        mixed_qkvz = projected_states_qkvz, mixed_ba = projected_states_ba)
+        mixed_qkvz=projected_states_qkvz, mixed_ba=projected_states_ba)
     query, key, value = map(lambda x: rearrange(x, 'l p d -> l (p d)'),
                             (query, key, value))
     mixed_qkv_ref = torch.cat((query, key, value), dim=-1)
@@ -117,3 +98,4 @@ def test_fused_qkvzba_split_reshape_cat(
     validate_cmp(z, z_ref, dtype)
     validate_cmp(b, b_ref, dtype)
     validate_cmp(a, a_ref, dtype)
+    
