@@ -38,6 +38,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
+          --enable-chunked-prefill
           --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -75,6 +76,7 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --enable-chunked-prefill
         --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
