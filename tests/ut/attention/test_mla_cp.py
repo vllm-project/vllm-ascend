@@ -6,8 +6,8 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.common_cp import CPChunkedContextMetadata
-from vllm_ascend.attention.mla_cp import AscendMlaCPImpl
+from vllm_ascend.attention.context_parallel_attention.common_cp import CPChunkedContextMetadata, _process_attn_out_lse, _npu_attention_update
+from vllm_ascend.attention.context_parallel_attention.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import ChunkedContextMetadata
 
 
@@ -252,7 +252,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.pcp_size, 2)
         self.assertEqual(self.impl.dcp_size, 2)
 
-    @patch('vllm_ascend.attention.mla_cp.get_dcp_group')
+    @patch('vllm_ascend.attention.context_parallel_attention.mla_cp.get_dcp_group')
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
     def test_mla_preprocess_dcp(self, magic_npu_fetch,
@@ -337,7 +337,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNone(prefill_res)
 
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('vllm_ascend.attention.mla_cp.get_pcp_group')
+    @patch('vllm_ascend.attention.context_parallel_attention.mla_cp.get_pcp_group')
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
     def test_mla_preprocess_pcp(self, magic_npu_fetch,
@@ -479,8 +479,8 @@ class TestAscendMLAImpl(TestBase):
         decode_metadata.batch_seq_mask = torch.tensor([True, False],
                                                       dtype=torch.bool)
 
-        result = self.impl._process_attn_out_lse(attn_output, softmax_lse,
-                                                 decode_metadata)
+        result = _process_attn_out_lse(attn_output, softmax_lse,
+                                                 decode_metadata.batch_seq_mask)
 
         self.assertEqual(result.shape[0], B * self.impl.pcp_size)
         self.assertEqual(result.shape[1], N)
@@ -489,7 +489,7 @@ class TestAscendMLAImpl(TestBase):
     @patch('vllm.distributed.parallel_state._PCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("torch.distributed.all_to_all_single")
-    @patch('vllm_ascend.attention.mla_cp.get_forward_context')
+    @patch('vllm_ascend.attention.context_parallel_attention.mla_cp.get_forward_context')
     @patch("torch_npu.atb.npu_multi_head_latent_attention")
     @patch('torch_npu.npu_attention_update')
     def test_forward_decode_pcp_dcp(self, mock_npu_attention_update,
@@ -819,7 +819,7 @@ class TestAscendMLAImpl(TestBase):
             attn_out_lse = torch.randn(self.impl.pcp_size * NUM_TOKENS,
                                        self.impl.dcp_size * num_heads,
                                        head_dim)
-            out = self.impl._npu_attention_update(attn_out_lse)
+            out = _npu_attention_update(self.impl.kv_lora_rank, attn_out_lse)
             self.impl.dcp_size = 1
             self.impl.pcp_size = 1
             assert out.shape == (NUM_TOKENS, num_heads, self.impl.kv_lora_rank)
@@ -947,8 +947,8 @@ class TestAscendMLAImpl(TestBase):
             mock_pcp.all_gather = MagicMock(
                 side_effect=mock_all_gather(self.impl.pcp_size))
 
-            result = self.impl._process_attn_out_lse(attn_output, softmax_lse,
-                                                     decode_meta)
+            result = _process_attn_out_lse(attn_output, softmax_lse,
+                                                     batch_seq_mask)
             # [PCP * S, DCP * H, D + 1]
             self.assertIsInstance(result, torch.Tensor)
             assert result.shape == (B * self.impl.pcp_size, H, D + 1)
