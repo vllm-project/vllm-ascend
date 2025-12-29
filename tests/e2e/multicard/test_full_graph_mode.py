@@ -51,6 +51,7 @@ def test_qwen3_moe_full_decode_only_tp2():
     with VllmRunner(
             model,
             max_model_len=1024,
+            cudagraph_capture_sizes=[4, 8, 24, 48, 60],
             tensor_parallel_size=2,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
@@ -95,6 +96,7 @@ def test_qwen3_moe_full_graph_tp2():
     with VllmRunner(
             model,
             max_model_len=1024,
+            cudagraph_capture_sizes=[4, 8, 24, 48, 60],
             tensor_parallel_size=2,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
