@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -26,11 +27,11 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
-    PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, QuantType)
+    PrepareAndFinalize, PrepareAndFinalizeWithAll2All,
+    PrepareAndFinalizeWithAllGather, PrepareAndFinalizeWithMC2, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
-    TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
-    TokenDispatcherWithMC2)
+    MoETokenDispatcher, TokenDispatcherWithAll2AllV,
+    TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
 
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
@@ -45,6 +46,14 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
     _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+
+
+@dataclass
+class FusedExpertsResult:
+    routed_out: torch.Tensor
+    # For dynamic_eplb
+    group_list_type: int | None = None
+    expert_tokens: torch.Tensor | None = None
 
 
 class MoECommMethod(ABC):
@@ -118,7 +127,7 @@ class MoECommMethod(ABC):
         moe_comm_method = get_forward_context().moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        results = self.token_dispatcher.token_dispatch(
+        dispatch_results = self.token_dispatcher.token_dispatch(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
@@ -134,43 +143,41 @@ class MoECommMethod(ABC):
             dynamic_eplb=dynamic_eplb,
             pertoken_scale=pertoken_scale)
 
-        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
-            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
+        mlp_output = unified_apply_mlp(
+            hidden_states=dispatch_results.hidden_states,
+            w1=w1,
+            w1_scale=w1_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            group_list=dispatch_results.group_list,
+            dynamic_scale=dispatch_results.dynamic_scale,
+            group_list_type=dispatch_results.group_list_type,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
+            w1_offset=w1_offset,
+            w2_offset=w2_offset,
+            topk_scales=dispatch_results.topk_scales,
+            with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16,
+            fusion=use_int8_w8a8,
+            need_trans=need_trans,
+            dynamic_eplb=dynamic_eplb)
 
-        mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
-                                       w1=w1,
-                                       w1_scale=w1_scale,
-                                       w2=w2,
-                                       w2_scale=w2_scale,
-                                       group_list=expert_tokens,
-                                       dynamic_scale=dynamic_scale,
-                                       group_list_type=group_list_type,
-                                       w1_scale_bias=w1_scale_bias,
-                                       w2_scale_bias=w2_scale_bias,
-                                       w1_offset=w1_offset,
-                                       w2_offset=w2_offset,
-                                       topk_scales=topk_scales,
-                                       with_quant=use_int8_w8a8
-                                       or use_int4_w4a8 or use_int4_w4a16,
-                                       fusion=use_int8_w8a8,
-                                       need_trans=need_trans,
-                                       dynamic_eplb=dynamic_eplb)
+        combine_results = self.token_dispatcher.token_combine(
+            hidden_states=mlp_output,
+            context_metadata=dispatch_results.context_metadata)
 
-        final_hidden_states = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output, context_metadata=context_metadata)
-
-        if dynamic_eplb:
-            return (final_hidden_states, group_list_type, expert_tokens)
-
-        return final_hidden_states
+        return FusedExpertsResult(
+            routed_out=combine_results.routed_out,
+            group_list_type=dispatch_results.group_list_type,
+            expert_tokens=dispatch_results.group_list)
 
     @abstractmethod
-    def _get_token_dispatcher(self):
+    def _get_token_dispatcher(self) -> MoETokenDispatcher:
         raise NotImplementedError(
             "_get_token_dispatcher function not implemented.")
 
     @abstractmethod
-    def _get_prepare_finalize(self):
+    def _get_prepare_finalize(self) -> PrepareAndFinalize:
         raise NotImplementedError(
             "_get_prepare_finalize function not implemented.")
 
@@ -325,4 +332,4 @@ class FusedMC2CommImpl(MoECommMethod):
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
-        return out
+        return FusedExpertsResult(routed_out=out)
