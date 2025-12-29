@@ -262,7 +262,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+        if attn_state in [AscendAttentionState.DecodeOnly,
+                          AscendAttentionState.ChunkedPrefill]:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -551,7 +552,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode=3,
         )
 
-        attn_output = attn_output.view(num_tokens, self.num_heads,
+        attn_output = attn_output.view(-1, self.num_heads,
                                        self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
