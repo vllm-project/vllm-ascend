@@ -113,7 +113,104 @@ def _register_replacement(epsilon):
                                   example_inputs=get_inputs(),
                                   extra_check=_extra_stream_scope_check)
 
+@functools.lru_cache(None):
+# The replacement registered here will be actually executed after AOT.
+def replacement_quant_pattern_with_bias(epsilon):
+    if 'torch_npu' not in sys.modules:
+        logger.info(
+            'The AddRMSNormQuant fusion will only be enabled in a torch npu env.'
+            'When there is no torch_npu in the env, skip fusion.')
+        return
+    
+    def _extra_stream_scope_check(match: Match) -> bool:
+        """
+        Checks if all nodes in the same stream.
+        """
+        non_default_streams = set()
+        has_default = False
 
+        for node in match.nodes:
+            if node.op == "call_function":
+                current_stream = node.meta.get("stream_label")
+                if current_stream is None:
+                    has_default = True
+                else:
+                    non_default_streams.add(current_stream)
+                    if len(non_default_streams) > 1:
+                        logger.debug(
+                            f"Cross-stream operation detected in pattern match for AddRMSNormQuantWithBias. "
+                            f"Multiple streams found: {non_default_streams}. "
+                            f"Fusion is not supported for cross-stream operations."
+                        )
+                        return False
+            
+        if has_default and len(non_default_streams) > 0:
+            logger.debug(
+                f"Cross-stream operation detected in pattern match for AddRMSNormQuantWithBias. "
+                f"Multiple streams found: {non_default_streams}. "
+                f"Fusion is not supported for cross-stream operations.")
+            return False
+        
+        return True
+
+    def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor,
+                rms_norm_weight: torch.Tensor, scale: torch.Tensor,
+                scale_reciprocal: torch.Tensor, offset: torch.Tensor,
+                bias: torch.Tensor):
+        """
+        Pattern for AddRMSNormQuant fusion.
+        """
+        output = torch.ops.npu.npu_add_rms_norm_quant(rms_norm_input, residual,
+                                                      rms_norm_weight, epsilon)
+        out0 = output[0]
+        out1 = output[1]
+        out0 = out0 + bias
+        quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset,
+                                                      torch.qint8, -1, False)
+        return quantized_output, out1
+
+    def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor,
+                    rms_norm_weight: torch.Tensor, scale: torch.Tensor,
+                    scale_reciprocal: torch.Tensor, offset: torch.Tensor,
+                    bias: torch.Tensor):
+        """
+        Replacement for AddRMSNormQuant fusion.
+        """
+        output = torch.ops.npu.npu_add_rms_norm_quant(
+            rms_norm_input,
+            residual,
+            rms_norm_weight,
+            1. / scale,
+            offset,
+            epsilon=epsilon,
+            beta=bias)
+        quantized_output = output[0]
+        out1 = output[2]
+        return quantized_output, out1
+
+    def get_inputs(self):
+        """
+        Generate example inputs for the AddRMSNormQuant fusion pattern.
+        """
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        rmsnorm_bias = torch.randn(4, device="npu", dtype=self.dtype)
+        scale = torch.ones(4, device="npu", dtype=self.dtype)
+        scale_reciprocal = torch.ones(4, device="npu", dtype=self.dtype)
+        offset = torch.zeros(4, device="npu", dtype=self.dtype)
+        return [
+            rms_norm_input, residual, rms_norm_weight, scale, scale_reciprocal,
+            offset, rmsnorm_bias
+        ]
+
+    import torchair
+
+    torchair.register_replacement(search_fn=pattern,
+                                  replace_fn=replacement,
+                                  example_inputs=get_inputs(),
+                                  extra_check=_extra_stream_scope_check)
+                                  
 # register converter for pass
 common_epsilons = [1e-5, 1e-6]
 for eps in common_epsilons:
