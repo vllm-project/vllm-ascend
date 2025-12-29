@@ -71,7 +71,7 @@ def test_models_long_sequence_output_between_tp_and_cp(
             "prefill_context_parallel_size": 2,
             "compilation_config": {
                 "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [2, 4, 8, 24, 48, 60]
+                "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
             },
         }
         tp_kwargs = {
