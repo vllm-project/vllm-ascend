@@ -17,7 +17,7 @@
 import json
 
 import pytest
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import get_TTFT, run_aisbench_cases
@@ -73,10 +73,7 @@ async def test_models(model: str) -> None:
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
-    additional_config = {
-        "chunked_prefill_for_mla": True,
-        "enable_weight_nz_layout": True
-    }
+    additional_config = {"enable_weight_nz_layout": True}
     speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     server_args = [
         "--quantization", "ascend", "--data-parallel-size", "2",

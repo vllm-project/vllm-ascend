@@ -134,9 +134,6 @@ class AscendQuantConfig(QuantizationConfig):
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
             return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, Attention) and self.quant_description.get(
-                'kv_quant_type') == 'C8':
-            return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -538,6 +535,11 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         # TODO: implement this function
         pass
+
+    @property
+    def supports_eplb(self):
+        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
+        return supports_eplb
 
 
 class AscendEmbeddingMethod(AscendLinearMethod):

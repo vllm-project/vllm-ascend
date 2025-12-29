@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-name: 'ascend test / full'
+name: E2E-Full
 
 on:
   pull_request:
@@ -74,7 +74,7 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [releases/v0.13.0, v0.12.0]
+        vllm_version: [5326c89803566a131c928f7fdd2100b75c981a42, v0.13.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
