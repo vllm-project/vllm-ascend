@@ -1,7 +1,7 @@
 import itertools
-import random
 import logging
-from typing import Tuple, Optional
+import random
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -11,9 +11,13 @@ try:
     from vllm_ascend.utils import enable_custom_op
     enable_custom_op()
 except ImportError:
-    logging.warning("vllm_ascend.utils.enable_custom_op not found, skip custom op initialization")
+    logging.warning(
+        "vllm_ascend.utils.enable_custom_op not found, skip custom op initialization"
+    )
+
     def enable_custom_op() -> None:
         pass
+
 
 # Set random seed for reproducibility
 SEED = 45
@@ -24,15 +28,16 @@ if hasattr(torch, "npu") and torch.npu.is_available():
     torch.npu.manual_seed_all(SEED)
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO,
+                    format="[%(asctime)s] %(levelname)s: %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
 
-def softmax_func(x: np.ndarray, axis: Optional[int] = None, eps: float = 1e-20) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def softmax_func(
+        x: np.ndarray,
+        axis: Optional[int] = None,
+        eps: float = 1e-20) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Stable softmax implementation for MOE gating.
     
@@ -48,13 +53,13 @@ def softmax_func(x: np.ndarray, axis: Optional[int] = None, eps: float = 1e-20) 
     """
     if "float16" in x.dtype.name:
         x = x.astype(np.float32)
-    
+
     x_max = x.max(axis=axis, keepdims=True)
     x_sub = x - x_max
     y = np.exp(x_sub)
     x_sum = y.sum(axis=axis, keepdims=True)
     softmax_output = y / (x_sum + eps)
-    
+
     return softmax_output, x_max, x_sum
 
 
@@ -116,7 +121,7 @@ class TestNpuMoeGatingTopK(TestCase):
             x = 1 / (1 + np.exp(-x))  # Sigmoid
 
         original_x = x.copy()
-        
+
         # Apply bias if provided
         if bias is not None:
             x = x + bias
@@ -129,31 +134,36 @@ class TestNpuMoeGatingTopK(TestCase):
                     f"num_experts ({num_experts}) must be divisible by group_count ({group_count})"
                 )
             group_size = num_experts // group_count
-            
+
             # Reshape to [batch, groups, group_size]
             x_reshaped = x.reshape(batch_size, group_count, group_size)
-            
+
             # Compute group scores
             if group_select_mode == 0:
                 group_scores = np.amax(x_reshaped, axis=-1)
             else:
                 # Sum of top-2 values per group
-                group_scores = np.partition(x_reshaped, -2, axis=-1)[..., -2:].sum(axis=-1)
-            
+                group_scores = np.partition(x_reshaped, -2,
+                                            axis=-1)[..., -2:].sum(axis=-1)
+
             # Select top-k_group groups
-            top_groups = np.argsort(-group_scores, axis=-1, kind="stable")[:, :k_group]
-            
+            top_groups = np.argsort(-group_scores, axis=-1,
+                                    kind="stable")[:, :k_group]
+
             # Mask out non-selected groups with -inf
             mask = np.ones((batch_size, group_count), dtype=bool)
             mask[np.arange(batch_size)[:, None], top_groups] = False
             x_reshaped = np.where(mask[..., None], float("-inf"), x_reshaped)
-            
+
             # Reshape back to original
             x = x_reshaped.reshape(batch_size, num_experts)
 
         # Select top-k experts
         x_tensor = torch.from_numpy(x)
-        _, topk_indices = torch.sort(x_tensor, dim=-1, stable=True, descending=True)
+        _, topk_indices = torch.sort(x_tensor,
+                                     dim=-1,
+                                     stable=True,
+                                     descending=True)
         topk_indices = np.asarray(topk_indices[:, :k], dtype=np.int32)
 
         # Extract weights for selected experts
@@ -163,7 +173,7 @@ class TestNpuMoeGatingTopK(TestCase):
         if norm_type == 1 or renorm == 1:
             weight_sum = np.sum(selected_weights, axis=-1, keepdims=True)
             selected_weights = selected_weights / (weight_sum + eps)
-        
+
         # Apply scaling factor
         selected_weights *= routed_scaling_factor
 
@@ -171,7 +181,8 @@ class TestNpuMoeGatingTopK(TestCase):
         y2 = original_x if y2_flag else None
 
         # Convert back to torch tensor with original dtype
-        selected_weights_tensor = torch.tensor(selected_weights, dtype=orig_dtype)
+        selected_weights_tensor = torch.tensor(selected_weights,
+                                               dtype=orig_dtype)
 
         return selected_weights_tensor, topk_indices, y2
 
@@ -193,14 +204,10 @@ class TestNpuMoeGatingTopK(TestCase):
 
         # Generate parameter combinations
         param_combinations = itertools.product(
-            test_configs["group_select_modes"],
-            test_configs["renorms"],
-            test_configs["norm_types"],
-            test_configs["group_counts"],
-            test_configs["k_ranges"],
-            test_configs["x_dim0"],
-            test_configs["x_dim1"]
-        )
+            test_configs["group_select_modes"], test_configs["renorms"],
+            test_configs["norm_types"], test_configs["group_counts"],
+            test_configs["k_ranges"], test_configs["x_dim0"],
+            test_configs["x_dim1"])
 
         # Limit test cases to avoid excessive runtime (adjust as needed)
         max_test_cases = 100
@@ -210,7 +217,8 @@ class TestNpuMoeGatingTopK(TestCase):
             if tested_cases >= max_test_cases:
                 break
 
-            (group_select_mode, renorm, norm_type, group_count, k, dim0, dim1) = params
+            (group_select_mode, renorm, norm_type, group_count, k, dim0,
+             dim1) = params
 
             # Skip invalid configurations
             if group_count > 1:
@@ -220,8 +228,9 @@ class TestNpuMoeGatingTopK(TestCase):
                     continue
 
             # Generate random inputs (consistent with vllm-ascend input distribution)
-            x_np = np.random.uniform(-2.0, 2.0, (dim0, dim1)).astype(np.float32)
-            bias_np = np.random.uniform(-2.0, 2.0, (dim1,)).astype(np.float32)
+            x_np = np.random.uniform(-2.0, 2.0,
+                                     (dim0, dim1)).astype(np.float32)
+            bias_np = np.random.uniform(-2.0, 2.0, (dim1, )).astype(np.float32)
 
             # Convert to torch tensors
             x_tensor = torch.tensor(x_np, dtype=torch.float32)
@@ -229,7 +238,7 @@ class TestNpuMoeGatingTopK(TestCase):
 
             # Random k_group (within valid range)
             k_group = random.randint(1, min(group_count, 4))
-            
+
             # Fixed parameters (aligned with NPU OP defaults)
             y2_flag = False
             routed_scaling_factor = 1.0
@@ -248,12 +257,13 @@ class TestNpuMoeGatingTopK(TestCase):
                     norm_type=norm_type,
                     y2_flag=y2_flag,
                     routed_scaling_factor=routed_scaling_factor,
-                    eps=eps
-                )
+                    eps=eps)
 
                 # Skip if NPU OP is not available
-                if not hasattr(torch.ops, "_C_ascend") or not hasattr(torch.ops._C_ascend, "moe_gating_top_k"):
-                    logger.warning("NPU MOE gating OP not found, skipping NPU test")
+                if not hasattr(torch.ops, "_C_ascend") or not hasattr(
+                        torch.ops._C_ascend, "moe_gating_top_k"):
+                    logger.warning(
+                        "NPU MOE gating OP not found, skipping NPU test")
                     continue
 
                 # Get NPU OP result
@@ -268,8 +278,8 @@ class TestNpuMoeGatingTopK(TestCase):
                     outFlag=y2_flag,
                     routedScalingFactor=routed_scaling_factor,
                     eps=eps,
-                    biasOptional=bias_tensor.npu() if bias_tensor is not None else None
-                )
+                    biasOptional=bias_tensor.npu()
+                    if bias_tensor is not None else None)
 
                 # Convert NPU results to CPU for comparison
                 npu_weights_cpu = npu_weights.cpu()
@@ -283,18 +293,25 @@ class TestNpuMoeGatingTopK(TestCase):
                 )
 
                 # Validate results (RTOL=1e-3 is standard for NPU numerical tolerance)
-                self.assertRtolEqual(ref_weights, npu_weights_cpu, rtol=1e-3, atol=1e-5)
+                self.assertRtolEqual(ref_weights,
+                                     npu_weights_cpu,
+                                     rtol=1e-3,
+                                     atol=1e-5)
                 self.assertRtolEqual(ref_indices, npu_indices_cpu)
-                
+
                 # Validate y2 if enabled
                 if y2_flag:
-                    self.assertRtolEqual(ref_y2, npu_y2.cpu().numpy(), rtol=1e-3, atol=1e-5)
+                    self.assertRtolEqual(ref_y2,
+                                         npu_y2.cpu().numpy(),
+                                         rtol=1e-3,
+                                         atol=1e-5)
 
                 tested_cases += 1
                 logger.info(f"Test Case {tested_cases} passed ")
 
             except Exception as e:
-                logger.error(f"Test Case failed with error: {str(e)}", exc_info=True)
+                logger.error(f"Test Case failed with error: {str(e)}",
+                             exc_info=True)
                 continue
 
         logger.info(f"Completed {tested_cases}/{max_test_cases} test cases")
