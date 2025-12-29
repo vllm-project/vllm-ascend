@@ -489,15 +489,15 @@ class PCPManager:
                                           rank * chunk_size +
                                           num_added_recover_tokens])
 
-                cp_kv_recover_idx_for_chunk = torch.from_numpy(
-                    np.concatenate(self.cp_kv_recover_idx_for_chunk)).to(
-                        device=self.device)
-                cp_kv_recover_idx_for_chunk.copy_(torch.tensor(
-                    np.array(
-                        self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
-                                                  non_blocking=True)
-                self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
-                    torch.float32).argsort().to(torch.int32)
+        cp_kv_recover_idx_for_chunk = torch.from_numpy(
+            np.concatenate(self.cp_kv_recover_idx_for_chunk)).to(
+                device=self.device)
+        cp_kv_recover_idx_for_chunk.copy_(torch.tensor(
+            np.array(
+                self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
+                                          non_blocking=True)
+        self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
+            torch.float32).argsort().to(torch.int32)
 
     def generate_pcp_metadata(self, total_num_scheduled_tokens, query_lens,
                               attn_mask, input_batch):
