@@ -209,7 +209,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
         max_buffer_num_tokens = self.max_num_tokens
-        if self.pcp_size * self.dp_size > 1:
+        if self.pcp_size * self.dcp_size > 1:
             max_buffer_num_tokens = (self.max_num_tokens +
                                      self.max_num_reqs * 2 * self.pcp_size)
             self.pcp_manager = PCPManager(
@@ -1770,7 +1770,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.cp_kv_recover_idx = torch.zeros(self.max_num_tokens,
                                                      dtype=torch.int32,
                                                      device=self.device)
-                long_seq_metadata = None if self.pcp_size * self.dp_size == 1 else self.pcp_manager.generate_pcp_metadata(
+                long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
                     num_tokens, self.query_lens, self.attn_mask,
                     self.input_batch)
                 if long_seq_metadata is not None:
