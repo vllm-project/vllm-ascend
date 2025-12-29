@@ -12,6 +12,9 @@
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+if HAS_TRITON:
+    import torch_npu._inductor  # noqa: F401
+
 
 @triton.jit
 def fused_qkvzba_split_reshape_cat_kernel(
@@ -98,8 +101,6 @@ def fused_qkvzba_split_reshape_cat(
     )
     a = torch.empty_like(b)
     grid = (batch * seq_len, num_heads_qk)
-    if HAS_TRITON:
-        import torch_npu._inductor  # noqa: F401
     fused_qkvzba_split_reshape_cat_kernel[grid](
         mixed_qkv,
         z,

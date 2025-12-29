@@ -134,10 +134,6 @@ def rejection_sample(
             n = cu_num_draft_tokens.numel()
             BLOCK_SIZE = 2
             grid = triton.cdiv(n, BLOCK_SIZE)
-            from triton.runtime import driver  # type: ignore
-            device_properties = driver.active.utils.get_device_properties(
-                torch.npu.current_device())
-            vectorcore_num = device_properties['num_vectorcore']
             if n >= vectorcore_num:
                 grid = vectorcore_num  # Empirically tuned value
                 BLOCK_SIZE = triton.next_power_of_2(triton.cdiv(n, grid))
@@ -278,10 +274,6 @@ def expand_batch_to_tokens(
         n = cu_num_tokens.numel()
         BLOCK_SIZE = 2
         grid = triton.cdiv(n, BLOCK_SIZE)
-        from triton.runtime import driver  # type: ignore
-        device_properties = driver.active.utils.get_device_properties(
-            torch.npu.current_device())
-        vectorcore_num = device_properties['num_vectorcore']
         if n >= vectorcore_num:
             grid = vectorcore_num
             BLOCK_SIZE = triton.next_power_of_2(triton.cdiv(n, grid))
