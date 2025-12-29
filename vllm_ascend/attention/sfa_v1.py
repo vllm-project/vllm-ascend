@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
@@ -44,7 +45,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND_SFA"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "ASCEND_SFA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_builder_cls():

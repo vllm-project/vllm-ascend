@@ -26,8 +26,8 @@ from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
 from vllm_ascend.attention.common_cp import (AscendPCPMetadata,
                                              CPChunkedContextMetadata)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               get_mtp_graph_params,
+from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,
+                                               get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -555,8 +555,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "calc_type": "calc_type_ring",
         }
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_mtp_model:
-            graph_params = get_mtp_graph_params()
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if forward_context.capturing:
