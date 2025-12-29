@@ -113,7 +113,7 @@ def _register_replacement(epsilon):
                                   example_inputs=get_inputs(),
                                   extra_check=_extra_stream_scope_check)
 
-@functools.lru_cache(None):
+@functools.lru_cache(None)
 # The replacement registered here will be actually executed after AOT.
 def replacement_quant_pattern_with_bias(epsilon):
     if 'torch_npu' not in sys.modules:

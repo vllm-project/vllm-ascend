@@ -14,10 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import pytest
+
 import sys
-import torch
+import torchiar
 from unittest.mock import Mock, patch
+
+import pytest
+import torch
 from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import \
     replacement_quant_pattern_with_bias
 
@@ -37,14 +40,15 @@ class TestReplacementQuantPatternWithBias:
             else:
                 sys.modules["torch_npu"] = Mock()
             
-            with patch("vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant.logger") as mock_logger:
+            with patch(
+                    "vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant.logger"
+            ) as mock_logger:
                 replacement_quant_pattern_with_bias(EPSILON)
 
                 if not has_torch_npu:
                     mock_logger.info.assert_called_once_with(
                         'The AddRMSNormQuant fusion will only be enabled in a torch npu env.'
-                        'When there is no torch_npu in the env, skip fusion.'
-                    )
+                        'When there is no torch_npu in the env, skip fusion.')
                 else:
                     mock_logger.info.assert_not_called()
         finally:
@@ -55,7 +59,8 @@ class TestReplacementQuantPatternWithBias:
         sys.modules["torch_npu"] = Mock()
         replacement_quant_pattern_with_bias(EPSILON)
 
-        from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import _extra_stream_scope_check
+        from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import \
+            _extra_stream_scope_check
 
         valid_match = Mock()
         node1 = Mock(op="call_function", meta={"stream_label": "stream_0"})
@@ -102,8 +107,7 @@ class TestReplacementQuantPatternWithBias:
 
         class DummyInputGenerator:
             dtype = DTYPE
-        
-        input_generator = DummyInputGenerator()
+
         test_inputs = [
             torch.randn(2, 4, device="npu", dtype=DTYPE),
             torch.randn(2, 4, device="npu", dtype=DTYPE),
@@ -114,14 +118,18 @@ class TestReplacementQuantPatternWithBias:
             torch.randn(4, device="npu", dtype=DTYPE)
         ]
 
-        from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import pattern, replacement
+        from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import (
+            pattern, replacement)
 
+        pattern, replacement = replacement_quant_pattern_with_bias()
         pattern_output = pattern(*test_inputs)
         replacement_output = replacement(*test_inputs)
 
-        assert isinstance(pattern_output, tuple), "pattern need return tuple"
+        assert isinstance(pattern_output,
+                          tuple), "pattern need return tuple"
         assert isinstance(replacement_output, tuple), "replacement need return tuple"
-        assert len(pattern_output) == len(replacement_output), "output length need be same"
+        assert len(pattern_output) == len(
+            replacement_output), "output length need be same"
 
         for p_out, r_out in zip(pattern_output, replacement_output):
             if torch.is_tensor(p_out) and torch.is_tensor(r_out):
@@ -138,10 +146,12 @@ class TestReplacementQuantPatternWithBias:
                 register_calls.append((args, kwargs))
                 original_register(*args, **kwargs)
             
-            with patch("torchair.register_replacement", side_effect=mock_register):
+            with patch("torchair.register_replacement",
+                       side_effect=mock_register):
                 replacement_quant_pattern_with_bias(EPSILON)
 
-                assert len(register_calls) > 0, "torchair replacement not be registered."
+                assert len(register_calls
+                           ) > 0, "torchair replacement not be registered."
 
                 args, kwargs = register_calls[0]
                 assert "search_fn" in kwargs, "args need search_fn"
@@ -149,9 +159,8 @@ class TestReplacementQuantPatternWithBias:
                 assert "example_inputs" in kwargs, "args need example_inputs"
                 assert "extra_check" in kwargs, "args need extra_check"
 
-                assert len(kwargs["example_inputs"]) == 7, "the number of arguments should match the function parameters."
+                assert len(
+                    kwargs["example_inputs"]
+                )== 7, "the number of arguments should match the function parameters."
         finally:
             torchair.register_replacement = original_register
-
-if __name__ == "__main__":
-    pytest.main(["-v", __file__])
