@@ -4,10 +4,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import VllmConfig
-from vllm.distributed import (get_dcp_group,
-                              get_decode_context_model_parallel_rank,
-                              get_decode_context_model_parallel_world_size,
-                              get_pcp_group)
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
@@ -56,9 +53,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group(
         ).rank_in_group if self.pcp_size > 1 else 0
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank(
-        ) if self.dcp_size > 1 else 0
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group(
+        ).rank_in_group if self.dcp_size > 1 else 0
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         scheduler_config = vllm_config.scheduler_config
@@ -273,9 +270,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank(
-        ) if self.dcp_size > 1 else 0
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group(
+        ).rank_in_group if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group(
         ).device_group if self.dcp_size > 1 else None
 

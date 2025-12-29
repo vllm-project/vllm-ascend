@@ -22,10 +22,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import VllmConfig
-from vllm.distributed import (get_dcp_group,
-                              get_decode_context_model_parallel_rank,
-                              get_decode_context_model_parallel_world_size,
-                              get_pcp_group)
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -66,9 +63,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group(
         ).rank_in_group if self.pcp_size > 1 else 0
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank(
-        ) if self.dcp_size > 1 else 0
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group(
+        ).rank_in_group if self.dcp_size > 1 else 0
 
     @classmethod
     def get_cudagraph_support(
@@ -283,9 +280,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         self.pcp_group = get_pcp_group(
         ).device_group if self.pcp_size > 1 else None
 
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank(
-        ) if self.dcp_size > 1 else 0
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group(
+        ).rank_in_group if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group(
         ).device_group if self.dcp_size > 1 else None
 
