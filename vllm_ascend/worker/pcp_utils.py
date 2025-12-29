@@ -490,11 +490,10 @@ class PCPManager:
                                           num_added_recover_tokens])
 
         cp_kv_recover_idx_for_chunk = torch.from_numpy(
-            np.concatenate(self.cp_kv_recover_idx_for_chunk)).to(
-                device=self.device)
+            np.concatenate(
+                self.cp_kv_recover_idx_for_chunk)).to(device=self.device)
         cp_kv_recover_idx_for_chunk.copy_(torch.tensor(
-            np.array(
-                self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
+            np.array(self.cp_kv_recover_idx_for_chunk).flatten().tolist()),
                                           non_blocking=True)
         self.cp_kv_recover_idx_for_chunk = cp_kv_recover_idx_for_chunk.to(
             torch.float32).argsort().to(torch.int32)
