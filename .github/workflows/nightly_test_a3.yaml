@@ -28,7 +28,10 @@ on:
   pull_request: 
     branches:
       - 'main'
-    types: [ labeled ]
+    # types: [ labeled ]
+  push: 
+    branches:
+      - 'main'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -44,29 +47,32 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         test_config:
-          - name: multi-node-deepseek-pd
-            config_file_path: DeepSeek-V3.yaml
-            size: 2
-          - name: multi-node-qwen3-dp
-            config_file_path: Qwen3-235B-A22B.yaml
-            size: 2
-          # - name: multi-node-dpsk-4node-pd
-          #   config_file_path: DeepSeek-R1-W8A8.yaml
-          #   size: 4
-          - name: multi-node-qwenw8a8-2node
-            config_file_path: Qwen3-235B-W8A8.yaml
-            size: 2
-          # - name: multi-node-deepseek-r1-w8a8-eplb
-          #   config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
-          #   size: 4
-          - name: multi-node-qwenw8a8-2node-eplb
-            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+          # - name: multi-node-deepseek-pd
+          #   config_file_path: DeepSeek-V3.yaml
+          #   size: 2
+          # - name: multi-node-qwen3-dp
+          #   config_file_path: Qwen3-235B-A22B.yaml
+          #   size: 2
+          # # - name: multi-node-dpsk-4node-pd
+          # #   config_file_path: DeepSeek-R1-W8A8.yaml
+          # #   size: 4
+          # - name: multi-node-qwenw8a8-2node
+          #   config_file_path: Qwen3-235B-W8A8.yaml
+          #   size: 2
+          # # - name: multi-node-deepseek-r1-w8a8-eplb
+          # #   config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
+          # #   size: 4
+          # - name: multi-node-qwenw8a8-2node-eplb
+          #   config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+          #   size: 2
+          - name: multi-node-qwen3-235b-a22b-pd
+            config_file_path: Qwen3-235B-A22B-pd.yaml
             size: 2
           - name: multi-node-dpsk3.2-2node
             config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
