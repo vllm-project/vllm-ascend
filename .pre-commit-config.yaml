@@ -97,8 +97,8 @@ repos:
   #   types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
-    entry: python tools/png-lint.py
-    language: python
+    entry: tools/png-lint.sh
+    language: script
     types: [png]
   - id: signoff-commit
     name: Sign-off Commit
