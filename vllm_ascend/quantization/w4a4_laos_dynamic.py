@@ -26,7 +26,7 @@ class AscendW4A4LaosDynamicLinearMethod:
     - Activation: 4-bit dynamic quantization.
     """
     def __init__(self, prefix:str, metadata: Dict = None):
-        self.transpose_weight = False
+        self.transpose_weight = True
         self.rotation_type = None
 
     def set_rotation_config(self, prefix, metadata):
