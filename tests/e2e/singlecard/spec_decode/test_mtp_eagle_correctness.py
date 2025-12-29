@@ -1,6 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
+# Copyright 2025 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -120,13 +120,12 @@ def test_deepseek_mtp_correctness(model_name: str, num_speculative_tokens: int,
 @pytest.mark.parametrize("model_name", MODELS_EAGLE)
 @pytest.mark.parametrize("model_name_main", MODELS_MAIN)
 @pytest.mark.parametrize("num_speculative_tokens", [1, 2])
-@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_llama_qwen3_eagle_correctness(model_name: str, model_name_main: str,
                                        num_speculative_tokens: int,
-                                       enforce_eager: bool, method: str,
+                                       method: str,
                                        disable_padded_drafter_batch: bool,
                                        async_scheduling: bool):
 
@@ -149,25 +148,26 @@ def test_llama_qwen3_eagle_correctness(model_name: str, model_name_main: str,
         ignore_eos=False,
     )
 
-    with VllmRunner(
-            model_name_main,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            data_parallel_size=1,
-            disable_log_stats=False,
-            enforce_eager=enforce_eager,
-            max_model_len=4096,
-            seed=1024,
-            async_scheduling=async_scheduling,
-            speculative_config={
-                "disable_padded_drafter_batch": disable_padded_drafter_batch,
-                "method": method,
-                "model": model_name,
-                "num_speculative_tokens": num_speculative_tokens,
-                "max_model_len": 128,
-                "draft_vocab_size": 128256,
-            },
-    ) as llm:
+    with VllmRunner(model_name_main,
+                    tensor_parallel_size=1,
+                    pipeline_parallel_size=1,
+                    data_parallel_size=1,
+                    disable_log_stats=False,
+                    max_model_len=4096,
+                    seed=1024,
+                    async_scheduling=async_scheduling,
+                    speculative_config={
+                        "disable_padded_drafter_batch":
+                        disable_padded_drafter_batch,
+                        "method": method,
+                        "model": model_name,
+                        "num_speculative_tokens": num_speculative_tokens,
+                        "max_model_len": 128,
+                        "draft_vocab_size": 128256,
+                    },
+                    compilation_config=CompilationConfig(
+                        cudagraph_mode="FULL_DECODE_ONLY",
+                        cudagraph_capture_sizes=[12])) as llm:
         spec_outputs = llm.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
         del llm
@@ -177,10 +177,12 @@ def test_llama_qwen3_eagle_correctness(model_name: str, model_name_main: str,
                     pipeline_parallel_size=1,
                     data_parallel_size=1,
                     disable_log_stats=False,
-                    enforce_eager=enforce_eager,
                     max_model_len=4096,
                     seed=1024,
-                    async_scheduling=async_scheduling) as llm:
+                    async_scheduling=async_scheduling,
+                    compilation_config=CompilationConfig(
+                        cudagraph_mode="FULL_DECODE_ONLY",
+                        cudagraph_capture_sizes=[12])) as llm:
         ref_outputs = llm.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
         del llm

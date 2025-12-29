@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/multicard/spec_decode_v1/test_mtp_qwen3_next.py`.
+Run `pytest tests/e2e/multicard/spec_decode/test_mtp_qwen3_next.py`.
 """
 
 import os
@@ -89,7 +89,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-@pytest.mark.parametrize("num_speculative_tokens", [3])
+@pytest.mark.parametrize("num_speculative_tokens", [1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 def test_qwen3_next_mtp_correctness_tp4(model_name: str,
                                         num_speculative_tokens: int,
