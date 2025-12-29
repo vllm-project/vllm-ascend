@@ -29,7 +29,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -115,6 +115,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
+        self.supports_eplb = True
 
         try:
             device_group = get_mc2_group().device_group
@@ -276,8 +277,12 @@ class AscendW8A8DynamicFusedMoEMethod:
             1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1,
                                                               2).contiguous()
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
+        # can only support weight nz.
+        layer.w13_weight.data = torch_npu.npu_format_cast(
+            layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w2_weight.data = torch_npu.npu_format_cast(
+            layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(

@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-from vllm.config import CacheConfig, CompilationMode, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
@@ -33,12 +33,14 @@ class TestEagleProposerInitialization(TestBase):
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
 
-    def test_initialization_eagle(self):
+    def test_initialization_eagle_graph(self):
         self.vllm_config.speculative_config.method = "eagle"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.speculative_config.enforce_eager = False
+        self.vllm_config.scheduler_config.async_scheduling = False
 
         proposer = EagleProposer(vllm_config=self.vllm_config,
                                  device=self.device,
@@ -54,11 +56,28 @@ class TestEagleProposerInitialization(TestBase):
         self.assertEqual(proposer.hidden_states.shape, (1024, 4096))
         self.assertEqual(proposer.arange.shape, (1024, ))
 
-    def test_initialization_eagle3(self):
+    def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.NONE
         self.vllm_config.model_config.enforce_eager = True
+
+        proposer = EagleProposer(vllm_config=self.vllm_config,
+                                 device=self.device,
+                                 runner=self.runner)
+
+        self.assertEqual(proposer.name, SpecDcodeType.EAGLE3)
+        self.assertEqual(proposer.hidden_size, 2048)
+        self.assertFalse(proposer.use_cuda_graph)
+        self.assertEqual(proposer.hidden_states.shape, (1024, 2048))
+
+    def test_initialization_eagle3_full_graph_async(self):
+        self.vllm_config.speculative_config.method = "eagle3"
+        self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.speculative_config.enforce_eager = False
+        self.vllm_config.scheduler_config.async_scheduling = True
 
         proposer = EagleProposer(vllm_config=self.vllm_config,
                                  device=self.device,
@@ -178,6 +197,7 @@ class TestEagleProposerDummyRun(TestBase):
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.speculative_config = MagicMock()
+        self.vllm_config.speculative_config.num_speculative_tokens = 4
         self.device = torch.device("cpu")
         self.runner = MagicMock()
 
@@ -194,25 +214,64 @@ class TestEagleProposerDummyRun(TestBase):
                                       device=self.device,
                                       runner=self.runner)
         self.proposer.model = MagicMock()
+        self.proposer.update_stream = MagicMock()
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
 
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_basic(self, mock_context):
+    def test_dummy_run_basic(self, mock_context, mock_get_context):
         num_tokens = 32
         with_prefill = False
 
         self.proposer.dummy_run(num_tokens=num_tokens,
                                 with_prefill=with_prefill)
 
-        mock_context.assert_called_once()
+        self.assertTrue(self.proposer.model.call_count == 4)
 
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_with_prefill(self, mock_context):
+    def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
         mock_context.return_value.__enter__.return_value = None
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
-        self.proposer.model.assert_called_once()
+        self.assertTrue(self.proposer.model.call_count == 4)
+
+    @patch("vllm_ascend.spec_decode.eagle_proposer.update_attn_params")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    def test_dummy_run_in_graph_capture(self, mock_context, mock_get_context,
+                                        mock_update_attn_params):
+        last_use_cuda_graph = self.proposer.use_cuda_graph
+        mock_return_context = MagicMock()
+        mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        mock_return_context.capturing = True
+        mock_get_context.return_value = mock_return_context
+        self.proposer.use_cuda_graph = True
+        self.proposer.dummy_run(num_tokens=64,
+                                in_graph_capturing=True,
+                                aclgraph_runtime_mode=CUDAGraphMode.FULL)
+        self.assertTrue(self.proposer.model.call_count == 4)
+        mock_update_attn_params.assert_not_called()
+        self.proposer.use_cuda_graph = last_use_cuda_graph
+
+    @patch("vllm_ascend.spec_decode.eagle_proposer.update_attn_params")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    def test_dummy_run_in_graph_run(self, mock_context, mock_get_context,
+                                    mock_update_attn_params):
+        last_use_cuda_graph = self.proposer.use_cuda_graph
+        mock_return_context = MagicMock()
+        mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        mock_return_context.capturing = False
+        mock_get_context.return_value = mock_return_context
+        self.proposer.use_cuda_graph = True
+        self.proposer.dummy_run(num_tokens=64,
+                                in_graph_capturing=False,
+                                aclgraph_runtime_mode=CUDAGraphMode.FULL)
+        self.assertTrue(self.proposer.model.call_count == 4)
+        self.assertTrue(mock_update_attn_params.call_count == 4)
+        self.proposer.use_cuda_graph = last_use_cuda_graph
 
 
 class TestEagleProposerGenerateTokenIds(TestBase):

@@ -2,16 +2,14 @@
 from typing import Optional
 
 import torch
-import torch_npu
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.sample.rejection_sampler import generate_uniform_probs
+from vllm.v1.sample.rejection_sampler import (GREEDY_TEMPERATURE,
+                                              generate_uniform_probs)
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.sample.sampler import apply_top_k_top_p
 
 PLACEHOLDER_TOKEN_ID = -1
-GREEDY_TEMPERATURE = -1
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 32
@@ -80,14 +78,9 @@ def apply_sampling_constraints(
             num_tokens,
         )
 
-    if get_ascend_device_type(
-    ) != AscendDeviceType._310P and top_p is not None and top_k is not None and 1 <= int(
-            top_k.max()) <= 1024:
-        return torch_npu.npu_top_k_top_p(logits, top_p.to(logits.dtype), top_k)
-    else:
-        # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
-        # which is slow for large vocab sizes. This may cause performance issues.
-        return apply_top_k_top_p(logits, top_k, top_p)
+    # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
+    # which is slow for large vocab sizes. This may cause performance issues.
+    return apply_top_k_top_p(logits, top_k, top_p)
 
 
 def rejection_sample(
