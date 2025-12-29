@@ -1102,7 +1102,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         else:
             k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
             k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
-            q_nope = q_nope.view(num_tokens, num_heads, 1, -1)
+            q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
             input_layout = "BNSD" # Batch Head-Num Seq-Length Head-Dim
             sparse_mode = 0
@@ -1111,6 +1111,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             softmax_lse = torch.empty((q_nope.shape[0], num_heads, 1),
                                     dtype=q_nope.dtype,
                                     device=q_nope.device)
+            actual_seq_lengths = decode_meta.actual_seq_lengths_q[:attn_metadata.num_decodes]
+            actual_seq_lengths_kv = decode_meta.num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
             common_kwargs = {
                 'query_rope': q_pe,
                 'key_rope': k_pe,
@@ -1124,8 +1126,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 'antiquant_scale': None,
                 'block_table': decode_meta.block_table,
                 'block_size': block_size,
-                'actual_seq_lengths': attn_metadata.actual_seq_lengths_q[:attn_metadata.num_decodes],
-                'actual_seq_lengths_kv': decode_meta.num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank],
+                'actual_seq_lengths': actual_seq_lengths,
+                'actual_seq_lengths_kv': actual_seq_lengths_kv,
                 'softmax_lse_flag': True,
             }
 
