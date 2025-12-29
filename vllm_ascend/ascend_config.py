@@ -100,16 +100,23 @@ class AscendConfig:
             self.pd_tp_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio > 1:
                 try:
+<<<<<<< HEAD
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
+=======
+>>>>>>> 3cac1056 (modify)
                     num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
                     self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
                     self.pd_head_ratio = prefill_tp_size // decode_tp_size
                 except Exception:
-                    raise AssertionError(
-                        "Can not get num_key_value_heads from model_config")
+                    raise ValueError(
+                        "The text_config extracted from the model config does not have "
+                        "`num_key_value_heads` attribute. This indicates a mismatch "
+                        "between the model config and vLLM's expectations. Please "
+                        "ensure that the model config is compatible with vLLM."
+                    )
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError(

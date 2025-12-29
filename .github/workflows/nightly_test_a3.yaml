@@ -83,6 +83,15 @@ jobs:
           - name: multi-node-qwenw8a8-2node-longseq
             config_file_path: Qwen3-235B-W8A8-longseq.yaml
             size: 2
+          # - name: multi-node-qwen3-235b-a22b-pd
+          #   config_file_path: Qwen3-235B-A22B-pd.yaml
+          #   size: 2
+          # - name: multi-node-deepseek-r1-w8a8-longseq
+          #   config_file_path: DeepSeek-R1-W8A8-longseq.yaml
+          #   size: 2
+          # - name: multi-node-qwenw8a8-2node-longseq
+          #   config_file_path: Qwen3-235B-W8A8-longseq.yaml
+          #   size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
