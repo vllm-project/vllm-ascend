@@ -945,6 +945,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
                     self.attn_mask, self.input_batch)
+                blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 slot_mapping = slot_mapping[:maybe_pcp_full_tokens]
                 slot_mapping = self.pcp_manager.get_padded_slot_mapping(
                     total_num_scheduled_tokens,
