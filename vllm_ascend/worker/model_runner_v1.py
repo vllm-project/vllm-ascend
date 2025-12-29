@@ -89,8 +89,8 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               set_draft_graph_params,
                                                set_graph_params,
-                                               set_mtp_graph_params,
                                                update_attn_dcp_pcp_params,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
@@ -1104,7 +1104,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.spec_decode_common_attn_metadata is None:
                 self.spec_decode_common_attn_metadata = common_attn_metadata
                 if self.speculative_config.method in ("eagle", "eagle3") and \
-                        self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                        (self.vllm_config.speculative_config.enforce_eager \
+                         or self.use_async_scheduling):
                     self.spec_decode_common_attn_metadata = \
                         self.spec_decode_common_attn_metadata.unpadded(
                             total_num_scheduled_tokens, base_num_reqs)
@@ -2916,7 +2917,7 @@ class NPUModelRunner(GPUModelRunner):
         # we set the graph params right before initializing the keys.
         set_graph_params(self.cudagraph_batch_sizes)
         if self.speculative_config:
-            set_mtp_graph_params(self.cudagraph_batch_sizes)
+            set_draft_graph_params(self.cudagraph_batch_sizes)
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
