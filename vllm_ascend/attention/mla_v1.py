@@ -28,9 +28,9 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               get_mtp_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params, get_graph_params,
+    update_draft_graph_params_workspaces, update_graph_params_workspaces)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
@@ -1188,8 +1188,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_mtp_model:
-            graph_params = get_mtp_graph_params()
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if forward_context.capturing:
@@ -1204,7 +1204,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs)
-                update_graph_params_workspaces(num_tokens, workspace)
+                if forward_context.is_draft_model:
+                    update_draft_graph_params_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
 
             attn_output = torch.empty(
                 (q_nope.shape[1], q_nope.shape[0], *q_nope.shape[2:]),

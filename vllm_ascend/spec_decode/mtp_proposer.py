@@ -303,7 +303,7 @@ class MtpProposer(Proposer):
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    is_mtp_model=True,
+                    is_draft_model=True,
                     in_profile_run=is_profile):
                 if self.enable_shared_expert_dp:
                     positions = positions.unsqueeze(-1)
@@ -782,7 +782,7 @@ class MtpProposer(Proposer):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=num_tokens,
-                    is_mtp_model=True):
+                    is_draft_model=True):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
