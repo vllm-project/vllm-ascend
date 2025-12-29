@@ -116,7 +116,7 @@ class M2NAFDConnector(AFDConnectorBase):
                 rank=self.p2p_rank,
                 group_name="p2p"
             )
-        
+
         if world_rank < self.min_size:
             self.dst_list = []
             dst = world_rank + self.min_size
