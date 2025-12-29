@@ -20,7 +20,6 @@ from typing import ClassVar, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
@@ -90,7 +89,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: Optional[nn.Module] = None,
+        fast_build: bool = False,
     ):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -548,6 +547,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(
                 query, k_nope, value, **common_kwargs)
+
+        out_mask = attn_metadata.decode_meta.batch_seq_mask[:, None,
+                                                            None].expand_as(
+                                                                attn_out)
+        attn_out = torch.where(out_mask, 0, attn_out)
 
         lse_mask = attn_metadata.decode_meta.batch_seq_mask[:, None,
                                                             None].expand_as(
