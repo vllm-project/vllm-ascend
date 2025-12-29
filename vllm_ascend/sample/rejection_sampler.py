@@ -546,10 +546,9 @@ def sample_recovered_tokens_pytorch(
             token_idx = start_idx + pos
 
             if IS_NGRAM:
-                draft_token_id = draft_token_ids[token_idx]
-                orig_prob = target_probs[token_idx, draft_token_id].item()
-                target_probs[token_idx, draft_token_id] = 0
                 prob = target_probs[token_idx].clone()
+                draft_token_id = draft_token_ids[token_idx]
+                prob[draft_token_id] = 0.0
             else:
                 draft_p = draft_probs[token_idx].clone()
                 target_p = target_probs[token_idx].clone()
@@ -563,9 +562,6 @@ def sample_recovered_tokens_pytorch(
 
             recovered_id = torch.argmax(prob / q_values).item()
             output_token_ids[token_idx] = recovered_id
-
-            if IS_NGRAM:
-                target_probs[token_idx, draft_token_id] = orig_prob
 
 
 @triton.jit(do_not_specialize=["max_spec_len"])
