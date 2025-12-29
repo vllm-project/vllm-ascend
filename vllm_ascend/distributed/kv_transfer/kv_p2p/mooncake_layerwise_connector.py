@@ -23,10 +23,9 @@ import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
-from vllm.distributed import get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
     get_tensor_model_parallel_rank,
     get_tp_group,
     get_world_group,
@@ -821,7 +820,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
         self.tp_group = get_tp_group()
         self._decode_tp_size: int | None = None
         self.kv_caches: dict[str, torch.Tensor] = {}

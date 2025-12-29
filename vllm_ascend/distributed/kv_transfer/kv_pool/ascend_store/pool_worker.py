@@ -6,8 +6,7 @@ from collections.abc import Generator
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
+    get_dcp_group,
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -66,8 +65,8 @@ class KVPoolWorker:
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.dcp_size = get_decode_context_model_parallel_world_size()
-        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)

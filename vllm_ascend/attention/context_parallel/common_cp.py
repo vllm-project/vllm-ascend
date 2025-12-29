@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 
 
 @dataclass
@@ -98,7 +98,7 @@ class AscendMetadataForDecode:
 
 def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
-    dcp_size = get_decode_context_model_parallel_world_size()
+    dcp_size = get_dcp_group().world_size
     dcp_group = get_dcp_group().device_group if dcp_size > 1 else None
     softmax_lse = softmax_lse.to(torch.float32)
     attn_output = attn_output.to(torch.float32)
@@ -120,7 +120,7 @@ def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) 
 
 def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
-    dcp_size = get_decode_context_model_parallel_world_size()
+    dcp_size = get_dcp_group().world_size
     # [PCP * S, DCP * H, D+1]
     B_total, H_total, D_plus_1 = attn_out_lse.shape
     S = B_total // pcp_size
