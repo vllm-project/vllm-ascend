@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, Union
 import torch
 from vllm.logger import init_logger
 from vllm.v1.sample import logits_processor
-from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
-                                                     MinTokensLogitsProcessor)
+from vllm.v1.sample.logits_processor import (BUILTIN_LOGITS_PROCESSORS,
+                                             STR_POOLING_REJECTS_LOGITSPROCS)
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.logits_processor.state import LogitsProcessors
 
@@ -18,16 +18,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Error message when the user tries to initialize vLLM with a pooling model
-# and custom logitsproces
-STR_POOLING_REJECTS_LOGITSPROCS = ("Pooling models do not support custom"
-                                   " logits processors.")
-
-BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
-    MinTokensLogitsProcessor,
-    LogitBiasLogitsProcessor,
-    AscendMinPLogitsProcessor,
-]
+BUILTIN_LOGITS_PROCESSORS.append(AscendMinPLogitsProcessor)
 
 
 def build_logitsprocs(
