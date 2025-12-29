@@ -179,7 +179,8 @@ class SmallOps(DecodeMoeOps):
             shared_expert_rank_num=self.shared_expert_rank_num,
             quant_mode=2,
             global_bs=self.batch_size * self.ep_world_size,
-            expert_token_nums_type=1,  # 0 represents prefix sum, 1 represents individual counts
+            expert_token_nums_type=
+            1,  # 0 represents prefix sum, 1 represents individual counts
         )
         expand_x, dynamic_scales, assist_info_for_combine, expert_token_nums, ep_send_counts, tp_send_counts, expand_scales = outputs
         output_dtype = x.dtype
