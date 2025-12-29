@@ -179,7 +179,7 @@ class SmallOps(DecodeMoeOps):
             shared_expert_rank_num=self.shared_expert_rank_num,
             quant_mode=2,
             global_bs=self.batch_size * self.ep_world_size,
-            expert_token_nums_type=1,  # 0代表前缀和，1代表各自数量
+            expert_token_nums_type=1,  # 0 represents prefix sum, 1 represents individual counts
         )
         expand_x, dynamic_scales, assist_info_for_combine, expert_token_nums, ep_send_counts, tp_send_counts, expand_scales = outputs
         output_dtype = x.dtype
@@ -188,8 +188,8 @@ class SmallOps(DecodeMoeOps):
             x=[expand_x],
             weight=[self.gmm1_weight],
             split_item=3,
-            group_list_type=1,  # 默认为0，代表前缀和形式
-            group_type=0,  # 0代表m轴分组
+            group_list_type=1,  # Default is 0, represents prefix sum format
+            group_type=0,  # 0 represents m-axis grouping
             group_list=expert_token_nums,
             output_dtype=torch.int32)[0]
         y1, y1_scale = torch_npu.npu_dequant_swiglu_quant(
@@ -365,7 +365,7 @@ def run_once(local_rank_id,
              with_mc2_mask=False):
     log_file = redirect_output(f"local_rank_{local_rank_id}.log"
                                ) if output_to_file(local_rank_id) else None
-    global_rank_id = local_rank_id  # 单机
+    global_rank_id = local_rank_id  # Single machine
     device_id = local_rank_id % 16
     torch_npu.npu.set_device(device_id)
 

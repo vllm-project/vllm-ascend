@@ -63,13 +63,13 @@ def main():
 
     if all_missing:
         print(
-            "[ERROR] Missing '__init__.py' files in the following Python package directories:"
+            "❌ Missing '__init__.py' files in the following Python package directories:"
         )
         for pkg in sorted(all_missing):
             print(f" - {pkg}")
         sys.exit(1)
     else:
-        print("[OK] All Python packages have __init__.py files.")
+        print("✅ All Python packages have __init__.py files.")
 
 
 if __name__ == "__main__":
