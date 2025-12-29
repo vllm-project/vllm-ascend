@@ -247,6 +247,15 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
+        # sliding window attn mask
+        self.swa_mask = None
+        is_swa = hasattr(self.vllm_config.model_config.hf_text_config,
+                         "sliding_window")
+        if self.model_config is not None and is_swa:
+            self.swa_mask = self.attn_mask_builder.get_swa_mask(
+                self.dtype,
+                self.vllm_config.model_config.hf_text_config.sliding_window)
+
         # kv role
         self.is_kv_producer = False
         self.is_kv_consumer = False
@@ -1064,6 +1073,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions=self.positions.gpu,
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
+                swa_mask=self.swa_mask,
                 attn_state=self.attn_state,
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
@@ -1876,6 +1886,7 @@ class NPUModelRunner(GPUModelRunner):
                     positions=self.positions.gpu,
                     attn_mask=self.attn_mask,
                     spec_attn_mask=self.spec_attn_mask,
+                    swa_mask=self.swa_mask,
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
