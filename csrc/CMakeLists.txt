@@ -81,7 +81,10 @@ if (BUILD_OPEN_PROJECT)
     target_include_directories(opapi PRIVATE
             $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
             $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
+            # For CANN 8.3
             $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn_kernels>
+            # For CANN 8.5 and later
+            $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/pkg_inc>
     )
     target_compile_options(opapi PRIVATE
             -Werror=format
