@@ -3,25 +3,27 @@ from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.linear import (LinearBase, ReplicatedLinear,
+from vllm.model_executor.layers.linear import (ReplicatedLinear,
                                                UnquantizedLinearMethod)
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_cos_and_sin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
     reach_layer_for_shared_weight_series,
@@ -29,10 +31,9 @@ from vllm_ascend.ops.shared_weight_layer import (
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               _round_up, dispose_layer, enable_sp,
-                               is_enable_nz, replace_layer)
-from vllm_ascend.worker.npu_input_batch import InputBatch
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
+                               enable_sp, maybe_trans_nz, replace_layer)
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -44,7 +45,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND_SFA"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "ASCEND_SFA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_builder_cls():
@@ -108,7 +112,7 @@ class AscendSFAMetadata:
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-class AscendSFAMetadataBuilder:
+class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -118,14 +122,17 @@ class AscendSFAMetadataBuilder:
     """
 
     # _attn_mask_builder = None
-    def __init__(self,
-                 kv_cache_spec,
-                 layer_names,
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 metadata_cls: Optional[AscendSFAMetadata] = None):
-        self.metadata_cls: Optional[AscendSFAMetadata] = metadata_cls \
-            if metadata_cls is not None else AscendSFAMetadata  # type: ignore
+    def __init__(
+        self,
+        kv_cache_spec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        self.metadata_cls = (metadata_cls if metadata_cls is not None else
+                             AscendSFAMetadata)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
@@ -143,13 +150,16 @@ class AscendSFAMetadataBuilder:
                 got {self.decode_threshold}"
 
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
-
         self.enable_sfa_cp = enable_sp() and \
             hasattr(self.model_config.hf_config, "index_topk")
 
-    def reorder_batch(self, input_batch: "InputBatch",
+        assert not (
+            self.enable_sfa_cp
+            and self.vllm_config.compilation_config.cudagraph_mode
+            == CUDAGraphMode.FULL_DECODE_ONLY
+        ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
+
+    def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
         return False
@@ -158,7 +168,7 @@ class AscendSFAMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        fast_build: bool = False,
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -173,33 +183,12 @@ class AscendSFAMetadataBuilder:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         has_prefill = any(query_lens_cpu > self.decode_threshold)
 
-        if self.cos_cache is None:
-            self.cos_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.sin_cached
-        if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
-            self.cos_cache = self.cos_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-            self.sin_cache = self.sin_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-
-        cos, sin = get_cos_and_sin()
-
-        assert self.cos_cache is not None and self.sin_cache is not None
-        new_cos = self.cos_cache[input_positions][:, None, None]
-        new_sin = self.sin_cache[input_positions][:, None, None]
-
-        if (cos is not None and sin is not None
-                and num_input_tokens <= cos.shape[0]
-                and num_input_tokens <= sin.shape[0]):
-            cos[:num_input_tokens] = new_cos
-            sin[:num_input_tokens] = new_sin
+        if has_prefill:
+            cos, sin = get_cos_and_sin_mla(input_positions)
         else:
-            cos, sin = new_cos, new_sin
+            cos, sin = get_cos_and_sin_mla(input_positions, True)
 
         sfa_cp_context = None
         if self.enable_sfa_cp:
@@ -294,7 +283,6 @@ class AscendSFAMetadataBuilder:
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
-        model: Optional[nn.Module] = None,
     ):
         if attn_state in {
                 AscendAttentionState.DecodeOnly,
@@ -303,7 +291,6 @@ class AscendSFAMetadataBuilder:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
-                model=model,
             )
         else:
             raise NotImplementedError(
@@ -404,40 +391,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.cp_size = 1
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-
-        def get_layer_weight(layer):
-            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
-            for attr in WEIGHT_NAMES:
-                try:
-                    return getattr(layer, attr)
-                except AttributeError:
-                    pass
-            raise AttributeError(
-                f"Layer '{layer}' has no recognized weight attribute:"
-                f" {WEIGHT_NAMES}.")
-
-        def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-                # NOTE: This should only be used offline, since it's O(N^3)
-                eye = torch.eye(layer.input_size_per_partition,
-                                dtype=act_dtype,
-                                device=get_layer_weight(layer).device)
-                dequant_weights = layer.quant_method.apply(layer,
-                                                           eye,
-                                                           bias=None)
-                del eye
-                # standardize to (output, input)
-                return dequant_weights.T
-            # Weight will be reshaped next. To be on the safe side, the format
-            # of the weight should be reverted to FRACTAL_AND.
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_ND)
-            return layer.weight
-
-        # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        # NOTE: We currently do not support quant kv_b_proj.
+        assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
+        # NOTE: Weight will be reshaped next, we need to revert and transpose it.
+        kv_b_proj_weight = torch_npu.npu_format_cast(
+            self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank, self.local_num_heads *
             (self.qk_nope_head_dim + self.v_head_dim)), (
@@ -460,15 +418,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
 
-        # Function `get_and_maybe_dequant_weights` will cast the weights to
-        # FRACTAL_AND. So we need to cast to FRACTAL_NZ again.
-        if is_enable_nz():
-            self.kv_b_proj.weight.data = torch_npu.npu_format_cast(
-                self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
+        # self.W_UV = maybe_trans_nz(self.W_UV)
 
-        # Waiting for BMM NZ support
-        # self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
-        # self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
 
@@ -502,13 +454,18 @@ class AscendSFAImpl(MLAAttentionImpl):
                     logger.warning_once(msg)
             else:
                 self._process_weights_for_fused_mlapo(act_dtype)
+        if not self.enable_mlapo:
+            # if mlapo, W_UK_T can't trans nz
+            self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-    def _v_up_proj(self, x):
-        forward_context = get_forward_context()
+    def _v_up_proj(self, x, has_prefill: bool):
+        # TODO(zzzzwwjj): We should not judge by whether `has_prefill` or not.
+        # The true criteria for judgment is tensorA's shape[0] <= 1024 (num_tokens <= 1024).
+        # This is a bug in the previous code.
         if x.dtype in [torch.float16, torch.bfloat16] \
                 and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
                 and not self.enable_sfa_cp \
-                and not forward_context.with_prefill:
+                and not has_prefill:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
             res = torch.empty((b, self.num_heads, self.v_head_dim),
@@ -793,7 +750,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
 
-        if self.enable_mlapo and not forward_context.with_prefill:
+        # TODO(zzzzwwjj): In sfa, prefill and decode have the same calculation formula,
+        # so `has_prefill` here is not necessary.
+        if self.enable_mlapo and not has_prefill:
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
@@ -868,7 +827,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             layout_kv="PA_BSND",
             sparse_mode=3,
         )
-        attn_output = self._v_up_proj(attn_output)
+        attn_output = self._v_up_proj(attn_output, has_prefill)
         maybe_npu_prefetch(inputs=self.o_proj.weight,
                            dependency=attn_output,
                            max_size=MAX_O_PROJ_PREFETCH_SIZE,

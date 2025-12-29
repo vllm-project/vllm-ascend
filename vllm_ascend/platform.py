@@ -18,6 +18,7 @@
 import gc
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
+from uuid import uuid4
 
 import torch
 from vllm.logger import logger
@@ -30,12 +31,11 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_vl_model,
-                               update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes,
-                               update_default_aclgraph_sizes)
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+    enable_sp, get_ascend_device_type, is_vl_model, update_aclgraph_sizes,
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes,
+    check_kv_extra_config)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -152,6 +152,12 @@ class NPUPlatform(Platform):
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+            if not getattr(vllm_config.kv_transfer_config,
+                           "_engine_id_patched", False):
+                vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
+                vllm_config.kv_transfer_config._engine_id_patched = True
         from vllm.config import CompilationMode  # noqa: E402
 
         compilation_config = vllm_config.compilation_config
@@ -166,10 +172,6 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
-        kv_cache_dtype = vllm_config.additional_config.get(
-            "kv_cache_dtype", None)
-        if kv_cache_dtype is not None:
-            vllm_config.cache_config.cache_dtype = kv_cache_dtype
         elif model_config and hasattr(model_config.hf_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
@@ -236,7 +238,11 @@ class NPUPlatform(Platform):
                 "using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, \
                 "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
-            compilation_config.set_splitting_ops_for_v1()
+            compilation_config.set_splitting_ops_for_v1(
+                all2all_backend=vllm_config.parallel_config.all2all_backend,
+                data_parallel_size=vllm_config.parallel_config.
+                data_parallel_size,
+            )
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
@@ -285,11 +291,11 @@ class NPUPlatform(Platform):
             parallel_config.all2all_backend = "flashinfer_all2allv"
             if ascend_config.xlite_graph_config.enabled:
                 logger.info(
-                    "Euler Xlite enabled. See: https://gitee.com/openeuler/GVirt/tree/master/xlite"
+                    "openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite"
                 )
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
             else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         refresh_block_size(vllm_config)
 
@@ -355,26 +361,16 @@ class NPUPlatform(Platform):
         CUSTOM_OP_REGISTERED = True
 
     @classmethod
-    def get_attn_backend_cls(
-        cls,
-        selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_mla,
-        has_sink=False,
-        use_sparse=False,
-        attn_type: str | None = None,
-    ):
-        # choose attention backend based on use_mla
+    def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
         }
-        return backend_map[(use_mla, use_sparse)]
+
+        return backend_map[(attn_selector_config.use_mla,
+                            attn_selector_config.use_sparse)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

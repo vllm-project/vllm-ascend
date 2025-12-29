@@ -199,7 +199,6 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
                                     (self.output_size, self.input_size // 8),
                                     dtype=torch.int32)
         mock_pack_weights.return_value = mock_packed
-        self.method.transpose_weight = False
         self.method.process_weights_after_loading(layer)
         mock_pack_weights.assert_called_once()
         self.assertFalse(hasattr(layer, 'weight'))
@@ -211,35 +210,6 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertTrue(layer.aclnn_clip_ratio - 0.9 < 0.01)
         self.assertEqual(layer.left_trans.shape, (24, 24))
         self.assertTrue(layer.left_trans.is_contiguous())
-
-    @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.pack_int4_weights')
-    def test_process_weights_after_loading_with_transpose(
-            self, mock_pack_weights):
-        """Tests weight processing after loading, with transpose."""
-        layer = nn.Module()
-        layer.weight = torch.randint(-8,
-                                     7, (self.output_size, self.input_size),
-                                     dtype=torch.int8)
-        layer.weight_scale = torch.randn(self.output_size,
-                                         1,
-                                         dtype=torch.bfloat16)
-        layer.weight_offset = torch.randn(self.output_size,
-                                          1,
-                                          dtype=torch.bfloat16)
-        layer.left_trans = torch.randn(24, 24)
-        layer.right_trans = torch.randn(32, 32)
-        layer.clip_ratio = torch.tensor([0.9])
-        mock_packed = torch.randint(0,
-                                    100,
-                                    (self.output_size, self.input_size // 8),
-                                    dtype=torch.int32)
-        mock_pack_weights.return_value = mock_packed
-        self.method.transpose_weight = True
-        self.method.process_weights_after_loading(layer)
-        self.assertTrue(hasattr(layer, 'weight_packed'))
-        self.assertEqual(layer.weight_packed.shape,
-                         (self.input_size // 8, self.output_size))
-        self.assertTrue(layer.weight_packed.is_contiguous())
 
 
 if __name__ == '__main__':

@@ -36,6 +36,7 @@ def test_qwen3_next_distributed_mp_tp4():
     max_tokens = 5
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp") as vllm_model:
@@ -61,10 +62,15 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
-# TODO: Fix the accuary of batch chunked prefill
 def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
-    example_prompts = ["Hello, my name is"]
-    max_tokens = 20
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    max_tokens = 15
 
     with VllmRunner(
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -120,6 +126,7 @@ def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
             gpu_memory_utilization=0.4,
             max_num_seqs=1,
             enable_expert_parallel=True,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

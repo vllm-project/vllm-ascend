@@ -41,6 +41,7 @@ def mtp_correctness(sampling_config: SamplingParams,
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
+                    cudagraph_capture_sizes=[12],
                     enforce_eager=enforce_eager) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
@@ -102,7 +103,6 @@ def test_mtp2_correctness_eager(
     mtp_correctness(sampling_config, model_name, 2, enforce_eager=True)
 
 
-@pytest.mark.skip("TODO(cmq): Revert me when mtp aclgraph is fixed")
 def test_mtp1_correctness_piecewise_graph(
     sampling_config: SamplingParams,
     model_name: str,
@@ -110,7 +110,6 @@ def test_mtp1_correctness_piecewise_graph(
     mtp_correctness(sampling_config, model_name, 1)
 
 
-@pytest.mark.skip("TODO(cmq): Revert me when mtp aclgraph is fixed")
 def test_mtp2_correctness_piecewise_graph(
     sampling_config: SamplingParams,
     model_name: str,

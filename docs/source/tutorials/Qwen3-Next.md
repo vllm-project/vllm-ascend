@@ -1,12 +1,28 @@
 # Qwen3-Next
 
-```{note}
-The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
-```
+## Introduction
 
-## Run vllm-ascend on Multi-NPU with Qwen3 Next
+The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high sparsity. Compared to the MoE architecture of Qwen3, it has introduced key improvements in aspects such as the hybrid attention mechanism and multi-token prediction mechanism, enhancing the training and inference efficiency of the model under long contexts and large total parameter scales.
 
-Run docker container:
+This document will present the core verification steps of the model, including supported features, environment preparation, as well as accuracy and performance evaluation. Qwen3 Next is currently using Triton Ascend, which is in the experimental phase. In subsequent versions, its performance related to stability and accuracy may change, and performance will be continuously optimized.
+
+The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1`.
+
+## Supported Features
+
+Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## Weight Preparation
+
+ Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-Next-80B-A3B-Instruct/tree/main)
+
+## Deployment
+
+If the machine environment is an Atlas 800I A3(64G*16), the deployment approach stays identical.
+
+### Run docker container
 
 ```{code-block} bash
    :substitutions:
@@ -32,12 +48,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Set up environment variables:
-
-```bash
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-```
+The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
 ### Install Triton Ascend
 
@@ -46,7 +57,7 @@ export VLLM_USE_MODELSCOPE=True
 
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
 
-Install the Ascend BiSheng toolkit:
+Source the Ascend BiSheng toolkit, execute the command:
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
@@ -68,7 +79,7 @@ Coming soon ...
 ::::
 :::::
 
-### Inference on Multi-NPU
+### Inference
 
 Please make sure you have already executed the command:
 
@@ -81,10 +92,8 @@ source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
 
 Run the following script to start the vLLM server on multi-NPU:
 
-For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 4, and for 32 GB of memory, tensor-parallel-size should be at least 8.
-
 ```bash
-vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 4096 --gpu-memory-utilization 0.7 --enforce-eager
+vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 32768 --gpu-memory-utilization 0.8 --max-num-batched-tokens 4096 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 Once your server is started, you can query the model with input prompts.
@@ -152,3 +161,53 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 
 ::::
 :::::
+
+## Accuracy Evaluation
+
+### Using AISBench
+
+1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result, here is the result of `Qwen3-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+|----- | ----- | ----- | ----- | -----|
+| gsm8k | - | accuracy | gen | 95.53 |
+
+## Performance
+
+### Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### Using vLLM Benchmark
+
+Run performance evaluation of `Qwen3-Next` as an example.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+There are three `vllm bench` subcommand:
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+Take the `serve` as an example. Run the code as follows.
+
+```shell
+export VLLM_USE_MODELSCOPE=true
+vllm bench serve --model Qwen/Qwen3-Next-80B-A3B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the performance evaluation result.
+
+The performance result is:  
+
+**Hardware**: A3-752T, 2 node
+
+**Deployment**: TP4 + Full Decode Only
+
+**Input/Output**: 2k/2k
+
+**Concurrency**: 32
+
+**Performance**: 580tps, TPOT 54ms

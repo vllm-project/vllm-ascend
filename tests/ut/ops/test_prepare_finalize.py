@@ -13,6 +13,10 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
     def setUp(self):
         # Mock FusedMoEConfig
+        fake_stream = MagicMock()
+        patcher = patch("torch.npu.Stream", return_value=fake_stream)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.tp_group = MagicMock()
         self.moe_config.tp_group.device_group = MagicMock()
@@ -165,15 +169,12 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(final_result.shape[0], 2)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
-    @patch(
-        "vllm_ascend.ops.fused_moe.prepare_finalize.tensor_model_parallel_all_reduce"
-    )
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp",
            return_value=False)
     def test_allgather_prepare_finalize(self, mock_enable_sp,
                                         mock_get_forward_context,
-                                        mock_tp_all_reduce, mock_get_dp_group):
+                                        mock_get_dp_group):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.max_tokens_across_dp = 6
@@ -218,7 +219,5 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         self.assertEqual(result.shape[0], 3)
 
-        # Test with TP all-reduce
-        mock_tp_all_reduce.return_value = result
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
