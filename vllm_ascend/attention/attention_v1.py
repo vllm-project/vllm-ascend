@@ -172,6 +172,7 @@ class AscendMetadata:
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
 
+
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
@@ -652,7 +653,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots[:attn_metadata.num_actual_tokens])
-            if self.vllm_config.kv_transfer_config.is_kv_producer:
+            if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return key, value
 
