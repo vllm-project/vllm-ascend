@@ -38,8 +38,9 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendMetadataForPrefill, enable_cp,
                                          split_decodes_and_prefills,
                                          using_paged_attention)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params, get_graph_params,
+    update_draft_graph_params_workspaces, update_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
 
@@ -262,7 +263,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+
+        if attn_state in (AscendAttentionState.DecodeOnly,
+                          AscendAttentionState.ChunkedPrefill):
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -319,7 +322,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        graph_params = get_graph_params()
+        forward_context = get_forward_context()
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
@@ -343,7 +350,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=3,
                 scale=self.scale,
             )
-            update_graph_params_workspaces(num_tokens, workspace)
+            if forward_context.is_draft_model:
+                update_draft_graph_params_workspaces(num_tokens, workspace)
+            else:
+                update_graph_params_workspaces(num_tokens, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
