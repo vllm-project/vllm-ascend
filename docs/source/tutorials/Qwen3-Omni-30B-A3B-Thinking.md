@@ -18,17 +18,62 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
-1. Start the docker image on your node, refer to [using docker](https://docs.vllm.ai/projects/ascend/en/latest/installation.html#set-up-using-docker).
-In addition, if you don’t want to use the docker image as above, you can also build all from source:
-    - Install vllm-ascend from source, refer to [installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html).
-2. Please install system dependencies
+
+:::::{tab-set}
+::::{tab-item} Use docker image
+
+You can using our official docker image to run Qwen3-Omni-30B-A3B-Thinking directly
+
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+
+```{code-block} bash
+  :substitutions:
+# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
+# Update the vllm-ascend image according to your environment.
+# Note you should download the weight to /root/.cache in advance.
+# Update the vllm-ascend image
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export NAME=vllm-ascend
+
+# Run the container using the defined variables
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+docker run --rm \
+--name $NAME \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
+```
+
+::::
+::::{tab-item} Build from source
+
+You can build all from source.
+
+- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
+
+::::
+:::::
+
+Please install system dependencies
 
 ```bash
-    pip install qwen_omni_utils modelscope
-    # Used for audio processing.
-    apt-get update && apt-get install ffmpeg -y
-    # Check the installation.
-    ffmpeg -version
+pip install qwen_omni_utils modelscope
+# Used for audio processing.
+apt-get update && apt-get install ffmpeg -y
+# Check the installation.
+ffmpeg -version
 ```
 
 ## Deployment
@@ -179,7 +224,7 @@ Here are accuracy evaluation methods.
 
 ### Using EvalScope
 
-As an example, take the `mmmu` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
+As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 1. Refer to Using evalscope(https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
@@ -196,16 +241,16 @@ evalscope eval \
     --limit 100
 ```
 
-3. After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.11.0rc1 for reference only.
+3. After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only.
 
 ```bash
  +-----------------------------+------------+----------+----------+-------+---------+---------+
 | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
 +=============================+============+==========+==========+=======+=========+=========+
-| Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.99 | default |
-+-----------------------------+-----------+----------+----------+-------+---------+---------+
-| Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |     0.44 | default |
+| Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
 +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+| Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
++-----------------------------+-----------+----------+----------+-------+---------+---------+
 | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
 +-----------------------------+------------+----------+----------+-------+---------+---------+
 ```
@@ -235,32 +280,32 @@ pip install -r vllm-ascend/benchmarks/requirements-bench.txt
 vllm bench serve --model $MODEL --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.11.0rc1 for reference only.
+After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only.
 
 ```bash
 ============ Serving Benchmark Result ============
 Successful requests:                     200
 Failed requests:                         0
 Request rate configured (RPS):           1.00
-Benchmark duration (s):                  209.58
+Benchmark duration (s):                  211.90
 Total input tokens:                      40000
 Total generated tokens:                  25600
-Request throughput (req/s):              0.95
-Output token throughput (tok/s):         122.15
-Peak output token throughput (tok/s):    209.00
-Peak concurrent requests:                20.00
-Total Token throughput (tok/s):          313.01
+Request throughput (req/s):              0.94
+Output token throughput (tok/s):         120.81
+Peak output token throughput (tok/s):    216.00
+Peak concurrent requests:                24.00
+Total token throughput (tok/s):          309.58
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          154.35
-Median TTFT (ms):                        154.75
-P99 TTFT (ms):                           220.14
+Mean TTFT (ms):                          215.50
+Median TTFT (ms):                        211.51
+P99 TTFT (ms):                           317.18
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          81.85
-Median TPOT (ms):                        79.44
-P99 TPOT (ms):                           91.31
+Mean TPOT (ms):                          98.96
+Median TPOT (ms):                        99.19
+P99 TPOT (ms):                           101.52
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           81.85
-Median ITL (ms):                         80.09
-P99 ITL (ms):                            128.03
+Mean ITL (ms):                           99.02
+Median ITL (ms):                         96.10
+P99 ITL (ms):                            176.02
 ==================================================
 ```
