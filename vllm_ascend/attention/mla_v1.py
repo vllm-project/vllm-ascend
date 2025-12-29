@@ -1158,6 +1158,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
                              self.qk_rope_head_dim)
 
+        attn_output_shape: tuple | None = None
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.ChunkedPrefill,
@@ -1172,7 +1173,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             # Output shape: [num_heads, num_tokens, dim]
-            attn_output_shape: tuple = (self.num_heads, num_tokens,
+            attn_output_shape = (self.num_heads, num_tokens,
                                         self.kv_lora_rank)
             sparse_mode = 3
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
@@ -1193,7 +1194,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                      -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             # Output shape: [num_heads, num_tokens, seq_len, dim]
-            attn_output_shape: tuple = (self.num_heads, num_tokens, 1,
+            attn_output_shape = (self.num_heads, num_tokens, 1,
                                         self.kv_lora_rank)
             sparse_mode = 0
             spec_attn_mask = None
