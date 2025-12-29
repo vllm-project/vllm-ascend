@@ -71,7 +71,8 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             remote_port=7777,
             remote_te_rpc_port=6000,
             remote_kv_caches_base_addr=[4000, 8000, 14000, 18000],
-            metaserver="http://dummy")
+            metaserver="http://dummy",
+            chunk_finish=False)
 
     @patch(
         "vllm_ascend.distributed.mooncake_layerwise_connector.torch.Tensor.data_ptr",
@@ -176,6 +177,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         req_meta = self.req_meta_base
         req_meta.local_block_ids = [5, 6]
         req_meta.remote_block_ids = [10, 11]
+        req_meta = True
 
         req_meta.remote_kv_caches_base_addr = [
             7000, 8000, 9000, 10000, 11000, 12000
@@ -468,6 +470,7 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         request = MockRequest("req1")
 
         self.scheduler._reqs_need_recv["req1"] = (request, [], [4, 5, 6])
+        self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
         request.kv_transfer_params = {
             "remote_block_ids": [1, 2, 3],
             "remote_engine_id": "remote",
@@ -505,7 +508,8 @@ class _MockSchedulerOutput:
                  cached_new_block_ids=None,
                  cached_num_computed=None,
                  new_reqs=None,
-                 num_sched=None):
+                 num_sched=None,
+                 scheduled_spec_decode_tokens=None):
         self.scheduled_cached_reqs = SimpleNamespace(
             req_ids=cached_req_ids or [],
             new_block_ids=cached_new_block_ids or [],
