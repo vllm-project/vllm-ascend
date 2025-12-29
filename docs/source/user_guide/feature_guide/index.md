@@ -13,6 +13,7 @@ structured_output
 lora
 eplb_swift_balancer
 netloader
+Multi_Token_Prediction
 dynamic_batch
 kv_pool
 external_dp

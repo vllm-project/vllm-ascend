@@ -179,7 +179,7 @@ class TestEagleProposerLoadModel(TestBase):
         mock_pp_group.return_value.world_size = 2
         mock_target_layer1 = MagicMock()
         mock_draft_layer2 = MagicMock()
-        
+
         mock_get_layers.side_effect = [{
             "layer1": mock_target_layer1
         }, {}, {}, {
@@ -215,7 +215,7 @@ class TestEagleProposerLoadModel(TestBase):
 
         mock_target_layer1 = MagicMock()
         mock_draft_layer2 = MagicMock()
-        
+
         mock_get_layers.side_effect = [{
             "layer1": mock_target_layer1
         }, {}, {}, {

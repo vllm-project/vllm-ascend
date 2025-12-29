@@ -132,7 +132,7 @@ class EagleProposer(VllmEagleProposer):
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            if self.name == SpecDcodeType.MTP:
+            if self.method == "mtp":
                 if self.vllm_config.model_config.is_deepseek_mla and \
                     torch.equal(self.model.model.embed_tokens.weight,
                                 model.model.embed_tokens.weight):
@@ -241,7 +241,7 @@ class EagleProposer(VllmEagleProposer):
             attn_metadata_eagle = builder.build_for_graph_capture(
                 common_attn_metadata, AscendAttentionState.ChunkedPrefill)
             attn_metadata = {}
-            for layer_name in [self.attn_layer_name]:
+            for layer_name in self.attn_layer_name:
                 attn_metadata[layer_name] = attn_metadata_eagle
         for i in range(self.num_speculative_tokens):
             if i > 0 and in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -337,9 +337,11 @@ class EagleProposer(VllmEagleProposer):
                                       self.runner.get_model())
         # update global cos, sin
         update_cos_sin(self.positions[:num_input_tokens])
-
+        per_layer_attn_metadata = {}
+        for layer_name in self.attn_layer_name:
+            per_layer_attn_metadata[layer_name] = attn_metadata
         with set_ascend_forward_context(
-            {self.attn_layer_name: attn_metadata},
+                per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_actual_tokens=num_tokens,
@@ -465,7 +467,7 @@ class EagleProposer(VllmEagleProposer):
 
             # Run the model.
             with set_ascend_forward_context(
-                {self.attn_layer_name: attn_metadata},
+                    per_layer_attn_metadata,
                     self.vllm_config,
                     num_tokens=input_batch_size,
                     num_actual_tokens=batch_size,
