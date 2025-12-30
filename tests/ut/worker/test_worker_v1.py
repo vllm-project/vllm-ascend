@@ -670,7 +670,7 @@ class TestNPUWorker(TestBase):
             (5000, 10000),
         ]
 
-        # Create worker mock
+        # 创建 worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker.init_npu_memory = 8500
