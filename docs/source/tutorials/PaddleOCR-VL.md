@@ -2,9 +2,9 @@
 
 ## Introduction
 
-PaddleOCR-VL 是一个专为文档解析设计的 SOTA 和资源高效模型。其核心组件是 PaddleOCR-VL-0.9B，一个紧凑但强大的视觉语言模型（VLM），集成了 NaViT 风格的动态分辨率视觉编码器与 ERNIE-4.5-0.3B 语言模型，实现了精准的元素识别。
+PaddleOCR-VL is a SOTA and resource-efficient model tailored for document parsing. Its core component is PaddleOCR-VL-0.9B, a compact yet powerful vision-language model (VLM) that integrates a NaViT-style dynamic resolution visual encoder with the ERNIE-4.5-0.3B language model to enable accurate element recognition.
 
-本文档详细介绍了模型的完整部署和验证工作流程，包括支持的功能、环境准备、单节点部署、功能验证、准确性和性能评估。它旨在帮助用户快速完成模型部署和验证。
+This document provides a detailed workflow for the complete deployment and verification of the model, including supported features, environment preparation, single-node deployment, and functional verification. It is designed to help users quickly complete model deployment and verification.
 
 ## Supported Features
 
@@ -26,8 +26,8 @@ You can using our official docker image to run `PaddleOCR-VL` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
-```{code-block}
-:substitutions:
+```{code-block} bash
+   :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc1
 docker run --rm \
     --name vllm-ascend \
@@ -53,12 +53,12 @@ docker run --rm \
 
 #### Single NPU (PaddleOCR-VL)
 
-:::{note}
 PaddleOCR-VL supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
 
 1. Prepare model weights: Ensure the downloaded model weights are stored in the `PaddleOCR-VL` directory.
-
-```bash
+2. Create and execute the deployment script (save as `deploy.sh`):
+```shell
+#!/bin/sh
 export VLLM_USE_MODELSCOPE=true
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 
@@ -71,7 +71,7 @@ vllm serve ${MODEL_PATH} \
 		  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
-#### Multiple NPU (Qwen2.5-Omni-7B)
+#### Multiple NPU (PaddleOCR-VL)
 
 Single-node deployment is recommended.
 
@@ -89,7 +89,7 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-Once your server is started, you can使用 OpenAI API 客户端查询
+Once your server is started, you can use the OpenAI API client to make queries.
 
 ```bash
 from openai import OpenAI
@@ -150,20 +150,20 @@ CHANGE DUE
 3,000
 ```
 
-## 结合 vLLM 与 PP-DocLayoutV2 进行离线推理
+## Offline Inference with vLLM and PP-DocLayoutV2
 
-在上述示例中，我们演示了利用vLLM推断PaddleOCR-VL的方法。通常，我们还需要整合PP-DocLayoutV2模型，充分释放PaddleOCR-VL模型的能力，使其更符合PaddlePaddle官方提供的示例。
+In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-0.9B model. Typically, we also need to integrate the PP-DocLayoutV2 model to fully unleash the capabilities of the PaddleOCR-VL model, making it more consistent with the examples provided by the official PaddlePaddle documentation.
 
 :::{note}
-Use separate virtual environments for and to prevent dependency conflicts.
+Use separate virtual environments for VLLM and PPdoclayoutV2 to prevent dependency conflicts.
 
-### 拉取paddle配套cann镜像
+### Pull the PaddlePaddle-compatible CANN image
 
 ```
 docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
 ```
 
-启动容器，参考如下命令
+Start the container using the following command:
 
 ```
 docker run -it --name paddle-npu-dev -v $(pwd):/work \
@@ -186,57 +186,37 @@ pip install safetensors
 ```
 
 :::{note}
-可能缺少opencv组件：
+The OpenCV component may be missing：
 
 ```
 apt-get update
 apt-get install -y libgl1 libglib2.0-0
 ```
 
-CANN-8.0.0 对 numpy 和 opencv 部分版本不支持，建议安装指定版本
+CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
 
 ```
 python -m pip install numpy==1.26.4
 python -m pip install opencv-python==3.4.18.65
 ```
 
-## Accuracy Evaluation
+### Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
-Qwen2.5-Omni on vllm-ascend has been test on AISBench.
-
-### Using AISBench
-
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
-2. After execution, you can get the result, here is the result of `Qwen2.5-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only.
-
-| dataset | platform | metric | mode | vllm-api-stream-chat |
-|----- | ----- | ----- | ----- | -----|
-| textVQA | A2 | accuracy | gen_base64 | 83.47 |
-| textVQA | A3 | accuracy | gen_base64 | 84.04 |
-
-## Performance Evaluation
-
-### Using AISBench
-
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
-
-### Using vLLM Benchmark
-
-Run performance evaluation of `Qwen2.5-Omni-7B` as an example.
-
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
-
-There are three `vllm bench` subcommand:
-
-- `latency`: Benchmark the latency of a single batch of requests.
-- `serve`: Benchmark the online serving throughput.
-- `throughput`: Benchmark offline inference throughput.
-
-Take the `serve` as an example. Run the code as follows.
-
-```shell
-vllm bench serve --model Qwen/Qwen2.5-Omni-7B --dataset-name random --random-input 1024 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
+from paddleocr import PaddleOCRVL
 
-After about several minutes, you can get the performance evaluation result.
+doclayout_model_path = "/path/to/your/PP-DocLayoutV2/"
+
+pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", 
+                       vl_rec_server_url="http://localhost:8000/v1", 
+                       layout_detection_model_name="PP-DocLayoutV2",  
+                       layout_detection_model_dir=doclayout_model_path,
+                       device="npu")
+
+output = pipeline.predict("https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png")
+
+for i, res in enumerate(output):
+    res.save_to_json(save_path=f"output_{i}.json")
+    res.save_to_markdown(save_path=f"output_{i}.md")
+```
 
