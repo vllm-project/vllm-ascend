@@ -1,4 +1,4 @@
-from typing import ClassVar, Optional, Tuple, TypeVar
+from typing import Optional, Tuple, TypeVar
 
 import numpy as np
 import torch
@@ -11,7 +11,7 @@ from vllm.distributed import (get_dcp_group,
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
@@ -36,9 +36,6 @@ M = TypeVar("M", bound=AscendMLAMetadata)
 
 
 class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-    AttentionCGSupport.UNIFORM_BATCH
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -72,6 +69,16 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                                               self.decode_threshold,
                                               dtype=torch.uint8,
                                               device=device)
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendMlaCPMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.UNIFORM_BATCH
 
     def set_num_actual_tokens(
         self,
