@@ -12,12 +12,11 @@ env_common:
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0, L2:0"
-  DYNAMIC_EPLB: true
 
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
-  decoder_host_index: [2]
+  decoder_host_index: [2, 3]
 
 deployment:
   -
@@ -56,7 +55,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
 
   -
     server_cmd: >
@@ -94,7 +93,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -133,7 +132,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"multistream_overlap_shared_expert":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -171,7 +170,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"multistream_overlap_shared_expert":true}'
 benchmarks:
   perf:
     case_type: performance
