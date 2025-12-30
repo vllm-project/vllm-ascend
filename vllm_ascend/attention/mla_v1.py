@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel_attention.common_cp import (
+from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata, CPChunkedContextMetadata)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          enable_cp,
@@ -63,7 +63,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         if enable_cp():
-            from vllm_ascend.attention.context_parallel_attention.mla_cp import \
+            from vllm_ascend.attention.context_parallel.mla_cp import \
                 AscendMlaCPMetadataBuilder
             return AscendMlaCPMetadataBuilder
         return AscendMLAMetadataBuilder
@@ -76,7 +76,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["MLAAttentionImpl"]:
         if enable_cp():
-            from vllm_ascend.attention.context_parallel_attention.mla_cp import \
+            from vllm_ascend.attention.context_parallel.mla_cp import \
                 AscendMlaCPImpl
             return AscendMlaCPImpl
         return AscendMLAImpl

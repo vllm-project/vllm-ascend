@@ -6,9 +6,9 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel_attention.common_cp import (
+from vllm_ascend.attention.context_parallel.common_cp import (
     CPChunkedContextMetadata, _npu_attention_update, _process_attn_out_lse)
-from vllm_ascend.attention.context_parallel_attention.mla_cp import \
+from vllm_ascend.attention.context_parallel.mla_cp import \
     AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import ChunkedContextMetadata
 
@@ -255,7 +255,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.dcp_size, 2)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.mla_cp.get_dcp_group'
+        'vllm_ascend.attention.context_parallel.mla_cp.get_dcp_group'
     )
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
@@ -342,7 +342,7 @@ class TestAscendMLAImpl(TestBase):
 
     @patch('torch_npu._npu_reshape_and_cache')
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.mla_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.mla_cp.get_pcp_group'
     )
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
@@ -496,7 +496,7 @@ class TestAscendMLAImpl(TestBase):
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("torch.distributed.all_to_all_single")
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.mla_cp.get_forward_context'
+        'vllm_ascend.attention.context_parallel.mla_cp.get_forward_context'
     )
     @patch("torch_npu.atb.npu_multi_head_latent_attention")
     @patch('torch_npu.npu_attention_update')

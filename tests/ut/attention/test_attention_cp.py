@@ -6,21 +6,21 @@ from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendMetadata
-from vllm_ascend.attention.context_parallel_attention.attention_cp import \
+from vllm_ascend.attention.context_parallel.attention_cp import \
     AscendAttentionCPImpl
-from vllm_ascend.attention.context_parallel_attention.common_cp import (
+from vllm_ascend.attention.context_parallel.common_cp import (
     AscendMetadataForPrefill, AscendPCPMetadata)
 
 
 class TestAscendAttentionCPImpl(TestBase):
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_dcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_dcp_group'
     )
     @patch('vllm.distributed.parallel_state._DCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
@@ -113,18 +113,18 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(output.shape[2], 128)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP')
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_dcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_dcp_group'
     )
     @patch('vllm.distributed.parallel_state._DCP')
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("torch.distributed.all_gather")
     @patch("torch.distributed.all_to_all_single")
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_forward_context'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_forward_context'
     )
     def test_forward_decode_pcp_dcp(self, mock_get_forward_context,
                                     mock_all_to_all_single, mock_all_gather,
@@ -198,11 +198,11 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(output.shape[2], 128)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP')
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_dcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_dcp_group'
     )
     @patch('vllm.distributed.parallel_state._DCP')
     def test_prefill_query_all_gather(self, mock_dcp, mock_get_dcp_group,
@@ -232,7 +232,7 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(output.shape[2], 128)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
     def test_compute_prefill_context(self, mock_npu_attention, mock_pcp_group):
@@ -319,7 +319,7 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(value.shape[2], head_size)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP')
     @patch('torch_npu._npu_reshape_and_cache')
@@ -530,7 +530,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
 
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
+        'vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
     )
     def test_attention_with_nomask_and_mask_chunk(
             self, mock_update_out_and_lse,
@@ -578,7 +578,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
 
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update'
+        'vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update'
     )
     def test_attention_with_nomask_and_mask_nochunk(
             self, mock_npu_attn_out_lse_update,
@@ -626,7 +626,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertEqual(attn_lse, None)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update'
+        'vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._npu_attn_out_lse_update'
     )
     def test_update_chunk_attn_out_lse_with_current_attn_out_lse(
             self, mock_npu_attn_out_lse_update):
@@ -708,7 +708,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertIsInstance(lse_final, torch.Tensor)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
@@ -752,7 +752,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         self.assertEqual(mock_get_pcp_group.call_count, 1)
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP')
     @patch('torch.cat')
@@ -798,7 +798,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
         mock_all_gather.assert_not_called()
 
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.get_pcp_group'
+        'vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group'
     )
     @patch('vllm.distributed.parallel_state._PCP')
     @patch('torch.cat')
@@ -807,7 +807,7 @@ class TestUpdateNpuAttnOutLse(TestBase):
     @patch('torch.distributed.all_to_all_single')
     @patch('torch.distributed.all_gather')
     @patch(
-        'vllm_ascend.attention.context_parallel_attention.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
+        'vllm_ascend.attention.context_parallel.attention_cp.AscendAttentionCPImpl._update_out_and_lse'
     )
     def test_update_chunk_attn_out_lse_pcp_greater_than_1_only(
             self, mock_update_out_and_lse, mock_all_gather,

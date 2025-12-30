@@ -22,7 +22,7 @@ from vllm_ascend.attention.mla_v1 import (
 #isort: on
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
-from vllm_ascend.attention.context_parallel_attention.common_cp import (
+from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata, CPChunkedContextMetadata, _process_attn_out_lse,
     _npu_attention_update)
 from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,

@@ -33,7 +33,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendMetadata)
-from vllm_ascend.attention.context_parallel_attention.common_cp import (
+from vllm_ascend.attention.context_parallel.common_cp import (
     AscendMetadataForDecode, AscendMetadataForPrefill, AscendPCPMetadata,
     _npu_attention_update, _process_attn_out_lse)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
