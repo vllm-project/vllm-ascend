@@ -30,8 +30,7 @@ class FaultTolerance:
         self.recovery_handler_manager = self._build_recovery_handler_manager()
 
         self._init_recovery_group()
-        if not self.is_enable_ep:
-            self._init_sync_group()
+        self._init_sync_group()
 
         self.aware_event = threading.Event()
         FaultAware(
@@ -84,7 +83,8 @@ class FaultTolerance:
                 state_backup = self._create_essential_state_backup()
                 try:
                     output = func(*args, **kwargs)
-                    if not self.is_enable_ep and output is not EMPTY_MODEL_RUNNER_OUTPUT:
+                    torch.npu.synchronize()
+                    if output is not EMPTY_MODEL_RUNNER_OUTPUT:
                         self._all_gather_for_sync_group()
                     return output
                 except Exception as e:
@@ -167,6 +167,7 @@ class FaultTolerance:
         try:
             torch_npu.npu.restart_device(torch.npu.current_device())
             torch.distributed.reinit_process_group(group=None, rebuild_link=False)
+            self.model_runner.execute_model_state = None
             self._restore_essential_state(ctx.back_up)
             reinit_status = RecoveryStatus.SUCCESS
         except Exception as inner_e:
