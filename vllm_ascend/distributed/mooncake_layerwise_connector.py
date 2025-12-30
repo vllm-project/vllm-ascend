@@ -430,6 +430,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1):
                  vllm_config: VllmConfig,
                  role: KVConnectorRole,
                  kv_cache_config: Optional[KVCacheConfig] = None):
+        super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeLayerwiseConnectorMetadata()
