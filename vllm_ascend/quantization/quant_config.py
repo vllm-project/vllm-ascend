@@ -536,11 +536,6 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         # TODO: implement this function
         pass
 
-    @property
-    def supports_eplb(self):
-        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
-        return supports_eplb
-
 
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.

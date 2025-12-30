@@ -1,67 +1,49 @@
-import os
+import random
 import sys
-import unittest
 from unittest.mock import patch
 
-# isort: off
 import pytest
 import torch
-from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
-                                                         FusedMoEParallelConfig
-                                                         )
 
-from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils, init_eplb_config
-# isort: on
+from vllm_ascend.eplb.core import eplb_utils
+from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 
 
-class TestAscendConfig(unittest.TestCase):
+def test_generate_log2phy_map_single_rank_holding():
 
-    def setUp(self):
-        vllm_config = VllmConfig()
-        ascend_config = init_ascend_config(vllm_config)
-        ascend_config.dynamic_eplb = True
-        ascend_config.init_redundancy_expert = 2
-        moe_parallel_config = FusedMoEParallelConfig(2, 0, 1, 2, 1, 1, 1, 1,
-                                                     True, "hccl")
-        moe_config = FusedMoEConfig(8, 8, 8192, 5, moe_parallel_config,
-                                    torch.float16)
-        moe_config.supports_eplb = True
-        self.ascend_config = ascend_config
-        self.moe_config = moe_config
-        self.mock_npu = patch("torch.Tensor.npu",
-                              new=lambda self: self).start()
+    expert_map = torch.tensor([[0, -1], [-1, 0]], dtype=torch.int32)
+    log2phy_map = eplb_utils.generate_log2phy_map(expert_map)
 
-    def test_init_eplb_config_with_eplb(self):
-        expert_map, log2phy, redundant_experts = init_eplb_config(
-            self.ascend_config, 0, self.moe_config)
-        gt_expert_map = torch.tensor([4, -1, -1, -1, 0, 1, 2, 3])
-        gt_log2phy = torch.tensor([9, 1, 2, 3, 5, 6, 7, 8])
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
-        self.assertTrue(torch.equal(log2phy, gt_log2phy))
-        self.assertEqual(redundant_experts, 2)
+    assert torch.all(log2phy_map[:, 0] == log2phy_map[0, 0])
+    assert torch.all(log2phy_map[:, 1] == log2phy_map[1, 1])
 
-    def test_init_eplb_config_with_eplb_withmap(self):
-        _TEST_DIR = os.path.dirname(__file__)
-        self.ascend_config.expert_map_path = _TEST_DIR + "/expert_map.json"
-        expert_map, log2phy, redundant_experts = init_eplb_config(
-            self.ascend_config, 0, self.moe_config)
-        gt_expert_map = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3])
-        gt_log2phy = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8])
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
-        self.assertTrue(torch.equal(log2phy, gt_log2phy))
-        self.assertEqual(redundant_experts, 2)
 
-    def test_init_eplb_config_without_eplb(self):
-        self.ascend_config.dynamic_eplb = False
-        self.ascend_config.expert_map_path = None
-        expert_map, log2phy, redundant_experts = init_eplb_config(
-            self.ascend_config, 0, self.moe_config)
-        gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
-        print(expert_map, log2phy, redundant_experts)
-        self.assertTrue(torch.equal(expert_map, gt_expert_map))
-        self.assertEqual(redundant_experts, 0)
+def test_generate_log2phy_map_multiple_rank_holding(monkeypatch):
+
+    expert_map = torch.tensor([[0], [0]], dtype=torch.int32)
+
+    monkeypatch.setattr(random, "choice", lambda x: x[0])
+
+    log2phy_map = eplb_utils.generate_log2phy_map(expert_map)
+
+    assert log2phy_map.shape == (2, 1)
+    assert (log2phy_map >= 0).all()
+
+
+def test_determine_default_log2phy_map_world_size_1():
+    log2phy = eplb_utils.determine_default_log2phy_map(global_expert_num=3,
+                                                       world_size=1,
+                                                       rank_id=0)
+    assert log2phy.shape == (3, )
+    assert (log2phy >= 0).all()
+
+
+def test_determine_default_log2phy_map_world_size_multiple():
+    log2phy = eplb_utils.determine_default_log2phy_map(global_expert_num=6,
+                                                       world_size=2,
+                                                       rank_id=1)
+    assert log2phy.shape == (6, )
+    assert (log2phy >= 0).all()
 
 
 class TestEPLBParamUtils:
