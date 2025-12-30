@@ -277,8 +277,15 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        return _rope_forward_oot(self, positions, query, key, is_neox_style,
-                                 offsets)
+        return torch.ops.vllm.rope_cos_sin(
+            query,
+            key,
+            self.cos_sin_cache,
+            positions,
+            self.head_size,
+            self.rotary_dim,
+            is_neox_style
+        )
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
