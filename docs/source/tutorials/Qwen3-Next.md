@@ -52,15 +52,12 @@ The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) 
 
 ### Install Triton Ascend
 
-:::::{tab-set}
-::::{tab-item} Linux (AArch64)
-
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
 
 Install the Ascend BiSheng toolkit, execute the command:
 
 ```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
 BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
 wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
 source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
@@ -69,18 +66,9 @@ source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
 Install Triton Ascend:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
-pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
+pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
 ```
-
-::::
-
-::::{tab-item} Linux (x86_64)
-
-Coming soon ...
-
-::::
-:::::
 
 ### Inference
 
