@@ -180,6 +180,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           HF_DATASETS_OFFLINE: True
           VLLM_USE_MODELSCOPE: True
+          HCCL_BUFFSIZE: 1024
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
           VLLM_COMMIT: ${{ env.VLLM_COMMIT }}

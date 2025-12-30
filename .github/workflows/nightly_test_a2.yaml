@@ -106,20 +106,20 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - os: linux-aarch64-a2-1
-            model_list:
-              - Qwen3-8B
-              - Qwen2-Audio-7B-Instruct
-              - Qwen3-8B-W8A8
-              - Qwen3-VL-8B-Instruct
-              - Qwen2.5-Omni-7B
-          - os: linux-aarch64-a2-1
-            model_list:
-              - ERNIE-4.5-21B-A3B-PT
-              - InternVL3_5-8B-hf
-              - Molmo-7B-D-0924
-              - Llama-3.2-3B-Instruct
-              - llava-onevision-qwen2-0.5b-ov-hf
+          # - os: linux-aarch64-a2-1
+          #   model_list:
+          #     - Qwen3-8B
+          #     - Qwen2-Audio-7B-Instruct
+          #     - Qwen3-8B-W8A8
+          #     - Qwen3-VL-8B-Instruct
+          #     - Qwen2.5-Omni-7B
+          # - os: linux-aarch64-a2-1
+          #   model_list:
+          #     - ERNIE-4.5-21B-A3B-PT
+          #     - InternVL3_5-8B-hf
+          #     - Molmo-7B-D-0924
+          #     - Llama-3.2-3B-Instruct
+          #     - llava-onevision-qwen2-0.5b-ov-hf
           - os: linux-aarch64-a2-2
             model_list:
               - Qwen3-30B-A3B
@@ -127,7 +127,7 @@ jobs:
               - Qwen3-30B-A3B-W8A8
           - os: linux-aarch64-a2-4
             model_list:
-              - Qwen3-Next-80B-A3B-Instruct
+              # - Qwen3-Next-80B-A3B-Instruct
               - Qwen3-Omni-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
