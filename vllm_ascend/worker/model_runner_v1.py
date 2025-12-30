@@ -1041,9 +1041,6 @@ class NPUModelRunner(GPUModelRunner):
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
-        # update global cos, sin
-        update_cos_sin(positions)
-
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(
@@ -2138,9 +2135,6 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions.gpu[:num_tokens_padded]
-
-            # update global cos, sin
-            update_cos_sin(positions)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
