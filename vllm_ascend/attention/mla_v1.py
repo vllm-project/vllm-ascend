@@ -63,7 +63,7 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         if enable_cp():
-            from vllm_ascend.attention.mla_cp import AscendMlaCPMetadataBuilder
+            from vllm_ascend.attention.context_parallel_attention.mla_cp import AscendMlaCPMetadataBuilder
             return AscendMlaCPMetadataBuilder
         return AscendMLAMetadataBuilder
 
