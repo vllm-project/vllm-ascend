@@ -18,8 +18,8 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 - `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
 - `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
-- `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/deepseek-ai/DeepSeek-V3.2/)
-- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot)
+- `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
+- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -29,10 +29,29 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-You can using our official docker image and install extra operator for supporting `DeepSeek-V3.2`.
+You can using our official docker image to run `DeepSeek-V3.2` directly..
 
 :::{note}
 We strongly recommend you to install triton ascend package to speed up the inference.
+
+The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
+
+Install the Ascend BiSheng toolkit, execute the command:
+
+```bash
+BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
+BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
+```
+
+Install Triton Ascend:
+
+```bash
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
+pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
+```
+
 :::
 
 :::::{tab-set}
@@ -273,7 +292,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -348,7 +367,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -425,7 +444,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -438,10 +457,10 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 4 \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 6, 8]}' \
+            --max-num-batched-tokens 12 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
             --trust-remote-code \
-            --max-num-seqs 1 \
+            --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
             --async-scheduling \
@@ -463,7 +482,8 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }'
+            }' \
+            --additional-config '{"recompute_scheduler_enable" : true}'
         ```
 
     4. Decode node 1
@@ -503,7 +523,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
 
 
-        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot \
+        vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -516,11 +536,11 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 4 \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[2, 4, 6, 8]}' \
+            --max-num-batched-tokens 12 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
             --trust-remote-code \
             --async-scheduling \
-            --max-num-seqs 1 \
+            --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
             --quantization ascend \
@@ -541,7 +561,8 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }'
+            }' \
+            --additional-config '{"recompute_scheduler_enable" : true}'
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
@@ -610,7 +631,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 ```shell
 lm_eval \
   --model local-completions \
-  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-QuaRot,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
@@ -622,6 +643,16 @@ lm_eval \
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+The performance result is:  
+
+**Hardware**: A3-752T, 4 node
+
+**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4
+
+**Input/Output**: 64k/3k
+
+**Performance**: 533tps, TPOT 32ms
 
 ### Using vLLM Benchmark
 
@@ -638,15 +669,11 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/DeepSeek-V3.2-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
+## Function Call
 
-**Hardware**: A3-752T, 4 node
+The function call feature is supported from v0.13.0rc1 on. Please use the latest version.
 
-**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4
-
-**Input/Output**: 64k/3k
-
-**Performance**: 255tps, TPOT 23ms
+Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html#tool-calling-example) for details.

@@ -1,18 +1,21 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from torch import nn
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import (ReplicatedLinear,
                                                UnquantizedLinearMethod)
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -43,7 +46,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND_SFA"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "ASCEND_SFA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_builder_cls():
@@ -107,24 +113,24 @@ class AscendSFAMetadata:
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-class AscendSFAMetadataBuilder:
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
     # _attn_mask_builder = None
-    def __init__(self,
-                 kv_cache_spec,
-                 layer_names,
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 metadata_cls: Optional[AscendSFAMetadata] = None):
-        self.metadata_cls: Optional[AscendSFAMetadata] = metadata_cls \
-            if metadata_cls is not None else AscendSFAMetadata  # type: ignore
+    def __init__(
+        self,
+        kv_cache_spec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        self.metadata_cls = (metadata_cls if metadata_cls is not None else
+                             AscendSFAMetadata)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
@@ -142,11 +148,24 @@ class AscendSFAMetadataBuilder:
                 got {self.decode_threshold}"
 
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
-
         self.enable_sfa_cp = enable_sp() and \
             hasattr(self.model_config.hf_config, "index_topk")
+
+        assert not (
+            self.enable_sfa_cp
+            and self.vllm_config.compilation_config.cudagraph_mode
+            == CUDAGraphMode.FULL_DECODE_ONLY
+        ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendSFAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -157,7 +176,7 @@ class AscendSFAMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        fast_build: bool = False,
     ) -> AscendSFAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -172,33 +191,12 @@ class AscendSFAMetadataBuilder:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         has_prefill = any(query_lens_cpu > self.decode_threshold)
 
-        if self.cos_cache is None:
-            self.cos_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[
-                model.model.start_layer].self_attn.rotary_emb.sin_cached
-        if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
-            self.cos_cache = self.cos_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-            self.sin_cache = self.sin_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-
         cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-
-        cos, sin = get_cos_and_sin_mla()
-
-        assert self.cos_cache is not None and self.sin_cache is not None
-        new_cos = self.cos_cache[input_positions][:, None, None]
-        new_sin = self.sin_cache[input_positions][:, None, None]
-
-        if (cos is not None and sin is not None
-                and num_input_tokens <= cos.shape[0]
-                and num_input_tokens <= sin.shape[0]):
-            cos[:num_input_tokens] = new_cos
-            sin[:num_input_tokens] = new_sin
+        if has_prefill:
+            cos, sin = get_cos_and_sin_mla(input_positions)
         else:
-            cos, sin = new_cos, new_sin
+            cos, sin = get_cos_and_sin_mla(input_positions, True)
 
         sfa_cp_context = None
         if self.enable_sfa_cp:
@@ -293,7 +291,6 @@ class AscendSFAMetadataBuilder:
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
-        model: Optional[nn.Module] = None,
     ):
         if attn_state in {
                 AscendAttentionState.DecodeOnly,
@@ -302,7 +299,6 @@ class AscendSFAMetadataBuilder:
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
-                model=model,
             )
         else:
             raise NotImplementedError(
@@ -470,12 +466,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-    def _v_up_proj(self, x):
-        forward_context = get_forward_context()
+    def _v_up_proj(self, x, has_prefill: bool):
+        # TODO(zzzzwwjj): We should not judge by whether `has_prefill` or not.
+        # The true criteria for judgment is tensorA's shape[0] <= 1024 (num_tokens <= 1024).
+        # This is a bug in the previous code.
         if x.dtype in [torch.float16, torch.bfloat16] \
                 and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
                 and not self.enable_sfa_cp \
-                and not forward_context.with_prefill:
+                and not has_prefill:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
             res = torch.empty((b, self.num_heads, self.v_head_dim),
@@ -760,7 +758,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
 
-        if self.enable_mlapo and not forward_context.with_prefill:
+        # TODO(zzzzwwjj): In sfa, prefill and decode have the same calculation formula,
+        # so `has_prefill` here is not necessary.
+        if self.enable_mlapo and not has_prefill:
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
@@ -835,7 +835,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             layout_kv="PA_BSND",
             sparse_mode=3,
         )
-        attn_output = self._v_up_proj(attn_output)
+        attn_output = self._v_up_proj(attn_output, has_prefill)
         maybe_npu_prefetch(inputs=self.o_proj.weight,
                            dependency=attn_output,
                            max_size=MAX_O_PROJ_PREFETCH_SIZE,

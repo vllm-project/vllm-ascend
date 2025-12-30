@@ -19,6 +19,7 @@ vLLM Ascend Plugin
 
 ---
 *Latest News* 🔥
+- [2025/12] We released the new official version [v0.11.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.11.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.11.0-dev/) to start using vLLM Ascend Plugin on Ascend.
 - [2025/09] We released the new official version [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! Please follow the [official guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html) to start deploy large scale Expert Parallelism (EP) on Ascend.
 - [2025/08] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/7n8OYNrCC_I9SJaybHA_-Q) with vLLM and Tencent! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
 - [2025/06] [User stories](https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html) page is now live! It kicks off with ‌LLaMA-Factory/verl//TRL/GPUStack‌ to demonstrate how ‌vLLM Ascend‌ assists Ascend users in enhancing their experience across fine-tuning, evaluation, reinforcement learning (RL), and deployment scenarios.
@@ -52,7 +53,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-|v0.12.0rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
+|v0.13.0rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
 |v0.11.0|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev/installation.html) for more details|
 
 ## Contributing
@@ -73,7 +74,7 @@ Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM v0.12.0 tag   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM v0.13.0 tag   |
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fix is allowed and no new release tag any more. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |

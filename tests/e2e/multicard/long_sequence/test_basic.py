@@ -34,7 +34,7 @@ os.environ["HCCL_BUFFSIZE"] = "768"
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
-def test_pcp_dcp_basic():
+def test_models_pcp_dcp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
@@ -69,7 +69,7 @@ def test_pcp_dcp_basic():
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
-def test_pcp_dcp_full_graph():
+def test_models_pcp_dcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
@@ -77,7 +77,6 @@ def test_pcp_dcp_full_graph():
     model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
@@ -93,7 +92,6 @@ def test_pcp_dcp_full_graph():
 
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     with VllmRunner(model,
-                    enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
@@ -110,7 +108,61 @@ def test_pcp_dcp_full_graph():
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
-def test_pcp_dcp_piece_wise():
+def test_models_pcp_dcp_piece_wise():
+    prompts = [
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
+    ]
+    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    max_model_len=1024,
+                    tensor_parallel_size=2,
+                    prefill_context_parallel_size=2,
+                    decode_context_parallel_size=2,
+                    max_num_batched_tokens=1024,
+                    enable_expert_parallel=True,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
+                    block_size=128) as runner:
+        runner.model.generate(prompts, sampling_params)
+
+    model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
+    with VllmRunner(model,
+                    max_model_len=1024,
+                    tensor_parallel_size=2,
+                    prefill_context_parallel_size=2,
+                    decode_context_parallel_size=1,
+                    enable_expert_parallel=True,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
+                    block_size=128,
+                    quantization="ascend") as runner:
+        runner.model.generate(prompts, sampling_params)
+
+
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
+def test_pcp_basic():
+    prompts = [
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
+    ]
+    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    enforce_eager=True,
+                    max_model_len=1024,
+                    tensor_parallel_size=2,
+                    prefill_context_parallel_size=2,
+                    decode_context_parallel_size=1,
+                    max_num_batched_tokens=1024,
+                    enable_expert_parallel=True,
+                    block_size=128) as runner:
+        runner.model.generate(prompts, sampling_params)
+
+
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
+def test_pcp_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
@@ -122,20 +174,100 @@ def test_pcp_dcp_piece_wise():
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
-                    decode_context_parallel_size=2,
+                    decode_context_parallel_size=1,
                     max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
-                    block_size=128) as runner:
+                    block_size=128,
+                    compilation_config={
+                        "cudagraph_mode": "FULL_DECODE_ONLY",
+                        "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
+                    }) as runner:
         runner.model.generate(prompts, sampling_params)
 
-    model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
+
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
+def test_pcp_piece_wise():
+    prompts = [
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
+    ]
+    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(model,
                     enforce_eager=False,
                     max_model_len=1024,
                     tensor_parallel_size=2,
                     prefill_context_parallel_size=2,
                     decode_context_parallel_size=1,
+                    max_num_batched_tokens=1024,
+                    enable_expert_parallel=True,
+                    block_size=128) as runner:
+        runner.model.generate(prompts, sampling_params)
+
+
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
+def test_dcp_basic():
+    prompts = [
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
+    ]
+    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    enforce_eager=True,
+                    max_model_len=1024,
+                    tensor_parallel_size=4,
+                    prefill_context_parallel_size=1,
+                    decode_context_parallel_size=2,
+                    max_num_batched_tokens=1024,
+                    enable_expert_parallel=True,
+                    block_size=128) as runner:
+        runner.model.generate(prompts, sampling_params)
+
+
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
+def test_dcp_full_graph():
+    prompts = [
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
+    ]
+    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    enforce_eager=False,
+                    max_model_len=1024,
+                    tensor_parallel_size=4,
+                    prefill_context_parallel_size=1,
+                    decode_context_parallel_size=2,
+                    max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
                     block_size=128,
-                    quantization="ascend") as runner:
+                    compilation_config={
+                        "cudagraph_mode": "FULL_DECODE_ONLY",
+                        "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
+                    }) as runner:
+        runner.model.generate(prompts, sampling_params)
+
+
+@pytest.mark.skipif(vllm_version_is('0.12.0'),
+                    reason="0.12.0 is not supported for context sequence.")
+def test_dcp_piece_wise():
+    prompts = [
+        "The capital of France is", "Hello, my name is Tom, I am",
+        "The president of United States is", "AI future is"
+    ]
+    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    enforce_eager=False,
+                    max_model_len=1024,
+                    tensor_parallel_size=4,
+                    prefill_context_parallel_size=1,
+                    decode_context_parallel_size=2,
+                    max_num_batched_tokens=1024,
+                    enable_expert_parallel=True,
+                    block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)

@@ -20,8 +20,8 @@ from enum import Enum
 from typing import ClassVar, List, Optional, Tuple, Type
 
 import torch
-import torch.nn as nn
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.registry import (AttentionBackendEnum,
@@ -29,17 +29,24 @@ from vllm.attention.backends.registry import (AttentionBackendEnum,
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         enable_cp, split_decodes_and_prefills,
+                                         AscendMetadataForDecode,
+                                         AscendMetadataForPrefill, enable_cp,
+                                         split_decodes_and_prefills,
                                          using_paged_attention)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params, get_graph_params,
+    update_draft_graph_params_workspaces, update_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
+
+# default max value of sliding window size
+SWA_INT_MAX = 2147483647
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -48,7 +55,10 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
@@ -119,51 +129,6 @@ class AscendAttentionState(Enum):
 
 
 @dataclass
-class AscendMetadataForPrefill:
-
-    @dataclass
-    class AscendPCPMetadata:
-        q_head_idx: torch.Tensor = None
-        q_tail_idx: torch.Tensor = None
-        kv_with_q_head_nomask_idx: torch.Tensor = None
-        kv_with_q_head_mask_idx: torch.Tensor = None
-        kv_with_q_tail_nomask_idx: torch.Tensor = None
-        kv_with_q_tail_mask_idx: torch.Tensor = None
-        attn_mask_seqlens: torch.Tensor = None
-        head_attn_nomask_seqlens: torch.Tensor = None
-        tail_attn_nomask_seqlens: torch.Tensor = None
-        q_full_idx: torch.Tensor = None
-        pcp_prefill_mask: torch.Tensor = None
-
-    @dataclass
-    class ChunkedContextMetadata:
-        actual_chunk_seq_lengths: torch.Tensor
-        actual_seq_lengths_kv: torch.Tensor
-        starts: torch.Tensor
-        chunk_seq_mask_filtered_indices: torch.Tensor
-        chunked_req_mask: Optional[list[bool]] = None
-        local_context_lens_allranks: Optional[list[list[int]]] = None
-        cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
-        kv_inverse_idx_for_chunk: Optional[list[int]] = None
-        batch_chunk_seq_mask: Optional[list[bool]] = None
-
-    """ Prefill Specific Metadata for Ascend"""
-    pcp_metadata: Optional[AscendPCPMetadata] = None
-    pcp_allgather_restore_idx: Optional[List[int]] = None
-    chunked_context: Optional[ChunkedContextMetadata] = None
-    block_tables: torch.Tensor = None
-    actual_seq_lengths_q: torch.Tensor = None
-
-
-@dataclass
-class AscendMetadataForDecode:
-    """ Decode Specific Metadata for Ascend"""
-    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
-    batch_seq_mask: torch.Tensor = None
-    block_tables: torch.Tensor = None
-
-
-@dataclass
 class AscendMetadata:
     # **************************** Basic Properties ************************** #
     attn_mask: Optional[torch.Tensor] = None
@@ -212,11 +177,11 @@ class AscendMetadata:
     # runner_type in model_config.
     model_runner_type: str = ""
 
+    # sliding window attention mask
+    swa_mask: Optional[torch.Tensor] = None
 
-class AscendAttentionMetadataBuilder:
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS
+
+class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
@@ -252,6 +217,16 @@ class AscendAttentionMetadataBuilder:
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
 
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendAttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.ALWAYS
+
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
@@ -260,8 +235,8 @@ class AscendAttentionMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: Optional[nn.Module] = None,
-    ):
+        fast_build: bool = False,
+    ) -> AscendMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
@@ -274,15 +249,9 @@ class AscendAttentionMetadataBuilder:
         block_table = common_attn_metadata.block_table_tensor
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
-        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
-        if num_actual_tokens_pcp_padded is None:
-            num_actual_tokens_pcp_padded = num_actual_tokens
-
-        slot_mapping = common_attn_metadata.slot_mapping[:
-                                                         num_actual_tokens_pcp_padded]
-
+        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
+        swa_mask = common_attn_metadata.swa_mask
         attn_state = common_attn_metadata.attn_state
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
@@ -292,7 +261,6 @@ class AscendAttentionMetadataBuilder:
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
-            num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
@@ -301,6 +269,7 @@ class AscendAttentionMetadataBuilder:
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
+            swa_mask=swa_mask,
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
@@ -312,9 +281,10 @@ class AscendAttentionMetadataBuilder:
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
-        model: Optional[nn.Module] = None,
     ):
-        if attn_state == AscendAttentionState.DecodeOnly:
+
+        if attn_state in (AscendAttentionState.DecodeOnly,
+                          AscendAttentionState.ChunkedPrefill):
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -371,7 +341,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        graph_params = get_graph_params()
+        forward_context = get_forward_context()
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
@@ -395,7 +369,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=3,
                 scale=self.scale,
             )
-            update_graph_params_workspaces(num_tokens, workspace)
+            if forward_context.is_draft_model:
+                update_draft_graph_params_workspaces(num_tokens, workspace)
+            else:
+                update_graph_params_workspaces(num_tokens, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -569,7 +546,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.capturing:
+        # we inherit ForwardContext in model runner v2, when enable model
+        # runner v2, there is not capturing attribute in forward_context,
+        # just use getattr to avoid attribute error.
+        if getattr(forward_context, "capturing", False):
             attn_output, num_tokens = self.full_graph_fia(
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
@@ -583,12 +563,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             = self._get_fia_params(key, value, attn_metadata)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            key = key[:num_tokens]
+            value = value[:num_tokens]
         # Get workspace from cache or calculate it if not present.
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.attn_mask,
+            pre_tokens=self.sliding_window
+            if self.sliding_window else SWA_INT_MAX,
+            next_tokens=0 if self.sliding_window else SWA_INT_MAX,
+            atten_mask=attn_metadata.swa_mask
+            if self.sliding_window else attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
@@ -597,7 +584,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=4 if self.sliding_window else 3,
         )
 
         attn_output = attn_output.view(num_tokens, self.num_heads,
