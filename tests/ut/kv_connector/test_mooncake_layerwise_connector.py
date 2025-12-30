@@ -118,7 +118,8 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                                   req_meta=req_meta,
                                   layer_index=0,
                                   key=key,
-                                  value=value)
+                                  value=value,
+                                  reshape_cache_event=MagicMock())
 
         self.engine.batch_transfer_sync_write.assert_called_once()
         session_id, src_list, dst_list, length_list = self.engine.batch_transfer_sync_write.call_args[
@@ -143,8 +144,12 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
     def test_transfer_skips_when_no_local_blocks(self):
         req_meta = self.req_meta_base
         req_meta.local_block_ids = []
-        self.thread._transfer_kv_cache("req2", req_meta, 0, torch.zeros(
-            (1, 8)), torch.zeros((1, 8)))
+        self.thread._transfer_kv_cache("req2",
+                                       req_meta,
+                                       0,
+                                       torch.zeros((1, 8)),
+                                       torch.zeros((1, 8)),
+                                       reshape_cache_event=MagicMock())
         self.engine.batch_transfer_sync_write.assert_not_called()
 
     def test_transfer_skips_when_tp_not_sender(self):
@@ -162,8 +167,12 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                                            first_kv_cache=self.first_kv_cache,
                                            callback_func=MagicMock())
         req_meta = self.req_meta_base
-        thread._transfer_kv_cache("req3", req_meta, 0, torch.zeros((1, 8)),
-                                  torch.zeros((1, 8)))
+        thread._transfer_kv_cache("req3",
+                                  req_meta,
+                                  0,
+                                  torch.zeros((1, 8)),
+                                  torch.zeros((1, 8)),
+                                  reshape_cache_event=MagicMock())
         self.engine.batch_transfer_sync_write.assert_not_called()
 
     @patch(
@@ -190,7 +199,8 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                                        req_meta,
                                        layer_index=2,
                                        key=key,
-                                       value=value)
+                                       value=value,
+                                       reshape_cache_event=MagicMock())
 
         self.thread.callback_func.assert_called_once()
 
@@ -517,6 +527,7 @@ class _MockSchedulerOutput:
         )
         self.scheduled_new_reqs = new_reqs or []
         self.num_scheduled_tokens = num_sched or {}
+        self.scheduled_spec_decode_tokens = scheduled_spec_decode_tokens or {}
 
 
 class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
@@ -555,17 +566,19 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
     def test_update_state_after_alloc_decode_records_send_layerwise(self):
         req = MockRequest("req_u2",
                           prompt_token_ids=list(range(10)),
-                          kv_transfer_params={"do_remote_decode": True})
+                          kv_transfer_params={
+                              "do_remote_decode": True,
+                              "remote_block_ids": {}
+                          })
         blocks = _MockBlocks(unhashed=[], block_ids_tuple=([7, 8, 9], ))
         self.scheduler.update_state_after_alloc(req,
                                                 blocks,
                                                 num_external_tokens=0)
         self.assertIn("req_u2", self.scheduler._reqs_need_send_layerwise)
-        total_tokens, local_block_ids, req_ref = self.scheduler._reqs_need_send_layerwise[
-            "req_u2"]
-        self.assertEqual(total_tokens, 10)
-        self.assertEqual(local_block_ids, [7, 8, 9])
-        self.assertIs(req_ref, req)
+        info = self.scheduler._reqs_need_send_layerwise["req_u2"]
+        self.assertEqual(info.local_block_ids, [7, 8, 9])
+        self.assertIs(info.request, req)
+        self.assertEqual(info.remote_block_ids, [])
 
     def test_build_connector_meta_consumes_reqs_need_recv_and_clears(self):
         req = MockRequest("req_b1",
