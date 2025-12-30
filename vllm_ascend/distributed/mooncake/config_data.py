@@ -318,6 +318,8 @@ class ReqMeta:
 
     is_last_chunk: Optional[bool] = None
 
+    current_event: Optional[torch.npu.Event] = None
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
@@ -413,6 +415,7 @@ class LasyerMultiBlockReqMeta:
     ends: list[int]
     block_ids: list[int]
     layer_id: int
+    current_event: Optional[torch.npu.Event] = None
 
 
 @dataclass

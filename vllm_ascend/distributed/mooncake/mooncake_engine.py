@@ -257,6 +257,14 @@ class MooncakeEngine:
         """MooncakeConnector does not save explicitly."""
         if self.current_layer == 0:
             self.layerwise_storers = []
+            current_event = None
+            for request in connector_metadata.requests:
+                can_save = request.can_save
+                if can_save is None or not can_save:
+                    continue
+                current_event = torch.npu.Event()
+                current_event.record()
+                break
             for request in connector_metadata.requests:
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
@@ -298,6 +306,7 @@ class MooncakeEngine:
                     token_ids,
                     mask=store_mask,
                     block_ids=request.block_ids,
+                    current_event=current_event,
                 )
                 self.layerwise_storers.append(layerwise_storer)
         for layerwise_storer in self.layerwise_storers:
@@ -309,6 +318,15 @@ class MooncakeEngine:
 
     def wait_for_save(self, connector_metadata: MooncakeConnectorMetadata):
         """MooncakeConnector does not save explicitly."""
+        current_event = None
+        for request in connector_metadata.requests:
+            can_save = request.can_save
+            if can_save is None or not can_save:
+                continue
+            current_event = torch.npu.Event()
+            current_event.record()
+            break
+
         for request in connector_metadata.requests:
             save_spec = request.save_spec
             if save_spec is None or not save_spec.can_save:
@@ -344,6 +362,7 @@ class MooncakeEngine:
                 request.req_id,
             )
 
+            request.current_event = current_event
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 req_id,
                 token_ids,
@@ -429,6 +448,7 @@ class MooncakeEngine:
         req_id: str,
         tokens: torch.Tensor,
         block_ids: list[int],
+        current_event: Optional[torch.npu.Event],
         mask: Optional[torch.Tensor] = None,
     ) -> Generator[None, None, None]:
         """
@@ -472,7 +492,7 @@ class MooncakeEngine:
             for layer_id, keys_multi_chunk in enumerate(keys):
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
-                                                   layer_id)
+                                                   layer_id, current_event)
                 self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 yield
