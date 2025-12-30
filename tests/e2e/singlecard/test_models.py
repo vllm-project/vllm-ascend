@@ -19,18 +19,28 @@
 
 import os
 
+import pytest
+from modelscope import snapshot_download  # type: ignore
+
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+# Note: MiniCPM-2B is a MHA model, MiniCPM4-0.5B is a GQA model
+MINICPM_MODELS = [
+    "openbmb/MiniCPM-2B-sft-bf16",
+    "OpenBMB/MiniCPM4-0.5B",
+]
 
-def test_minicpm_2b() -> None:
+
+@pytest.mark.parametrize("model", MINICPM_MODELS)
+def test_minicpm(model) -> None:
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
 
-    with VllmRunner("openbmb/MiniCPM-2B-sft-bf16",
+    with VllmRunner(snapshot_download(model),
                     max_model_len=512,
                     gpu_memory_utilization=0.7) as runner:
         runner.generate_greedy(example_prompts, max_tokens)

@@ -36,6 +36,7 @@ def test_qwen3_w8a8_quant():
             snapshot_download("vllm-ascend/Qwen3-0.6B-W8A8"),
             max_model_len=8192,
             gpu_memory_utilization=0.7,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_quant_w8a8_outputs = vllm_model.generate_greedy(
