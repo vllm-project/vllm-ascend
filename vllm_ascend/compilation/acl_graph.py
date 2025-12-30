@@ -493,6 +493,35 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
             event.record(update_stream)
 
 
+# update full-graph params for one step
+def update_full_graph_params(update_stream,
+                             forward_context,
+                             num_tokens,
+                             vllm_config,
+                             speculative_config=None,
+                             pcp_size=1,
+                             dcp_size=1,
+                             num_dcp_pcp_tokens=None):
+    if num_dcp_pcp_tokens is None:
+        num_dcp_pcp_tokens = num_tokens
+    if vllm_config.model_config.use_mla:
+        if pcp_size * dcp_size > 1:
+            # FIXME: Try using `auto_dispatch_capture=True` in NPUModelRunner
+            update_mla_attn_dcp_pcp_params(update_stream, forward_context,
+                                           num_dcp_pcp_tokens)
+        else:
+            # FIXME: Try using `auto_dispatch_capture=True` in NPUModelRunner
+            update_mla_attn_params(update_stream, forward_context, num_tokens,
+                                   speculative_config)
+    else:
+        if pcp_size * dcp_size > 1:
+            update_attn_dcp_pcp_params(update_stream, forward_context,
+                                       num_dcp_pcp_tokens)
+        else:
+            update_attn_params(update_stream, forward_context, num_tokens,
+                               vllm_config)
+
+
 @dataclass
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
