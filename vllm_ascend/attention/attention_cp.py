@@ -20,7 +20,6 @@ from typing import ClassVar, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
@@ -45,9 +44,6 @@ from vllm_ascend.utils import weak_ref_tensors
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS
     # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
@@ -73,6 +69,16 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
 
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendAttentionCPMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.ALWAYS
+
     def _get_chunked_req_mask(self, local_context_lens_allranks) -> List[bool]:
         """
         given 4-d list [req][pcp][dcp], return:
@@ -90,7 +96,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: Optional[nn.Module] = None,
+        fast_build: bool = False,
     ):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
