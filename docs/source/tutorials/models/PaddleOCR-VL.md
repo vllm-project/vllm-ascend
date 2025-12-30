@@ -53,15 +53,26 @@ docker run --rm \
 
 #### Single NPU (PaddleOCR-VL)
 
-PaddleOCR-VL supports single-node single-card deployment on the 910B4 platform. Follow these steps to start the inference service:
+PaddleOCR-VL supports single-node single-card deployment on the 910B4 and 310P platform. Follow these steps to start the inference service:
 
 1. Prepare model weights: Ensure the downloaded model weights are stored in the `PaddleOCR-VL` directory.
 2. Create and execute the deployment script (save as `deploy.sh`):
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} 910B4
+:sync: 910B4
+
+Run the following script to start the vLLM server on single 910B4:
 
 ```shell
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=true
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
+export TASK_QUEUE_ENABLE=2
+export CPU_AFFINITY_CONF=1
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve ${MODEL_PATH} \
           --max-num-batched-tokens 16384 \
@@ -69,8 +80,39 @@ vllm serve ${MODEL_PATH} \
           --trust-remote-code \
           --no-enable-prefix-caching \
           --mm-processor-cache-gb 0 \
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+          --additional_config '{"enable_cpu_binding":true}' \
+          --port 8000
 ```
+
+::::
+::::{tab-item} 310P3
+:sync: 310P3
+
+Run the following script to start the vLLM server on single 310P3:
+
+```shell
+#!/bin/sh
+export VLLM_USE_MODELSCOPE=true
+export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
+
+vllm serve ${MODEL_PATH} \
+          --max_model_len 16384 \
+          --served-model-name PaddleOCR-VL-0.9B \
+          --trust-remote-code \
+          --no-enable-prefix-caching \
+          --mm-processor-cache-gb 0 \
+          --enforce-eager \
+          --dtype float16 \
+          --port 8000
+```
+
+:::{note}
+The `--max_model_len` option is added to avoid errors in generating the mask for the attention operator.
+:::
+
+::::
+:::::
 
 #### Multiple NPU (PaddleOCR-VL)
 
@@ -156,12 +198,18 @@ CHANGE DUE
 In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-0.9B model. Typically, we also need to integrate the PP-DocLayoutV2 model to fully unleash the capabilities of the PaddleOCR-VL model, making it more consistent with the examples provided by the official PaddlePaddle documentation.
 
 :::{note}
-Use separate virtual environments for VLLM and PPdoclayoutV2 to prevent dependency conflicts.
+Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
 :::
 
-### Pull the PaddlePaddle-compatible CANN image
+:::::{tab-set}
+:sync-group: install
 
-Obtaining Ascend Images from PaddlePaddle:
+::::{tab-item} PaddlePaddle
+:sync: paddlepaddle
+
+The 910B4 device supports inference using the PaddlePaddle framework.
+
+1. Pull the PaddlePaddle-compatible CANN image
 
 ```bash
 docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
@@ -179,7 +227,7 @@ docker run -it --name paddle-npu-dev -v $(pwd):/work \
     ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
 ```
 
-### Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 
 ```bash
 python -m pip install paddlepaddle==3.2.0
@@ -204,7 +252,11 @@ python -m pip install numpy==1.26.4
 python -m pip install opencv-python==3.4.18.65
 ```
 
-:::
+::::
+::::{tab-item} OM inference
+:sync: om
+
+The 310P3 device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
 ### Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
