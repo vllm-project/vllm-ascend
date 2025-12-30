@@ -76,9 +76,9 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        --compilation_config '{"cudagraph_capture_sizes":[4,8,12,16],"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --enable-chunked-prefill
-        --speculative-config '{"cudagraph_capture_sizes":[4,8,12,16],"num_speculative_tokens": 3, "method":"mtp"}'
+        --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
