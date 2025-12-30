@@ -53,13 +53,13 @@ from vllm.distributed import (split_tensor_along_last_dim,
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (dense_optim_enable, enable_sp,
-                               flashcomm2_enable,
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
@@ -135,7 +135,7 @@ class CustomRowParallelOp(CustomLinearOp):
 
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
-        if dense_optim_enable():
+        if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
             torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
             return output
@@ -484,6 +484,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 
 class SequenceRowParallelOp(CustomRowParallelOp):
 
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.unique_prefix = None
+
     def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -509,7 +513,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                              bias=bias_)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel,
-                                                      self.prefix)
+                                                      self.unique_prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -602,6 +606,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.reduce_results = self.layer.reduce_results
+        self.unique_prefix = self.layer.unique_prefix
 
 
 def _get_column_parallel_op(

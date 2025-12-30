@@ -22,6 +22,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |         PyTorch/torch_npu       |
 |-------------|-------------------|-----------------|-------------|---------------------------------|
+| v0.13.0rc1  | v0.13.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |
 | v0.11.0     | v0.11.0           | >= 3.9 , < 3.12 | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
 | v0.12.0rc1  | v0.12.0           | >= 3.10, < 3.12 | 8.3.RC2     | 2.8.0  / 2.8.0                  |
 | v0.11.0rc3  | v0.11.0           | >= 3.9, < 3.12  | 8.3.RC2     | 2.7.1 / 2.7.1.post1             |
@@ -50,7 +51,7 @@ If you're using v0.7.3, don't forget to install [mindie-turbo](https://pypi.org/
 For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | 5fbfa8d9ef15948599631baeb91e8220b2ee9bcc, v0.13.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
+|     main    | 45c1ca1ca1ee8fa06df263c8715e8a412ff408d4, v0.13.0 tag | >= 3.10, < 3.12   | 8.3.RC2 | 2.8.0 / 2.8.0 |
 
 ## Release cadence
 
