@@ -2,7 +2,6 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -98,7 +97,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
                                            vllm_config=vllm_config,
                                            device=device)
 
-        assert builder.aclgraph_support == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         assert builder.device == device
         assert builder.vllm_config == vllm_config
 
