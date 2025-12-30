@@ -311,7 +311,7 @@ def test_client_handler_mismatch(server_config):
         mismatch_data = {
             "label": "JOIN",
             "content": {
-                "device_id": 1,  # 不匹配的ID
+                "device_id": 1,  # Mismatched ID
                 "model_path": "/wrong/model",
                 "tp": 2,
                 "pp": 2,
