@@ -58,10 +58,10 @@ INPUT_PROMPTS = [
     LONG_PROMPT +
     "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
     LONG_PROMPT +
-    "Question: what is the age of Umar Black? Your answer: The age of Umar Black is "
+    "Question: what is the age of Alice Johnson? Your answer: The age of Alice Johnson is "
 ]
 
-VLLM_OUTPUT = [INPUT_PROMPTS[0] + "29", INPUT_PROMPTS[1] + "39"]
+VLLM_OUTPUT = [INPUT_PROMPTS[0] + "29", INPUT_PROMPTS[1] + "27"]
 
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
