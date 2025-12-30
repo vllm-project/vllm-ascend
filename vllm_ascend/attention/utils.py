@@ -243,14 +243,6 @@ def _make_metadata_with_slice(
     # TODO attn_metadata.spec_attn_mask是nonetype
     spec_attn_mask = attn_metadata.spec_attn_mask
 
-    # 3. 处理 positions 位置偏移（关键：拆分请求时位置从0重新开始）
-    if splits_first_request:
-        tokens_skipped = first_tok - start_locs[first_req]
-        # 计算首个请求在当前微批的令牌数量
-        first_req_token_count = start_locs[first_req + 1] - first_tok
-        # 调整首个请求的位置：减去被跳过的令牌数（位置从0起始）
-        positions[:first_req_token_count] -= tokens_skipped
-
     enable_dbo_across_dp = attn_metadata.enable_dbo_across_dp
     is_only_prefill = attn_metadata.is_only_prefill
     graph_pad_size = attn_metadata.graph_pad_size

@@ -1356,14 +1356,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
 
-        dp_rank = self.parallel_config.data_parallel_rank
-        if ubatch_slices:
-            assert num_tokens_across_dp is not None
-            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-        elif num_tokens_across_dp is not None:
-            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-
         self.seq_lens_np[:num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                 num_scheduled_tokens)
@@ -1992,6 +1984,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              intermediate_tensors, afd_metadata,
              max_query_len, ubatch_slices
              ) = self._prepare_inputs(scheduler_output)
+
+        dp_rank = self.parallel_config.data_parallel_rank
+        if ubatch_slices:
+            assert num_tokens_across_dp is not None
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+        elif num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
 
         if self.dynamic_eplb:
             self.eplb_updator.take_update_info_from_eplb_process()
