@@ -259,8 +259,8 @@ class MooncakeEngine:
             self.layerwise_storers = []
             current_event = None
             for request in connector_metadata.requests:
-                can_save = request.can_save
-                if can_save is None or not can_save:
+                save_spec = request.save_spec
+                if save_spec is None or not save_spec.can_save:
                     continue
                 current_event = torch.npu.Event()
                 current_event.record()
@@ -306,7 +306,6 @@ class MooncakeEngine:
                     token_ids,
                     mask=store_mask,
                     block_ids=request.block_ids,
-                    current_event=current_event,
                 )
                 self.layerwise_storers.append(layerwise_storer)
         for layerwise_storer in self.layerwise_storers:
@@ -320,8 +319,8 @@ class MooncakeEngine:
         """MooncakeConnector does not save explicitly."""
         current_event = None
         for request in connector_metadata.requests:
-            can_save = request.can_save
-            if can_save is None or not can_save:
+            save_spec = request.save_spec
+            if save_spec is None or not save_spec.can_save:
                 continue
             current_event = torch.npu.Event()
             current_event.record()
@@ -369,6 +368,7 @@ class MooncakeEngine:
                 request.block_ids,
                 store_mask,
                 request.is_last_chunk,
+                current_event,
             )
 
     def retrieve_layer(
