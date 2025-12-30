@@ -1984,6 +1984,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              intermediate_tensors, afd_metadata,
              max_query_len, ubatch_slices
              ) = self._prepare_inputs(scheduler_output)
+            
+        dp_rank = self.parallel_config.data_parallel_rank
+        if ubatch_slices:
+            assert num_tokens_across_dp is not None
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+        elif num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+        logger.info(f"jcz execute_model ubatch_slices is {ubatch_slices}")
 
         dp_rank = self.parallel_config.data_parallel_rank
         if ubatch_slices:
@@ -2331,11 +2340,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return None, None
 
     def _build_attention_metadata_dummy(self, create_mixed_batch, num_reqs,
-                                        num_tokens, max_query_len, force_attention):
-        attn_metadata: Optional[dict[str, Any]] = None
+                                        num_tokens, max_query_len, force_attention,
+                                        ubatch_slices: Optional[UBatchSlices] = None):
 
         if force_attention:
-            attn_metadata = {}
+            if ubatch_slices is not None:
+                attn_metadata: list[PerLayerAttnMetadata] = [dict() for _ in range(len(ubatch_slices))]
+            else:
+                attn_metadata: Optional[PerLayerAttnMetadata] = {}
 
             if create_mixed_batch:
                 raise NotImplementedError(
@@ -2348,14 +2360,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
 
+            # Initialize query_start_locs to [0, 1, 2, ..., num_reqs]
+            dummy_locs = torch.arange(num_reqs + 1, dtype=self.query_start_loc.dtype, device="cpu")
+            self.query_start_loc_cpu[:num_reqs + 1].copy_(dummy_locs)
+            self.query_start_loc[:num_reqs + 1].copy_(dummy_locs.to(self.query_start_loc.device))
+
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
                 block_table_tensor = self.input_batch.block_table[
                     kv_cache_group_id].get_device_tensor()
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc[:num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
-                                                                  1],
+                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
                     seq_lens_cpu=self.seq_lens_cpu,
                     seq_lens=self.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
@@ -2379,8 +2395,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata_i = builder.build_for_graph_capture(
                         common_attn_metadata, AscendAttentionState.DecodeOnly,
                         self.get_model())
-                    for layer_name in kv_cache_group_spec.layer_names:
-                        attn_metadata[layer_name] = attn_metadata_i
+                    if ubatch_slices is not None:
+                        print(f"jcz _build_attention_metadata_dummy common_attn_metadata "
+                              f"query_start_loc:{common_attn_metadata.query_start_loc}", flush=True)
+                        common_attn_metadata_list = split_attn_metadata(
+                        ubatch_slices, common_attn_metadata
+                    )
+                        for ubid, common_attn_metadata in enumerate(
+                                common_attn_metadata_list
+                        ):
+                            print(f"jcz _build_attention_metadata_dummy ubid is {ubid}")
+                            attn_metadata_i = attn_group.get_metadata_builder(
+                                ubatch_id=ubid
+                            ).build(
+                                common_prefix_len=0,
+                                common_attn_metadata=common_attn_metadata,
+                                model=self.get_model(),
+                            )
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                assert type(attn_metadata) is list
+                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                    else:
+                        for layer_name in kv_cache_group_spec.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
+        else:
+            attn_metadata = None
 
         return attn_metadata
 
@@ -2539,7 +2578,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=num_tokens,
             max_query_len=max_query_len,
             force_attention=force_attention,
+            ubatch_slices=ubatch_slices,
         )
+        print(f"jcz _dummy_run attn_metadata is {type(attn_metadata)} force_attention:{force_attention}")
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2608,6 +2649,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         hidden_states[dummy_indices])
             
             afd_metadata = self._build_afd_metadata(ubatch_slices, num_tokens_after_padding)
+            logger.info(f"jcz _dummy_run ubatch_slices is {ubatch_slices}")
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2821,6 +2863,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                          runtime_mode=CUDAGraphMode.FULL)
         elif self.parallel_config.use_ubatching:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.update_stream = torch.npu.Stream()
+                set_graph_params(self.compilation_config.cudagraph_capture_sizes)
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.FULL, self.device)
             else:
@@ -3606,6 +3650,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # if we want to warm up attention or not. This is
                     # different from the case where `FULL` implies capture
                     # attention while `PIECEWISE` implies no attention.
+                    print(f"jcz _capture_aclgraphs warmup num_tokens is {num_tokens} aclgraph_runtime_mode:{aclgraph_runtime_mode}")
                     self._dummy_run(num_tokens,
                                     aclgraph_runtime_mode=CUDAGraphMode.NONE,
                                     force_attention=force_attention,
@@ -3613,6 +3658,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                     allow_microbatching=allow_microbatching)
 
                 # Graph Capture
+                print(f"jcz _capture_aclgraphs num_tokens is {num_tokens} aclgraph_runtime_mode:{aclgraph_runtime_mode}")
                 self._dummy_run(num_tokens,
                                 aclgraph_runtime_mode=aclgraph_runtime_mode,
                                 force_attention=force_attention,
