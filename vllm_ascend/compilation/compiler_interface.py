@@ -26,6 +26,7 @@ from torch._inductor.compile_fx import (graph_returns_tuple,
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
+from vllm.config import VllmConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 
@@ -71,6 +72,7 @@ def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
+    vllm_config: VllmConfig,
     runtime_shape: Optional[int] = None,
     key: Optional[str] = None,
 ) -> tuple[Optional[Callable], Optional[Any]]:
@@ -105,6 +107,14 @@ def npugraph_ex_compile(
     config.debug.run_eagerly = True
     # static kernel switch, suitable for static shapes or scenes with less shape changes.
     config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+    num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+    uniform_decode_query_len = num_spec_tokens + 1
+    max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
+    decode_cudagraph_batch_sizes = [
+        x for x in vllm_config.compilation_config.cudagraph_capture_sizes if
+        x <= max_num_tokens and x >= uniform_decode_query_len
+    ]
+    config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
     compile_graph = npugraph_ex(graph, example_inputs)
@@ -119,6 +129,12 @@ class AscendCompiler(CompilerInterface):
     """
     name = "AscendCompiler"
 
+    def compute_hash(self, vllm_config: VllmConfig) -> str:
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_npugraph_ex:
+            self.vllm_config = vllm_config
+        return ""
+
     def compile(
         self,
         graph: fx.GraphModule,
@@ -131,7 +147,7 @@ class AscendCompiler(CompilerInterface):
         ascend_config = get_ascend_config()
         if ascend_config.enable_npugraph_ex:
             return npugraph_ex_compile(graph, example_inputs, compiler_config,
-                                       runtime_shape, key)
+                                       self.vllm_config, runtime_shape, key)
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config,
                                        runtime_shape, key)
