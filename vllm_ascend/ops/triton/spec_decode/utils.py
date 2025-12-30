@@ -1,5 +1,4 @@
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -33,17 +32,20 @@ def prepare_inputs_padded_kernel(
             other=0,
         )
 
-        num_draft_tokens = tl.where(
-            has_prev, cu_draft_curr - cu_draft_prev, cu_draft_curr
-        )
+        num_draft_tokens = tl.where(has_prev, cu_draft_curr - cu_draft_prev,
+                                    cu_draft_curr)
 
-        valid_count = tl.load(valid_sampled_tokens_count_ptr + offsets, mask=mask)
+        valid_count = tl.load(valid_sampled_tokens_count_ptr + offsets,
+                              mask=mask)
         num_rejected = num_draft_tokens + 1 - valid_count
         num_rejected = tl.where(num_draft_tokens > 0, num_rejected, 0)
 
         # query_start_loc[req_idx + 1] is the start position of the next request,
         # which is one past the last token of this request.
-        q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + offsets + 1, mask=mask) - 1
+        q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + offsets + 1,
+                                 mask=mask) - 1
 
         index_to_sample = q_last_tok_idx - num_rejected
-        tl.store(token_indices_to_sample_ptr + offsets, index_to_sample, mask=mask)
+        tl.store(token_indices_to_sample_ptr + offsets,
+                 index_to_sample,
+                 mask=mask)

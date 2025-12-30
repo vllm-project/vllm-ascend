@@ -4,7 +4,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import triton
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
@@ -15,6 +14,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -854,27 +854,44 @@ class EagleProposer(VllmEagleProposer):
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        num_reqs = common_attn_metadata.num_reqs
-        device = valid_sampled_tokens_count.device
+        if HAS_TRITON:
+            num_reqs = common_attn_metadata.num_reqs
+            device = valid_sampled_tokens_count.device
 
-        token_indices_to_sample = torch.empty((num_reqs,),
-                                              dtype=torch.int32,
-                                              device=device)
+            token_indices_to_sample = torch.empty((num_reqs, ),
+                                                  dtype=torch.int32,
+                                                  device=device)
 
-        BLOCK_SIZE = 4
-        num_blocks_needed = triton.cdiv(num_reqs, BLOCK_SIZE)
-        num_vector_core = get_vectorcore_num()
-        grid_size = min(num_blocks_needed, num_vector_core)
-        grid = (grid_size, )
+            BLOCK_SIZE = 4
+            num_blocks_needed = triton.cdiv(num_reqs, BLOCK_SIZE)
+            num_vector_core = get_vectorcore_num()
+            grid_size = min(num_blocks_needed, num_vector_core)
+            grid = (grid_size, )
 
-        prepare_inputs_padded_kernel[grid](
-            spec_decode_metadata.cu_num_draft_tokens,
-            valid_sampled_tokens_count,
-            common_attn_metadata.query_start_loc,
-            token_indices_to_sample,
-            num_reqs,
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
+            prepare_inputs_padded_kernel[grid](
+                spec_decode_metadata.cu_num_draft_tokens,
+                valid_sampled_tokens_count,
+                common_attn_metadata.query_start_loc,
+                token_indices_to_sample,
+                num_reqs,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+        else:
+            num_draft_tokens_gpu = torch.cat([
+                spec_decode_metadata.cu_num_draft_tokens[0:1],
+                spec_decode_metadata.cu_num_draft_tokens[1:] -
+                spec_decode_metadata.cu_num_draft_tokens[:-1],
+            ])
+
+            num_rejected_tokens_gpu = torch.where(
+                num_draft_tokens_gpu > 0,
+                num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+                torch.zeros_like(num_draft_tokens_gpu),
+            )
+
+            query_start_loc = common_attn_metadata.query_start_loc[
+                1:1 + num_rejected_tokens_gpu.shape[0]]
+            token_indices_to_sample = query_start_loc - 1 - num_rejected_tokens_gpu
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
