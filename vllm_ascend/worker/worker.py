@@ -315,7 +315,7 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
-        additional_config = self.vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
         level = additional_config.get("fault_tolerance_level",
                                       0) if additional_config else 0
         if level != FaultToleranceLevel.OFF.value:
