@@ -116,6 +116,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
+        self.supports_eplb = True
 
         try:
             device_group = get_mc2_group().device_group

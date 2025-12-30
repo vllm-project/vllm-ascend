@@ -31,13 +31,12 @@ def set_ascend_forward_context(
         virtual_engine: int = 0,
         num_tokens: int = 0,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
-        with_prefill: bool = True,
         in_profile_run: bool = False,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
         model_instance: torch.nn.Module = None,
-        is_mtp_model=False):
+        is_draft_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -56,11 +55,10 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import \
             get_moe_comm_method
         moe_comm_type = select_moe_comm_method(num_tokens, vllm_config,
-                                               is_mtp_model)
+                                               is_draft_model)
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
-        forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
 
         forward_context.in_profile_run = in_profile_run
@@ -104,8 +102,7 @@ def set_ascend_forward_context(
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
-        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
-            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
             forward_context.layer_idx is not None and \
             num_tokens is not None and num_tokens < 500
         if prefetch_mlp_enabled:
@@ -113,7 +110,7 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
-        forward_context.is_mtp_model = is_mtp_model
+        forward_context.is_draft_model = is_draft_model
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
@@ -198,7 +195,7 @@ def get_mc2_mask():
 
 def select_moe_comm_method(num_tokens: int,
                            vllm_config: VllmConfig,
-                           is_mtp_model=False) -> Optional[MoECommType]:
+                           is_draft_model=False) -> Optional[MoECommType]:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -213,7 +210,7 @@ def select_moe_comm_method(num_tokens: int,
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_mtp_model (bool): Whether the model runs in MTP mode (disables fused MC2).
+        is_draft_model (bool): Whether the model runs in MTP mode (disables fused MC2).
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -229,7 +226,8 @@ def select_moe_comm_method(num_tokens: int,
         vllm_config.model_config.hf_config, 'moe_quantize',
         getattr(vllm_config.model_config.hf_config, 'quantize', None))
 
-    if not vllm_config.parallel_config.enable_expert_parallel:
+    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
+    ).world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
         if (num_tokens <= mc2_tokens_capacity
@@ -251,13 +249,13 @@ def select_moe_comm_method(num_tokens: int,
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and get_ep_group(
-                ).world_size <= 16 and (not is_mtp_model)
+                ).world_size <= 16 and (not is_draft_model)
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_prefill_enable = fused_mc2_enable and get_ep_group(
-                ).world_size <= 16 and (not is_mtp_model)
+                ).world_size <= 16 and (not is_draft_model)
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL

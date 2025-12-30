@@ -78,6 +78,9 @@ jobs:
           - name: multi-node-deepseek-dp
             config_file_path: DeepSeek-R1-W8A8-A2.yaml
             size: 2
+          - name: multi-node-qwen3-235b-dp
+            config_file_path: Qwen3-235B-A22B-A2.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
@@ -125,7 +128,7 @@ jobs:
           - os: linux-aarch64-a2-4
             model_list:
               - Qwen3-Next-80B-A3B-Instruct
-              - Qwen3-VL-30B-A3B-Instruct
+              - Qwen3-Omni-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
       vllm: v0.13.0

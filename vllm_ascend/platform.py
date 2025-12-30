@@ -18,6 +18,7 @@
 import gc
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
+from uuid import uuid4
 
 import torch
 from vllm.logger import logger
@@ -25,17 +26,18 @@ from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
+# todo: please remove it when support controls garbage collection during CUDA graph capture.
+os.environ["VLLM_ENABLE_CUDAGRAPH_GC"] = "1"
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
-                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               enable_sp, get_ascend_device_type, is_vl_model,
-                               update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes,
-                               update_default_aclgraph_sizes)
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+    enable_sp, get_ascend_device_type, is_vl_model, update_aclgraph_sizes,
+    update_cudagraph_capture_sizes, update_default_aclgraph_sizes,
+    check_kv_extra_config)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -152,6 +154,12 @@ class NPUPlatform(Platform):
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
+        if vllm_config.kv_transfer_config is not None:
+            check_kv_extra_config(vllm_config)
+            if not getattr(vllm_config.kv_transfer_config,
+                           "_engine_id_patched", False):
+                vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
+                vllm_config.kv_transfer_config._engine_id_patched = True
         from vllm.config import CompilationMode  # noqa: E402
 
         compilation_config = vllm_config.compilation_config
@@ -232,8 +240,18 @@ class NPUPlatform(Platform):
                 "using only ACL Graph mode")
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, \
                 "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
-            compilation_config.set_splitting_ops_for_v1()
+            compilation_config.set_splitting_ops_for_v1(
+                all2all_backend=vllm_config.parallel_config.all2all_backend,
+                data_parallel_size=vllm_config.parallel_config.
+                data_parallel_size,
+            )
             compilation_config.use_inductor = False
+            # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
+            # Since the process is created in the spawn mode, the value of the class attribute
+            # attention ops transmitted is still the one before modification, so it has not been modified.
+            # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
+            # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
+            # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.enable_npugraph_ex = False
