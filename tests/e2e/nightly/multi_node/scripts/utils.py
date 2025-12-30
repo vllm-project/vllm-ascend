@@ -3,9 +3,13 @@ import os
 import socket
 import time
 from contextlib import contextmanager
-from typing import Optional
+from typing import List, Optional
 
 import psutil
+
+DISAGGEGATED_PREFILL_PORT = 5333
+CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/config/"
+DEFAULT_SERVER_PORT = 8080
 
 
 @contextmanager
@@ -41,13 +45,29 @@ def dns_resolver(retries: int = 240, base_delay: float = 0.5):
     return resolve
 
 
-def get_cluster_dns_list(word_size: int) -> list[str]:
+def get_cluster_dns_list(world_size: int) -> List[str]:
+    if world_size < 1:
+        raise ValueError(f"world_size must be >= 1, got {world_size}")
+
     leader_dns = os.getenv("LWS_LEADER_ADDRESS")
     if not leader_dns:
-        raise RuntimeError("LWS_LEADER_ADDRESS is not set")
+        raise RuntimeError(
+            "environment variable LWS_LEADER_ADDRESS is not set")
 
-    workers = [f"vllm-0-{i}.vllm.vllm-project" for i in range(1, word_size)]
-    return [leader_dns] + workers
+    # Expected format:
+    # <leader-name>.<group-name>.<namespace>
+    parts = leader_dns.split(".")
+    if len(parts) < 3:
+        raise ValueError(f"invalid leader DNS format: {leader_dns}")
+
+    leader_name, group_name, namespace = parts[0], parts[1], parts[2]
+
+    worker_dns_list = [
+        f"{leader_name}-{idx}.{group_name}.{namespace}"
+        for idx in range(1, world_size)
+    ]
+
+    return [leader_dns, *worker_dns_list]
 
 
 def get_cluster_ips(word_size: int = 2) -> list[str]:
@@ -92,7 +112,7 @@ def get_cur_ip(retries: int = 20, base_delay: float = 0.5):
                 delay = min(delay * 1.5, 5)
 
 
-def get_net_interface(ip: Optional[str] = None) -> Optional[str]:
+def get_net_interface(ip: Optional[str] = None) -> str:
     """
     Returns specified IP's inetwork interface.
     If no IP is provided, uses the first from hostname -I.
@@ -104,7 +124,7 @@ def get_net_interface(ip: Optional[str] = None) -> Optional[str]:
         for addr in addrs:
             if addr.family == socket.AF_INET and addr.address == ip:
                 return iface
-    return None
+    raise RuntimeError(f"No network interface found for IP {ip}")
 
 
 def get_all_ipv4():
