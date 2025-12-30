@@ -33,6 +33,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import (align_memory,
                                            get_transfer_timeout_value,
@@ -151,6 +152,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         first_kv_cache: torch.Tensor,
         k_buffer: torch.Tensor,
         v_buffer: torch.Tensor,
+        resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
@@ -163,7 +165,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.use_mla = use_mla
         self.block_len = block_len
         self._decode_tp_size = decode_tp_size
-        self.model_stream = torch_npu.npu.current_stream()
+        self.resharding_stream = resharding_stream
         self.current_layer = -1
 
         self.send_queue = queue.Queue[SendTask]()
@@ -270,12 +272,13 @@ class KVCacheSendingLayerThread(threading.Thread):
 
     def _transfer_kv_cache(self, send_task: SendTask):
         if self.pd_head_ratio > 1:
-            key = send_task.k_cache
-            value = send_task.v_cache
-            key = key.view(-1, key.shape[-1])
-            value = value.view(-1, key.shape[-1])
-            self.k_buffer[:key.shape[0]].copy_(key)  # [:4, 128] ->
-            self.v_buffer[:value.shape[0]].copy_(value)
+            with npu_stream_switch(self.resharding_stream):
+                key = send_task.k_cache
+                value = send_task.v_cache
+                key = key.view(-1, key.shape[-1])
+                value = value.view(-1, key.shape[-1])
+                self.k_buffer[:key.shape[0]].copy_(key)  # [:4, 128] ->
+                self.v_buffer[:value.shape[0]].copy_(value)
 
         # Merge transmission tasks of the same session
         session_meta = {}
@@ -304,7 +307,7 @@ class KVCacheSendingLayerThread(threading.Thread):
             """
             send_task.wait_event.synchronize()
         elif self.pd_head_ratio > 1:
-            self.model_stream.synchronize()
+            self.resharding_stream.synchronize()
 
         for session_id, transfer_meta in session_meta.items():
             if len(transfer_meta.src) > 0:
@@ -846,6 +849,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.pd_tp_ratio = get_ascend_config().pd_tp_ratio
         self.pd_head_ratio = get_ascend_config().pd_head_ratio
         self.num_head_replica = get_ascend_config().num_head_replica
+        self.resharding_stream = None
+        if self.pd_head_ratio > 1:
+            self.resharding_stream = torch.npu.Stream()
 
         self.remote_poller = zmq.Poller()  # type: ignore
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
@@ -995,6 +1001,7 @@ class MooncakeLayerwiseConnectorWorker:
                 first_kv_cache=first_kv_cache,
                 k_buffer=self.k_buffer,
                 v_buffer=self.v_buffer,
+                resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal)
             self.kv_send_layer_thread.start()
             ready_event.wait()
@@ -1043,27 +1050,30 @@ class MooncakeLayerwiseConnectorWorker:
                 reshape_cache_event = attn_metadata.reshape_cache_event
 
             if self.pd_head_ratio != 1:
-                rearrange_block_ids = sorted({
-                    block_id
-                    for request in connector_metadata.requests.values()
-                    for block_id in request.local_block_ids
-                })
+                assert self.resharding_stream is not None
+                with npu_stream_switch(self.resharding_stream):
+                    reshape_cache_event.wait()
+                    rearrange_block_ids = sorted({
+                        block_id
+                        for request in connector_metadata.requests.values()
+                        for block_id in request.local_block_ids
+                    })
 
-                keys = kv_layer[0][rearrange_block_ids].clone()
-                values = kv_layer[1][rearrange_block_ids].clone()
-                # sort kv caches for each block
-                keys = keys.view(keys.size(0), self.pd_head_ratio, -1,
-                                 *keys.shape[2:]).transpose(0,
-                                                            1).reshape_as(keys)
-                values = values.view(values.size(0), self.pd_head_ratio, -1,
-                                     *values.shape[2:]).transpose(
-                                         0, 1).reshape_as(values)
-                # reshard kv cache
-                keys = keys.reshape(-1, *kv_layer[0].shape[2:])
-                values = values.reshape(-1, *kv_layer[1].shape[2:])
-                (keys,
-                 values) = kv_alltoall_and_rearrange(self.pd_head_ratio, keys,
-                                                     values)
+                    keys = kv_layer[0][rearrange_block_ids].clone()
+                    values = kv_layer[1][rearrange_block_ids].clone()
+                    # sort kv caches for each block
+                    keys = keys.view(keys.size(0), self.pd_head_ratio, -1,
+                                    *keys.shape[2:]).transpose(0,
+                                                                1).reshape_as(keys)
+                    values = values.view(values.size(0), self.pd_head_ratio, -1,
+                                        *values.shape[2:]).transpose(
+                                            0, 1).reshape_as(values)
+                    # reshard kv cache
+                    keys = keys.reshape(-1, *kv_layer[0].shape[2:])
+                    values = values.reshape(-1, *kv_layer[1].shape[2:])
+                    (keys,
+                    values) = kv_alltoall_and_rearrange(self.pd_head_ratio, keys,
+                                                        values)
             else:
                 keys = None
                 values = None
