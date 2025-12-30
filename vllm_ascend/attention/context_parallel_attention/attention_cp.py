@@ -33,14 +33,12 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendMetadata)
+from vllm_ascend.attention.context_parallel_attention.common_cp import (
+    AscendMetadataForDecode, AscendMetadataForPrefill, AscendPCPMetadata,
+    _npu_attention_update, _process_attn_out_lse)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)
-from vllm_ascend.attention.context_parallel_attention.common_cp import (AscendMetadataForDecode,
-                                                                        AscendMetadataForPrefill,
-                                                                        AscendPCPMetadata,
-                                                                        _process_attn_out_lse,
-                                                                        _npu_attention_update)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.utils import weak_ref_tensors
@@ -206,7 +204,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
                 q_full_idx=common_long_seq_metadata.q_full_idx,
                 pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask,
-                pcp_allgather_restore_idx = common_long_seq_metadata.pcp_allgather_restore_idx)
+                pcp_allgather_restore_idx=common_long_seq_metadata.
+                pcp_allgather_restore_idx)
 
             prefill_metadata = AscendMetadataForPrefill(
                 pcp_metadata=pcp_metadata,
@@ -428,7 +427,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])
         return attn_out, attn_lse
 
-
     def _forward_decode_pcp_dcp(self, query: torch.Tensor,
                                 attn_metadata: AscendMetadata) -> torch.Tensor:
         assert self.key_cache is not None
@@ -516,8 +514,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(
                 query, k_nope, value, **common_kwargs)
-        attn_out_lse = _process_attn_out_lse(attn_out, attn_lse,
-                                             attn_metadata.decode_meta.batch_seq_mask)
+        attn_out_lse = _process_attn_out_lse(
+            attn_out, attn_lse, attn_metadata.decode_meta.batch_seq_mask)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
 

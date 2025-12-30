@@ -14,20 +14,17 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 # isort: off
-from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
-                                          AscendMLAImpl, AscendMLAMetadata,
-                                          AscendMLAMetadataBuilder,
-                                          AscendMLAPrefillMetadata,
-                                          DecodeMLAPreprocessResult,
-                                          PrefillMLAPreprocessResult,
-                                          BUILD_METADATA_STEP_PREFILL)
+from vllm_ascend.attention.mla_v1 import (
+    AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata,
+    AscendMLAMetadataBuilder, AscendMLAPrefillMetadata,
+    DecodeMLAPreprocessResult, PrefillMLAPreprocessResult,
+    BUILD_METADATA_STEP_PREFILL)
 #isort: on
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
-from vllm_ascend.attention.context_parallel_attention.common_cp import (AscendPCPMetadata,
-                                                                        CPChunkedContextMetadata,
-                                                                        _process_attn_out_lse,
-                                                                        _npu_attention_update)
+from vllm_ascend.attention.context_parallel_attention.common_cp import (
+    AscendPCPMetadata, CPChunkedContextMetadata, _process_attn_out_lse,
+    _npu_attention_update)
 from vllm_ascend.compilation.acl_graph import (get_draft_graph_params,
                                                get_graph_params,
                                                update_graph_params_workspaces)
@@ -184,9 +181,11 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         )
         return chunked_metadata
 
-    def get_block_table_size(self, common_attn_metadata: AscendCommonAttentionMetadata,
-        build_metadata_step: int):
-        self.num_decodes_flatten = self.query_lens[:self.num_decodes].sum().item()
+    def get_block_table_size(
+            self, common_attn_metadata: AscendCommonAttentionMetadata,
+            build_metadata_step: int):
+        self.num_decodes_flatten = self.query_lens[:self.num_decodes].sum(
+        ).item()
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # For pcp + spec decode, we flatten seq_lens and block_table
             # to avoid irregular spec_attn_mask shape
@@ -619,7 +618,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         # Update out&lse
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse,
-                                                  decode_meta.batch_seq_mask)
+                                             decode_meta.batch_seq_mask)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 

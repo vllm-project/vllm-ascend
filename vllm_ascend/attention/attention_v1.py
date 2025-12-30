@@ -34,12 +34,11 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.context_parallel_attention.common_cp import (
+    AscendMetadataForDecode, AscendMetadataForPrefill)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         enable_cp,
-                                         split_decodes_and_prefills,
+                                         enable_cp, split_decodes_and_prefills,
                                          using_paged_attention)
-from vllm_ascend.attention.context_parallel_attention.common_cp import (AscendMetadataForDecode,
-                                                                        AscendMetadataForPrefill)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
