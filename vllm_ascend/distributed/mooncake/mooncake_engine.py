@@ -361,7 +361,6 @@ class MooncakeEngine:
                 request.req_id,
             )
 
-            request.current_event = current_event
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 req_id,
                 token_ids,
@@ -448,7 +447,6 @@ class MooncakeEngine:
         req_id: str,
         tokens: torch.Tensor,
         block_ids: list[int],
-        current_event: Optional[torch.npu.Event],
         mask: Optional[torch.Tensor] = None,
     ) -> Generator[None, None, None]:
         """
@@ -492,7 +490,7 @@ class MooncakeEngine:
             for layer_id, keys_multi_chunk in enumerate(keys):
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
-                                                   layer_id, current_event)
+                                                   layer_id)
                 self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 yield

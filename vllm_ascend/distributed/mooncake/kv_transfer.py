@@ -248,14 +248,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def _handle_request(  # type: ignore[override]
             self, req_meta: LasyerMultiBlockReqMeta):
-        current_event = req_meta.current_event
         for index, key in enumerate(req_meta.keys):
             addr, size = self.prepare_value_layer(req_meta.starts[index],
                                                   req_meta.ends[index],
                                                   req_meta.block_ids,
                                                   req_meta.layer_id)
-            if current_event is not None:
-                current_event.synchronize()
             self.m_store.put(key, addr, size)
         if req_meta.layer_id == self.final_layer_id:
             self.set_finished_request(req_meta.req_id)
