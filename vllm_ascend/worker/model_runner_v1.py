@@ -559,7 +559,7 @@ class NPUModelRunner(GPUModelRunner):
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
         # for pcp, prefill mtp should use origin scheduleroutput ,
-        if self.speculative_config and self.pcp_size > 1:
+        if self.speculative_config and self.pcp_size * self.dcp_size > 1:
             self.pcp_manager.generate_pcp_mtp_input(
                 num_reqs, total_num_scheduled_tokens,
                 scheduler_output.num_scheduled_tokens, with_prefill,
