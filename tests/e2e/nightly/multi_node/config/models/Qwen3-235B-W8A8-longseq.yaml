@@ -72,7 +72,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --compilation_config '{"cudagraph_capture_sizes":[1,2,4,8,16,32], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+        --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
