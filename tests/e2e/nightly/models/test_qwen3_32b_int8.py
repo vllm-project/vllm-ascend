@@ -48,8 +48,13 @@ batch_size_dict = {
     "linux-aarch64-a2-4": 72,
     "linux-aarch64-a3-4": 76,
 }
+perf_baseline_dict = {
+    "linux-aarch64-a2-4": 1163.6003,
+    "linux-aarch64-a3-4": 1267.4346,
+}
 VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
+perf_baseline = perf_baseline_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{
     "case_type": "accuracy",
@@ -68,7 +73,7 @@ aisbench_cases = [{
     "num_prompts": 4 * performance_batch_size,
     "max_out_len": 1500,
     "batch_size": performance_batch_size,
-    "baseline": 1,
+    "baseline": perf_baseline,
     "threshold": 0.97
 }]
 
