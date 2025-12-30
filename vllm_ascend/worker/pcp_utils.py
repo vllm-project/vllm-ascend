@@ -88,7 +88,7 @@ class PCPManager:
             range(self.max_num_tokens * self.pcp_world_size *
                   self.dcp_world_size + self.pcp_world_size *
                   self.dcp_world_size * self.max_num_reqs))
-        if self.speculative_config and self.pcp_world_size > 1:
+        if self.speculative_config and self.pcp_world_size * self.dcp_world_size > 1:
             self.input_ids_pcp_full = CpuGpuBuffer(self.max_num_tokens,
                                                    dtype=torch.int32,
                                                    device=device,
