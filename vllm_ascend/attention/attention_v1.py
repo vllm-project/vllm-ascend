@@ -21,6 +21,7 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.registry import (AttentionBackendEnum,
@@ -44,6 +45,9 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
 
+# default max value of sliding window size
+SWA_INT_MAX = 2147483647
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
@@ -51,7 +55,10 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
@@ -170,6 +177,9 @@ class AscendMetadata:
     # runner_type in model_config.
     model_runner_type: str = ""
 
+    # sliding window attention mask
+    swa_mask: Optional[torch.Tensor] = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -241,6 +251,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
+        swa_mask = common_attn_metadata.swa_mask
         attn_state = common_attn_metadata.attn_state
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
@@ -258,6 +269,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
+            swa_mask=swa_mask,
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
@@ -534,7 +546,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.capturing:
+        # we inherit ForwardContext in model runner v2, when enable model
+        # runner v2, there is not capturing attribute in forward_context,
+        # just use getattr to avoid attribute error.
+        if getattr(forward_context, "capturing", False):
             attn_output, num_tokens = self.full_graph_fia(
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
@@ -556,7 +571,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.attn_mask,
+            pre_tokens=self.sliding_window
+            if self.sliding_window else SWA_INT_MAX,
+            next_tokens=0 if self.sliding_window else SWA_INT_MAX,
+            atten_mask=attn_metadata.swa_mask
+            if self.sliding_window else attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
@@ -565,7 +584,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=4 if self.sliding_window else 3,
         )
 
         attn_output = attn_output.view(num_tokens, self.num_heads,
