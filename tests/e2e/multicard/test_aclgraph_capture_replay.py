@@ -107,6 +107,7 @@ def _run_worker_process(
             quantization="ascend" if "W8A8" in model_path else None,
             enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
+            async_scheduling=False, # vllm enables async scheduling by default, remove this when vllm >= 0.14.0
         )
 
         # Expose model config to the main test process
