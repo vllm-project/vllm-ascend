@@ -246,7 +246,8 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
 
     def test_add_request(self):
         test_req = {
@@ -300,7 +301,8 @@ class TestSocketManagement(unittest.TestCase):
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.thread.remote_sockets = defaultdict(deque)
         self.thread.remote_poller = MagicMock()
 
@@ -358,7 +360,8 @@ class TestCoreFunctionality(unittest.TestCase):
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.thread.request_queue = self.mock_queue
         self.test_req = {
             "request_id": "req1",
@@ -444,7 +447,8 @@ class TestMetadataHandling(unittest.TestCase):
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.test_metadata = MooncakeAgentMetadata(
             engine_id="remote_engine",
             te_rpc_port=9090,
@@ -509,7 +513,8 @@ class TestMainThreadLoop(unittest.TestCase):
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.thread.request_queue = queue.Queue()
 
     @patch.object(KVCacheRecvingThread, '_handle_request')
@@ -546,6 +551,7 @@ class MockVllmConfig:
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
+        self.speculative_config = MagicMock()
         self.model_config.use_mla = True
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
