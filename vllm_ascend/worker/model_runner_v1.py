@@ -18,7 +18,7 @@
 #
 
 import math
-import time
+import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -27,16 +27,12 @@ from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union
 
 import numpy as np
-import regex as re
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from tqdm import tqdm  # type: ignore
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.attention.selector import get_attn_backend
-from vllm.compilation.counter import compilation_counter
-from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed import (get_tensor_model_parallel_world_size,
@@ -46,8 +42,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
                                              get_pcp_group, get_pp_group,
-                                             get_tp_group,
-                                             is_global_first_rank)
+                                             get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -58,8 +53,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
@@ -1972,13 +1966,18 @@ class NPUModelRunner(GPUModelRunner):
         self,
         num_tokens: int,
         with_prefill: bool = False,
-        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+        cudagraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
         is_profile: bool = False,
+        allow_microbatching: bool = True,
+        skip_eplb: bool = False,
+        remove_lora: bool = True,
+        activate_lora: bool = False,
+        is_graph_capturing: bool = False,
     ) -> torch.Tensor:
         # only support eager mode and piecewise graph now
-        assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
+        assert cudagraph_runtime_mode is None or cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
         # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
@@ -2054,15 +2053,15 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
 
         # filter out the valid batch descriptor
-        if aclgraph_runtime_mode is not None:
+        if cudagraph_runtime_mode is not None:
             # we allow forcing NONE when the dispatcher disagrees to support
             # warm ups for aclgraph capture
-            if aclgraph_runtime_mode != CUDAGraphMode.NONE and aclgraph_runtime_mode != _ag_mode:
+            if cudagraph_runtime_mode != CUDAGraphMode.NONE and cudagraph_runtime_mode != _ag_mode:
                 raise ValueError(
                     f"Aclgraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
+                    f"Expected {_ag_mode}, but got {cudagraph_runtime_mode}.")
         else:
-            aclgraph_runtime_mode = _ag_mode
+            cudagraph_runtime_mode = _ag_mode
 
         # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
         # and not supported in ASCEND now. We could remove it in the future.
@@ -2071,7 +2070,7 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs=num_reqs_padded,
             num_tokens=num_tokens_padded,
             max_query_len=max_query_len,
-            aclgraph_runtime_mode=aclgraph_runtime_mode,
+            aclgraph_runtime_mode=cudagraph_runtime_mode,
             force_attention=force_attention,
             num_scheduled_tokens=num_scheduled_tokens,
         )
@@ -2147,7 +2146,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_across_dp=num_tokens_across_dp,
                     in_profile_run=is_profile,
                     num_actual_tokens=0,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     model_instance=self.model):
                 hidden_states = self._generate_dummy_run_hidden_states(
@@ -2161,7 +2160,7 @@ class NPUModelRunner(GPUModelRunner):
                     with_prefill=with_prefill,
                     num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
@@ -2677,7 +2676,8 @@ class NPUModelRunner(GPUModelRunner):
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
-        ) -> dict[AttentionGroupKey, list[str]]:
+        ) -> tuple[dict[AttentionGroupKey, list[str]],
+                   set[type[AttentionBackend]]]:
             layers = get_layers_from_vllm_config(
                 self.vllm_config, AttentionLayerBase,
                 kv_cache_group_spec.layer_names)
@@ -2699,10 +2699,14 @@ class NPUModelRunner(GPUModelRunner):
                 attn_backends[key] = AttentionGroupKey(attn_backend,
                                                        layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
-            return {
-                attn_backends[k]: v
-                for k, v in attn_backend_layers.items()
-            }
+            return (
+                {
+                    attn_backends[k]: v
+                    for k, v in attn_backend_layers.items()
+                },
+                set(group_key.attn_backend
+                    for group_key in attn_backends.values()),
+            )
 
         def create_attn_groups(attn_backends_map: dict[AttentionBackend,
                                                        list[str]],
@@ -2723,11 +2727,21 @@ class NPUModelRunner(GPUModelRunner):
                 attn_groups.append(attn_group)
             return attn_groups
 
+        attention_backend_maps = []
+        attention_backend_list = []
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
+            attention_backend_maps.append(attn_backends[0])
+            attention_backend_list.append(attn_backends[1])
+
+        self._check_and_update_cudagraph_mode(attention_backend_list,
+                                              kv_cache_config.kv_cache_groups)
+
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             attn_backends = get_attn_backends_for_group(  # type: ignore
                 kv_cache_group_spec)
-            self.attn_groups.append(create_attn_groups(attn_backends, i))
+            self.attn_groups.append(create_attn_groups(attn_backends[0], i))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
@@ -2855,214 +2869,26 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_cache_spec
 
-    def initialize_aclgraph_capture(self) -> None:
-        min_ag_support = AttentionCGSupport.ALWAYS
-        min_ag_builder_name = None
-
-        for attn_group in self._attn_group_iterator():
-            builder = attn_group.get_metadata_builder()
-            graph_support = None
-            if hasattr(builder, 'aclgraph_support'):
-                graph_support = builder.aclgraph_support.value
-                builder_aclgraph = builder.aclgraph_support
-            else:
-                graph_support = builder._cudagraph_support.value
-                builder_aclgraph = builder._cudagraph_support
-            if graph_support < min_ag_support.value:
-                min_ag_support = builder_aclgraph
-                min_ag_builder_name = builder.__class__.__name__
-
-        # This is an imitation of compilation_config.splitting_ops_contain_attention()
-        splitting_ops_contain_attention = (
-            self.compilation_config.splitting_ops is not None
-            and all(op in self.compilation_config.splitting_ops for op in [
-                "vllm.mla_forward",
-            ]))
-
-        # Flexible resolve the aclgraph mode
-        aclgraph_mode = self.compilation_config.cudagraph_mode
-        # check graph for mixed batch is supported
-        if aclgraph_mode.mixed_mode() == CUDAGraphMode.FULL \
-            and min_ag_support != AttentionCGSupport.ALWAYS:
-            msg = (f"ACLGraphMode.{aclgraph_mode.name} is not supported "
-                   f"with {min_ag_builder_name} backend (support: "
-                   f"{min_ag_support})")
-            if min_ag_support == AttentionCGSupport.NEVER:
-                # if not supported any full graphs, just raise it.
-                msg += "; please try cudagraph_mode=PIECEWISE, and "\
-                    "make sure compilation level is piecewise"
-                raise ValueError(msg)
-
-            # attempt to resolve the full graph related mode
-            if splitting_ops_contain_attention:
-                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
-                aclgraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_AND_PIECEWISE)
-            else:
-                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
-                aclgraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_DECODE_ONLY)
-            logger.warning(msg)
-
-        # double check that we can support full graph if they are requested
-        # even after automatic downgrades
-        if aclgraph_mode.has_full_cudagraphs() \
-            and min_ag_support == AttentionCGSupport.NEVER:
-            raise ValueError(f"CUDAGraphMode.{aclgraph_mode.name} is not "
-                             f"supported with {min_ag_builder_name} backend ("
-                             f"support:{min_ag_support}) "
-                             "; please try cudagraph_mode=PIECEWISE, "
-                             "and make sure compilation level is piecewise")
-
-        if (aclgraph_mode.decode_mode() == CUDAGraphMode.FULL
-                and aclgraph_mode.separate_routine()
-                and self.uniform_decode_query_len > 1):
-            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
-                self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size)
-            capture_sizes = self.compilation_config.cudagraph_capture_sizes
-            self.cudagraph_batch_sizes = (capture_sizes
-                                          if capture_sizes is not None else [])
+    def _check_and_update_cudagraph_mode(
+        self,
+        attention_backends: list[set[type[AttentionBackend]]],
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> None:
+        super()._check_and_update_cudagraph_mode(attention_backends,
+                                                 kv_cache_groups)
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
-        set_graph_params(self.cudagraph_batch_sizes)
-        if self.speculative_config:
-            set_draft_graph_params(self.cudagraph_batch_sizes)
-
-        self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            self.compilation_config.cudagraph_mode,
-            self.uniform_decode_query_len)
-
-    def _capture_aclgraphs(self, compilation_cases: list[int],
-                           aclgraph_runtime_mode: CUDAGraphMode,
-                           uniform_decode: bool):
-        assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
-            aclgraph_runtime_mode in [CUDAGraphMode.FULL,
-                                      CUDAGraphMode.PIECEWISE]
-
-        # Only rank 0 should print progress bar during capture
-        if is_global_first_rank():
-            logger.info(
-                "Starting to capture ACL graphs for cases: %s, "
-                "mode: %s, uniform_decode: %s", compilation_cases,
-                aclgraph_runtime_mode.name, uniform_decode)
-            compilation_cases = tqdm(
-                compilation_cases,
-                disable=not self.load_config.use_tqdm_on_load,
-                desc="Capturing ACL graphs ({}, {})".format(
-                    "decode" if uniform_decode else "mixed prefill-decode",
-                    aclgraph_runtime_mode.name))
-
-        force_attention = (aclgraph_runtime_mode == CUDAGraphMode.FULL)
-        # When the kv cache spec is empty, PiecewiseBackend is not initialized, and
-        # compilation_case=1 will cause the dynamic shape position to be incorrectly derived.
-        if not self.get_kv_cache_spec():
-            self._dummy_run(2,
-                            aclgraph_runtime_mode=CUDAGraphMode.NONE,
-                            force_attention=force_attention,
-                            uniform_decode=uniform_decode)
-        # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens in compilation_cases:
-            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
-                # if we want to warm up attention or not. This is
-                # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
-                self._dummy_run(num_tokens,
-                                aclgraph_runtime_mode=CUDAGraphMode.NONE,
-                                force_attention=force_attention,
-                                uniform_decode=uniform_decode)
-            self._dummy_run(num_tokens,
-                            aclgraph_runtime_mode=aclgraph_runtime_mode,
-                            force_attention=force_attention,
-                            uniform_decode=uniform_decode)
-
-    def _capture_model(self):
-        if not self.use_aclgraph:
-            logger.warning(
-                "Skipping ACL graph capture. To turn on ACL graph capture, "
-                "ensure `aclraph_mode` was not manually set to `NONE`")
-            return
-        else:
-            self.initialize_aclgraph_capture()
-
-        set_cudagraph_capturing_enabled(True)
-        # Trigger ACL graph capture for specific shapes.
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
-        with graph_capture(device=self.device):
-            aclgraph_mode = self.compilation_config.cudagraph_mode
-            if aclgraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-                aclgraph_runtime_mode = aclgraph_mode.mixed_mode()
-
-                # make sure we capture the largest batch size first
-                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
-
-                try:
-                    self._capture_aclgraphs(
-                        compilation_cases,
-                        aclgraph_runtime_mode=aclgraph_runtime_mode,
-                        uniform_decode=False)
-                except Exception as e:
-                    error_msg = str(e)
-                    error_code = '0x7020023'
-                    pattern = r'retCode=([^,\s\.]+)'
-                    match = re.search(pattern, error_msg)
-                    if match:
-                        retCode = match.group(1)
-                    # Determine whether the error message is caused by stream capture failure.
-                    if match and retCode == error_code:
-                        logger.error(
-                            f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
-                            "ACLgraph has insufficient available streams to capture the configured number of sizes. "
-                            "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
-                            "Recommended solutions:\n"
-                            "1. Manually configure the compilation_config parameter "
-                            "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
-                            "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
-                            f"{str(e)}")
-                    raise
-
-            if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                aclgraph_mode.separate_routine():
-                max_num_tokens = self.scheduler_config.max_num_seqs * \
-                        self.uniform_decode_query_len
-                decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes if
-                    x <= max_num_tokens and x >= self.uniform_decode_query_len
-                ]
-                compilation_cases_decode = list(
-                    reversed(decode_cudagraph_batch_sizes))
-                self._capture_aclgraphs(
-                    compilation_cases=compilation_cases_decode,
-                    aclgraph_runtime_mode=CUDAGraphMode.FULL,
-                    uniform_decode=True)
-
-        # Disable aclgraph capturing globally, so any unexpected aclgraph
-        # capturing will be detected and raise an error after here.
-        # Note: We don't put it into graph_capture context manager because
-        # we may doing lazy capturing in future that still allows capturing
-        # after here.
-        set_cudagraph_capturing_enabled(False)
+        if self.use_aclgraph:
+            set_graph_params(self.cudagraph_batch_sizes)
+            if self.speculative_config:
+                set_draft_graph_params(self.cudagraph_batch_sizes)
 
     def capture_model(self) -> None:
-
-        compilation_counter.num_gpu_runner_capture_triggers += 1
-
-        start_time = time.perf_counter()
-        start_free_npu_memory = torch.npu.mem_get_info()[0]
-
-        self._capture_model()
-
-        end_time = time.perf_counter()
-        end_free_npu_memory = torch.npu.mem_get_info()[0]
-        elapsed_time = end_time - start_time
-        npu_graph_size = start_free_npu_memory - end_free_npu_memory
-        # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, npu_graph_size / (1 << 30))
+        parent_module_name = self.__class__.__base__.__module__
+        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(
+                parent_module_name):
+            super().capture_model()
 
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
@@ -3473,6 +3299,8 @@ def _torch_cuda_wrapper():
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.stream = torch.npu.stream
+        torch.cuda.synchronize = torch.npu.synchronize
+        torch.cuda.mem_get_info = torch.npu.mem_get_info
         yield
     except Exception:
         torch.cuda.Event = _EventPlaceholder
@@ -3480,6 +3308,8 @@ def _torch_cuda_wrapper():
         torch.cuda.default_stream = _StreamPlaceholder
         torch.cuda.current_stream = _StreamPlaceholder
         torch.cuda.stream = _StreamPlaceholder
+        torch.cuda.synchronize = _StreamPlaceholder
+        torch.cuda.mem_get_info = _StreamPlaceholder
     finally:
         # if anything goes wrong, just patch it with a placeholder
         torch.cuda.Event = _EventPlaceholder
@@ -3487,3 +3317,16 @@ def _torch_cuda_wrapper():
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.stream = torch.npu.stream
+        torch.cuda.synchronize = torch.npu.synchronize
+        torch.cuda.mem_get_info = torch.npu.mem_get_info
+
+
+# TODO: This method will be removed subsequently and implemented in platform.
+@contextmanager
+def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    try:
+        target_module = sys.modules[target_module_name]
+        setattr(target_module, "graph_capture", graph_capture)
+        yield
+    finally:
+        setattr(target_module, "graph_capture", graph_capture)
