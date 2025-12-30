@@ -194,8 +194,10 @@ class AscendW8A8DynamicFusedMoEMethod:
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-        # assert router_logits.shape[
-        #    1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
+        n_shared_experts = layer.n_shared_experts
+        valid_global_expert_num = global_num_experts - global_redundant_expert_num - n_shared_experts
+        assert router_logits.shape[1] == valid_global_expert_num, \
+            "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -207,8 +209,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            mix_placement=getattr(layer.ascend_config, "mix_placement", False),
-            num_logical_experts=256,
+            mix_placement=layer.mix_placement,
+            num_logical_experts=router_logits.shape[1],
+            num_shared_experts=n_shared_experts,
             global_num_experts=global_num_experts)
 
         # this is a naive implementation for experts load balance so as

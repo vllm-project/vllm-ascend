@@ -35,6 +35,7 @@ def select_experts(hidden_states: torch.Tensor,
                    indices_type: Optional[torch.dtype] = None,
                    mix_placement: Optional[bool] = False,
                    num_logical_experts: int = -1,
+                   num_shared_experts: int = 0,
                    global_num_experts: int = -1):
     """
     Fused experts with select experts.
@@ -98,13 +99,17 @@ def select_experts(hidden_states: torch.Tensor,
             global_num_experts=global_num_experts,
         )
     if mix_placement:
-        pad_shared_expert_ids = torch.full((topk_ids.shape[0], 1),
-                                           num_logical_experts,
-                                           dtype=topk_ids.dtype,
-                                           device=topk_ids.device)
+        shared_expert_routing_factor = 0.4
+        batch_size = topk_ids.shape[0]
+        pad_shared_expert_ids = torch.arange(
+                                        num_logical_experts,
+                                        num_logical_experts + num_shared_experts,
+                                        dtype=topk_ids.dtype,
+                                        device=topk_ids.device
+                                        ).repeat(batch_size,1)
 
-        pad_shared_expert_weights = torch.full((topk_weights.shape[0], 1),
-                                               0.4,
+        pad_shared_expert_weights = torch.full((topk_weights.shape[0], num_shared_experts),
+                                               shared_expert_routing_factor,
                                                dtype=topk_weights.dtype,
                                                device=topk_weights.device)
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)

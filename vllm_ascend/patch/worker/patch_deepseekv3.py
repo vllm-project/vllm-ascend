@@ -129,6 +129,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            n_shared_experts=config.n_shared_experts if self.mix_placement else 0,
         )
 
         
@@ -146,7 +147,6 @@ class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
         fused_moe_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        ascend_config = get_ascend_config()
         shared_output, final_hidden_states = fused_moe_out
         if self.shared_experts is None:
             assert shared_output is None
