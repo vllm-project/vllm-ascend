@@ -28,10 +28,10 @@ on:
   pull_request: 
     branches:
       - 'main'
-    # types: [ labeled ]
-  push: 
-    branches:
-      - 'main'
+    types: [ labeled ]
+  # push: 
+  #   branches:
+  #     - 'main'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -47,7 +47,7 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
