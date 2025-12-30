@@ -102,6 +102,18 @@ class AscendQuantConfig(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
+        
+        if model_type in ["minimax", "minimax_m2"]:
+            prefix = prefix.replace("mlp", "block_sparse_moe")
+
+        #To adapt to minimax, modify the prefix of the model layer name
+        parts = prefix.split('.')
+        if "experts" in parts and len(parts) > 2:
+            exp_idx = parts.index("experts")
+            if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
+                parts = parts[:exp_idx + 1]
+                prefix = ".".join(parts)
+        
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
@@ -247,6 +259,15 @@ packed_modules_model_mapping = {
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     },
+    "minimax":{
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "experts":
+        ["experts.0.w1", "experts.0.w2", "experts.0.w3"]
+    }
 }
 
 
