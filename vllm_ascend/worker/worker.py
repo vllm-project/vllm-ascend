@@ -27,7 +27,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
@@ -231,10 +232,13 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
+        # Initialize workspace manager
+        num_ubatches = 1
+        init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
-            logger.error(
-                "npu model runner v2 is in developing, it can't work well for now."
+            logger.warning(
+                "npu model runner v2 is in developing, some features doesn't work for now."
             )
             from vllm_ascend.worker.v2.model_runner import \
                 NPUModelRunner as NPUModelRunnerV2
@@ -351,7 +355,8 @@ class NPUWorker(WorkerBase):
         else:
             from contextlib import nullcontext
             context = nullcontext()  # type: ignore
-        with context:
+
+        with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:

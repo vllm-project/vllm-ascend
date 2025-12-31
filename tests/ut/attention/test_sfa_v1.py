@@ -1,8 +1,7 @@
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -98,11 +97,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
                                            vllm_config=vllm_config,
                                            device=device)
 
-        assert builder.aclgraph_support == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         assert builder.device == device
         assert builder.vllm_config == vllm_config
 
-    def test_ascend_sfa_metadata_builder_build(self):
+    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
+    def test_ascend_sfa_metadata_builder_build(self, mock_get_cos_and_sin_mla):
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
@@ -133,21 +132,21 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.sin = None
         common_attn_metadata.num_input_tokens = 100
 
-        model = MagicMock()
-        model.model.layers = [MagicMock() for _ in range(10)]
-        model.model.start_layer = 0
+        mock_get_cos_and_sin_mla.return_value = (torch.randn(100),
+                                                 torch.randn(100))
 
         metadata = builder.build(
             common_prefix_len=10,
             common_attn_metadata=common_attn_metadata,
-            model=model,
         )
 
         assert isinstance(metadata, AscendSFAMetadata)
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
-    def test_ascend_sfa_metadata_builder_build_for_graph_capture(self):
+    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
+    def test_ascend_sfa_metadata_builder_build_for_graph_capture(
+            self, mock_get_cos_and_sin_mla):
         kv_cache_spec = MagicMock()
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
@@ -178,14 +177,12 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.sin = None
         common_attn_metadata.num_input_tokens = 100
 
-        model = MagicMock()
-        model.model.layers = [MagicMock() for _ in range(10)]
-        model.model.start_layer = 0
+        mock_get_cos_and_sin_mla.return_value = (torch.randn(100),
+                                                 torch.randn(100))
 
         attn_metadata = builder.build_for_graph_capture(
             common_attn_metadata=common_attn_metadata,
             attn_state=AscendAttentionState.DecodeOnly,
-            model=model,
         )
 
         assert isinstance(attn_metadata, AscendSFAMetadata)

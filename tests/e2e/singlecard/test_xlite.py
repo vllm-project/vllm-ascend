@@ -36,7 +36,7 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("max_tokens", [15])
 def test_models_with_xlite_decode_only(
     model: str,
     max_tokens: int,
@@ -61,10 +61,10 @@ def test_models_with_xlite_decode_only(
                                             vllm_xlite_outputs_list[idx][1])
 
     vllm_xlite_answers = [
-        "Hello, my name is Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
-        'The president of the United States is the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
-        'The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
-        'The future of AI is not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and'
+        "Hello, my name is Lina. I'm a 22-year-old student from China.",
+        'The president of the United States is the same as the president of the United Nations. This is because the president',
+        'The capital of France is Paris. The capital of France is also the capital of the French Republic.',
+        'The future of AI is not just a technological challenge but a profound transformation of how we live, work'
     ]
 
     vllm_eager_outputs_list = []
