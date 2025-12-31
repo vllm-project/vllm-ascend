@@ -1112,6 +1112,7 @@ class TestAscendMLAImpl(TestBase):
             MagicMock(), MagicMock()
         ]
         self.impl.num_kv_heads = self.impl.num_heads
+        self.impl.is_kv_producer = False
 
         decode_res, prefill_res = self.impl._mla_preprocess(
             "mock_layer",
