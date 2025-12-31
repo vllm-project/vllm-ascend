@@ -348,7 +348,7 @@ class UBatchWrapper:
         ubatch_slices = forward_context.ubatch_slices
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
         afd_metadata = forward_context.afd_metadata
-
+        print(f"__call__ 1 ubatch_slices is {ubatch_slices} aclgraph_runtime_mode:{aclgraph_runtime_mode}")
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
 
@@ -406,6 +406,7 @@ class UBatchWrapper:
             print(f"jcz __call__ 3 num_tokens is {num_tokens} aclgraphs is {self.aclgraphs}")
             aclgraph_metadata = self.aclgraphs[num_tokens]
             aclgraph_metadata.aclgraph.replay()
+            print("UBatchWrapper replay")
             return aclgraph_metadata.outputs
         else:
             print(f"jcz __call__ 4 num_tokens is {num_tokens}")
