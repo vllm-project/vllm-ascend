@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
-                    TypeVar)
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
 
 import numpy as np
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -14,7 +14,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -27,9 +27,9 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.compilation.acl_graph import (get_graph_params,
-                                               get_mtp_graph_params,
-                                               update_graph_params_workspaces)
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params, get_graph_params,
+    update_draft_graph_params_workspaces, update_graph_params_workspaces)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.shared_weight_layer import (
     is_hidden_layer, post_process_after_loading_for_shared_weight_series,
@@ -53,7 +53,10 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND_MLA"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "ASCEND_MLA" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_builder_cls():
@@ -178,9 +181,6 @@ M = TypeVar("M", bound=AscendMLAMetadata)
 
 
 class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_BATCH
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -258,6 +258,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.graph_pad_size = 0
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendMLAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -1184,8 +1194,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_mtp_model:
-            graph_params = get_mtp_graph_params()
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if forward_context.capturing:
@@ -1200,7 +1210,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs)
-                update_graph_params_workspaces(num_tokens, workspace)
+                if forward_context.is_draft_model:
+                    update_draft_graph_params_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
 
             attn_output = torch.empty(
                 (q_nope.shape[1], q_nope.shape[0], *q_nope.shape[2:]),
