@@ -108,7 +108,7 @@ class TestAscendAttentionCPImpl(TestBase):
         self.assertEqual(output.shape[1], 4)
         self.assertEqual(output.shape[2], 128)
 
-    @patch('vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group')
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP')
     @patch('vllm_ascend.attention.context_parallel.attention_cp.get_dcp_group')
     @patch('vllm.distributed.parallel_state._DCP')
@@ -118,7 +118,9 @@ class TestAscendAttentionCPImpl(TestBase):
     @patch(
         'vllm_ascend.attention.context_parallel.attention_cp.get_forward_context'
     )
-    def test_forward_decode_pcp_dcp(self, mock_get_forward_context,
+    @patch('torch_npu.npu_attention_update')
+    def test_forward_decode_pcp_dcp(self, mock_npu_attention_update,
+                                    mock_get_forward_context,
                                     mock_all_to_all_single, mock_all_gather,
                                     mock_npu_fused_infer_attention_score,
                                     mock_dcp, mock_get_dcp_group, mock_pcp,
@@ -141,23 +143,15 @@ class TestAscendAttentionCPImpl(TestBase):
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.rank_in_group = 0
         pcp_group.world_size = 2
-        pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.all_gather = mock_all_gather_func
         mock_pcp_group.return_value = pcp_group
 
-        query = torch.randn(2, 4, 128)
-        self.impl.key_cache = torch.randn(100, 128, 1, 128)
-        self.impl.value_cache = torch.randn(100, 128, 1, 128)
+        query = torch.randn(2, 4, 64)
+        self.impl.key_cache = torch.randn(100, 64, 1, 64)
+        self.impl.value_cache = torch.randn(100, 64, 1, 64)
 
-        def mock_npu_attention_update(attn_out_lse_list):
-            mock_output = torch.randn(
-                attn_out_lse_list.shape[0] // mock_pcp.world_size,
-                attn_out_lse_list.shape[1] // mock_dcp.world_size,
-                attn_out_lse_list.shape[2] - 1)
-            return mock_output
-
-        _npu_attention_update = MagicMock()
-        _npu_attention_update.side_effect = mock_npu_attention_update
+        # Mock output
+        mock_npu_attention_update.return_value = (torch.randn(2 * 4, 64), None)
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
@@ -182,12 +176,11 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.decode_meta = MagicMock()
         attn_metadata.decode_meta.batch_seq_mask = torch.tensor(
             [1, 0], dtype=torch.bool)
-
         output = self.impl._forward_decode_pcp_dcp(query, attn_metadata)
 
         self.assertEqual(output.shape[0], 2)
         self.assertEqual(output.shape[1], 4)
-        self.assertEqual(output.shape[2], 128)
+        self.assertEqual(output.shape[2], 64)
 
     @patch('vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP')
@@ -222,7 +215,6 @@ class TestAscendAttentionCPImpl(TestBase):
     @patch('vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group')
     @patch('torch.ops.npu.npu_fused_infer_attention_score')
     def test_compute_prefill_context(self, mock_npu_attention, mock_pcp_group):
-
         block_num = 100
         block_size = 128
         kv_num_heads = 1

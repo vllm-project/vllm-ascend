@@ -452,12 +452,20 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("torch.distributed.all_to_all_single")
-    def test_process_attn_out_lse(self, mock_all_to_all_single, mock_pcp):
+    def test_process_attn_out_lse(self, mock_all_to_all_single, mock_dcp,
+                                  mock_get_dcp_group, mock_pcp,
+                                  mock_get_pcp_group):
         self.impl.dcp_size = 2
         self.impl.pcp_size = 2
+        mock_pcp_group = MagicMock()
+        mock_get_pcp_group.return_value = mock_pcp_group
 
         B = 2
         N = self.impl.num_heads
@@ -472,7 +480,16 @@ class TestAscendMLAImpl(TestBase):
         def make_all_gather(ws):
             return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-        mock_pcp.all_gather = MagicMock(side_effect=make_all_gather(2))
+        mock_pcp_group = MagicMock()
+        mock_pcp_group.all_gather = MagicMock(
+            side_effect=make_all_gather(self.impl.pcp_size))
+        mock_pcp_group.world_size = self.impl.pcp_size
+        mock_get_pcp_group.return_value = mock_pcp_group
+
+        mock_dcp.world_size = self.impl.dcp_size
+        mock_dcp_group = MagicMock()
+        # mock_dcp_group.world_size = 2
+        mock_get_dcp_group.return_value = mock_dcp_group
 
         decode_metadata = MagicMock()
         decode_metadata.actual_seq_lengths_q = MagicMock()
@@ -487,7 +504,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[1], N)
         self.assertEqual(result.shape[2], self.impl.kv_lora_rank + 1)
 
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_pcp_group')
     @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("torch.distributed.all_to_all_single")
     @patch('vllm_ascend.attention.context_parallel.mla_cp.get_forward_context')
@@ -496,7 +517,9 @@ class TestAscendMLAImpl(TestBase):
     def test_forward_decode_pcp_dcp(self, mock_npu_attention_update,
                                     mock_npu_multi_head_latent_attention,
                                     mock_get_forward_context,
-                                    mock_all_to_all_single, mock_pcp):
+                                    mock_all_to_all_single, mock_dcp,
+                                    mock_get_dcp_group, mock_pcp,
+                                    mock_get_pcp_group):
         self.impl.dcp_size = 2
         self.impl.pcp_size = 2
         self.impl.num_kv_heads = 1
@@ -538,7 +561,15 @@ class TestAscendMLAImpl(TestBase):
         def make_all_gather(ws):
             return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-        mock_pcp.all_gather = MagicMock(side_effect=make_all_gather(2))
+        mock_pcp_group = MagicMock()
+        mock_pcp_group.all_gather = MagicMock(
+            side_effect=make_all_gather(self.impl.pcp_size))
+        mock_pcp_group.world_size = self.impl.pcp_size
+        mock_get_pcp_group.return_value = mock_pcp_group
+
+        mock_dcp.world_size = self.impl.dcp_size
+        mock_dcp_group = MagicMock()
+        mock_get_dcp_group.return_value = mock_dcp_group
 
         self.impl._v_up_proj = MagicMock()
         self.impl._v_up_proj.return_value = torch.randn(
@@ -790,7 +821,15 @@ class TestAscendMLAImpl(TestBase):
             assert torch.allclose(lse, expected_lse)
 
     @patch('torch_npu.npu_attention_update')
-    def test_npu_attention_update_with_dcp_pcp(self,
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    def test_npu_attention_update_with_dcp_pcp(self, mock_dcp,
+                                               mock_get_dcp_group, mock_pcp,
+                                               mock_get_pcp_group,
                                                mock_npu_attention_update):
         NUM_TOKENS = 10  # fixed
         test_cases = [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3)]
@@ -817,6 +856,15 @@ class TestAscendMLAImpl(TestBase):
                         attn_lse_split_cp[0])
 
             mock_npu_attention_update.side_effect = mock_npu_attention_update_effect
+
+            mock_pcp_group = MagicMock()
+            mock_pcp_group.world_size = self.impl.pcp_size
+            mock_get_pcp_group.return_value = mock_pcp_group
+
+            mock_dcp.world_size = self.impl.dcp_size
+            mock_dcp_group = MagicMock()
+            # mock_dcp_group.world_size = self.impl.dcp_size
+            mock_get_dcp_group.return_value = mock_dcp_group
             attn_out_lse = torch.randn(self.impl.pcp_size * NUM_TOKENS,
                                        self.impl.dcp_size * num_heads,
                                        head_dim)
@@ -919,11 +967,17 @@ class TestAscendMLAImpl(TestBase):
                                  1 + (kv_with_q_tail_nomask_idx.shape[0] != 0))
                 mock_npu_ring_mla.reset_mock()
 
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_pcp_group')
     @patch("torch.distributed.all_to_all_single")
     @patch('vllm.distributed.parallel_state._PCP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    def test_process_attn_out_lse_with_dcp_pcp(self, mock_pcp,
-                                               mock_all_to_all):
+    @patch('vllm_ascend.attention.context_parallel.common_cp.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    def test_process_attn_out_lse_with_dcp_pcp(self, mock_dcp,
+                                               mock_get_dcp_group, mock_pcp,
+                                               mock_all_to_all,
+                                               mock_get_pcp_group):
         B, H, D = 4, self.impl.num_heads, self.impl.v_head_dim  # total: [4, 4, 8]
         test_cases = [(1, 1), (1, 2), (2, 1), (2, 2), (4, 4)]
         for test_case in test_cases:
@@ -945,9 +999,16 @@ class TestAscendMLAImpl(TestBase):
             def mock_all_gather(ws):
                 return lambda tensor, dim: torch.cat([tensor] * ws, dim=dim)
 
-            mock_pcp.all_gather = MagicMock(
+            mock_pcp_group = MagicMock()
+            mock_pcp_group.all_gather = MagicMock(
                 side_effect=mock_all_gather(self.impl.pcp_size))
+            mock_pcp_group.world_size = self.impl.pcp_size
+            mock_get_pcp_group.return_value = mock_pcp_group
 
+            mock_dcp.world_size = self.impl.dcp_size
+            mock_dcp_group = MagicMock()
+            # mock_dcp_group.world_size = 2
+            mock_get_dcp_group.return_value = mock_dcp_group
             result = _process_attn_out_lse(attn_output, softmax_lse,
                                            batch_seq_mask)
             # [PCP * S, DCP * H, D + 1]
