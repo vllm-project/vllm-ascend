@@ -48,7 +48,8 @@ def mrope_golden(positions, query, key, cos_sin_cache, head_size,
     query = query.view(num_tokens, -1, head_size)
     query_rot = query[..., :rotary_dim]
     query_pass = query[..., rotary_dim:]
-    query_rot = apply_rotary_emb_torch(query_rot, cos, sin, bool(is_neox_style))
+    query_rot = apply_rotary_emb_torch(query_rot, cos, sin,
+                                       bool(is_neox_style))
     query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
     key_shape = key.shape
@@ -112,16 +113,10 @@ def _compute_cos_sin_cache(base, max_position_embeddings,
 @pytest.mark.parametrize("dtype", DTYPE)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_split_mrope(
-    num_tokens: int,
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    rotary_dim: int,
-    mrope_section: list[int],
-    is_neox_style: bool,
-    dtype: torch.dtype,
-    device: str) -> None:
+def test_split_mrope(num_tokens: int, num_q_heads: int, num_kv_heads: int,
+                     head_size: int, rotary_dim: int, mrope_section: list[int],
+                     is_neox_style: bool, dtype: torch.dtype,
+                     device: str) -> None:
 
     torch.set_default_device(device)
 
@@ -132,22 +127,17 @@ def test_split_mrope(
                          dtype=dtype, device="npu")
     in_cos_sin_cache = _compute_cos_sin_cache(num_tokens, num_tokens,
                                               rotary_dim).to(device="npu")
-    print(f"in_cos_sin_cache_shape: {in_cos_sin_cache.shape}")
 
     # Execute golden cases.
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
     in_q, in_k, golden_v = in_qkv.split([q_size, kv_size, kv_size], dim=-1)
 
-    golden_q, golden_k = mrope_golden(
-        in_positions,
-        in_q,
-        in_k,
-        in_cos_sin_cache,
-        head_size,
-        mrope_section,
-        is_neox_style
-    )
+    golden_q, golden_k = mrope_golden(in_positions, in_q, in_k,
+                                      in_cos_sin_cache,
+                                      head_size,
+                                      mrope_section,
+                                      is_neox_style)
 
     # Execute real cases.
     if is_neox_style:
@@ -165,12 +155,9 @@ def test_split_mrope(
         num_kv_heads,
         head_size,
         mrope_section=mrope_section,
-        rotary_mode=rotary_mode
-    )
+        rotary_mode=rotary_mode)
 
     # Compare the results.
-    print(f"golden_q: {golden_q}")
-    print(f"real_q: {q}")
     torch.testing.assert_close(q.view(golden_q.size()),
                                golden_q,
                                atol=DEFAULT_ATOL,
