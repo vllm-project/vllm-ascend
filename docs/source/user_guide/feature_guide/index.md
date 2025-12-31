@@ -7,7 +7,6 @@ This section provides a detailed usage guide of vLLM Ascend features.
 :maxdepth: 1
 graph_mode
 quantization
-quantization-llm-compressor
 sleep_mode
 structured_output
 lora
