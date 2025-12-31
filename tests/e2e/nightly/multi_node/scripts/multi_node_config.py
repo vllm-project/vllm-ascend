@@ -340,6 +340,9 @@ class MultiNodeConfigLoader:
     @staticmethod
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:
         if "cluster_hosts" in cfg and cfg["cluster_hosts"]:
+            logger.info(
+                "Using cluster_hosts from config. This typically indicates that your current environment is a non-Kubernetes environment."
+            )
             ips = cfg["cluster_hosts"]
             if len(ips) != num_nodes:
                 raise AssertionError("cluster_hosts size mismatch")
