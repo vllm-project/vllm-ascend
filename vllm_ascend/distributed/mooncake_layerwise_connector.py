@@ -1063,17 +1063,16 @@ class MooncakeLayerwiseConnectorWorker:
                     values = kv_layer[1][rearrange_block_ids].clone()
                     # sort kv caches for each block
                     keys = keys.view(keys.size(0), self.pd_head_ratio, -1,
-                                    *keys.shape[2:]).transpose(0,
-                                                                1).reshape_as(keys)
-                    values = values.view(values.size(0), self.pd_head_ratio, -1,
-                                        *values.shape[2:]).transpose(
-                                            0, 1).reshape_as(values)
+                                     *keys.shape[2:]).transpose(
+                                         0, 1).reshape_as(keys)
+                    values = values.view(values.size(0), self.pd_head_ratio,
+                                         -1, *values.shape[2:]).transpose(
+                                             0, 1).reshape_as(values)
                     # reshard kv cache
                     keys = keys.reshape(-1, *kv_layer[0].shape[2:])
                     values = values.reshape(-1, *kv_layer[1].shape[2:])
-                    (keys,
-                    values) = kv_alltoall_and_rearrange(self.pd_head_ratio, keys,
-                                                        values)
+                    (keys, values) = kv_alltoall_and_rearrange(
+                        self.pd_head_ratio, keys, values)
             else:
                 keys = None
                 values = None
