@@ -165,8 +165,8 @@ export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-# Enable dense model and general optimizations for better performance.
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
+# Enable MLP prefetch for better performance.
+export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -334,7 +334,7 @@ In dense model scenarios, the MLP's gate_up_proj and down_proj linear layers oft
 
 It is important to emphasize that, since we use vector computations to hide the weight prefetching pipeline, the setting of the prefetch buffer size is crucial. If the buffer size is too small, the optimization benefits will not be fully realized, while a larger buffer size may lead to resource contention, resulting in performance degradation. To accommodate different scenarios, we have exposed two environment variables `VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE` and `VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE` to allow for flexible buffer size configuration based on the specific workload.
 
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` and `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE = 1` to be enabled.
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` to be enabled.
 
 ### 6. Zerolike Elimination
 This elimination removes unnecessary operations related to zero-like tensors in Attention forward, improving the efficiency of matrix operations and reducing memory usage.
