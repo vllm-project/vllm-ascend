@@ -77,6 +77,7 @@ class KVTransferThread(threading.Thread):
         block_ids: list[int],
         mask: Optional[torch.Tensor] = None,
         is_last_chunk: Optional[bool] = None,
+        current_event: Optional[torch.npu.Event] = None,
     ) -> torch.Tensor:
         req = ({
             "req_id": req_id,
@@ -84,6 +85,7 @@ class KVTransferThread(threading.Thread):
             "block_ids": block_ids,
             "mask": mask,
             "is_last_chunk": is_last_chunk,
+            "current_event": current_event,
         })
         self.request_queue.put(req)
 
@@ -142,6 +144,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_ids = req_meta["block_ids"]
         req_id = req_meta["req_id"]
         is_last_chunk = req_meta["is_last_chunk"]
+        current_event = req_meta["current_event"]
         if self.m_store.config.use_ascend_direct:
             addr_list = []
             size_list = []
@@ -155,13 +158,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
                 blockIds.append(block_id)
-            torch.npu.current_stream().synchronize()
+            if key_list:
+                """
+                Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
+                This issue will be fixed in CANN version 8.5.rc1.
+                You can manually build the master branch of the project at https://gitcode.com/cann/hixl
+                to resolve this issue before the 8.5.RC1 release.
+                """
+                if current_event is not None:
+                    current_event.synchronize()
             self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
         else:
-            torch.npu.current_stream().synchronize()
             for start, end, key in self.token_database.process_tokens(
                     tokens, mask):
                 addr, size, _ = self.prepare_value(start, end, block_ids)
+                if current_event is not None:
+                    current_event.synchronize()
                 self.m_store.put(key, addr, size)
         if is_last_chunk:
             self.set_finished_request(req_id)
@@ -236,7 +248,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def _handle_request(  # type: ignore[override]
             self, req_meta: LasyerMultiBlockReqMeta):
-        torch.npu.current_stream().synchronize()
         for index, key in enumerate(req_meta.keys):
             addr, size = self.prepare_value_layer(req_meta.starts[index],
                                                   req_meta.ends[index],
