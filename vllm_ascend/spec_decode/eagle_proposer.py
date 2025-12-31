@@ -41,6 +41,9 @@ _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
 
 _FIRST_LAYERS = {"Qwen3NextForCausalLM": 'model.layers.3.self_attn.attn'}
 
+# Currently we will fix block size to a small one since `num_reqs` can't be too large
+_PREPARE_INPUTS_BLOCK_SIZE = 4
+
 
 class EagleProposer(VllmEagleProposer):
 
@@ -862,8 +865,8 @@ class EagleProposer(VllmEagleProposer):
                                                   dtype=torch.int32,
                                                   device=device)
 
-            BLOCK_SIZE = 4
-            num_blocks_needed = triton.cdiv(num_reqs, BLOCK_SIZE)
+            num_blocks_needed = triton.cdiv(num_reqs,
+                                            _PREPARE_INPUTS_BLOCK_SIZE)
             num_vector_core = get_vectorcore_num()
             grid_size = min(num_blocks_needed, num_vector_core)
             grid = (grid_size, )
@@ -874,7 +877,7 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata.query_start_loc,
                 token_indices_to_sample,
                 num_reqs,
-                BLOCK_SIZE=BLOCK_SIZE,
+                BLOCK_SIZE=_PREPARE_INPUTS_BLOCK_SIZE,
             )
         else:
             num_draft_tokens_gpu = torch.cat([
