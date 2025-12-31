@@ -162,6 +162,13 @@ class ACLGraphWrapper:
                         # any other acl graph.
                         output = weak_ref_tensors(output)
 
+            # here we always use weak ref for the workspaces
+            # to save memory
+            global _graph_params
+            global _draft_graph_params
+            weak_ref_workspaces(_graph_params)
+            weak_ref_workspaces(_draft_graph_params)
+
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)
@@ -193,6 +200,16 @@ class ACLGraphWrapper:
         torch.npu.synchronize()
         entry.aclgraph.replay()
         return entry.output
+
+
+def weak_ref_workspaces(params):
+    if params is None:
+        return
+    for num_tokens in params.workspaces:
+        if params.workspaces[num_tokens] is None:
+            continue
+        params.workspaces[num_tokens] = weak_ref_tensors(
+            params.workspaces[num_tokens])
 
 
 def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
@@ -523,7 +540,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
     global _graph_params
     if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
+        _graph_params.workspaces[num_tokens] = workspace
 
 
 def get_graph_params():
