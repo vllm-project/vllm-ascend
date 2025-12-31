@@ -52,6 +52,7 @@ Based on the above content, we present a brief description of the adaptation pro
 
 - **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, pertensor/perchannel/pergroup).
 - **Step 2: Registration**. Add the algorithm ID to `ASCEND_QUANTIZATION_METHOD_MAP` in `vllm_ascend/quantization/utils.py` and associate it with the corresponding method class.
+
 ```python
 ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W4A8_DYNAMIC": {
@@ -70,6 +71,7 @@ Adapting a new quantized model requires ensuring the following three points:
 
 - The original model has been successfully adapted in `vLLM Ascend`.
 - **Fused Module Mapping**: Add the model's `model_type` to `packed_modules_model_mapping` in `vllm_ascend/quantization/quant_config.py` (e.g., `qkv_proj`, `gate_up_proj`, `experts`) to ensure sharding consistency and correct loading.
+
 ```python
 packed_modules_model_mapping = {
     "qwen3_moe": {

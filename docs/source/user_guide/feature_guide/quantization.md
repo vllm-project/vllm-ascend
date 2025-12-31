@@ -5,7 +5,7 @@ Model quantization is a technique that reduces model size and computational over
 `vLLM Ascend` supports multiple quantization methods. This guide provides instructions for using different quantization tools and running quantized models on vLLM Ascend.
 
 > **Note**
-> 
+>
 > You can choose to convert the model yourself or use the quantized model we uploaded.
 > See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.
 > Before you quantize a model, ensure that the RAM size is enough.
@@ -140,7 +140,6 @@ python -m vllm.entrypoints.api_server \
 ```
 
 The above commands are for reference only. For more details, consult the [official guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials).
-
 
 ## References
 
