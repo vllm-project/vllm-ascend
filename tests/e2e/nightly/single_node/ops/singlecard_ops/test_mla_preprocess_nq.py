@@ -1,5 +1,6 @@
 import gc
 
+import pytest
 import torch
 import torch_npu
 
@@ -8,8 +9,9 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 
+@pytest.mark.parametrize("cache_mode", ["krope_ctkv", "nzcache"])
 @torch.inference_mode()
-def test_mla_preprocess_kernel():
+def test_mla_preprocess_kernel(cache_mode: str):
     token_num = 1
     head_num = 2
     N_7168 = 7168
@@ -82,7 +84,7 @@ def test_mla_preprocess_kernel():
         None,
         None,
         None,
-        cache_mode="krope_ctkv",
+        cache_mode=cache_mode,
         quant_mode="no_quant",
         enable_inner_out=False,
         q_out0=q_nope_out,
