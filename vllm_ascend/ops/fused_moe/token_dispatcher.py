@@ -488,10 +488,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         super().__init__(**kwargs)
         self.apply_router_weight_on_input = False
         self.max_num_tokens = kwargs.get("max_num_tokens")
-        self.num_experts_local = kwargs.get("num_local_experts", 0)
         self.sorted_weights = None
         self.expanded_row_idx = None
         self.sorted_token_indices = None
+        num_experts_local = kwargs.get("num_local_experts", 0)
+        self.num_experts_local = num_experts_local.item() if torch.is_tensor(
+            num_experts_local) else int(num_experts_local)
         self.original_shape = None
         self.with_quant = False
 
