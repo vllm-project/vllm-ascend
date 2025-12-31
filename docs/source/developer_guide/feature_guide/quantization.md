@@ -16,15 +16,11 @@ Currently supported quantization methods include `AscendLinearMethod`, `AscendFu
 
 ![quant_methods_overview](../../assets/quantization/quant_methods_overview.png)
 
-The quantization method base class defined by vLLM is:
-
-![quant_method_base_class](../../assets/quantization/quant_method_base_class.png)
-
-The `embedding` method is generally not implemented for quantization, focusing only on the other three methods.
-
-The overall call flow of quantization methods is as follows:
+The quantization method base class defined by vLLM  and the overall call flow of quantization methods are as follows:
 
 ![quant_method_call_flow](../../assets/quantization/quant_method_call_flow.png)
+
+The `embedding` method is generally not implemented for quantization, focusing only on the other three methods.
 
 The `create_weights` method is used for weight initialization; the `process_weights_after_loading` method is used for weight post-processing, such as transposition, format conversion, data type conversion, etc.; the `apply` method is used to perform activation quantization and quantized matrix multiplication calculations during the forward process.
 
