@@ -18,6 +18,7 @@
 from typing import List, Optional, Union
 
 import torch
+import torch_npu
 import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import (GroupCoordinator,
@@ -47,7 +48,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self_device_group = None
         self_cpu_group = None
         # hccl_pg_options = create_hccl_pg_options(group_name)
-        import torch_npu
         hccl_pg_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options(
         )
         hccl_pg_options.hccl_config = {"hccl_op_expansion_mode": 2}

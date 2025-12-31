@@ -257,10 +257,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             kwargs_mc2 = self.get_dispatch_mc2_kwargs(
                 hidden_states, topk_weights, topk_ids, expert_map, mc2_mask,
                 global_redundant_expert_num)
-            if self.enable_dispatch_v2:
-                output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
-            else:
-                output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+
+        if self.enable_dispatch_v2:
+            output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
+        else:
+            output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
 
         # comm_stream.wait_stream(torch.npu.current_stream())
         expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, \
