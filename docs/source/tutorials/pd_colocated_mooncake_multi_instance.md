@@ -73,7 +73,7 @@ Start a Docker container on each node.
 
 ```bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc2
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
