@@ -291,7 +291,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             )
         else:
             raise NotImplementedError(
-                "Currently we only support building dummy metadata for DecodeOnly state"
+                "Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state"
             )
 
         attn_metadata.attn_state = attn_state

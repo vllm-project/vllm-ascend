@@ -78,7 +78,10 @@ def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
             max_model_len=4096,
             gpu_memory_utilization=0.8,
             distributed_executor_backend="mp",
-            enforce_eager=True,
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1, 4, 8]
+            },
     ) as vllm_model:
         ref_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
@@ -88,7 +91,10 @@ def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
-                    enforce_eager=True,
+                    compilation_config={
+                        "cudagraph_mode": "FULL_DECODE_ONLY",
+                        "cudagraph_capture_sizes": [1, 4, 8]
+                    },
                     speculative_config={
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 1
