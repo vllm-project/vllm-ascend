@@ -259,7 +259,9 @@ def select_moe_comm_method(num_tokens: int,
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
-
+    elif soc_version in {AscendDeviceType.A5}:
+        # Currently MC2 is not supported; falling back to All2All
+        moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type

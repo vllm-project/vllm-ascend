@@ -24,7 +24,6 @@ from vllm.distributed.parallel_state import (GroupCoordinator,
                                              _get_unique_name, _register_group)
 
 from vllm_ascend.distributed.communicator import NPUCommunicator
-from vllm_ascend.utils import create_hccl_pg_options
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
@@ -47,7 +46,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         self_device_group = None
         self_cpu_group = None
-        hccl_pg_options = create_hccl_pg_options(group_name)
+        # hccl_pg_options = create_hccl_pg_options(group_name)
+        import torch_npu
+        hccl_pg_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options(
+        )
+        hccl_pg_options.hccl_config = {"hccl_op_expansion_mode": 2}
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(

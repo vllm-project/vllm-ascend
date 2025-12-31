@@ -160,6 +160,8 @@ def gen_build_info():
         "ascend310p3vir04": "_310P",
         "ascend310p3vir08": "_310P",
         "ascend910_9579": "A5",
+        "ascend910_9589": "A5",
+        "ascend910_9599": "A5",
     }
 
     assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
