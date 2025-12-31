@@ -599,6 +599,51 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
+std::tuple<at::Tensor,at::Tensor,at::Tensor> npu_split_mrope(
+    const at::Tensor & positions,
+    const at::Tensor & qkv,
+    const at::Tensor & cos_sin_cache,
+    int64_t q_size,
+    int64_t kv_size,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_size,
+    c10::optional<at::IntArrayRef> mrope_section,
+    c10::optional<c10::string_view> rotary_mode
+)
+{
+    auto mrope_section_value = mrope_section.value_or(at::IntArrayRef{0, 0, 0});
+    std::string rotary_mode_str = static_cast<std::string>(rotary_mode.value_or("half"));
+
+    int is_neox_style_value = 0;
+    if (rotary_mode_str == "half") {
+        is_neox_style_value = 1;
+    }
+
+    int num_tokens = qkv.sizes()[0];
+
+    at::Tensor query_out = at::empty({num_tokens, q_size}, qkv.options().dtype(qkv.dtype()));
+    at::Tensor key_out = at::empty({num_tokens, kv_size}, qkv.options().dtype(qkv.dtype()));
+    at::Tensor value_out = at::empty({num_tokens, kv_size}, qkv.options().dtype(qkv.dtype()));
+
+    EXEC_NPU_CMD(
+        aclnnSplitMrope,
+        positions,
+        qkv,
+        cos_sin_cache,
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        mrope_section_value,
+        is_neox_style_value,
+        query_out,
+        key_out,
+        value_out
+    );
+
+    return {query_out, key_out, value_out};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz_tensor_list(
     const at::Tensor & x,
     const at::TensorList & weight,
@@ -1299,6 +1344,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int global_bs=0) -> (Tensor output, Tensor ep_recv_count)"
     );
     ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
+
+    ops.def(
+        "npu_split_mrope(Tensor positions, Tensor qkv, Tensor cos_sin_cache, int q_size, int kv_size, int num_q_heads, int num_kv_heads, int head_size, int[]? mrope_section, str? rotary_mode) -> (Tensor, Tensor, Tensor)"
+    );
+    ops.impl("npu_split_mrope", torch::kPrivateUse1, &vllm_ascend::npu_split_mrope);
 
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"

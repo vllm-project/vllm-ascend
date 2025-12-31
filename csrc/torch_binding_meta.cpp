@@ -133,6 +133,28 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     return {output, output_scale, output_offset};
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_split_mrope_meta(
+    const at::Tensor & positions,
+    const at::Tensor & qkv,
+    const at::Tensor & cos_sin_cache,
+    int64_t q_size,
+    int64_t kv_size,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_size,
+    c10::optional<at::IntArrayRef> mrope_section,
+    c10::optional<c10::string_view> rotary_mode
+)
+{
+    auto num_tokens = qkv.sym_size(0);
+
+    at::Tensor query_out = at::empty_symint({num_tokens, q_size}, qkv.options());
+    at::Tensor key_out = at::empty_symint({num_tokens, kv_size}, qkv.options());
+    at::Tensor value_out = at::empty_symint({num_tokens, kv_size}, qkv.options());
+
+    return {query_out, key_out, value_out};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta(
     const at::Tensor & x,
     const at::TensorList & weight,
@@ -385,6 +407,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
     // grouped_matmul_swiglu_quant meta implementation
     ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
+    // npu_split_mrope_meta
+    ops.impl("npu_split_mrope", &vllm_ascend::meta::npu_split_mrope_meta);
     // Grouped matmul swiglu quant weight nz tensor list
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // dispatch_gmm_combine_decode meta implementation
