@@ -107,5 +107,5 @@ benchmarks:
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 7680
     batch_size: 512
-    baseline: 95
+    baseline: 97
     threshold: 3
