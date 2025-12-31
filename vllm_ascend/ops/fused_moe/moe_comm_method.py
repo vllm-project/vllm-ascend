@@ -136,7 +136,7 @@ class MoECommMethod(ABC):
                 shared_experts=shared_experts,
                 quantized_x_for_share=quantized_x_for_share,
                 dynamic_scale_for_share=dynamic_scale_for_share,
-                mc2_mask=self.mc2_mask,
+                mc2_mask=mc2_mask,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 with_quant=use_fp8_comm,
                 comm_quant_mode=kwargs.get("comm_quant_mode", 2),

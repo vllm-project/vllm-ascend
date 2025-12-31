@@ -26,7 +26,6 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 
-
 GROUP_SIZE = 32
 
 
@@ -42,7 +41,8 @@ class AscendW8A8MXFP8DynamicLinearMethod:
     def get_weight(input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
+            "weight":
+            torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
         }
         return params_dict
 
@@ -52,27 +52,32 @@ class AscendW8A8MXFP8DynamicLinearMethod:
 
     @staticmethod
     def get_perchannel_param(
-            output_size: int,
-            params_dtype: torch.dtype,
+        output_size: int,
+        params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
         return {}
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype, layer_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(
-            output_size, input_size // GROUP_SIZE, dtype=torch.uint8)
+        params_dict["weight_scale"] = torch.empty(output_size,
+                                                  input_size // GROUP_SIZE,
+                                                  dtype=torch.uint8)
         return params_dict
 
     @staticmethod
     def apply(
-            layer: torch.nn.Module,
-            x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-            bias: Optional[torch.Tensor] = None,
-            tp_rank: Optional[int] = 0,
+        layer: torch.nn.Module,
+        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        bias: Optional[torch.Tensor] = None,
+        tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
 
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            x, dst_type=torch.float8_e4m3fn)
         pertoken_scale = dynamic_scale
         output_dtype = x.dtype
 
@@ -85,14 +90,14 @@ class AscendW8A8MXFP8DynamicLinearMethod:
             pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
-            group_sizes=[1, 1, GROUP_SIZE]
-        )
+            group_sizes=[1, 1, GROUP_SIZE])
 
         return output
 
     def process_weights_after_loading(self, layer):
         n_dim, k_dim = layer.weight_scale.data.shape
-        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim//2, 2)
+        layer.weight_scale.data = layer.weight_scale.data.reshape(
+            n_dim, k_dim // 2, 2)
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1)
             layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
@@ -110,10 +115,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-                vllm_config.compilation_config.level == CompilationMode.VLLM_COMPILE
-                and not vllm_config.model_config.enforce_eager
-                and not ascend_config.torchair_graph_config.enabled)
+        self.use_aclgraph = (vllm_config.compilation_config.level
+                             == CompilationMode.VLLM_COMPILE
+                             and not vllm_config.model_config.enforce_eager and
+                             not ascend_config.torchair_graph_config.enabled)
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
 
     @staticmethod
@@ -122,7 +127,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(num_experts,
-                                               2 * intermediate_size_per_partition,
+                                               2 *
+                                               intermediate_size_per_partition,
                                                hidden_sizes,
                                                dtype=torch.float8_e4m3fn)
         param_dict["w2_weight"] = torch.empty(num_experts,
@@ -143,38 +149,39 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
             hidden_sizes // GROUP_SIZE,
             dtype=torch.uint8)
 
-        param_dict["w2_weight_scale"] = torch.empty(num_experts,
-                                                    hidden_sizes,
-                                                    intermediate_size_per_partition // GROUP_SIZE,
-                                                    dtype=torch.uint8)
+        param_dict["w2_weight_scale"] = torch.empty(
+            num_experts,
+            hidden_sizes,
+            intermediate_size_per_partition // GROUP_SIZE,
+            dtype=torch.uint8)
         return param_dict
 
     def apply(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            router_logits: torch.Tensor,
-            top_k: int,
-            renormalize: bool,
-            use_grouped_topk: bool = False,
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            is_prefill: bool = True,
-            enable_force_load_balance: bool = True,
-            log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
-            shared_experts: Optional[Any] = None,
-            quantized_x_for_share: Optional[Any] = None,
-            dynamic_scale_for_share: Optional[Any] = None,
-            **kwargs,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill: bool = True,
+        enable_force_load_balance: bool = True,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
+        shared_experts: Optional[Any] = None,
+        quantized_x_for_share: Optional[Any] = None,
+        dynamic_scale_for_share: Optional[Any] = None,
+        **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-                   1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -224,13 +231,15 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
 
     def process_weights_after_loading(self, layer):
         g_num, n_size, k_size = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size//2, 2)
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(
+            g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size//2, 2)
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(
+            g_num, n_size, k_size // 2, 2)
         if self.transpose_weight:
-            layer.w13_weight.data = layer.w13_weight.data.transpose(
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(
                 1, 2)
-            layer.w2_weight.data = layer.w2_weight.data.transpose(
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(
                 1, 2)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)

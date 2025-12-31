@@ -393,7 +393,6 @@ class AscendLinearMethod(LinearMethodBase):
             if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name or isinstance(
                     self.quant_method, mx_type):
                 setattr(param, "input_dim", 1)
-                param.input_dim = 1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):

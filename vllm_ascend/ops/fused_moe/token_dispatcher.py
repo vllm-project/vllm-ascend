@@ -190,7 +190,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                                    topk_weights: torch.Tensor,
                                    topk_ids: torch.Tensor,
                                    expert_map: torch.Tensor,
-                                   mc2_mask: torch.Tensor,
                                    global_redundant_expert_num: int = 0,
                                    **kwargs):
         if self.with_quant:

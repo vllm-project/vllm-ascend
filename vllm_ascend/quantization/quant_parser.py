@@ -50,9 +50,9 @@ def parse_quant_moe_down_proj_params(rollback_quant_type, parsed_round_mode):
     quant_type_mapping = QuantTypeMapping.get_quant_settings()
     cur_rollback_quant_config = quant_type_mapping[rollback_quant_type]
     # W4A4_MXFP4 supports 'round' and 'rint' rounding modes
-    if rollback_quant_type in ["W4A4_MXFP4"]: 
+    if rollback_quant_type in ["W4A4_MXFP4"]:
         round_mode = parsed_round_mode
-    else: 
+    else:
         # MXFP8 only supports 'rint'
         round_mode = "rint"
     return cur_rollback_quant_config["act_quant_type"], cur_rollback_quant_config["weight_quant_type"], \
