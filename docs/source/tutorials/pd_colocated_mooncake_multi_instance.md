@@ -73,7 +73,7 @@ Start a Docker container on each node.
 
 ```bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -102,7 +102,10 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-## Install Mooncake
+## (Optional) Install Mooncake
+
+Mooncake is pre-installed and functional in the v0.11.0 image.
+The following installation steps are optional.
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by
 Moonshot AI. Installation and compilation guide:
@@ -180,14 +183,14 @@ The template for the mooncake.json file is as follows:
 }
 ```
 
-| Parameter             | Value               | Explanation                    |
-| --------------------- | ------------------- | ------------------------------ |
-| local_hostname        | 90.90.100.188       | IP address of the current node |
-| metadata_server       | P2PHANDSHAKE        | Point-to-point handshake mode  |
+| Parameter   | Value                  | Explanation                           |
+| --------------| ------------------------| -----------------------------------|
+| local_hostname | 90.90.100.188(for example) | IP address of the current node |
+| metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
 | use_ascend_direct     | true                | Enable direct hardware access  |
-| master_server_address | 90.90.100.188:50088 | Address of the master server   |
-| global_segment_size   | 107374182400        | Size per segment (100 GB)      |
+| master_server_address | 90.90.100.188:50088(for example) | Master server address|
+| global_segment_size   | 107374182400    | Size per segment (100 GB)      |
 
 ## vLLM Instance Deployment
 
@@ -217,9 +220,6 @@ vllm serve <path_to_your_model>/Qwen2.5-72B-Instruct/ \
 --tensor-parallel-size 4 \
 --host <your_server_ip> \
 --port 8002 \
---enforce-eager \
---enable-prefix-caching \
---block-size 128 \
 --max-num-batched-tokens 4096 \
 --gpu-memory-utilization 0.9 \
 --kv-transfer-config '{
@@ -293,8 +293,44 @@ Send Dataset A to Instance 2. With the Mooncake KV Cache pool, this results
 in a cross-node KV Cache hit from Node 1's DRAM. Record the TTFT as
 **TTFT3**.
 
+**Model Configuration**:
+
+```python
+from ais_bench.benchmark.models import VLLMCustomAPIChatStream
+from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChatStream,
+        abbr='vllm-api-stream-chat',
+        path="<path_to_your_model>/Qwen2.5-72B-Instruct",
+        model="qwen",
+        request_rate = 0,
+        retry = 2,
+        host_ip = "<your_server_ip>",
+        host_port = 8002,
+        max_out_len = 10,
+        batch_size= 25,
+        trust_remote_code=False,
+        generation_kwargs = dict(
+            temperature = 0,
+            ignore_eos = True,
+        ),
+    )
+]
+```
+
+**Performance Benchmarking Commands**：
+
+```shell
+ais_bench --models vllm_api_stream_chat \
+  --datasets gsm8k_gen_0_shot_cot_str_perf \
+  --debug --summarizer default_perf --mode perf
+```
+
 ### Test Results
 
 | Requests | Concur | TTFT1 (ms) | TTFT2 (ms) | TTFT3 (ms) |
 | -------- | ------ | ---------- | ---------- | ---------- |
-| 100      | 25     | 2463       | 743        | 974        |
+| 100      | 25     | 2322       | 739        | 948        |
