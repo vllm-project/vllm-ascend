@@ -26,7 +26,7 @@ print_section() {
 }
 
 print_failure() {
-    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: $1${NC}"
     exit 1
 }
 
