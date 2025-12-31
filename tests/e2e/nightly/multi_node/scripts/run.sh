@@ -9,11 +9,15 @@ RED="\033[0;31m"
 NC="\033[0m" # No Color
 
 # Configuration
-LOG_DIR="/root/.cache/tests/logs"
-OVERWRITE_LOGS=true
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+# Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+
+# Logging configurations
 export VLLM_LOGGING_LEVEL="INFO"
+# Reduce glog verbosity for mooncake
+export GLOG_minloglevel=1
+# Set transformers to offline mode to avoid downloading models during tests
 export TRANSFORMERS_OFFLINE="1"
 
 # Function to print section headers
@@ -22,7 +26,7 @@ print_section() {
 }
 
 print_failure() {
-    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: $1${NC}"
     exit 1
 }
 
@@ -131,7 +135,7 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/test_multi_node.py
+    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/scripts/test_multi_node.py
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
