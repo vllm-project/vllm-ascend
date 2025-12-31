@@ -180,7 +180,7 @@ class AscendFusedMoE(FusedMoE):
                              or ascend_config.expert_map_record_path) and (
                                  self.log2phy is not None)
         self.local_num_experts = (torch.sum(
-            self._expert_map != -1) if self._expert_map is not None else
+            self._expert_map != -1).item() if self._expert_map is not None else
                                   self.global_num_experts)
         if self._expert_map is not None:
             logger.info_once(
