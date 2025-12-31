@@ -49,8 +49,8 @@ export MODEL_PATH="/path/to/your/model"
 export SAVE_PATH="/path/to/your/quantized_model"
 
 # Run quantization script
-python3 quant_qwen_moe_w8a8.py --model_path {MODEL_PATH} \
---save_path {SAVE_PATH} \
+python3 quant_qwen_moe_w8a8.py --model_path $MODEL_PATH \
+--save_path $SAVE_PATH \
 --anti_dataset ../common/qwen3-moe_anti_prompt_50.json \
 --calib_dataset ../common/qwen3-moe_calib_prompt_50.json \
 --trust_remote_code True
@@ -139,7 +139,7 @@ python -m vllm.entrypoints.api_server \
     --quantization ascend
 ```
 
-The above commands are for reference only. For more details, consult the [official guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials).
+The above commands are for reference only. For more details, consult the [official guide](../../tutorials/index.md).
 
 ## References
 
