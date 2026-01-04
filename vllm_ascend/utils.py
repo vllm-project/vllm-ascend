@@ -1168,6 +1168,7 @@ def get_current_model_config():
 #TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
-    current_model_config = get_current_model_config()
-    is_ds_v32 = hasattr(current_model_config.hf_config, "index_topk")
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
     return is_ds_v32 and enable_sp()

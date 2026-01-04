@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, List, Optional
 
 import torch
@@ -8,7 +9,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.distributed.parallel_state import get_shard_weight_group
-from vllm_ascend.utils import get_current_model_config
 
 
 def dispose_tensor(x: torch.Tensor):
@@ -254,8 +254,15 @@ def wait_layer_for_shard_weight_series(layer: LinearBase):
     ext.series.wait_weight(ext.layer_idx)
 
 
+@lru_cache(maxsize=1)
+def get_current_model_num_hidden_layers() -> int:
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    return vllm_config.model_config.get_total_num_hidden_layers()
+
+
 def is_hidden_layer(layer: LinearBase) -> bool:
-    num_hidden_layers = get_current_model_config().hf_config.num_hidden_layers
+    num_hidden_layers = get_current_model_num_hidden_layers()
     layer_idx = extract_layer_index(layer.prefix)
     return layer_idx < num_hidden_layers
 
