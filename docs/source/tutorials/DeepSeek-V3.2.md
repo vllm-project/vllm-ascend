@@ -19,7 +19,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 - `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
 - `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 - `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
-- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot)
+- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -36,17 +36,20 @@ We strongly recommend you to install triton ascend package to speed up the infer
 
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
 
-Source the Ascend BiSheng toolkit, execute the command:
+Install the Ascend BiSheng toolkit, execute the command:
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
+BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
 ```
 
 Install Triton Ascend:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
-pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
+pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
 ```
 
 :::

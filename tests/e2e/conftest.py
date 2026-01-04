@@ -28,7 +28,6 @@ import sys
 import time
 from typing import Any, Optional, Tuple, TypeVar, Union
 
-import httpx
 import numpy as np
 import openai
 import pytest
@@ -52,7 +51,8 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
-from tests.e2e.nightly.multi_node.config.multi_node_config import NodeInfo
+from tests.e2e.nightly.multi_node.scripts.multi_node_config import (
+    DisaggregatedPrefillCfg, NodeInfo)
 from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
@@ -104,6 +104,7 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
+        logger.info(f"Starting server with command: {' '.join(server_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             server_cmd,
             env=env,
@@ -111,20 +112,21 @@ class RemoteOpenAIServer:
             stderr=sys.stderr,
         )
 
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: Union[list[str], str],
-                 *,
-                 server_host: str = '0.0.0.0',
-                 server_port: int = 8080,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = None,
-                 auto_port: bool = True,
-                 nodes_info: Optional[list[NodeInfo]] = None,
-                 disaggregated_prefill: Optional[dict] = None,
-                 proxy_port: Optional[int] = None,
-                 max_wait_seconds: Optional[float] = None,
-                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            model: str,
+            vllm_serve_args: Union[list[str], str],
+            *,
+            server_host: str = '0.0.0.0',
+            server_port: int = 8080,
+            env_dict: Optional[dict[str, str]] = None,
+            seed: Optional[int] = None,
+            auto_port: bool = True,
+            nodes_info: Optional[list[NodeInfo]] = None,
+            disaggregated_prefill: Optional[DisaggregatedPrefillCfg] = None,
+            proxy_port: Optional[int] = None,
+            max_wait_seconds: Optional[float] = None,
+            override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if isinstance(vllm_serve_args, str):
             vllm_serve_args = shlex.split(vllm_serve_args)
         else:
@@ -187,6 +189,7 @@ class RemoteOpenAIServer:
         This is for headless mode, where the api server
         process only exists in the leader node.
         """
+        logger.info("Hanging until server process terminates...")
         client = requests
         try:
             while True:
@@ -198,8 +201,6 @@ class RemoteOpenAIServer:
                 except Exception:
                     break
         finally:
-            if isinstance(client, httpx.Client):
-                client.close()
             self._terminate_server()
 
     def _wait_for_server_pd(self, timeout: float):
@@ -210,8 +211,7 @@ class RemoteOpenAIServer:
         def url_health(ip: str, port: int) -> str:
             return f"http://{ip}:{port}/health"
 
-        targets = [(node_info.ip,
-                    url_health(node_info.ip, node_info.server_port))
+        targets = [(node_info.ip, url_health(node_info.ip, self.port))
                    for node_info in self.nodes_info if not node_info.headless]
 
         # Wait for proxy ready
@@ -780,6 +780,11 @@ PROMPT_CONFIGS = {
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
+    },
+    "hunyuan-vl": {
+        "model": "Tencent-Hunyuan/HunyuanOCR",
+        "prompt_fn": hunyuan_prompt,
+        "mm_processor_kwargs": {},
     },
 }
 

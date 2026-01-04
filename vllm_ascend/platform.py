@@ -26,6 +26,8 @@ from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
+# todo: please remove it when support controls garbage collection during CUDA graph capture.
+os.environ["VLLM_ENABLE_CUDAGRAPH_GC"] = "1"
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
@@ -190,8 +192,6 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
-        compilation_config.pass_config.fuse_norm_quant = False
-        compilation_config.pass_config.fuse_act_quant = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -244,6 +244,12 @@ class NPUPlatform(Platform):
                 data_parallel_size,
             )
             compilation_config.use_inductor = False
+            # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
+            # Since the process is created in the spawn mode, the value of the class attribute
+            # attention ops transmitted is still the one before modification, so it has not been modified.
+            # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
+            # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
+            # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.enable_npugraph_ex = False

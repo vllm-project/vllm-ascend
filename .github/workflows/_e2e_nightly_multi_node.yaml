@@ -286,9 +286,9 @@ jobs:
 
         - name: Upload logs
           if: always()
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
-            name: pod-logs
+            name: ${{ inputs.config_file_path }}-pod-logs
             path: /tmp/vllm*_logs.txt
             retention-days: 7
 

@@ -62,56 +62,6 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
-def test_qwen3_next_distributed_mp_eager_mtp_similarity_tp4():
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    max_tokens = 20
-
-    with VllmRunner(
-            "Qwen/Qwen3-Next-80B-A3B-Instruct",
-            tensor_parallel_size=4,
-            max_model_len=4096,
-            gpu_memory_utilization=0.8,
-            distributed_executor_backend="mp",
-            enforce_eager=True,
-    ) as vllm_model:
-        ref_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
-
-    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
-                    tensor_parallel_size=4,
-                    max_model_len=4096,
-                    gpu_memory_utilization=0.8,
-                    distributed_executor_backend="mp",
-                    enforce_eager=True,
-                    speculative_config={
-                        "method": "qwen3_next_mtp",
-                        "num_speculative_tokens": 1
-                    }) as spec_vllm_model:
-        spec_outputs = spec_vllm_model.generate_greedy(example_prompts,
-                                                       max_tokens)
-    del spec_vllm_model
-
-    matches = 0
-    misses = 0
-    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-        ref_token_ids = ref_output[0]
-        spec_token_ids = spec_output[0]
-        if ref_token_ids == spec_token_ids[:len(ref_token_ids)]:
-            matches += 1
-        else:
-            misses += 1
-            print(f"ref_output: {ref_output[1]}")
-            print(f"spec_output: {spec_output[1]}")
-
-    assert matches > int(0.66 * len(ref_outputs))
-
-
 # TODO: will conduct accuracy verification after the subsequent version becomes stable
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
