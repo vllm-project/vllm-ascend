@@ -24,18 +24,16 @@ def softmax_func(x, axis=None):
     x_sub = x - x_max
     y = numpy.exp(x_sub)
     x_sum = y.sum(axis=axis, keepdims=True)
-    # print(" x_sum:",x_sum)
-    ans = y / x_sum
-    # print(" ans:",ans)
-    return ans, x_max, x_sum
+    res = y / x_sum
+    return res, x_max, x_sum
 
 
 class TestNpuMoeGatingTopK(TestCase):
 
     def moe_gating_top_k_numpy(self,
-                               x: numpy.ndarray,
+                               x: torch.Tensor,
                                k: int,
-                               bias: numpy.ndarray,
+                               bias: torch.Tensor | None,
                                k_group: int = 1,
                                group_count: int = 1,
                                group_select_mode: int = 0,
@@ -48,7 +46,8 @@ class TestNpuMoeGatingTopK(TestCase):
         dtype = x.dtype
         if dtype != torch.float32:
             x = x.to(dtype=torch.float32)
-            bias = bias.to(dtype=torch.float32)
+            if bias is not None:
+                bias = bias.to(dtype=torch.float32)
 
         x = x.numpy()
         if bias is not None:
