@@ -55,6 +55,7 @@ _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -338,6 +339,13 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
         # we return the default stream.
         _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
+def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
+    global _CP_CHUNKEDPREFILL_COMM_STREAM
+    if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
+        _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
