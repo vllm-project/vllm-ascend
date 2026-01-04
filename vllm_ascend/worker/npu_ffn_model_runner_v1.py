@@ -135,7 +135,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
 
         
     @torch.inference_mode()
-    def execute_model(self, scheduler_output=None, intermediate_tensors=None,is_ubatch:bool=False):
+    def execute_model(self, scheduler_output=None, intermediate_tensors=None, is_ubatch:bool=False):
         """Execute FFN computation for a single request"""
         # self.prof.step()
         current_layer_idx = self._get_current_layer_idx()

@@ -211,7 +211,7 @@ class NPUWorker(WorkerBase):
             return
         if not self.model_config.enforce_eager:
             print("start to ffn profile_run  ")
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(is_ubatch=True)
             # self.model_runner.initialize_afd_connector()
             print("finsh  ffn profile_run  ")
             print("start  ffn compile_or_warm_up_model  ")
@@ -224,10 +224,10 @@ class NPUWorker(WorkerBase):
             ]
             for size in sorted(warmup_sizes, reverse=True):
                 logger.info("Compile and warming up model for size %d", size)
-                self.model_runner._dummy_run(size)
+                self.model_runner._dummy_run(size, is_ubatch=True)
             print("finsh  ffn compile_or_warm_up_model  ")
             print("start to capture ffn capture_model")
-            self.model_runner.capture_model()
+            self.model_runner.capture_model(is_ubatch=True)
             # self.model_runner.initialize_afd_connector()
             print("finsh  capture ffn capture_model")
         if self.profiler:
