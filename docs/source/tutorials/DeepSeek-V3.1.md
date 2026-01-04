@@ -296,7 +296,7 @@ export HCCL_BUFFSIZE=256
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -372,7 +372,7 @@ export HCCL_BUFFSIZE=256
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -449,7 +449,7 @@ export HCCL_BUFFSIZE=1100
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -527,7 +527,7 @@ export HCCL_BUFFSIZE=1100
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICE=$1
+export ASCEND_RT_VISIBLE_DEVICES=$1
 export ASCEND_BUFFER_POOL=4:8
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 

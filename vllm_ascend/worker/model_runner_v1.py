@@ -183,8 +183,15 @@ class ExecuteModelState(NamedTuple):
 class NPUModelRunner(GPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # TODO(qcs): These manual pad and unpad for GPUModelRunner are
+        # used to expand some buffers, which need to be reverted after
+        # the following PR is merged:
+        # https://github.com/vllm-project/vllm/pull/28988
+        max_pcp_pad_tokens = vllm_config.parallel_config.prefill_context_parallel_size * 2 * vllm_config.scheduler_config.max_num_seqs
+        vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        vllm_config.scheduler_config.max_num_batched_tokens -= max_pcp_pad_tokens
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -894,9 +901,6 @@ class NPUModelRunner(GPUModelRunner):
         self.logits_indices = logits_indices
 
         # Used in the below loop.
-        # query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
-        num_computed_tokens_cpu = (
-            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         self.spec_decode_common_attn_metadata = None
         if use_spec_decode and self.need_accepted_tokens:
             self.num_accepted_tokens.np[:num_reqs] = (
@@ -991,7 +995,8 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
                 slot_mapping=slot_mapping,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_computed_tokens_cpu=self.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
                 positions=self.positions.gpu,
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
@@ -1911,9 +1916,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
-                self.cp_kv_recover_idx = torch.zeros(self.max_num_tokens,
-                                                     dtype=torch.int32,
-                                                     device=self.device)
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
                     num_tokens, self.query_lens, self.attn_mask,
                     self.input_batch)
@@ -1960,7 +1962,11 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
                         self.speculative_config.method == "mtp":
-                    attn_state = AscendAttentionState.SpecDecoding
+                    # `AscendAttentionState.SpecDecoding` is only designed for mla
+                    if self.vllm_config.model_config.use_mla:
+                        attn_state = AscendAttentionState.SpecDecoding
+                    else:
+                        attn_state = AscendAttentionState.ChunkedPrefill
 
                 common_metadata = CommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
@@ -2378,9 +2384,10 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
+        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
-                      self.kv_caches)
+                      self.kv_caches, num_attn_module)
         return kv_caches
 
     def _allocate_kv_cache_tensors(

@@ -55,6 +55,7 @@ _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -338,6 +339,13 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
         # we return the default stream.
         _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
+def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
+    global _CP_CHUNKEDPREFILL_COMM_STREAM
+    if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
+        _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -956,14 +964,6 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
-
-
-# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
-# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
-# significantly improve communication performance of MC2 ops dispatch/combine.
-def is_hierarchical_communication_enabled():
-    return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
