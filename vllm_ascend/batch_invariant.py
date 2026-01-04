@@ -21,6 +21,8 @@ import os
 import torch
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
+from vllm_ascend.ops.triton.batch_invariant.matmul import linear_batch_invariant
+
 
 def override_envs_for_invariance():
     # TODO(Ronald) set attntion backend to deterministic mode

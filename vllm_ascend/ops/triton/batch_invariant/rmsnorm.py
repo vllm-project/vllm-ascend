@@ -1,3 +1,22 @@
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/batch_invariant.py
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
 import torch
 
 from vllm.triton_utils import triton, tl
@@ -63,7 +82,7 @@ def _rms_norm_kernel(
 
 
 def rms_norm(
-    input: torch.Tensor,
+    input_: torch.Tensor,
     weight: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
@@ -82,19 +101,19 @@ def rms_norm(
         Tensor with RMS normalization applied along the last dimension
     """
     assert weight.dim() == 1, "Weight must be 1-dimensional"
-    assert input.shape[-1] == weight.shape[0], (
-        f"Input last dimension ({input.shape[-1]}) must match "
+    assert input_.shape[-1] == weight.shape[0], (
+        f"Input last dimension ({input_.shape[-1]}) must match "
         f"weight dimension ({weight.shape[0]})")
 
     # Flatten all dimensions except the last one
-    original_shape = input.shape
-    input_2d = input.reshape(-1, input.shape[-1])
+    original_shape = input_.shape
+    input_2d = input_.reshape(-1, input_.shape[-1])
     input_2d = input_2d.contiguous()
     weight = weight.contiguous()
 
     n_rows, n_cols = input_2d.shape
 
-    output = torch.empty_like(input_2d, dtype=input.dtype)
+    output = torch.empty_like(input_2d, dtype=input_.dtype)
     BLOCK_SIZE = 1024  # 保持原有的BLOCK_SIZE
     max_grid_size = driver.active.utils.get_device_properties(
         torch.npu.current_device())["num_vectorcore"]
@@ -116,9 +135,11 @@ def rms_norm(
     return output.reshape(original_shape)
 
 
-def rms_norm_batch_invariant(input: torch.Tensor,
-                             weight: torch.Tensor,
-                             eps: float = 1e-6) -> torch.Tensor:
+def rms_norm_batch_invariant(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
     """
     Batch-invariant wrapper for RMS normalization.
 
@@ -132,4 +153,4 @@ def rms_norm_batch_invariant(input: torch.Tensor,
     Returns:
         RMS normalized tensor
     """
-    return rms_norm(input, weight, eps=eps)
+    return rms_norm(input_, weight, eps=eps)
