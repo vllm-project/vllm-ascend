@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
@@ -71,7 +71,7 @@ class AscendW8A8MXFP8DynamicLinearMethod:
     @staticmethod
     def apply(
         layer: torch.nn.Module,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:

@@ -327,7 +327,8 @@ class FusedMC2CommImpl(MoECommMethod):
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
-            pertoken_scale: Optional[torch.Tensor] = None):
+            pertoken_scale: Optional[torch.Tensor] = None,
+            **kwargs):
         assert not (
             w1_scale is None or w2_scale is None
         ), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
