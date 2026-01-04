@@ -25,9 +25,24 @@ from torch._inductor.compile_fx import (graph_returns_tuple,
                                         make_graph_return_tuple)
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
+from vllm.config import VllmConfig
 from vllm.compilation.compiler_interface import CompilerInterface
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+# Global reference to the current compiler instance
+_current_compiler = None
+
+
+def set_current_compiler(compiler: "AscendCompiler") -> None:
+    """Set the current compiler instance globally."""
+    global _current_compiler
+    _current_compiler = compiler
+
+
+def get_current_compiler() -> Optional["AscendCompiler"]:
+    """Get the current compiler instance globally."""
+    return _current_compiler
 
 
 def compile_fx(graph: GraphModule, example_inputs: list,
@@ -71,6 +86,7 @@ def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
+    vllm_config: VllmConfig,
     runtime_shape: Optional[int] = None,
     key: Optional[str] = None,
 ) -> tuple[Optional[Callable], Optional[Any]]:
@@ -96,6 +112,7 @@ def npugraph_ex_compile(
     # TODO: use a better way to lazy register replacement, instead of import one by one
     # As an example, we directly import here to register replacement.
     # import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
+    # import vllm_ascend.compilation.npugraph_ex_passes.add_qk_norm_rope_fusion  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
@@ -118,6 +135,13 @@ class AscendCompiler(CompilerInterface):
     specific configurations for graph fusion and decomposition.
     """
     name = "AscendCompiler"
+    
+    def compute_hash(self, vllm_config: VllmConfig) -> str:
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_npugraph_ex:
+            self.vllm_config = vllm_config
+            set_current_compiler(self)
+        return vllm_config.compute_hash()
 
     def compile(
         self,
@@ -130,7 +154,7 @@ class AscendCompiler(CompilerInterface):
 
         ascend_config = get_ascend_config()
         if ascend_config.enable_npugraph_ex:
-            return npugraph_ex_compile(graph, example_inputs, compiler_config,
+            return npugraph_ex_compile(graph, example_inputs, compiler_config, self.vllm_config,
                                        runtime_shape, key)
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config,
