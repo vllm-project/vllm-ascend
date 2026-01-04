@@ -26,6 +26,8 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
+      # We should also trigger image build when nightly test related files are changed to ensure the image is valid for nightly tests
+      - 'tests/e2e/nightly/'
     types: [ labeled ]
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
