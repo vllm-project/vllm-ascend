@@ -529,35 +529,3 @@ def flash_attn_with_kvcache(
     if return_softmax_lse:
         return out, softmax_lse
     return out
-
-
-# Alias for consistency with the spec naming
-flash_attn_with_kvcache_batch_invariant = flash_attn_with_kvcache
-
-# =============================================================================
-# Integration Functions
-# =============================================================================
-# The following functions provide mechanisms to integrate the batch-invariant
-# flash attention into vllm-ascend runtime.
-# =============================================================================
-
-_original_flash_attn_with_kvcache = None
-
-
-def get_flash_attn_with_kvcache():
-    """
-    Get the batch-invariant flash attention function.
-
-    This function returns the batch-invariant implementation of
-    flash_attn_with_kvcache that can be used as a drop-in replacement
-    for the standard flash-attention v3 implementation.
-
-    Returns:
-        The flash_attn_with_kvcache function
-
-    Example:
-        >>> from vllm_ascend.batch_invariant import get_flash_attn_with_kvcache
-        >>> flash_attn = get_flash_attn_with_kvcache()
-        >>> output = flash_attn(q, k_cache, v_cache, causal=True)
-    """
-    return flash_attn_with_kvcache
