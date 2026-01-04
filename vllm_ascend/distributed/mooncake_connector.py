@@ -292,12 +292,20 @@ class KVCacheSendingThread(threading.Thread):
 
 class KVCacheRecvingThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, tp_size: int, _prefill_pp_size: int,
-                 engine: TransferEngine, local_engine_id: str,
-                 local_handshake_port: int, side_channel_port: int,
-                 local_kv_caches_base_addr: list[int], block_len: list[int],
-                 ready_event: threading.Event, vllm_config: VllmConfig,
-                 kv_caches: dict[str, Any], prefill_pp_layer_partition: Optional[str] = None):
+    def __init__(self,
+                 tp_rank: int,
+                 tp_size: int,
+                 _prefill_pp_size: int,
+                 engine: TransferEngine,
+                 local_engine_id: str,
+                 local_handshake_port: int,
+                 side_channel_port: int,
+                 local_kv_caches_base_addr: list[int],
+                 block_len: list[int],
+                 ready_event: threading.Event,
+                 vllm_config: VllmConfig,
+                 kv_caches: dict[str, Any],
+                 prefill_pp_layer_partition: Optional[str] = None):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -1284,7 +1292,8 @@ class MooncakeConnectorWorker:
                 self.tp_rank, self.tp_size, self._prefill_pp_size, self.engine,
                 self.engine_id, self.handshake_port, self.side_channel_port,
                 kv_caches_base_addr, self.block_len, ready_event,
-                self.vllm_config, self.kv_caches, self._prefill_pp_layer_partition)
+                self.vllm_config, self.kv_caches,
+                self._prefill_pp_layer_partition)
             self.kv_recv_thread.start()
 
         start_wait_time = time.time()
