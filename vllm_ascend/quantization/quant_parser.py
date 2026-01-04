@@ -23,7 +23,7 @@ if hasattr(torch_npu, "float8_e8m0fnu"):
         },
     }
 else:
-    QUANT_CONFIGS = None
+    QUANT_CONFIGS = {}
 
 
 def get_rollback_quant_type(rollback_quant_config):

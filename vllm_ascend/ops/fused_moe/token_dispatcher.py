@@ -126,10 +126,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             get_ascend_device_type() == AscendDeviceType.A3)
         self.a5_need_extra_args = get_ascend_device_type(
         ) == AscendDeviceType.A5
-        # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
-        # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
-        # improve communication performance.
-        self.need_expert_scale = is_hierarchical_communication_enabled()
         self.with_quant = False
         self.expand_scales = None
 
