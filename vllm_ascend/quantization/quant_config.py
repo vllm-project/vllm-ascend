@@ -322,8 +322,7 @@ packed_modules_model_mapping = {
             "k_proj",
             "v_proj",
         ],
-        "experts":
-        ["experts.0.w1", "experts.0.w2", "experts.0.w3"]
+        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"]
     }
 }
 
