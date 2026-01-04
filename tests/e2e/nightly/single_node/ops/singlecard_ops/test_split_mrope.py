@@ -120,11 +120,14 @@ def test_split_mrope(num_tokens: int, num_q_heads: int, num_kv_heads: int,
 
     torch.set_default_device(device)
 
-    in_positions = torch.randint(0, num_tokens, [3, num_tokens],
-                                 dtype=torch.int64, device="npu")
+    in_positions = torch.randint(0,
+                                 num_tokens, [3, num_tokens],
+                                 dtype=torch.int64,
+                                 device="npu")
     in_qkv = torch.randn(num_tokens,
                          (num_q_heads + 2 * num_kv_heads) * head_size,
-                         dtype=dtype, device="npu")
+                         dtype=dtype,
+                         device="npu")
     in_cos_sin_cache = _compute_cos_sin_cache(num_tokens, num_tokens,
                                               rotary_dim).to(device="npu")
 
@@ -134,10 +137,8 @@ def test_split_mrope(num_tokens: int, num_q_heads: int, num_kv_heads: int,
     in_q, in_k, golden_v = in_qkv.split([q_size, kv_size, kv_size], dim=-1)
 
     golden_q, golden_k = mrope_golden(in_positions, in_q, in_k,
-                                      in_cos_sin_cache,
-                                      head_size,
-                                      mrope_section,
-                                      is_neox_style)
+                                      in_cos_sin_cache, head_size,
+                                      mrope_section, is_neox_style)
 
     # Execute real cases.
     if is_neox_style:
