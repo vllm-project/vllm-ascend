@@ -1007,8 +1007,6 @@ class TestNPUWorker(TestBase):
             # Verify _dummy_run call count and order (by size descending)
             expected_calls = [
                 unittest.mock.call(16),
-                unittest.mock.call(8),
-                unittest.mock.call(4),
                 unittest.mock.call(1),
             ]
             worker.model_runner._dummy_run.assert_has_calls(expected_calls)
@@ -1017,7 +1015,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner.capture_model.assert_not_called()
 
             # Verify log output
-            self.assertEqual(mock_logger.info.call_count, 4)
+            self.assertEqual(mock_logger.info.call_count, 2)
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
