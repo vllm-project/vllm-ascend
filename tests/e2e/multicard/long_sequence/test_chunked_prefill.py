@@ -22,18 +22,13 @@ Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
 """
 
 import os
+from unittest.mock import patch
 import random
 import string
 
-import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.utils import vllm_version_is
-
-os.environ["HCCL_BUFFSIZE"] = "768"
-os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = "1"
-os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
 
 def generate_prompts(input_len, batchsize):
@@ -45,8 +40,11 @@ def generate_prompts(input_len, batchsize):
     return prompts
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
+@patch.dict(os.environ, {
+    "HCCL_BUFFSIZE": "768",
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"
+})
 def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
     TEST_ROPE_PARAMETERS = {
         "rope_theta": 1000000,
