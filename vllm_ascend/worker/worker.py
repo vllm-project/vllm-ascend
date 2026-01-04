@@ -59,6 +59,7 @@ from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
                                enable_sp, get_ascend_device_type,
                                register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.batch_invariant import init_batch_invariance
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -445,6 +446,7 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
+        init_batch_invariance()
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")

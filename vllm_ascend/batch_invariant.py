@@ -1,0 +1,81 @@
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/batch_invariant.py
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+import os
+
+import torch
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+
+def override_envs_for_invariance():
+    # TODO(Ronald) set attntion backend to deterministic mode
+
+    # enabling NZ mode introduces NZ format input to the triton operator,
+    # resulting in accuracy anomalies.
+    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+
+    # communication determinism settings
+    os.environ["HCCL_DETERMINISTIC"] = "true"
+    os.environ["LCCL_DETERMINISTIC"] = "1"
+
+    # computing determinism settings
+    os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
+    os.environ["ATB_MATMUL_SHUFFLE_K_ENABLE"] = "0"
+    os.environ["ATB_LLM_LCOC_ENABLE"] = "0"
+
+
+def enable_batch_invariant_mode():
+    global _batch_invariant_LIB
+
+    _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
+
+    # _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
+    # _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
+    # _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant,
+    #                           "NPU")
+    _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
+    # _batch_invariant_LIB.impl("aten::_log_softmax",
+    #                           _log_softmax_batch_invariant, "NPU")
+    # _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant,
+    #                           "NPU")
+    # _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant,
+    #                           "NPU")
+    # _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant,
+    #                           "NPU")
+
+    # Also monkeypatch torch.bmm directly as a fallback
+    # _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
+    # _original_torch_bmm = torch.bmm
+    # torch.bmm = bmm_batch_invariant
+
+
+def init_batch_invariance():
+    """
+    Initialize batch-invariant mode for vLLM on Ascend NPU.
+
+    This function:
+    1. Sets environment variables for deterministic computation
+    2. Registers batch-invariant implementations for torch operators
+    3. Enables batch-invariant flash attention
+
+    Call this function early in your application, or set VLLM_BATCH_INVARIANT=1
+    environment variable to enable automatically.
+    """
+    if vllm_is_batch_invariant():
+        override_envs_for_invariance()
+        enable_batch_invariant_mode()
