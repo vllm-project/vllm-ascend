@@ -27,6 +27,7 @@ from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config.utils import Range
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
@@ -72,7 +73,7 @@ def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
-    runtime_shape: Optional[int] = None,
+    compile_range: Range,
     key: Optional[str] = None,
 ) -> tuple[Optional[Callable], Optional[Any]]:
     # When currently using the FULL_DECODE_ONLY mode,
@@ -125,7 +126,6 @@ class AscendCompiler(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        # runtime_shape: Optional[int] = None,
         compile_range: Range,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
