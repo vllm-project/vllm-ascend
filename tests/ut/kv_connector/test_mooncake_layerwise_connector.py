@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import torch
 import zmq
-from vllm.logger import logger
 
 # fake mooncake.engine.TransferEngine
 fake_engine = types.ModuleType("mooncake.engine")
@@ -34,11 +33,6 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.engine = MagicMock()
         self.engine.register_memory.return_value = 0
         self.engine.batch_transfer_sync_write.return_value = 1
-        self._patcher_cs = patch(
-            'vllm_ascend.distributed.mooncake_layerwise_connector.torch_npu.npu.current_stream'
-        )
-        self.mock_current_stream = self._patcher_cs.start()
-        self.addCleanup(self._patcher_cs.stop)
         fake_stream = MagicMock(name="FakeStream")
         fake_stream.synchronize = MagicMock()
         self.mock_current_stream.return_value = fake_stream
@@ -634,9 +628,6 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
 
     def test_build_connector_meta_accumulates_cached_blocks(self):
-        req = MockRequest("req_b2",
-                          prompt_token_ids=list(range(8)),
-                          kv_transfer_params={"do_remote_decode": True})
         req_meta = MagicMock(spec=ReqMeta)
         req_meta.local_block_ids = [1, 2, 3]
         req_meta.remote_block_ids = [4, 5]

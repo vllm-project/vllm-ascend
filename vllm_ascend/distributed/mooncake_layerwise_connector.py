@@ -19,7 +19,6 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
@@ -33,11 +32,11 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import (align_memory,
                                            get_transfer_timeout_value,
                                            kv_alltoall_and_rearrange)
+from vllm_ascend.utils import npu_stream_switch
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -220,7 +219,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 for i in [2 * layer_idx, 2 * layer_idx + 1]
             ]
             layer_remote_kv_base_addr = [
-                remote_kv_base_addrs[i]
+                remote_kv_base_addrs[i]  # type:ignore
                 for i in [2 * layer_idx, 2 * layer_idx + 1]
             ]
             grouped_remote_block_ids, grouped_local_block_ids = \
@@ -244,7 +243,8 @@ class KVCacheSendingLayerThread(threading.Thread):
             rearrange_block_ids = send_task.rearrange_block_ids
             rearrange_block_dict = {
                 value: index
-                for index, value in enumerate(rearrange_block_ids)
+                for index, value in enumerate(
+                    rearrange_block_ids)  # type:ignore
             }
             layer_local_kv_base_addr = [
                 self.k_buffer.data_ptr(),
@@ -252,7 +252,7 @@ class KVCacheSendingLayerThread(threading.Thread):
             ]
 
             layer_remote_kv_base_addr = [
-                remote_kv_base_addrs[i]
+                remote_kv_base_addrs[i]  # type:ignore
                 for i in [2 * layer_idx, 2 * layer_idx + 1]
             ]
 
@@ -278,8 +278,8 @@ class KVCacheSendingLayerThread(threading.Thread):
             with npu_stream_switch(self.resharding_stream):
                 key = send_task.k_cache
                 value = send_task.v_cache
-                key = key.view(-1, key.shape[-1])
-                value = value.view(-1, key.shape[-1])
+                key = key.view(-1, key.shape[-1])  # type:ignore
+                value = value.view(-1, key.shape[-1])  # type:ignore
                 self.k_buffer[:key.shape[0]].copy_(key)  # [:4, 128] ->
                 self.v_buffer[:value.shape[0]].copy_(value)
 
@@ -308,7 +308,7 @@ class KVCacheSendingLayerThread(threading.Thread):
             You can manually build the master branch of the project at https://gitcode.com/cann/hixl
             to resolve this issue before the 8.5.RC1 release.
             """
-            send_task.wait_event.synchronize()
+            send_task.wait_event.synchronize()  # type:ignore
         elif self.pd_head_ratio > 1:
             self.resharding_stream.synchronize()
 
@@ -870,8 +870,8 @@ class MooncakeLayerwiseConnectorWorker:
                 deque)
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
-        self.k_buffer = None
-        self.v_buffer = None
+        self.k_buffer: Optional[torch.Tensor] = None
+        self.v_buffer: Optional[torch.Tensor] = None
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1146,6 +1146,14 @@ class MooncakeLayerwiseConnectorWorker:
             logger.info(
                 f"Query to port and kv base addr for request {req_id} from {req_meta_update.remote_host}:{req_meta_update.remote_port} success {agent_meta.kv_caches_base_addr=} {agent_meta.te_rpc_port=}"
             )
+            session_id = f"{req_meta_update.remote_host}:{agent_meta.te_rpc_port}"
+            ret = self.engine.batch_transfer_sync_write(
+                session_id, [self.kv_caches_base_addr[0]],
+                [agent_meta.kv_caches_base_addr[0]], 128)
+            if ret < 0:
+                logger.error(
+                    f"Mooncake transfer failed to create link to device {session_id}"
+                )
         req_meta_update.remote_te_rpc_port = self.remote_te_port[
             req_meta_update.remote_engine_id][req_meta_update.remote_port]
         req_meta_update.remote_kv_caches_base_addr = self.remote_kv_caches_base_addr[
