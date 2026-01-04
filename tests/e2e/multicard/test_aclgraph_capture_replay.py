@@ -28,7 +28,9 @@ from vllm.utils.network_utils import get_open_port
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
-    "Qwen/Qwen3-0.6B",
+    # wjunlu: Offline data parallel mode will be not supported/useful for dense models
+    # see `https://github.com/vllm-project/vllm/pull/30739``
+    # "Qwen/Qwen3-0.6B",
     "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 
@@ -153,7 +155,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
         "hidden_layers": multiprocessing.Value("i", -1),
     }
 
-    dp_size = 2
+    dp_size = 2 if "DeepSeek" in model else 1
     port = get_open_port()
 
     # Launch workers
