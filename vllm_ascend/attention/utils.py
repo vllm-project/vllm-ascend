@@ -63,6 +63,7 @@ class AscendMetadataForPrefill:
         cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
         kv_inverse_idx_for_chunk: Optional[list[int]] = None
         batch_chunk_seq_mask: Optional[list[bool]] = None
+        local_total_toks: Optional[int] = None
 
     """ Prefill Specific Metadata for Ascend"""
     pcp_metadata: Optional[AscendPCPMetadata] = None
@@ -142,6 +143,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     spec_attn_mask: torch.Tensor = None
 
+    swa_mask: torch.Tensor = None
+
     attn_state: Any = None
 
     graph_pad_size: int = -1
@@ -175,6 +178,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             positions=self.positions[:num_actual_tokens],
             attn_mask=self.attn_mask,
             spec_attn_mask=self.spec_attn_mask,
+            swa_mask=self.swa_mask,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,

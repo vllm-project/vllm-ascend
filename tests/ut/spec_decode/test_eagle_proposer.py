@@ -2,9 +2,10 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-from vllm.config import CacheConfig, CompilationMode, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 
@@ -25,25 +26,38 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.scheduler_config.max_num_seqs = 32
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.speculative_token_tree = str([
+            (i + 1) * (0, ) for i in range(2)
+        ])
+        self.vllm_config.additional_config = None
 
         self.mock_cpugpubuffer = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+            "vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
+        )
+        self.mock_supports_multimodal_inputs.start()
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
 
-    def test_initialization_eagle(self):
+    def test_initialization_eagle_graph(self):
         self.vllm_config.speculative_config.method = "eagle"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.speculative_config.enforce_eager = False
+        self.vllm_config.scheduler_config.async_scheduling = False
+        init_ascend_config(self.vllm_config)
 
         proposer = EagleProposer(vllm_config=self.vllm_config,
                                  device=self.device,
                                  runner=self.runner)
 
-        self.assertEqual(proposer.name, SpecDcodeType.EAGLE)
         self.assertEqual(proposer.block_size, 16)
         self.assertEqual(proposer.hidden_size, 4096)
         self.assertTrue(proposer.use_cuda_graph)
@@ -53,17 +67,34 @@ class TestEagleProposerInitialization(TestBase):
         self.assertEqual(proposer.hidden_states.shape, (1024, 4096))
         self.assertEqual(proposer.arange.shape, (1024, ))
 
-    def test_initialization_eagle3(self):
+    def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.NONE
         self.vllm_config.model_config.enforce_eager = True
+        init_ascend_config(self.vllm_config)
 
         proposer = EagleProposer(vllm_config=self.vllm_config,
                                  device=self.device,
                                  runner=self.runner)
 
-        self.assertEqual(proposer.name, SpecDcodeType.EAGLE3)
+        self.assertEqual(proposer.hidden_size, 2048)
+        self.assertFalse(proposer.use_cuda_graph)
+        self.assertEqual(proposer.hidden_states.shape, (1024, 2048))
+
+    def test_initialization_eagle3_full_graph_async(self):
+        self.vllm_config.speculative_config.method = "eagle3"
+        self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.speculative_config.enforce_eager = False
+        self.vllm_config.scheduler_config.async_scheduling = True
+        init_ascend_config(self.vllm_config)
+
+        proposer = EagleProposer(vllm_config=self.vllm_config,
+                                 device=self.device,
+                                 runner=self.runner)
+
         self.assertEqual(proposer.hidden_size, 2048)
         self.assertFalse(proposer.use_cuda_graph)
         self.assertEqual(proposer.hidden_states.shape, (1024, 2048))
@@ -83,16 +114,28 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.scheduler_config.max_num_seqs = 32
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.speculative_token_tree = str([
+            (i + 1) * (0, ) for i in range(2)
+        ])
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
 
         self.mock_cpugpubuffer = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+            "vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
+        )
+        self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
 
     @patch(
         "vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
@@ -176,6 +219,7 @@ class TestEagleProposerDummyRun(TestBase):
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.speculative_config = MagicMock()
+        self.vllm_config.speculative_config.num_speculative_tokens = 4
         self.device = torch.device("cpu")
         self.runner = MagicMock()
 
@@ -184,33 +228,83 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.scheduler_config.max_num_seqs = 32
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.speculative_config.speculative_token_tree = str([
+            (i + 1) * (0, ) for i in range(4)
+        ])
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
 
         self.mock_cpugpubuffer = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+            "vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
+        )
+        self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
         self.proposer.model = MagicMock()
+        self.proposer.update_stream = MagicMock()
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
 
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_basic(self, mock_context):
+    def test_dummy_run_basic(self, mock_context, mock_get_context):
         num_tokens = 32
         with_prefill = False
 
         self.proposer.dummy_run(num_tokens=num_tokens,
                                 with_prefill=with_prefill)
 
-        mock_context.assert_called_once()
+        self.assertTrue(self.proposer.model.call_count == 4)
 
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_with_prefill(self, mock_context):
+    def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
         mock_context.return_value.__enter__.return_value = None
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
-        self.proposer.model.assert_called_once()
+        self.assertTrue(self.proposer.model.call_count == 4)
+
+    @patch("vllm_ascend.spec_decode.eagle_proposer.update_attn_params")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    def test_dummy_run_in_graph_capture(self, mock_context, mock_get_context,
+                                        mock_update_attn_params):
+        last_use_cuda_graph = self.proposer.use_cuda_graph
+        mock_return_context = MagicMock()
+        mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        mock_return_context.capturing = True
+        mock_get_context.return_value = mock_return_context
+        self.proposer.use_cuda_graph = True
+        self.proposer.dummy_run(num_tokens=64,
+                                in_graph_capturing=True,
+                                aclgraph_runtime_mode=CUDAGraphMode.FULL)
+        self.assertTrue(self.proposer.model.call_count == 4)
+        mock_update_attn_params.assert_not_called()
+        self.proposer.use_cuda_graph = last_use_cuda_graph
+
+    @patch("vllm_ascend.spec_decode.eagle_proposer.update_attn_params")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    def test_dummy_run_in_graph_run(self, mock_context, mock_get_context,
+                                    mock_update_attn_params):
+        last_use_cuda_graph = self.proposer.use_cuda_graph
+        mock_return_context = MagicMock()
+        mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        mock_return_context.capturing = False
+        mock_get_context.return_value = mock_return_context
+        self.proposer.use_cuda_graph = True
+        self.proposer.dummy_run(num_tokens=64,
+                                in_graph_capturing=False,
+                                aclgraph_runtime_mode=CUDAGraphMode.FULL)
+        self.assertTrue(self.proposer.model.call_count == 4)
+        self.assertTrue(mock_update_attn_params.call_count == 4)
+        self.proposer.use_cuda_graph = last_use_cuda_graph
 
 
 class TestEagleProposerGenerateTokenIds(TestBase):
@@ -228,16 +322,28 @@ class TestEagleProposerGenerateTokenIds(TestBase):
             1: MagicMock(get_token_id=lambda x: 101),
             2: MagicMock(get_token_id=lambda x: 102),
         }
+        self.runner.pcp_size = 1
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
         self.vllm_config.scheduler_config.max_num_seqs = 32
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.speculative_token_tree = str([
+            (i + 1) * (0, ) for i in range(2)
+        ])
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
 
         self.mock_cpugpubuffer = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+            "vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
+        )
+        self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
@@ -247,6 +353,7 @@ class TestEagleProposerGenerateTokenIds(TestBase):
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
 
     # TODO: This is equivalent to disable_padded_drafter_batch=True.
     # We need to add some cases about disable_padded_drafter_batch=False in future.
@@ -296,16 +403,28 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.scheduler_config.max_num_seqs = 32
         self.vllm_config.model_config.dtype = torch.float16
         self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.speculative_token_tree = str([
+            (i + 1) * (0, ) for i in range(2)
+        ])
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
 
         self.mock_cpugpubuffer = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.CpuGpuBuffer")
+            "vllm.v1.spec_decode.eagle.CpuGpuBuffer")
         self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs"
+        )
+        self.mock_supports_multimodal_inputs.start()
         self.proposer = EagleProposer(vllm_config=self.vllm_config,
                                       device=self.device,
                                       runner=self.runner)
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
 
     # TODO: This is equivalent to disable_padded_drafter_batch=True.
     # We need to add a test_prepare_inputs_padded in future.

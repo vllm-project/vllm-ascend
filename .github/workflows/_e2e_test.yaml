@@ -80,8 +80,11 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -103,11 +106,12 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
 
-          pytest -sv --durations=0 tests/e2e/nightly/ops/triton/
+          pytest -sv --durations=0 tests/e2e/nightly/single_node/ops/singlecard_ops/triton/
           pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
+          # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
+          # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
           pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
@@ -122,8 +126,10 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
-          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
+          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
+
+          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
 
   e2e-2-cards:
     name: multicard-2
@@ -189,8 +195,11 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -286,14 +295,18 @@ jobs:
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
+          pytest -sv --durations=0 tests/e2e/multicard/spec_decode/test_mtp_qwen3_next.py
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_kimi_k2_thinking_w4a16_tp4
           pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
