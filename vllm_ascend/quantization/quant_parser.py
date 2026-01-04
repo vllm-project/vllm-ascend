@@ -1,8 +1,7 @@
 import torch
 import torch_npu
 
-
-class QuantTypeMapping:
+if hasattr(torch_npu, "float8_e8m0fnu"):
     QUANT_CONFIGS = {
         "W8A8_MXFP8": {
             "act_quant_type": torch.float8_e4m3fn,
@@ -23,10 +22,8 @@ class QuantTypeMapping:
             "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
         },
     }
-
-    @staticmethod
-    def get_quant_settings():
-        return QuantTypeMapping.QUANT_CONFIGS
+else:
+    QUANT_CONFIGS = None
 
 
 def get_rollback_quant_type(rollback_quant_config):
@@ -47,8 +44,7 @@ def parse_a5_quant_params(**kwargs):
 
 
 def parse_quant_moe_down_proj_params(rollback_quant_type, parsed_round_mode):
-    quant_type_mapping = QuantTypeMapping.get_quant_settings()
-    cur_rollback_quant_config = quant_type_mapping[rollback_quant_type]
+    cur_rollback_quant_config = QUANT_CONFIGS[rollback_quant_type]
     # W4A4_MXFP4 supports 'round' and 'rint' rounding modes
     if rollback_quant_type in ["W4A4_MXFP4"]:
         round_mode = parsed_round_mode
