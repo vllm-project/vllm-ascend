@@ -396,9 +396,9 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
         auto bias_size = bias.sizes();
         TORCH_CHECK(bias_size[0] == expert_num, "The bias first dim should be same as x second dim");
     }
-    at::Tensor yOut = at::empty({rows, k}, x.options());
-    at::Tensor expertIdxOut = at::empty({rows, k}, x.options().dtype(at::kInt));
-    at::Tensor outOut = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+    at::Tensor y = at::empty({rows, k}, x.options());
+    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
