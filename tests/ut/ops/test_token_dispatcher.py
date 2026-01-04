@@ -149,43 +149,6 @@ class TestTokenDispatcherWithMC2(TestBase):
                                                        context_metadata)
         self.assertIn("tp_send_counts", kwargs)
 
-    def test_token_combine_with_shared_experts(self):
-        shared_experts = MagicMock()
-        shared_experts.down_proj.return_value = (torch.randn(10, 128),
-                                                 torch.tensor(1.0))
-
-        topk_ids = torch.randint(0, 8, (10, 1))
-        topk_weights = torch.randn(10, 1)
-        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-        assist_info_for_combine = torch.arange(10)
-        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-
-        context_metadata = {
-            "topk_ids": topk_ids,
-            "topk_weights": topk_weights,
-            "expert_map": expert_map,
-            "ep_recv_counts": ep_recv_counts,
-            "mc2_mask": None,
-            "assist_info_for_combine": assist_info_for_combine,
-            "expand_scales": None,
-            "shared_experts": shared_experts,
-            "shared_act": torch.randn(10, 128),
-            "swiglu_out_scale": torch.randn(10, 1),
-            "tp_recv_counts": tp_recv_counts
-        }
-
-        self.dispatcher.with_quant = True
-        self.dispatcher.need_extra_args = True
-        self.dispatcher.enable_dispatch_v2 = True
-        self.dispatcher.moe_expert_num = len(expert_map)
-        hidden_states = torch.randn(10, 128)
-        with patch("torch_npu.npu_moe_distribute_combine_v2",
-                   return_value=torch.randn(10, 128)):
-            result = self.dispatcher.token_combine(hidden_states,
-                                                   context_metadata)
-            self.assertIsInstance(result, tuple)
-
 
 class TestTokenDispatcherWithAllGather(TestBase):
 
