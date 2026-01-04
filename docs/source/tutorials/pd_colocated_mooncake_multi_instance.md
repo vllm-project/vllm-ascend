@@ -7,7 +7,7 @@ This guide provides step-by-step instructions to test these features with
 constrained resources.
 
 Using the Qwen2.5-72B-Instruct model as an example, this guide demonstrates
-how to use vllm-ascend v0.11.0rc2 (with vLLM v0.11.0) on two Atlas 800T A2
+how to use vllm-ascend v0.11.0 (with vLLM v0.11.0) on two Atlas 800T A2
 nodes to deploy two vLLM instances. Each instance occupies 4 NPU cards and
 uses PD-colocated deployment.
 
@@ -115,6 +115,8 @@ First, obtain the Mooncake project using the following command:
 
 ```bash
 git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+cd Mooncake
+git submodule update --init --recursive
 ```
 
 Install MPI:
@@ -173,7 +175,6 @@ The template for the mooncake.json file is as follows:
 
 ```json
 {
-    "local_hostname": "<your_server_ip>",
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
@@ -185,7 +186,6 @@ The template for the mooncake.json file is as follows:
 
 | Parameter   | Value                  | Explanation                           |
 | --------------| ------------------------| -----------------------------------|
-| local_hostname | 90.90.100.188(for example) | IP address of the current node |
 | metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
 | use_ascend_direct     | true                | Enable direct hardware access  |
