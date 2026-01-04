@@ -22,9 +22,9 @@ Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
 """
 
 import os
-from unittest.mock import patch
 import random
 import string
+from unittest.mock import patch
 
 from vllm import SamplingParams
 
@@ -40,11 +40,12 @@ def generate_prompts(input_len, batchsize):
     return prompts
 
 
-@patch.dict(os.environ, {
-    "HCCL_BUFFSIZE": "768",
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"
-})
+@patch.dict(
+    os.environ, {
+        "HCCL_BUFFSIZE": "768",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+        "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"
+    })
 def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
     TEST_ROPE_PARAMETERS = {
         "rope_theta": 1000000,
