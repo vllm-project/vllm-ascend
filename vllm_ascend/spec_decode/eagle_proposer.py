@@ -107,7 +107,7 @@ class EagleProposer(VllmEagleProposer):
                                                     True)
         return use_aux_hidden_state
 
-    def load_model(self, model: nn.Module) -> None:
+    def load_model(self, target_model: nn.Module) -> None:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
         self.model = get_model(vllm_config=self.vllm_config,
@@ -120,11 +120,58 @@ class EagleProposer(VllmEagleProposer):
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            logger.info(
-                "The EAGLE head shares the same vocab embedding" \
-                " with the target model."
-            )
-            self.model.model.embed_tokens = model.model.embed_tokens
+            if hasattr(target_model.model, "embed_tokens"):
+                target_embed_tokens = target_model.model.embed_tokens
+            elif hasattr(target_model, "embedding"):
+                target_embed_tokens = target_model.model.embedding
+            else:
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' attribute."
+                )
+            share_embeddings = False
+            if hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE model
+                if not self.model.has_own_embed_tokens:
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model without its own embed_tokens in the"
+                        " checkpoint. Sharing target model embedding weights with the"
+                        " draft model."
+                    )
+                elif (
+                    isinstance(target_embed_tokens.weight, torch.Tensor)
+                    and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                    # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                    # usage in CI testing environments with limited GPU memory
+                    and torch.equal(
+                        target_embed_tokens.weight.cpu(),
+                        self.model.model.embed_tokens.weight.cpu(),
+                    )
+                ):
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model with embed_tokens identical to the target"
+                        " model. Sharing target model embedding weights with the draft"
+                        " model."
+                    )
+                else:
+                    logger.info(
+                        "Detected EAGLE model with distinct embed_tokens weights. "
+                        "Keeping separate embedding weights from the target model."
+                    )
+            else:
+                # MTP model
+                share_embeddings = True
+                logger.info(
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
+                )
+
+            if share_embeddings:
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
+
         else:
             logger.info(
                 "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
@@ -134,12 +181,12 @@ class EagleProposer(VllmEagleProposer):
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method == "eagle" and hasattr(model, "lm_head"):
+        if self.method == "eagle" and hasattr(target_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            if supports_multimodal(model):
-                self.model.lm_head = model.get_language_model().lm_head
+            if supports_multimodal(target_model):
+                self.model.lm_head = target_model.get_language_model().lm_head
             else:
-                self.model.lm_head = model.lm_head
+                self.model.lm_head = target_model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and self.use_cuda_graph:
