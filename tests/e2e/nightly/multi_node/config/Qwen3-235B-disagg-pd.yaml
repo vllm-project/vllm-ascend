@@ -1,17 +1,19 @@
-test_name: "test Qwen3-235B-A22B pd online"
+test_name: "test Qwen3-235B-A22B disaggregated_prefill"
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
 env_common:
   VLLM_USE_MODELSCOPE: true
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  HCCL_BUFFSIZE: 1024
+  HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
-  HCCL_BUFFSIZE: 1024
-  SERVER_PORT: 8080
-  NUMEXPR_MAX_THREADS: 128
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+  VLLM_ASCEND_ENABLE_FUSED_MC2: 2
   TASK_QUEUE_ENABLE: 1
-  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-
+  SERVER_PORT: 8080
+  
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -20,22 +22,23 @@ disaggregated_prefill:
 deployment:
   -
     server_cmd: >
-        env VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
         --data-parallel-size-local 2
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
         --tensor-parallel-size 8
         --seed 1024
-        --enable-expert-parallel
         --max-num-seqs 32
         --max-model-len 8192
         --max-num-batched-tokens 8192
+        --enable-expert-parallel
         --trust-remote-code
-        --no-enable-prefix-caching
-        --async-scheduling
         --gpu-memory-utilization 0.9
+        --no-enable-prefix-caching
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -43,6 +46,7 @@ deployment:
         "engine_id": "0",
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
         "kv_connector_extra_config": {
+                  "use_ascend_direct": true,
                   "prefill": {
                           "dp_size": 2,
                           "tp_size": 8
@@ -53,6 +57,7 @@ deployment:
                   }
             }
         }'
+
   -
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
@@ -60,24 +65,28 @@ deployment:
         --port $SERVER_PORT
         --data-parallel-size 4
         --data-parallel-size-local 4
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
         --tensor-parallel-size 4
         --seed 1024
-        --enable-expert-parallel
         --max-num-seqs 32
         --max-model-len 8192
         --max-num-batched-tokens 8192
+        --enable-expert-parallel
         --trust-remote-code
-        --no-enable-prefix-caching
-        --async-scheduling
         --gpu-memory-utilization 0.9
-        --compilation-config '{"cudagraph_mode":"FULL"}'
+        --no-enable-prefix-caching
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --async-scheduling
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
-        "kv_port": "30200",
+        "kv_port": "30100",
         "engine_id": "1",
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
         "kv_connector_extra_config": {
+                  "use_ascend_direct": true,
                   "prefill": {
                           "dp_size": 2,
                           "tp_size": 8
@@ -88,6 +97,7 @@ deployment:
                   }
             }
         }'
+
 benchmarks:
   perf:
     case_type: performance

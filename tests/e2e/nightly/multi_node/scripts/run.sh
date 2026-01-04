@@ -157,18 +157,6 @@ kill_npu_processes() {
   sleep 4
 }
 
-upgrade_vllm_ascend_scr() {
-    # Fix me(Potabk): Remove this once our image build use 
-    # The separate architecture build process currently suffers from errors during cross-compilation
-    # causing the image to fail to build correctly. 
-    # This results in the nightly test code not being the latest version.
-    cd "$WORKSPACE/vllm-ascend"
-    # git pull origin main
-    git fetch origin pull/5502/head:pr-5502
-    git checkout pr-5502
-    
-}
-
 run_tests_with_log() {
     set +e
     kill_npu_processes
@@ -193,7 +181,6 @@ main() {
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi
-    upgrade_vllm_ascend_scr
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
