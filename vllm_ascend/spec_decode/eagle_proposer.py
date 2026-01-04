@@ -136,24 +136,21 @@ class EagleProposer(VllmEagleProposer):
                     logger.info(
                         "Detected EAGLE model without its own embed_tokens in the"
                         " checkpoint. Sharing target model embedding weights with the"
-                        " draft model."
-                    )
-                elif (
-                    isinstance(target_embed_tokens.weight, torch.Tensor)
-                    and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                        " draft model.")
+                elif (isinstance(target_embed_tokens.weight, torch.Tensor)
+                    and isinstance(self.model.model.embed_tokens.weight,
+                                    torch.Tensor)
                     # TODO: Offload to CPU for comparison to avoid extra GPU memory
                     # usage in CI testing environments with limited GPU memory
                     and torch.equal(
                         target_embed_tokens.weight.cpu(),
                         self.model.model.embed_tokens.weight.cpu(),
-                    )
-                ):
+                    )):
                     share_embeddings = True
                     logger.info(
                         "Detected EAGLE model with embed_tokens identical to the target"
                         " model. Sharing target model embedding weights with the draft"
-                        " model."
-                    )
+                        " model.")
                 else:
                     logger.info(
                         "Detected EAGLE model with distinct embed_tokens weights. "
