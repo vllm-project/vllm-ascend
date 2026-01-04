@@ -1,5 +1,6 @@
 import gc
 
+import pytest
 import torch
 import torch_npu
 
@@ -8,8 +9,9 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 
+@pytest.mark.parametrize("cache_mode", ["krope_ctkv", "nzcache"])
 @torch.inference_mode()
-def test_mla_preprocess_kernel():
+def test_mla_preprocess_kernel(cache_mode: str):
     token_num = 1
     head_num = 2
     N_7168 = 7168
@@ -72,43 +74,44 @@ def test_mla_preprocess_kernel():
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
+
     q_nope_old = q_nope_out.clone()
     q_rope_old = q_rope_out.clone()
+    q_down_old = q_down.clone()
 
-    torch.ops._C_ascend.mla_preprocess(
-        hidden_states,
-        wdqkv,
-        de_scale0,
-        gamma1,
-        beta1,
-        wuq,
-        de_scale1,
-        gamma2,
-        cos,
-        sin,
-        wuk,
-        kv_cache,
-        kv_cache_rope,
-        slotmapping,
-        quant_scale0=quant_scale0,
-        quant_offset0=quant_offset0,
-        bias0=bias0,
-        quant_scale1=quant_scale1,
-        quant_offset1=quant_offset1,
-        bias1=bias1,
-        ctkv_scale=ctkv_scale,
-        q_nope_scale=qnope_scale,
-        cache_mode="krope_ctkv",
-        quant_mode="per_tensor_quant_asymm",
-        enable_inner_out=False,
-        q_out0=q_nope_out,
-        kv_cache_out0=kv_cache,
-        q_out1=q_rope_out,
-        kv_cache_out1=kv_cache_rope,
-        inner_out=q_down,
-    )
+    torch.ops._C_ascend.mla_preprocess(hidden_states,
+                                       wdqkv,
+                                       de_scale0,
+                                       gamma1,
+                                       beta1,
+                                       wuq,
+                                       de_scale1,
+                                       gamma2,
+                                       cos,
+                                       sin,
+                                       wuk,
+                                       kv_cache,
+                                       kv_cache_rope,
+                                       slotmapping,
+                                       quant_scale0=quant_scale0,
+                                       quant_offset0=quant_offset0,
+                                       bias0=bias0,
+                                       quant_scale1=quant_scale1,
+                                       quant_offset1=quant_offset1,
+                                       bias1=bias1,
+                                       ctkv_scale=ctkv_scale,
+                                       q_nope_scale=qnope_scale,
+                                       cache_mode=cache_mode,
+                                       quant_mode="per_tensor_quant_asymm",
+                                       enable_inner_out=True,
+                                       q_out0=q_nope_out,
+                                       kv_cache_out0=kv_cache,
+                                       q_out1=q_rope_out,
+                                       kv_cache_out1=kv_cache_rope,
+                                       inner_out=q_down)
     assert not torch.equal(q_nope_out, q_nope_old)
     assert not torch.equal(q_rope_out, q_rope_old)
+    assert not torch.equal(q_down, q_down_old)
 
     gc.collect()
     torch.npu.empty_cache()

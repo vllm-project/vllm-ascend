@@ -30,6 +30,8 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               update_attn_dcp_pcp_params,
+                                               update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -65,6 +67,24 @@ class MtpProposer(EagleProposer):
 
     # TODO: Find out why ModelRunner does not this explicit typing?
     model: Union[nn.Module, ACLGraphWrapper]
+
+    # update full-graph params for one spec token
+    def _update_full_graph_params(self, forward_context, num_tokens):
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size * self.dcp_size > 1:
+                update_mla_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context, num_tokens)
+            else:
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       num_tokens,
+                                       self.vllm_config.speculative_config)
+        else:
+            if self.pcp_size * self.dcp_size > 1:
+                update_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           num_tokens)
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   num_tokens, self.vllm_config)
 
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
@@ -141,7 +161,7 @@ class MtpProposer(EagleProposer):
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
-        if self.use_async_scheduling:
+        if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
             # synchronization overhead.
@@ -179,14 +199,16 @@ class MtpProposer(EagleProposer):
                 if self.pcp_size * self.dcp_size > 1:
                     # update long_seq related params and flatten block_table
                     common_attn_metadata.prefill_context_parallel_metadata = \
-                        self.runner.long_seq_metadata
+                        self.runner.pcp_manager.long_seq_metadata
                     common_attn_metadata.block_table_tensor = \
                         self.runner.input_batch.block_table[0].get_device_tensor()[
                             :num_reqs * self.decode_threshold]
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
+                # `AscendAttentionState.SpecDecoding` is only designed for mla, `AscendAttentionState.ChunkedPrefill` is used in self-attention.
+                attn_state = AscendAttentionState.SpecDecoding if self.vllm_config.model_config.use_mla else AscendAttentionState.ChunkedPrefill
                 attn_metadata_mtp = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.SpecDecoding)
+                    common_attn_metadata, attn_state)
                 attn_metadata = {}
                 for layer_name in self.attn_layer_name:
                     attn_metadata[layer_name] = attn_metadata_mtp
@@ -222,17 +244,9 @@ class MtpProposer(EagleProposer):
                            hidden_states=previous_hidden_states)
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
-                    not forward_context.capturing:
-                    if self.vllm_config.model_config.use_mla and not self.use_sparse:
-                        if self.pcp_size * self.dcp_size > 1:
-                            update_mla_attn_dcp_pcp_params(
-                                self.update_stream, forward_context,
-                                num_tokens)
-                        else:
-                            update_mla_attn_params(
-                                self.update_stream, forward_context,
-                                num_tokens,
-                                self.vllm_config.speculative_config)
+                    not forward_context.capturing and not self.use_sparse:
+                    self._update_full_graph_params(forward_context, num_tokens)
+
                 if self.enable_shared_expert_dp:
                     positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         positions, True)
@@ -286,9 +300,9 @@ class MtpProposer(EagleProposer):
         req_scheduled_tokens = scheduler_output.num_scheduled_tokens
         if self.pcp_size * self.dcp_size > 1:
             long_seq_metadata = self.runner.long_seq_metadata
-            input_ids_pcp_full = self.runner.input_ids_pcp_full.gpu
-            query_start_loc_pcp_full = self.runner.query_start_loc_pcp_full.gpu
-            query_start_loc_pcp_full_cpu = self.runner.query_start_loc_pcp_full.cpu
+            input_ids_pcp_full = self.runner.pcp_manager.input_ids_pcp_full.gpu
+            query_start_loc_pcp_full = self.runner.pcp_manager.query_start_loc_pcp_full.gpu
+            query_start_loc_pcp_full_cpu = self.runner.pcp_manager.query_start_loc_pcp_full.cpu
             num_reqs = self.runner.input_batch.num_reqs
             ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
                 query_start_loc_pcp_full_cpu[:num_reqs]
@@ -303,7 +317,7 @@ class MtpProposer(EagleProposer):
             # update pcp related params
             if self.pcp_size > 1:
                 token_indices_to_sample = \
-                    query_start_loc_pcp_full_cpu[1:num_reqs + 1] - 1
+                    query_start_loc_pcp_full[1:num_reqs + 1] - 1
                 target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
                 target_positions = positions[:num_scheduled_tokens]
                 target_hidden_states = hidden_states
@@ -654,7 +668,7 @@ class MtpProposer(EagleProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-        if self.use_async_scheduling:
+        if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
             # synchronization overhead.
@@ -721,17 +735,9 @@ class MtpProposer(EagleProposer):
                                                positions=positions,
                                                hidden_states=hidden_states)
                     forward_context = get_forward_context()
-                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                        if self.vllm_config.model_config.use_mla and not self.use_sparse:
-                            if self.pcp_size * self.dcp_size > 1:
-                                update_mla_attn_dcp_pcp_params(
-                                    self.update_stream, forward_context,
-                                    num_input_tokens)
-                            else:
-                                update_mla_attn_params(
-                                    self.update_stream, forward_context,
-                                    num_input_tokens,
-                                    self.vllm_config.speculative_config)
+                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
+                        self._update_full_graph_params(forward_context,
+                                                       num_input_tokens)
 
                     if self.enable_shared_expert_dp:
                         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -751,8 +757,8 @@ class MtpProposer(EagleProposer):
                 hidden_states = hidden_states[:num_tokens]
                 hidden_states = get_pcp_group().all_gather(hidden_states, 0)
                 hidden_states = torch.index_select(
-                    hidden_states, 0, self.runner.
-                    pcp_allgather_restore_idx[:hidden_states.shape[0]])
+                    hidden_states, 0, self.runner.pcp_manager.
+                    pcp_allgather_restore_idx.gpu[:hidden_states.shape[0]])
 
             sample_hidden_states = hidden_states[last_token_indices]
             logits = self.model.compute_logits(sample_hidden_states)
@@ -797,13 +803,13 @@ class MtpProposer(EagleProposer):
                     # (_generate_pcp_mtp_input), and use updated slot_indices
                     # to get corresponding slot_mapping in each step.
                     num_reject_tokens = torch.tensor(
-                        self.runner.cu_num_tokens_pcp_full,
+                        self.runner.pcp_manager.cu_num_tokens_pcp_full,
                         dtype=torch.int32).to(
                             self.device) - ori_last_token_indices - 1
                     num_accept_tokens = \
                         query_lens_d.to(self.device) - num_reject_tokens
                     ori_seq_len = attn_metadata_i.seq_lens
-                    mtp_slot_mapping = self.runner.mtp_slot_pad
+                    mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                     # slot_mapping index base offset:
                     # scheduled tokens + pre-allocated mtp tokens + accepted tokens
@@ -889,7 +895,7 @@ class MtpProposer(EagleProposer):
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             if self.pcp_size * self.dcp_size > 1:
                 # update local seq_len and batch_seq_mask
-                num_computed_tokens_of_pcp_dcp = self.runner._get_cp_local_seq_lens(
+                num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
                     ori_seq_len + step + 1,
                     self.pcp_size,
                     self.dcp_size,
