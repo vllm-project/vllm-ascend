@@ -273,11 +273,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        logger.info("before graph fusion")
-        logger.info(graph.graph)
         self.matched_count = self.pattern_match_passes.apply(graph)
-        logger.info("after graph fusion")
-        logger.info(graph.graph)
         logger.debug("Fused %s QKNorm and Rope patterns", self.matched_count)
         logger.debug("Patterns registered for replacement:")
         pattern_idx = 0
@@ -289,4 +285,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
         self.end_and_log()
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
+        """
+        Check if the pass is applicable for the current configuration.
+        """
         return True
