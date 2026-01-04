@@ -894,9 +894,6 @@ class NPUModelRunner(GPUModelRunner):
         self.logits_indices = logits_indices
 
         # Used in the below loop.
-        # query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
-        num_computed_tokens_cpu = (
-            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         self.spec_decode_common_attn_metadata = None
         if use_spec_decode and self.need_accepted_tokens:
             self.num_accepted_tokens.np[:num_reqs] = (
@@ -991,7 +988,8 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
                 slot_mapping=slot_mapping,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_computed_tokens_cpu=self.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
                 positions=self.positions.gpu,
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
@@ -1822,7 +1820,11 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
                         self.speculative_config.method == "mtp":
-                    attn_state = AscendAttentionState.SpecDecoding
+                    # `AscendAttentionState.SpecDecoding` is only designed for mla
+                    if self.vllm_config.model_config.use_mla:
+                        attn_state = AscendAttentionState.SpecDecoding
+                    else:
+                        attn_state = AscendAttentionState.ChunkedPrefill
 
                 common_metadata = CommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
