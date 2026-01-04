@@ -173,7 +173,15 @@ class AscendQuantConfig(QuantizationConfig):
                         "are quantized. All shards of fused layers "
                         "to have the same precision.")
         else:
-            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
+            # NOTE: In GLM4.6, the MTP draft model shares the same LM head weigthts
+            # with the main model. Therefore, before `load_weights()` runs, some parameter
+            # names may not include the expected prefix and may appear only with the
+            # ".head" suffix. This can trigger a load-time error, so here we replace the
+            # key with "lm_head.weight".
+            key = prefix + '.weight'
+            if key not in self.quant_description and ".head" in prefix:
+                key = 'lm_head.weight'
+            is_skipped = self.quant_description[key] == "FLOAT"
 
         assert is_skipped is not None
         return is_skipped
