@@ -166,14 +166,14 @@ class BatchInvariantBackendImpl(AscendAttentionBackendImpl):
         Returns:
             output: [num_tokens, num_heads, head_size]
         """
-        # Get sequence boundaries from query_start_loc
-        query_start_loc = attn_metadata.query_start_loc_list  # List of cumulative positions
-        num_seqs = len(query_start_loc)
+        # Get sequence boundaries from actual_seq_lengths_q
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q  # List of cumulative positions
+        num_seqs = len(actual_seq_lengths_q)
 
         # Process each sequence independently
         prev_end = 0
         for seq_idx in range(num_seqs):
-            seq_end = query_start_loc[seq_idx]
+            seq_end = actual_seq_lengths_q[seq_idx]
             seq_len = seq_end - prev_end
 
             if seq_len == 0:
