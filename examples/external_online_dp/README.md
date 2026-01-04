@@ -1,4 +1,4 @@
-Here is an example guiding how to use `launch_online_dp.py` to launch external dp server in vllm. User can easily launch external dp server following the steps below:
+Here is an example guiding how to use `launch_online_dp.py` to launch external dp vllm servers. User can easily launch external dp servers following the steps below:
 
 ### Modify parameters in `run_dp_template.sh`
 `run_dp_template.sh` is an template script used to launch each dp vllm instance separately. It will be called by `launch_online_dp.py` in multi threads and most of its configurations are set by `launch_online_dp.py`. Parameters you need to set manually include:
@@ -36,3 +36,19 @@ python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-s
 python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address x.x.x.x --dp-rpc-port 12342
 ```
 
+### (Optional) Run `dp_load_balance_proxy_server.py` to load balance requests between external dp servers
+External dp server means that you need to handle load balance between multiple dp instances out of vllm by implementing your custom proxy server. Here we provide an example of request-length-aware dp load-balance proxy server for you. The arguments of `dp_load_balance_proxy_server.py` include:
+
+1. `--port`: port of proxy server, default 8000
+2. `--host`: host address of proxy server, default localhost
+3. `--dp-hosts`: host addresses of external dp servers
+4. `--dp-ports`: ports of external dp servers, the number of dp ports should be the same as dp hosts.
+5. `--max-retries`: Max number of retries for HTTP requests, default 3
+
+For example, if you have two external dp servers running in x.x.x.a:10001 and x.x.x.b:10002, then you can start the proxy server by:
+
+```(python)
+python dp_load_balance_proxy_server.py --host x.x.x.c --port 8000 --dp-hosts x.x.x.a x.x.x.b --dp-ports 10001 10002
+```
+
+which will then serve as the entrypoint for inference requests at x.x.x.c:8000, and load balance coming requests between these two external dp servers according to request length.

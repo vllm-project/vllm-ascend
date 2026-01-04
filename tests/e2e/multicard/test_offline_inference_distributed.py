@@ -28,45 +28,29 @@ from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.model_utils import check_outputs_equal
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 QWEN_DENSE_MODELS = [
-    "vllm-ascend/Qwen3-8B-W8A8", "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"
+    "vllm-ascend/Qwen3-0.6B-W8A8",
 ]
 
-QWEN_W4A8_OLD_VERSION_MODELS = [
-    "vllm-ascend/Qwen3-8B-W4A8",
-]
-
-QWEN_W4A8_NEW_VERSION_MODELS = [
+QWEN_W4A8_MODELS = [
     "vllm-ascend/Qwen3-1.7B-W4A8-V1",
 ]
 
 DEEPSEEK_W4A8_MODELS = [
-    "vllm-ascend/DeepSeek-V3-W4A8-Pruing",
-    "vllm-ascend/DeepSeek-V3.1-W4A8-puring"
+    "vllm-ascend/DeepSeek-V3.1-W4A8-puring",
+]
+
+KIMI_W4A16_MODELS = [
+    "vllm-ascend/Kimi-K2-Thinking-Pruning",
 ]
 
 
-def test_models_distributed_QwQ():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "half"
-    max_tokens = 5
-    with VllmRunner(
-            "Qwen/QwQ-32B",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-            enforce_eager=False,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_models_distributed_DeepSeek_multistream_moe():
+def test_deepseek_multistream_moe_tp2():
     example_prompts = [
         "Hello, my name is",
     ]
@@ -76,39 +60,18 @@ def test_models_distributed_DeepSeek_multistream_moe():
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             distributed_executor_backend="mp",
             additional_config={
-                "torchair_graph_config": {
-                    "enabled": True,
-                },
                 "enable_multistream_moe": True,
-                "ascend_scheduler_config": {
-                    "enabled": True,
-                },
                 "refresh": True,
             },
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_models_distributed_Qwen3_W8A8():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-
-    with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-8B-W8A8"),
-            max_model_len=8192,
-            dtype="auto",
-            tensor_parallel_size=2,
-            quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@pytest.mark.parametrize("model", QWEN_W4A8_OLD_VERSION_MODELS)
-def test_models_distributed_Qwen3_W4A8DYNAMIC_old_version(model):
+@pytest.mark.parametrize("model", QWEN_W4A8_MODELS)
+def test_qwen3_w4a8_dynamic_tp2(model):
     prompts = [
         "Hello, my name is",
     ]
@@ -118,55 +81,13 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC_old_version(model):
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
 
 
-@pytest.mark.parametrize("model", QWEN_W4A8_NEW_VERSION_MODELS)
-def test_models_distributed_Qwen3_W4A8DYNAMIC_new_version(model):
-    prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-            snapshot_download(model),
-            max_model_len=8192,
-            dtype="auto",
-            tensor_parallel_size=2,
-            quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(prompts, max_tokens)
-
-
-@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
-    prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-            snapshot_download(model),
-            dtype="auto",
-            tensor_parallel_size=2,
-            quantization="ascend",
-            enforce_eager=True,
-            enable_expert_parallel=True,
-            additional_config={
-                "torchair_graph_config": {
-                    "enabled": False,
-                },
-                "ascend_scheduler_config": {
-                    "enabled": True,
-                }
-            },
-    ) as vllm_model:
-        vllm_model.generate_greedy(prompts, max_tokens)
-
-
-def test_sp_for_qwen3_moe() -> None:
+def test_qwen3_moe_sp_tp2() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
@@ -179,19 +100,50 @@ def test_sp_for_qwen3_moe() -> None:
                     dtype="auto",
                     tensor_parallel_size=2,
                     distributed_executor_backend="mp",
-                    compilation_config={
-                        "pass_config": {
-                            "enable_sequence_parallelism": True
-                        }
-                    },
+                    compilation_config={"pass_config": {
+                        "enable_sp": True
+                    }},
                     enable_expert_parallel=True,
                     enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
+
+
+@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "2048"})
+def test_deepseek_w4a8_accuracy_tp2(model):
+    prompts = [
+        "Hello, my name is", "The president of the United States is",
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs"
+    ]
+    vllm_ds_w4a8_answers = [
+        '逍遙而至地去 accrued', '平行于我udo madreHelen', 'ysteepaolis backwards Kj'
+    ]
+    sampling_params = SamplingParams(max_tokens=5, temperature=0.0)
+    with VllmRunner(snapshot_download(model),
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    cudagraph_capture_sizes=[1, 2, 4, 8],
+                    quantization="ascend",
+                    enable_expert_parallel=True) as vllm_model:
+        vllm_quant_outputs = vllm_model.model.generate(prompts,
+                                                       sampling_params)
+
+    vllm_quant_outputs_list = []
+    for output in vllm_quant_outputs:
+        vllm_quant_outputs_list.append(
+            ([output.outputs[0].index], output.outputs[0].text))
+    vllm_answer_list = []
+    vllm_answer_list = ([([0], answer) for answer in vllm_ds_w4a8_answers])
+
+    check_outputs_equal(outputs_0_lst=vllm_answer_list,
+                        outputs_1_lst=vllm_quant_outputs_list,
+                        name_0="vllm_quant_outputs",
+                        name_1="vllm_answer_outputs")
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
-def test_fc2_for_qwen3_moe() -> None:
+def test_qwen3_moe_fc2_tp2() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
@@ -210,7 +162,7 @@ def test_fc2_for_qwen3_moe() -> None:
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
+def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
         "test" * 1001,
     ]
@@ -229,9 +181,8 @@ def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
+def test_qwen3_dense_fc1_tp2(model):
     example_prompts = [
         "Hello, my name is",
     ]
@@ -240,18 +191,17 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"})
-def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
+def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
     example_prompts = [
         "Hello, my name is",
     ]
@@ -260,9 +210,30 @@ def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", KIMI_W4A16_MODELS)
+def test_kimi_k2_thinking_w4a16_tp4(model):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            model,
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1],
+            },
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

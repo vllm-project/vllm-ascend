@@ -1,9 +1,11 @@
 [build-system]
 # Should be mirrored in requirements.txt
 requires = [
+    "attrs",
     "cmake>=3.26",
     "decorator",
     "einops",
+    "googleapis-common-protos",
     "numpy<2.0.0",
     "packaging",
     "pip",
@@ -12,16 +14,20 @@ requires = [
     "scipy",
     "pandas",
     "pandas-stubs",
+    "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch-npu==2.7.1",
-    "torch==2.7.1",
+    "transformers<=4.57.1",
+    "torch-npu==2.8.0",
+    "torch==2.8.0",
     "torchvision",
     "wheel",
     "msgpack",
     "quart",
     "numba",
+    "fastapi<0.124.0",
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
+    "compressed_tensors>=0.11.0"
 ]
 build-backend = "setuptools.build_meta"
 

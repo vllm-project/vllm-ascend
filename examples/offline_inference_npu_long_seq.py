@@ -42,7 +42,6 @@ if __name__ == "__main__":
         enable_chunked_prefill=False,
         max_num_batched_tokens=2048,
         max_model_len=1024,
-        additional_config={"ascend_scheduler_config": {"enabled": False}},
         max_num_seqs=1,
         block_size=128,
         gpu_memory_utilization=0.9

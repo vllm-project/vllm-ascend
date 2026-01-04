@@ -2,22 +2,39 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import (npu_stream_switch, prefetch_stream,
-                               vllm_version_is)
+from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import direct_register_custom_op
-else:
-    from vllm.utils.torch_utils import direct_register_custom_op
+
+def _maybe_chunk_residual_impl(x: torch.Tensor,
+                               residual: torch.Tensor) -> torch.Tensor:
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return residual
+
+    if x.size(0) != residual.size(0):
+        sp_enabled = forward_context.sp_enabled
+        assert sp_enabled is True, ("Currently, this situation only occurs "
+                                    "when sp is enabled")
+        pad_size = forward_context.pad_size
+        if pad_size > 0:
+            residual = F.pad(residual, (0, 0, 0, pad_size))
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
+
+    return residual
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(
@@ -64,7 +81,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    if not forward_context.sp_enabled:
+    if not getattr(forward_context, "sp_enabled", False):
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata
@@ -99,22 +116,23 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     model_instance = forward_context.model_instance
-    prefetch_stream = forward_context.prefetch_stream
+    weight_prefetch_stream = prefetch_stream()
     layer_idx = int(prefix.split('.')[2])
 
     # start point of gate_up_proj weight prefetch
     if prefix.split('.')[-2] == "self_attn":
         forward_context.prefetch_mlp_gate_up_proj = True
     if forward_context.prefetch_mlp_gate_up_proj:
-        prefetch_stream.wait_stream(torch.npu.current_stream())
+        weight_prefetch_stream.wait_stream(torch.npu.current_stream())
 
-        with torch.npu.stream(prefetch_stream):
+        with torch.npu.stream(weight_prefetch_stream):
             mlp_gate_up_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE
-            torch_npu.npu_prefetch(model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight, \
-                                x_dependency, mlp_gate_up_prefetch_size)
+            torch_npu.npu_prefetch(
+                model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight,
+                x_dependency, mlp_gate_up_prefetch_size)
     return
 
 
@@ -156,20 +174,21 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     forward_context.prefetch_mlp_down_proj = True
     model_instance = forward_context.model_instance
-    prefetch_stream = forward_context.prefetch_stream
+    weight_prefetch_stream = prefetch_stream()
     layer_idx = forward_context.layer_idx
 
     # start point of down_proj weight prefetch
-    prefetch_stream.wait_stream(torch.npu.current_stream())
+    weight_prefetch_stream.wait_stream(torch.npu.current_stream())
 
-    with torch.npu.stream(prefetch_stream):
+    with torch.npu.stream(weight_prefetch_stream):
         mlp_down_prefetch_size = envs_ascend.VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE
-        torch_npu.npu_prefetch(model_instance.model.layers[layer_idx].mlp.down_proj.weight, \
-                            x_dependency, mlp_down_prefetch_size)
+        torch_npu.npu_prefetch(
+            model_instance.model.layers[layer_idx].mlp.down_proj.weight,
+            x_dependency, mlp_down_prefetch_size)
     forward_context.layer_idx += 1
     return
 
@@ -185,13 +204,13 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
     except AssertionError:
         return
 
-    if not forward_context.prefetch_mlp_enabled:
+    if not getattr(forward_context, 'prefetch_mlp_enabled', False):
         return
     if forward_context.prefetch_mlp_gate_up_proj or \
         forward_context.prefetch_mlp_down_proj:
-        prefetch_stream = forward_context.prefetch_stream
+        weight_prefetch_stream = prefetch_stream()
         # wait until prefetch done
-        torch.npu.current_stream().wait_stream(prefetch_stream)
+        torch.npu.current_stream().wait_stream(weight_prefetch_stream)
         forward_context.prefetch_mlp_gate_up_proj = False
         forward_context.prefetch_mlp_down_proj = False
     return
@@ -232,8 +251,9 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         final_hidden_states: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
-    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2
-                         } or forward_context.sp_enabled:
+    if moe_comm_type in {
+            MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2
+    } or forward_context.sp_enabled:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -263,6 +283,32 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
 
     return output
 
+
+# TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
+# is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
+# aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
+# pass input_scale and input_scale_reciprocal at the same time to avoid redundant
+# reciprocal calculation in fussion pass. We shall remove this once
+# aclnnAddRmsNormQuantV2 supports div_moe=False.
+def _quantize_impl(in_tensor: torch.Tensor, input_scale: torch.Tensor,
+                   input_scale_reciprocal: torch.Tensor,
+                   input_offset: torch.Tensor) -> torch.Tensor:
+    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
+                                  input_offset, torch.qint8, -1, False)
+
+
+def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
+                        input_scale_reciprocal: torch.Tensor,
+                        input_offset: torch.Tensor) -> torch.Tensor:
+    return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
+                                  input_offset, torch.qint8, -1, False)
+
+
+direct_register_custom_op(op_name="maybe_chunk_residual",
+                          op_func=_maybe_chunk_residual_impl,
+                          fake_impl=lambda x, residual: x,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
@@ -315,5 +361,11 @@ direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
 direct_register_custom_op(op_name="matmul_and_reduce",
                           op_func=_matmul_and_reduce_impl,
                           fake_impl=_matmul_and_reduce_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="quantize",
+                          op_func=_quantize_impl,
+                          fake_impl=_quantize_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

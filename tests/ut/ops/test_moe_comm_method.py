@@ -8,6 +8,8 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        AlltoAllCommImpl,
                                                        MC2CommImpl)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.ops.fused_moe.token_dispatcher import (TokenCombineResult,
+                                                        TokenDispatchResult)
 
 
 class TestMoECommMethod(TestBase):
@@ -26,7 +28,6 @@ class TestMoECommMethod(TestBase):
         self.moe_config.dp_group = MagicMock()
         self.moe_config.num_global_redundant_experts = 0
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"
@@ -36,11 +37,7 @@ class TestMoECommMethod(TestBase):
     )
     def test_all_gather_comm_impl(self, mock_token_dispatcher,
                                   mock_prepare_finalize,
-                                  mock_get_forward_context,
-                                  mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                                  mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "all_gather"
@@ -76,17 +73,12 @@ class TestMoECommMethod(TestBase):
                            context_metadata=context_metadata)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
     def test_mc2_comm_impl(self, mock_token_dispatcher, mock_prepare_finalize,
-                           mock_get_forward_context,
-                           mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                           mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "mc2"
@@ -124,7 +116,6 @@ class TestMoECommMethod(TestBase):
                            context_metadata=context_metadata)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAll2All"
@@ -134,11 +125,7 @@ class TestMoECommMethod(TestBase):
     )
     def test_alltoall_comm_impl(self, mock_token_dispatcher,
                                 mock_prepare_finalize,
-                                mock_get_forward_context,
-                                mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                                mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "alltoall"
@@ -168,7 +155,6 @@ class TestMoECommMethod(TestBase):
         mock_pf_instance.prepare.assert_called_once_with(
             hidden_states, router_logits, False, False, QuantType.NONE)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"
@@ -179,11 +165,7 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
     def test_fused_experts_method(self, mock_unified_apply_mlp,
                                   mock_token_dispatcher, mock_prepare_finalize,
-                                  mock_get_forward_context,
-                                  mock_get_current_vllm_config):
-        # Mock vLLM config
-        mock_get_current_vllm_config.return_value = MagicMock()
-
+                                  mock_get_forward_context):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.moe_comm_method = "all_gather"
@@ -198,12 +180,12 @@ class TestMoECommMethod(TestBase):
 
         # Mock token dispatcher
         mock_td_instance = MagicMock()
-        mock_td_instance.token_dispatch.return_value = {
-            "hidden_states": torch.randn(6, 8),
-            "group_list": torch.tensor([2, 2, 2]),
-            "group_list_type": 1
-        }
-        mock_td_instance.token_combine.return_value = torch.randn(4, 8)
+        mock_td_instance.token_dispatch.return_value = TokenDispatchResult(
+            hidden_states=torch.randn(6, 8),
+            group_list=torch.tensor([2, 2, 2]),
+            group_list_type=1)
+        mock_td_instance.token_combine.return_value = TokenCombineResult(
+            routed_out=torch.randn(4, 8))
         mock_token_dispatcher.return_value = mock_td_instance
 
         # Mock unified_apply_mlp
@@ -226,14 +208,14 @@ class TestMoECommMethod(TestBase):
         w2 = w2.contiguous()
 
         result = comm_impl.fused_experts(hidden_states=hidden_states,
-                                         w1=w1,
-                                         w2=w2,
+                                         w1=[w1],
+                                         w2=[w2],
                                          topk_weights=topk_weights,
                                          topk_ids=topk_ids,
                                          activation="silu")
 
         # Verify result shape
-        self.assertEqual(result.shape, (4, 8))
+        self.assertEqual(result.routed_out.shape, (4, 8))
 
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()

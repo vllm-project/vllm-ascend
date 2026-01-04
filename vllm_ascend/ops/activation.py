@@ -33,10 +33,10 @@ class AscendSiluAndMul(SiluAndMul):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         import torch_npu
 
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
         torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
         else:
             out = torch_npu.npu_swiglu(x)

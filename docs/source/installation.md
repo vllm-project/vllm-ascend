@@ -12,9 +12,9 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | >= 8.3.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.7.1             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.7.1                         | Required for torch-npu and vllm           |
+    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
 
 There are two installation methods:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
@@ -80,19 +80,19 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run --full
-# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc1_linux-aarch64.run
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.3.RC2_linux-"$(uname -i)".run --full
+# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc2_linux-aarch64.run
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.3.RC2_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC2/Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.3.RC2_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -157,15 +157,15 @@ cd ..
 # Install vLLM Ascend.
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+git submodule update --init --recursive
 pip install -v -e .
 cd ..
 ```
 
-vllm-ascend will build custom operators by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has Internet access.
 :::
 
 ```{note}
-If you are building from v0.7.3-dev and intend to use sleep mode feature, you should set `COMPILE_CUSTOM_KERNELS=1` manually.
 To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your g++ and gcc locations before compiling.
 ```
@@ -261,8 +261,14 @@ for output in outputs:
 Then run:
 
 ```bash
-# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
-# to speed up download if huggingface is not reachable.
+python example.py
+```
+
+If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
+
+```bash
+export VLLM_USE_MODELSCOPE = true
+pip install modelscope
 python example.py
 ```
 

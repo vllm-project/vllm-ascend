@@ -9,10 +9,16 @@ RED="\033[0;31m"
 NC="\033[0m" # No Color
 
 # Configuration
-LOG_DIR="/root/.cache/tests/logs"
-OVERWRITE_LOGS=true
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+# Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+
+# Logging configurations
+export VLLM_LOGGING_LEVEL="INFO"
+# Reduce glog verbosity for mooncake
+export GLOG_minloglevel=1
+# Set transformers to offline mode to avoid downloading models during tests
+export TRANSFORMERS_OFFLINE="1"
 
 # Function to print section headers
 print_section() {
@@ -20,7 +26,7 @@ print_section() {
 }
 
 print_failure() {
-    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: $1${NC}"
     exit 1
 }
 
@@ -87,7 +93,9 @@ check_npu_info() {
 
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
+    # Fix me(Potabk): Currently, there have some issues with accessing GitHub via https://gh-proxy.test.osinfra.cn in certain regions.
+    # We should switch to a more stable proxy for now until the network proxy is stable enough.
+    git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
@@ -108,8 +116,8 @@ install_extra_components() {
     fi
     pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
     
-    export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
+    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     
     rm -f CANN-custom_ops-sfa-linux.aarch64.run \
@@ -127,19 +135,15 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
-    # each worker should have log file
-    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
-    mkdir -p ${RESULT_FILE_PATH}
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
-    ret=${PIPESTATUS[0]}
+    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/scripts/test_multi_node.py
+    ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed!"
-            mv LOG_FILE error_${LOG_FILE}
+            print_failure "Some tests failed, please check the error stack above for details.\
+            If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
 }

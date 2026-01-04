@@ -8,8 +8,8 @@ documentation:
 ci/build:
   - changed-files:
       - any-glob-to-any-file:
-          - '.github/actions/*.yml'
-          - '.github/workflows/*.yml'
+          - '.github/actions/*.yaml'
+          - '.github/workflows/*.yaml'
 
 'module:tests':
   - changed-files:

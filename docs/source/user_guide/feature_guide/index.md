@@ -7,11 +7,18 @@ This section provides a detailed usage guide of vLLM Ascend features.
 :maxdepth: 1
 graph_mode
 quantization
+quantization-llm-compressor
 sleep_mode
 structured_output
 lora
 eplb_swift_balancer
 netloader
 dynamic_batch
-kv_pool_mooncake
+kv_pool
+external_dp
+large_scale_ep
+ucm_deployment
+Fine_grained_TP
+speculative_decoding
+context_parallel
 :::

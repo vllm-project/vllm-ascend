@@ -18,7 +18,8 @@ from typing import Callable, Optional
 
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
+
+from vllm_ascend.utils import get_weight_prefetch_method
 
 
 def select_experts(hidden_states: torch.Tensor,
@@ -56,11 +57,19 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
     # prefetch w1_w3_proj.weight preprocess
-    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
-    if custom_routing_function is None:
+    is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
+        hidden_states=hidden_states,
+        top_k=top_k,
+        topk_group=topk_group,
+        num_expert_group=num_expert_group,
+        scoring_func=scoring_func,
+        custom_routing_function=custom_routing_function)
+
+    if is_support_npu_moe_gating_top_k:
         topk_weights, topk_ids = _select_experts_with_fusion_ops(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -88,6 +97,32 @@ def select_experts(hidden_states: torch.Tensor,
             global_num_experts=global_num_experts,
         )
     return topk_weights, topk_ids
+
+
+def check_npu_moe_gating_top_k(
+        hidden_states: torch.Tensor,
+        top_k: int,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        scoring_func: str = "softmax",
+        custom_routing_function: Optional[Callable] = None):
+    if custom_routing_function is not None:
+        return False
+    if scoring_func != "softmax" and scoring_func != "sigmoid":
+        return False
+    topk_group = topk_group if topk_group is not None else 1
+    num_expert_group = num_expert_group if num_expert_group is not None else 1
+    if not (num_expert_group > 0 and hidden_states.shape[-1] % num_expert_group
+            == 0 and hidden_states.shape[-1] // num_expert_group > 2):
+        return False
+    if topk_group < 1 or topk_group > num_expert_group:
+        return False
+    if top_k < 1 or \
+        top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
+        return False
+    if topk_group * hidden_states.shape[-1] / num_expert_group < top_k:
+        return False
+    return True
 
 
 def _native_grouped_topk(
@@ -172,12 +207,9 @@ def _select_experts_with_fusion_ops(
         routed_scaling_factor=1.0,
         global_num_experts: int = -1):
 
-    if scoring_func == "softmax":
-        norm_type = 0
-        topk_group = 1
-        num_expert_group = 1
-    else:
-        norm_type = 1
+    topk_group = topk_group if topk_group is not None else 1
+    num_expert_group = num_expert_group if num_expert_group is not None else 1
+    norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and \
         e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(
@@ -193,7 +225,7 @@ def _select_experts_with_fusion_ops(
         norm_type=norm_type,  # 0: softmax; 1: sigmoid
         # out_flag=False, # todo new api; should the third output be output
         # y2_flag=False, # old api; should the third output be output
-        routed_scaling_factor=1,
+        routed_scaling_factor=routed_scaling_factor,
         eps=float(1e-20))
     if scoring_func == "softmax":
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
@@ -272,3 +304,28 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
+
+def zero_experts_compute(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    zero_expert_type: str,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if zero_expert_type == "identity":
+        zero_expert_mask = expert_indices < num_experts
+        zero_expert_scales = expert_scales.clone()
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0,
+                                         zero_expert_scales)
+
+        hidden_states = hidden_states.unsqueeze(1)
+        zero_expert_scales = zero_expert_scales.unsqueeze(2)
+        result = hidden_states * zero_expert_scales
+        result = result.sum(dim=1)
+
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
+    expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
+
+    return expert_indices, expert_scales, result
