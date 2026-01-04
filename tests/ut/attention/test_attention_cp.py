@@ -25,6 +25,7 @@ def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0):
     """
 
     def decorator(func):
+
         @wraps(func)
         @patch('torch.distributed.all_to_all_single')
         @patch('vllm.distributed.parallel_state._PCP')
@@ -152,6 +153,7 @@ class TestAscendAttentionCPImpl(TestBase):
                                     mock_npu_fused_infer_attention_score,
                                     mock_dcp, mock_get_dcp_group, mock_pcp,
                                     mock_pcp_group):
+
         def mock_all_gather_func(tensor, dim):
             return torch.cat([tensor, tensor], dim=dim)
 
@@ -262,11 +264,11 @@ class TestAscendAttentionCPImpl(TestBase):
         local_context_lens_allranks = torch.tensor([[[256, 256], [256, 256]]])
         attn_metadata.prefill.chunked_context.local_context_lens_allranks = local_context_lens_allranks
         attn_metadata.prefill.chunked_context.batch_chunk_seq_mask = torch.randint(
-            0, 2, (1024,), dtype=torch.bool)
+            0, 2, (1024, ), dtype=torch.bool)
         attn_metadata.prefill.chunked_context.local_total_toks = local_context_lens_allranks[:,
-        0,
-        0].sum(
-        )
+                                                                                             0,
+                                                                                             0].sum(
+                                                                                             )
 
         def mock_load_kv_for_chunk(attn_metadata, kv_cache,
                                    local_chunked_kv_lens_rank, query,
@@ -287,8 +289,8 @@ class TestAscendAttentionCPImpl(TestBase):
 
         mock_npu_attention.return_value = torch.randn(batch_size, num_heads,
                                                       head_size), torch.randn(
-            batch_size,
-            num_heads, 1)
+                                                          batch_size,
+                                                          num_heads, 1)
 
         context_output = self.impl._compute_prefill_context(
             query, kv_cache, attn_metadata)
