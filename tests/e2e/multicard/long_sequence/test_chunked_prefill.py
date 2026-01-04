@@ -37,8 +37,13 @@ os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
 
 def generate_prompts(input_len, batchsize):
-    prompts = [" ".join([f"{random.choice(string.ascii_letters)}" for _ in range(input_len)]) for _ in range(batchsize)]
+    prompts = [
+        " ".join([
+            f"{random.choice(string.ascii_letters)}" for _ in range(input_len)
+        ]) for _ in range(batchsize)
+    ]
     return prompts
+
 
 @pytest.mark.skipif(vllm_version_is('0.12.0'),
                     reason="0.12.0 is not supported for context sequence.")
@@ -50,7 +55,7 @@ def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
         "original_max_position_embeddings": 32768
     }
     prompts = [
-        generate_prompts(128*1024, 1)[0],
+        generate_prompts(128 * 1024, 1)[0],
         generate_prompts(1, 1)[0],
         generate_prompts(9104, 1)[0],
     ]
