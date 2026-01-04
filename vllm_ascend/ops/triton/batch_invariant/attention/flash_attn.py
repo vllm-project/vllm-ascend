@@ -1,22 +1,22 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
 import torch
 
 from vllm.triton_utils import triton, tl
-
-# =============================================================================
-# Batch-Invariant Flash Attention with KV Cache
-# =============================================================================
-#
-# This section implements a batch-invariant Flash Attention operator using
-# Triton for Ascend NPU. The key design principle is that each (batch, head)
-# pair is processed independently to ensure batch invariance.
-#
-# Grid Design: (num_q_blocks, batch_size, num_heads)
-# - This ensures Request A's computation never depends on Request B
-#
-# Block Sizes: Conservative sizes to avoid NPU UB overflow (192KB limit)
-# - BLOCK_M = 64 (query block size)
-# - BLOCK_N = 64 (key/value block size, adjusted based on HEAD_DIM)
-# =============================================================================
 
 
 def _get_block_sizes(head_dim: int) -> tuple:
@@ -281,6 +281,8 @@ def flash_attn_with_kvcache(
 
     This function provides a drop-in replacement for flash_attn_with_kvcache
     from flash-attention v3, ensuring batch-invariant computation on Ascend NPU.
+    The key design principle is that each (batch, head) pair is processed 
+    independently to ensure batch invariance.
 
     The key batch invariance guarantee: the output for sequence i is
     mathematically identical regardless of:

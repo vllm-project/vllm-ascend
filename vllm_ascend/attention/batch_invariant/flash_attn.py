@@ -1,8 +1,31 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+from typing import Optional, Tuple
+
 import torch
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackendImpl,
+    AscendMetadata,
+    AscendAttentionState,
+)
+from vllm_ascend.ops.triton.batch_invariant.attention.flash_attn import flash_attn_with_kvcache
 
 
-class BatchInvariantBackendImp(AscendAttentionBackendImpl):
+class BatchInvariantBackendImpl(AscendAttentionBackendImpl):
     """Batch-invariant attention backend implementation for Ascend NPUs."""
 
     def forward_impl(
@@ -14,8 +37,19 @@ class BatchInvariantBackendImp(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        return super().forward_impl(query, key, value, kv_cache, attn_metadata,
-                                    output)
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            return self._forward_decode_only_batch_invariant(
+                query,
+                attn_metadata,
+                output,
+            )
+        return self._forward_prefill_batch_invariant(
+            query,
+            key,
+            value,
+            attn_metadata,
+            output,
+        )
 
     def _forward_decode_only_batch_invariant(
         self,
@@ -54,6 +88,7 @@ class BatchInvariantBackendImp(AscendAttentionBackendImpl):
         # independently. This ensures batch invariance at the cost of parallelism.
         # TODO: Optimize this with a proper paged attention kernel
         max_seq_len = seq_lens.max().item()
+        assert self.key_cache is not None, "KV cache must be provided for decode"
         block_size = self.key_cache.shape[1]
 
         # Allocate contiguous KV tensors for batch processing
