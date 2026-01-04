@@ -310,4 +310,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         self.end_and_log()
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
+        """
+        Check if the pass is applicable for the current configuration.
+        """
         return True
