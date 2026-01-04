@@ -60,7 +60,7 @@ Install the Ascend BiSheng toolkit, execute the command:
 BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
 BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
 wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
+export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
 ```
 
 Install Triton Ascend:
