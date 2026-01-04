@@ -61,7 +61,7 @@ def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
     ]
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
 
-    model = "/mnt/nfs/weights/Qwen3-30B-A3B-W8A8"
+    model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     with VllmRunner(
             model,
             enforce_eager=True,
