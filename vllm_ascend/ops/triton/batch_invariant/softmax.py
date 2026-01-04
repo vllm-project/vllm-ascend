@@ -18,8 +18,6 @@
 #
 import torch
 
-from vllm.triton_utils import triton, tl
-
 
 def softmax_batch_invariant(input_, dim, dtype=None):
     # Compute softmax in a deterministic way

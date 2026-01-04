@@ -17,12 +17,12 @@
 from typing import Optional, Tuple
 
 import torch
-from vllm_ascend.attention.attention_v1 import (
-    AscendAttentionBackendImpl,
-    AscendMetadata,
-    AscendAttentionState,
-)
-from vllm_ascend.ops.triton.batch_invariant.attention.flash_attn import flash_attn_with_kvcache
+
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
+                                                AscendAttentionState,
+                                                AscendMetadata)
+from vllm_ascend.ops.triton.batch_invariant.attention.flash_attn import \
+    flash_attn_with_kvcache
 
 
 class BatchInvariantBackendImpl(AscendAttentionBackendImpl):

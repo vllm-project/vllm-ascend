@@ -22,12 +22,8 @@ import torch
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
 from vllm_ascend.ops.triton.batch_invariant.matmul import (
-    matmul_batch_invariant,
-    mm_batch_invariant,
-    addmm_batch_invariant,
-    bmm_batch_invariant,
-    linear_batch_invariant,
-)
+    addmm_batch_invariant, bmm_batch_invariant, linear_batch_invariant,
+    matmul_batch_invariant, mm_batch_invariant)
 
 
 def override_envs_for_invariance():

@@ -18,8 +18,7 @@
 #
 
 import torch
-
-from vllm.triton_utils import triton, tl
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
