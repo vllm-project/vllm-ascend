@@ -55,6 +55,7 @@ _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -338,6 +339,13 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
         # we return the default stream.
         _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
+def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
+    global _CP_CHUNKEDPREFILL_COMM_STREAM
+    if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
+        _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -821,6 +829,23 @@ def is_moe_model(vllm_config: VllmConfig):
         model_configs = vllm_config.model_config.hf_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def speculative_enable_dispatch_gmm_combine_decode(
+        vllm_config: VllmConfig) -> bool:
+    if vllm_config.speculative_config is None:
+        return True
+    speculative_method = getattr(vllm_config.speculative_config, "method",
+                                 None)
+    if speculative_method in [None, "ngram", "suffix"]:
+        return True
+    if speculative_method in ["eagle", "eagle3"]:
+        return False
+    if speculative_method == "mtp":
+        mtp_quant_type = getattr(vllm_config.model_config.hf_config,
+                                 "mtp_quantize", None)
+        return mtp_quant_type == "w8a8_dynamic"
+    return False
 
 
 def _is_contain_expert(config: Any):
