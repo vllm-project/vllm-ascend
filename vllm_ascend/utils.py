@@ -513,7 +513,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     num_comm_groups = sum(size > 1 for size in [
         parallel_config.data_parallel_size,
         parallel_config.tensor_parallel_size,
-        parallel_config.prefill_context_parallel_size,
     ])
 
     if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
@@ -539,6 +538,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
     else:
+        # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
+        if parallel_config.prefill_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - 100
+        if parallel_config.decode_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - 100
+
         # The above describes an empirical formula applicable to the A2 hardware.
         # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
         # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
