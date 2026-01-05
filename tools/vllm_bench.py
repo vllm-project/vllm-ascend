@@ -27,13 +27,13 @@ class VllmbenchRunner:
 
     def _run_vllm_bench_task(self):
         vllm_bench_cmd = [
-            'vllm', 'bench', 'serve', '--backend', 'openai',
+            'vllm', 'bench', 'serve', '--backend', 'openai-chat',
             '--trust-remote-code', '--served-model-name',
             str(self.model_name), '--model', self.model_path, '--tokenizer',
             self.model_path, '--metric-percentiles', '50,90,99', '--host',
             self.host_ip, '--port',
             str(self.port), '--save-result', '--result-filename',
-            self.result_filename, '--endpoint', '/v1/completions',
+            self.result_filename, '--endpoint', '/v1/chat/completions',
             '--ready-check-timeout-sec', '0'
         ]
         self._concat_config_args(vllm_bench_cmd)
@@ -91,30 +91,16 @@ class VllmbenchRunner:
             self.proc.kill()
 
     def _wait_for_task(self):
-        """Wait for the vllm bench command to complete and check the execution result"""
-
-        stdout, stderr = self.proc.communicate()
-
-        if self.proc.returncode != 0:
-            logging.error(
-                f"vllm bench command failed, return code: {self.proc.returncode}"
-            )
-            logging.error(f"Standard output: {stdout}")
-            logging.error(f"Standard error: {stderr}")
-            raise RuntimeError(
-                f"vllm bench command execution failed: {stderr}")
-
-        logging.info(
-            f"vllm bench command completed, return code: {self.proc.returncode}"
-        )
-        if stdout:
-            lines = stdout.split('\n')
-            last_lines = lines[-100:] if len(lines) > 100 else lines
-            logging.info(f"Last {len(last_lines)} lines of standard output:")
-            for line in last_lines:
-                logging.info(line)
-        else:
-            logging.info("Standard output is empty")
+        result_msg = "============ Serving Benchmark Result ============"
+        while True:
+            line = self.proc.stdout.readline().strip()
+            if line:
+                print(line)
+            if result_msg in line:
+                return
+            if "ERROR" in line:
+                error_msg = f"Some errors happened to vllm_bench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _get_result(self):
         result_file = os.path.join(os.getcwd(), self.result_filename)
@@ -141,6 +127,7 @@ def run_vllm_bench_case(model_name,
                              port,
                              config,
                              baseline,
+                             model_path=model_path,
                              host_ip=host_ip) as vllm_bench:
             vllm_bench_result = vllm_bench.result
     except Exception as e:

@@ -78,6 +78,7 @@ async def test_models(model: str) -> None:
         "--gpu-memory-utilization",
         "0.9",
     ]
+
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
