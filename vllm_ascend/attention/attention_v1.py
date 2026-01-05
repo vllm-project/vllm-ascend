@@ -21,6 +21,7 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.registry import (AttentionBackendEnum,
@@ -54,7 +55,10 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        # HACK(Ronald1995): vllm `initialize_kv_cache` method in model runner v2 make
+        # attention name assertion, we just set name to FLASH_ATTN to avoid assertion error.
+        # rectify this when vllm disable the assertion.
+        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
@@ -172,15 +176,17 @@ class AscendMetadata:
     causal: bool = True
     # runner_type in model_config.
     model_runner_type: str = ""
+    # prefill reshape_and_cache event
+    reshape_cache_event: torch.npu.Event = None
+
+    # sliding window attention mask
+    swa_mask: Optional[torch.Tensor] = None
 
     # sliding window attention mask
     swa_mask: Optional[torch.Tensor] = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS
     # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
@@ -215,6 +221,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendAttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -280,7 +296,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             )
         else:
             raise NotImplementedError(
-                "Currently we only support building dummy metadata for DecodeOnly state"
+                "Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state"
             )
 
         attn_metadata.attn_state = attn_state
@@ -322,6 +338,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,
@@ -426,8 +443,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_table=attn_metadata.block_tables,
                     context_lens=attn_metadata.seq_lens,
                     out=output)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens, workspace)
 
             # Handle graph capturing mode
             stream = torch_npu.npu.current_stream()
@@ -535,7 +551,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       attn_metadata: AscendMetadata,
                                       output: torch.Tensor):
         forward_context: ForwardContext = get_forward_context()
-        if forward_context.capturing:
+        # we inherit ForwardContext in model runner v2, when enable model
+        # runner v2, there is not capturing attribute in forward_context,
+        # just use getattr to avoid attribute error.
+        if getattr(forward_context, "capturing", False):
             attn_output, num_tokens = self.full_graph_fia(
                 query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
@@ -640,6 +659,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
 
         if len(kv_cache) > 1:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
@@ -660,6 +681,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots[:attn_metadata.num_actual_tokens])
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
         return key, value
 
     def forward_impl(

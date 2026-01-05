@@ -103,14 +103,14 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download arm64 digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-${{ inputs.suffix }}-arm64
           merge-multiple: true
 
       - name: Download amd64 digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-${{ inputs.suffix }}-amd64
