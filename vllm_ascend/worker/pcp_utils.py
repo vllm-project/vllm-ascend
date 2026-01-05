@@ -463,13 +463,11 @@ class PCPManager:
                                             ]
 
         for i, req_id in enumerate(input_batch.req_ids):
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                req_id]
-            is_prefill = input_batch.num_computed_tokens_cpu[
-                i] < input_batch.num_prompt_tokens[i]
+            num_scheduled_token = scheduler_output.num_scheduled_tokens[req_id]
+            is_prefill = num_scheduled_token > self.decode_threshold
             if is_prefill:
                 num_cp_padded_scheduled_tokens = cdiv(
-                    num_scheduled_tokens,
+                    num_scheduled_token,
                     2 * self.pcp_world_size) * (2 * self.pcp_world_size)
                 chunk_size = num_cp_padded_scheduled_tokens // (
                     2 * self.pcp_world_size)
