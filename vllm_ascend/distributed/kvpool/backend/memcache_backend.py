@@ -62,12 +62,12 @@ class MemcacheBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        try:
+        soc_version = get_ascend_device_type()
+        if soc_version in {AscendDeviceType.A2}:
             for ptr, size in zip(ptrs, sizes):
                 self.store.register_buffer(ptr, size)
-        except Exception as exc:
-            logger.info(
-                "A3 environment does not require cache registration.: %s", exc)
+        else:
+            pass
 
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
