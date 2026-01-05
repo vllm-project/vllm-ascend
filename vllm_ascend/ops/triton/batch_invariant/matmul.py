@@ -35,12 +35,12 @@ def matmul_bias_persistent_kernel(
     K,
     # Stride information
     stride_xm,
-    stride_xk,  # strides of x: [M, K]
+    stride_xk,  # Strides of x: [M, K]
     stride_yk,
-    stride_yn,  # strides of y: [K, N]
-    stride_bias,  # stride of bias: [N]
+    stride_yn,  # Strides of y: [K, N]
+    stride_bias,  # Stride of bias: [N]
     stride_outm,
-    stride_outn,  # strides of output: [M, N]
+    stride_outn,  # Strides of output: [M, N]
     # Whether to use bias
     has_bias: tl.constexpr,
     # Block sizes
@@ -188,9 +188,9 @@ def linear_persistent_kernel(
         stride_bk,  # Stride of tensor b along dimension K (typically 1)
         stride_cm,  # Stride of tensor c along dimension M (typically N)
         stride_cn,  # Stride of tensor c along dimension N (typically 1)
-        BLOCK_M: tl.constexpr,  # block size for M dimension
-        BLOCK_N: tl.constexpr,  # block size for N dimension
-        BLOCK_K: tl.constexpr,  # block size for K dimension
+        BLOCK_M: tl.constexpr,  # Block size for M dimension
+        BLOCK_N: tl.constexpr,  # Block size for N dimension
+        BLOCK_K: tl.constexpr,  # Block size for K dimension
         NUM_BLOCKS_M: tl.constexpr,  # New: Number of blocks in M dimension
         NUM_BLOCKS_N: tl.constexpr,  # New: Number of blocks in N dimension
         GRID_SIZE: tl.constexpr,  # New: Fixed 1D grid size
