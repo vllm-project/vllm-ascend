@@ -89,13 +89,13 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
 # yapf: enable
+from vllm_ascend.eplb.adaptor.eplb_adptor_factory import EplbAdaptorFactory
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
-from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.logits_processor import build_logitsprocs
@@ -316,6 +316,8 @@ class NPUModelRunner(GPUModelRunner):
             ascend_config = get_ascend_config()
             self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
                                             self.eplb_process, self.process)
+            self.eplb_adaptor_cls: Optional[type[VllmEplbAdaptor]] = None
+            self.eplb_adaptor: Optional[VllmEplbAdaptor] = None
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -2156,7 +2158,8 @@ class NPUModelRunner(GPUModelRunner):
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
-            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            assert self.eplb_adaptor_cls is not None
+            self.eplb_adaptor = self.eplb_adaptor_cls(self.model)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
@@ -2167,7 +2170,11 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
+                self.eplb_adaptor_cls = EplbAdaptorFactory.get_eplb_adapator(
+                    vllm_config=self.vllm_config)
+                assert self.eplb_adaptor_cls is not None
+                self.eplb_adaptor_cls.model_register(self.model,
+                                                     self.model_config)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)

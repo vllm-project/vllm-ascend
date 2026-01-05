@@ -25,6 +25,10 @@ class EplbAdaptor():
         pass
 
     @abstractmethod
+    def init_eplb_params(self):
+        raise NotImplementedError
+
+    @abstractmethod
     def get_rank_expert_workload(self):
         raise NotImplementedError
 
@@ -41,4 +45,9 @@ class EplbAdaptor():
     def do_update_expert_weight(self, layer_id: Any,
                                 local_expert_to_replace: Any,
                                 buffer_tensor_id: Any) -> Any:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def model_register(model, model_config):
         raise NotImplementedError

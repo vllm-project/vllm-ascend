@@ -22,9 +22,12 @@ from collections import defaultdict
 
 import numpy as np
 import torch
+import torch_npu
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+
+_MOE_LOAD_ASYNC_STREAM = None
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):
@@ -117,6 +120,15 @@ def generate_log2phy_map(global_expert_map, ep_rank):
         torch.tensor(list(log2phy_map.values()), dtype=torch.int32))
 
     return log2phy_map
+
+
+def moe_load_async_stream() -> torch_npu.npu.Stream:
+    global _MOE_LOAD_ASYNC_STREAM
+    if _MOE_LOAD_ASYNC_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _MOE_LOAD_ASYNC_STREAM = torch_npu.npu.Stream()
+    return _MOE_LOAD_ASYNC_STREAM
 
 
 class EPLBParamUtils:
