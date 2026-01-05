@@ -33,9 +33,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendMetadata)
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendMetadataForDecode, AscendMetadataForPrefill, AscendPCPMetadata,
+    _npu_attention_update, _process_attn_out_lse)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         AscendMetadataForDecode,
-                                         AscendMetadataForPrefill,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
@@ -196,7 +197,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 tail_attn_nomask_seqlens = torch.cumsum(
                     tail_attn_nomask_seqlens[1], dim=0).tolist()
 
-            pcp_metadata = AscendMetadataForPrefill.AscendPCPMetadata(
+            pcp_metadata = AscendPCPMetadata(
                 q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
                 q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
                 kv_with_q_head_nomask_idx=common_long_seq_metadata.
@@ -211,13 +212,12 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 head_attn_nomask_seqlens=head_attn_nomask_seqlens,
                 tail_attn_nomask_seqlens=tail_attn_nomask_seqlens,
                 q_full_idx=common_long_seq_metadata.q_full_idx,
-                pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask)
+                pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask,
+                pcp_allgather_restore_idx=common_long_seq_metadata.
+                pcp_allgather_restore_idx)
 
             prefill_metadata = AscendMetadataForPrefill(
                 pcp_metadata=pcp_metadata,
-                pcp_allgather_restore_idx=common_long_seq_metadata.
-                pcp_allgather_restore_idx
-                if common_long_seq_metadata is not None else None,
                 chunked_context=chunked_context_metadata,
                 block_tables=block_table[num_decodes:],
                 actual_seq_lengths_q=torch.cumsum(query_lens, dim=0))
@@ -460,39 +460,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])
         return attn_out, attn_lse
 
-    def _npu_attention_update(self,
-                              attn_out_lse: torch.Tensor) -> torch.Tensor:
-        B_total, H_total, D_plus_1 = attn_out_lse.shape
-        S = B_total // self.pcp_size
-        H = H_total // self.dcp_size
-        D = self.head_size
-        update_type = 0
-        assert D_plus_1 == D + 1
-        # [PCP, S, DCP, H, D+1]
-        x = attn_out_lse.view(self.pcp_size, S, self.dcp_size, H, D_plus_1)
-        # [PCP, DCP, S, H, D+1]
-        x = x.permute(0, 2, 1, 3, 4).contiguous()
-        # Flatten [N, S, H, D+1], N = pcp_size * dcp_size
-        x = x.view(-1, S, H, D_plus_1)
-        # Split out lse
-        # [N, S, H, D], [N, S, H, 1]
-        out_flat, lse_flat = torch.split(x, [D, 1], dim=-1)
-        # out: [N, S, H, D] -> [N, S*H, D]
-        # lse: [N, S, H, 1] -> [N, S*H]
-        out_flat = out_flat.flatten(1, 2)
-        lse_flat = lse_flat.squeeze(-1).flatten(1)
-        #  unbind to list
-        # [S*H, D]
-        out_list = out_flat.unbind(0)
-        # [S*H]
-        lse_list = lse_flat.unbind(0)
-
-        attn_out, attn_lse = torch_npu.npu_attention_update(
-            lse_list, out_list, update_type)
-        attn_out = attn_out.view(S, H, D)
-
-        return attn_out
-
     def _forward_decode_pcp_dcp(self, query: torch.Tensor,
                                 attn_metadata: AscendMetadata) -> torch.Tensor:
         assert self.key_cache is not None
@@ -580,33 +547,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(
                 query, k_nope, value, **common_kwargs)
-
-        out_mask = attn_metadata.decode_meta.batch_seq_mask[:, None,
-                                                            None].expand_as(
-                                                                attn_out)
-        attn_out = torch.where(out_mask, 0, attn_out)
-
-        lse_mask = attn_metadata.decode_meta.batch_seq_mask[:, None,
-                                                            None].expand_as(
-                                                                attn_lse)
-        attn_lse = torch.where(lse_mask, -torch.inf, attn_lse)
-        # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
-        attn_out_lse = torch.cat([attn_out, attn_lse], dim=-1)
-        if self.dcp_size > 1:
-            # permute: [bs, num_heads, v_head_dim+1] -> [num_heads, v_head_dim+1, bs]
-            attn_out_lse = attn_out_lse.permute([1, 2, 0]).contiguous()
-            attn_out_lse_all2all = torch.empty_like(attn_out_lse)
-            dist.all_to_all_single(attn_out_lse_all2all,
-                                   attn_out_lse,
-                                   group=self.dcp_group)
-            attn_out_lse = attn_out_lse_all2all.permute([2, 0, 1])
-
-        if self.pcp_size > 1:
-            # AllGather out&lse within CP group
-            attn_out_lse = get_pcp_group().all_gather(
-                attn_out_lse.contiguous(), dim=0)
-
-        attn_out = self._npu_attention_update(attn_out_lse)
+        attn_out_lse = _process_attn_out_lse(
+            attn_out, attn_lse, attn_metadata.decode_meta.batch_seq_mask)
+        attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
 
     def _update_out_and_lse(self, out_list: torch.Tensor,
@@ -780,7 +723,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
                     all_kv = get_pcp_group().all_gather(
                         kv[:num_actual_tokens_pcp_padded].contiguous(), dim=0)
-                    pcp_allgather_restore_idx = attn_metadata.prefill.pcp_allgather_restore_idx if attn_metadata.prefill else None
+                    assert attn_metadata.prefill is not None
+                    assert attn_metadata.prefill.pcp_metadata is not None
+                    pcp_allgather_restore_idx = attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
                     all_kv = torch.index_select(all_kv, 0,
                                                 pcp_allgather_restore_idx)
                     key, value = all_kv.split([self.head_size, self.head_size],
