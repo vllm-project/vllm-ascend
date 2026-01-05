@@ -183,7 +183,6 @@ class AscendMetadata:
     swa_mask: Optional[torch.Tensor] = None
 
 
-
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     # Does this backend/builder reorder the batch?
