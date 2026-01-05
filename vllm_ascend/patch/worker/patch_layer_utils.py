@@ -5,7 +5,7 @@ import vllm.model_executor.layers.utils as lu
 
 
 @triton.jit
-def _bincount_emergency_kernel(
+def _token_bin_counts_and_mask_kernel(
     tokens_ptr,
     tokens_batch_stride,
     tokens_seq_stride,
@@ -15,21 +15,23 @@ def _bincount_emergency_kernel(
     bin_counts_ptr,
     counts_batch_stride,
     counts_vocab_stride,
+    MAX_GRID_SIZE: tl.constexpr,
 ):
-    batch_idx = tl.program_id(0)
+    pid = tl.program_id(0)
     
-    if batch_idx < batch_size:
+    batches_per_thread = (batch_size + MAX_GRID_SIZE - 1) // MAX_GRID_SIZE
+    start_batch = pid * batches_per_thread
+    end_batch = min(start_batch + batches_per_thread, batch_size)
+    
+    for batch_idx in range(start_batch, end_batch):
         batch_tokens_start = tokens_ptr + batch_idx * tokens_batch_stride
         batch_counts_start = bin_counts_ptr + batch_idx * counts_batch_stride
-
-        pos = 0
-        while pos < seq_len:
+        
+        for pos in range(seq_len):
             token = tl.load(batch_tokens_start + pos * tokens_seq_stride)
-            
             if token < vocab_size:
                 count_ptr = batch_counts_start + token * counts_vocab_stride
                 tl.atomic_add(count_ptr, 1)
-            pos += 1
 
 def get_token_bin_counts_and_mask_triton(
     tokens: torch.Tensor,
@@ -56,17 +58,15 @@ def get_token_bin_counts_and_mask_triton(
         dtype=torch.int32,
         device=device
     )
-    
     if not tokens.is_contiguous():
         tokens = tokens.contiguous()
     if not bin_counts.is_contiguous():
         bin_counts = bin_counts.contiguous()
     
-    # TODO(linfeng): use get_vector_core() here
     grid_size = min(batch_size, 40)
     grid_size = max(1, grid_size)
 
-    _bincount_emergency_kernel[(grid_size,)](
+    _token_bin_counts_and_mask_kernel[(grid_size,)](
         tokens,
         tokens.stride(0),
         tokens.stride(1),
@@ -76,8 +76,8 @@ def get_token_bin_counts_and_mask_triton(
         bin_counts,
         bin_counts.stride(0),
         bin_counts.stride(1),
+        MAX_GRID_SIZE=grid_size
     )
-    
     mask = bin_counts > 0
     return bin_counts, mask
 
