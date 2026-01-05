@@ -258,9 +258,6 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
-def tensor_model_parallel_all_reduce_impl(
-        final_hidden_states: torch.Tensor) -> torch.Tensor:
-    return tensor_model_parallel_all_reduce(final_hidden_states)
 
 def _matmul_and_reduce_impl(input_parallel: torch.Tensor,
                             layer_name: str) -> torch.Tensor:
@@ -357,12 +354,6 @@ direct_register_custom_op(op_name="prefetch_postprocess",
 
 direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
                           op_func=_maybe_all_reduce_tensor_model_parallel_impl,
-                          fake_impl=lambda x: x,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
-
-direct_register_custom_op(op_name="tensor_model_parallel_all_reduce",
-                          op_func=tensor_model_parallel_all_reduce_impl,
                           fake_impl=lambda x: x,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

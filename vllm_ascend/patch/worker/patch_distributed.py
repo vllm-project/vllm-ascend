@@ -112,5 +112,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
                                                    gather_dim, scatter_sizes,
                                                    gather_sizes)
 
+    def all_reduce(self, input_):
+        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
+
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
