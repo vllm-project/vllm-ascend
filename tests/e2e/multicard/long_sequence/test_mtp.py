@@ -19,16 +19,11 @@
 
 import os
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "512"
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_mtp1_eager():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -53,8 +48,6 @@ def test_pcp_dcp_mtp1_eager():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_mtp3_eager():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -79,8 +72,6 @@ def test_pcp_dcp_mtp3_eager():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_mtp3_piecewise_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -108,8 +99,6 @@ def test_pcp_dcp_mtp3_piecewise_graph():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 def test_pcp_dcp_mtp3_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
@@ -137,8 +126,6 @@ def test_pcp_dcp_mtp3_full_graph():
         runner.generate_greedy(prompts, 32)
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 def test_dcp_mtp3_full_graph():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",

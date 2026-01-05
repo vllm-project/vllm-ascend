@@ -9,6 +9,7 @@ env_common:
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128
+  DYNAMIC_EPLB: true
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -52,6 +53,8 @@ deployment:
                   }
             }
         }'
+        --additional-config
+          '{"dynamic_eplb":true}'
 
   -
     server_cmd: >
@@ -90,4 +93,6 @@ deployment:
                   }
             }
         }'
+        --additional-config
+          '{"dynamic_eplb":true}'
 benchmarks:
