@@ -1,0 +1,72 @@
+test_name: "test DeepSeek-R1-W8A8 pcp across-machine"
+model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
+num_nodes: 2
+npu_per_node: 16
+env_common:
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 100
+  HCCL_BUFFSIZE: 1024
+  SERVER_PORT: 8080
+  NUMEXPR_MAX_THREADS: 128
+
+deployment:
+  -
+    server_cmd: >
+      vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --prefill-context-parallel-size 2
+          --decode-context-parallel-size 8
+          --tensor-parallel-size 16
+          --enforce-eager
+          --enable-expert-parallel
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 4
+          --max-model-len 36864
+          --max-num-batched-tokens 36864
+          --nnodes 2
+          --node-rank 0
+          --master-addr $MASTER_IP
+          --master-port 7001
+          --trust-remote-code
+          --gpu-memory-utilization 0.9
+          --additional-config
+          '{"enable_cpu_binding":true}'
+
+  -
+    server_cmd: >
+      vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
+          --headless
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --prefill-context-parallel-size 2
+          --decode-context-parallel-size 8
+          --tensor-parallel-size 16
+          --enforce-eager
+          --enable-expert-parallel
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 4
+          --max-model-len 36864
+          --max-num-batched-tokens 16384
+          --nnodes 2
+          --node-rank 1
+          --master-addr $MASTER_IP
+          --master-port 7001
+          --trust-remote-code
+          --gpu-memory-utilization 0.9
+          --additional-config
+          '{"enable_cpu_binding":true}'
+
+benchmarks:
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 512
+    baseline: 95
+    threshold: 5
