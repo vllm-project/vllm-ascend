@@ -34,10 +34,10 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendMetadataForDecode, AscendMetadataForPrefill)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         AscendMetadataForDecode,
-                                         AscendMetadataForPrefill, enable_cp,
-                                         split_decodes_and_prefills,
+                                         enable_cp, split_decodes_and_prefills,
                                          using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
@@ -63,7 +63,7 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
         if enable_cp():
-            from vllm_ascend.attention.attention_cp import \
+            from vllm_ascend.attention.context_parallel.attention_cp import \
                 AscendAttentionCPImpl
             return AscendAttentionCPImpl
         return AscendAttentionBackendImpl
@@ -71,7 +71,7 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
         if enable_cp():
-            from vllm_ascend.attention.attention_cp import \
+            from vllm_ascend.attention.context_parallel.attention_cp import \
                 AscendAttentionCPMetadataBuilder
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
