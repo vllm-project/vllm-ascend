@@ -50,7 +50,7 @@ deployment:
           --quantization ascend
           --max-num-seqs 4
           --max-model-len 36864
-          --max-num-batched-tokens 16384
+          --max-num-batched-tokens 36864
           --nnodes 2
           --node-rank 1
           --master-addr $MASTER_IP
