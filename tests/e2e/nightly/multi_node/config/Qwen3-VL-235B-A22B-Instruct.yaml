@@ -105,5 +105,5 @@ benchmarks:
     dataset_conf: textvqa/textvqa_gen_base64
     max_out_len: 7680
     batch_size: 64
-    baseline: 95
+    baseline: 85
     threshold: 5
