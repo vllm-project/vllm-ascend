@@ -25,7 +25,7 @@
 #include "error_log.h"
 #include "moe_gating_top_k_tiling.h"
 
-// 放在文件顶部，或单独头文件中
+
 #ifndef CEIL_ALIGN
 #define CEIL_ALIGN(val, align) ((((val) + (align) - 1) / (align)) * (align))
 #endif
@@ -63,7 +63,7 @@ const static int64_t NORM_TYPE_ATTR_INDEX = 5;
 const static int64_t OUT_FLAG_ATTR_INDEX = 6;
 const static int64_t ROUTED_SCALING_FACTOR_ATTR_INDEX = 7;
 const static int64_t EPS_ATTR_INDEX = 8;
-const static int64_t DEFAULT_WORKSPACE_SIZE = 16777216; // 预留16M空间
+const static int64_t DEFAULT_WORKSPACE_SIZE = 16777216; 
 const static uint32_t DATATYPESIZE_FLOAT = 4;
 const static bool IS_LARGEST = true;
 const static bool IS_INITINDEX = false;
@@ -101,19 +101,19 @@ protected:
     {
         return true;
     }
-    // 1、获取平台信息比如CoreNum、UB/L1/L0C资源大小
+
     ge::graphStatus GetPlatformInfo() override;
-    // 2、获取INPUT/OUTPUT/ATTR信息
+
     ge::graphStatus GetShapeAttrsInfo() override;
-    // 3、计算数据切分TilingData
+
     ge::graphStatus DoOpTiling() override;
-    // 4、计算高阶API的TilingData
+ 
     ge::graphStatus DoLibApiTiling() override;
-    // 5、计算TilingKey
+
     uint64_t GetTilingKey() const override;
-    // 6、计算Workspace 大小
+
     ge::graphStatus GetWorkspaceSize() override;
-    // 7、保存Tiling数据
+
     ge::graphStatus PostTiling() override;
     void Reset();
 
@@ -159,7 +159,7 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckInputShape()
     OP_LOGE(context_, "The dim number of x is: %zu, but should be %zu.", xDimNum, X_INPUT_DIMS),
             return ge::GRAPH_FAILED);
    
-    // 通过输入获取rows 和 expertCount
+
     rows_ = xShape_->GetDim(0);
     expertCount_ = xShape_->GetDim(1);
 
@@ -241,7 +241,7 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckAttr()
     int64_t groupExpertCountAlign = CEIL_ALIGN(perGroupExpertCount_, 32L);
     OP_LOGI(context_, "333groupExpertCountAlign: %ld", groupExpertCountAlign);
     if (groupCount_ != 1 && groupCount_ != expertCount_ && kGroup_ != groupCount_) {
-        // 分组场景下才需要校验对齐后的数量
+
         OP_CHECK_IF(groupCount_ * groupExpertCountAlign > MAX_EXPERT_COUNT,
                     OP_LOGE(context_, "group count * group expert count align is: %ld, but should not greater than %ld.",
                          groupCount_ * groupExpertCountAlign, MAX_EXPERT_COUNT),
@@ -257,7 +257,6 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckAttr()
 ge::graphStatus MoeGatingTopKTilingBase::GetShapeAttrsInfo()
 {
     opName_ = context_->GetNodeName();
-    // 获取输入shape信息
     OP_LOGI(context_, "111GetShapeAttrsInfo: opName = %s", opName_);
     auto xShapePtr = context_->GetInputShape(X_INPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr);
@@ -269,7 +268,7 @@ ge::graphStatus MoeGatingTopKTilingBase::GetShapeAttrsInfo()
      if (biasShape_ != nullptr) {
         OP_LOGI(context_, "113biasShape: %s", biasShape_->ToString().c_str());
     } 
-    // 获取输出shape
+
     auto yShapePtr = context_->GetOutputShape(Y_OUTPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, yShapePtr);
     yShape_ = &yShapePtr->GetStorageShape();
@@ -331,7 +330,7 @@ ge::graphStatus MoeGatingTopKTilingBase::GetShapeAttrsInfo()
                      ge::TypeUtils::DataTypeToSerialString(normOutDtype).c_str()),
                 return ge::GRAPH_FAILED);
 
-    // 获取属性
+
     auto attrs = context_->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
 
@@ -485,7 +484,7 @@ void MoeGatingTopKTilingBase::SplitRows()
     moeGatingTopKTilingData_.set_lastCoreRowCount(lastCoreRows);
     int64_t vmsCount = CeilLog4(CEIL_DIV(kGroup_, 4L));
     OP_LOGI(context_, "vms count is: %ld", vmsCount);
-    moeGatingTopKTilingData_.set_vmsCount(vmsCount); // 需要归并的轮数
+    moeGatingTopKTilingData_.set_vmsCount(vmsCount); 
 }
 
 void MoeGatingTopKTilingBase::CalTmpBufUbSize()
@@ -533,7 +532,7 @@ ge::graphStatus MoeGatingTopKTilingBase::DoLibApiTiling()
 
 ge::graphStatus MoeGatingTopKTilingBase::GetWorkspaceSize()
 {
-    // 计算workspace大小
+  
     workspaceSize_ = DEFAULT_WORKSPACE_SIZE;
     return ge::GRAPH_SUCCESS;
 }
@@ -551,19 +550,13 @@ ge::graphStatus MoeGatingTopKTilingBase::PostTiling()
 
 uint64_t MoeGatingTopKTilingBase::GetTilingKey() const
 {
-    // DeepSeekV3排序对齐高性能场景
+   
     if (expertCount_ == 256 && groupCount_ == 8 && kGroup_ == 4 && k_ <= 32 && addBias_ &&
         groupSelectMode_ == GROUP_SELECT_MODE_SUM && renorm_ == RENORM_NO && normType_ == NORM_TYPE_SIGMOID &&
         !outFlag_) {
-        // DeepSeekV3排序对齐高性能场景
+       
         return TILING_KEY_EXPERTNUM_GROUPNUM_ALIGN_HIGH_PERF;
     } else if (groupCount_ == 1 || groupCount_ == expertCount_ || kGroup_ == groupCount_) {
-        /**
-         * 不分组场景：
-         * 1. 分组数为 1
-         * 2. 分组数等于专家数（每个组只有一个专家）
-         * 3. 选择所有组
-         */
         return TILING_KEY_WITHOUT_GROUP;
     } else {
         return TILING_KEY_GENERALIZED;

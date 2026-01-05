@@ -32,7 +32,7 @@ namespace optiling {
         OP_LOGE_WITHOUT_REPORT(op_name, err_msg, ##__VA_ARGS__); \
     } while (0)
 
-// 修改 OP_TILING_CHECK 宏，确保正确处理表达式
+// Modify OP_TILING_CHECK macro to ensure proper handling of expressions
 #define OP_CHECK_IF(cond, log_func, expr) \
     do {                                      \
         if (cond) {                           \

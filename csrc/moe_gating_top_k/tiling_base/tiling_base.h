@@ -89,10 +89,10 @@ public:
 
     virtual ~TilingBaseClass() = default;
 
-    // Tiling执行框架
-    //     1、GRAPH_SUCCESS: 成功，并且不需要继续执行后续Tiling类的实现
-    //     2、GRAPH_FAILED: 失败，中止整个Tiling流程
-    //     3、GRAPH_PARAM_INVALID: 本类不支持，需要继续往下执行其他Tiling类的实现
+    // Tiling execution framework
+    //     1. GRAPH_SUCCESS: Success, and no need to continue executing subsequent Tiling class implementations
+    //     2. GRAPH_FAILED: Failure, abort the entire Tiling process
+    //     3. GRAPH_PARAM_INVALID: This class does not support, need to continue executing other Tiling class implementations
     ge::graphStatus DoTiling()
     {
         auto ret = GetShapeAttrsInfo();
@@ -127,7 +127,7 @@ public:
         return ge::GRAPH_SUCCESS;
     }
 
-    // 更新 context
+    // Update context
     virtual void Reset(gert::TilingContext* context)
     {
         context_ = context;
@@ -135,21 +135,21 @@ public:
 
 protected:
     virtual bool IsCapable() = 0;
-    // 1、获取平台信息比如CoreNum、UB/L1/L0C资源大小
+    // 1. Get platform information such as CoreNum, UB/L1/L0C resource sizes
     virtual ge::graphStatus GetPlatformInfo() = 0;
-    // 2、获取INPUT/OUTPUT/ATTR信息
+    // 2. Get INPUT/OUTPUT/ATTR information
     virtual ge::graphStatus GetShapeAttrsInfo() = 0;
-    // 3、计算数据切分TilingData
+    // 3. Calculate data splitting TilingData
     virtual ge::graphStatus DoOpTiling() = 0;
-    // 4、计算高阶API的TilingData
+    // 4. Calculate high-level API TilingData
     virtual ge::graphStatus DoLibApiTiling() = 0;
-    // 5、计算TilingKey
+    // 5. Calculate TilingKey
     [[nodiscard]] virtual uint64_t GetTilingKey() const = 0;
-    // 6、计算Workspace 大小
+    // 6. Calculate Workspace size
     virtual ge::graphStatus GetWorkspaceSize() = 0;
-    // 7、保存Tiling数据
+    // 7. Save Tiling data
     virtual ge::graphStatus PostTiling() = 0;
-    // 8、Dump Tiling数据
+    // 8. Dump Tiling data
     virtual void DumpTilingInfo()
     {
         int32_t enable = CheckLogLevel(static_cast<int32_t>(OP), DLOG_DEBUG);

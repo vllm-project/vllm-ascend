@@ -47,11 +47,11 @@ private:
     TQue<QuePosition::VECOUT, 1> expertIdxOutQueue_;
     TQue<QuePosition::VECOUT, 1> outOutQueue_;
 
-    TBuf<TPosition::VECCALC> biasBuf_;          // 存放输入bias
-    TBuf<TPosition::VECCALC> expertIdBuf_;      // 专家编号
-    TBuf<TPosition::VECCALC> xNormWithBiasBuf_; // 存放加了bias之后的值
-    TBuf<TPosition::VECCALC> xNormBuf_;         // 存放计算sigmoid或softmax的值
-    TBuf<TPosition::VECCALC> sortedInGroupBuf_; // 存放组内排序后的结果
+    TBuf<TPosition::VECCALC> biasBuf_;          // Store input bias
+    TBuf<TPosition::VECCALC> expertIdBuf_;      // Expert ID
+    TBuf<TPosition::VECCALC> xNormWithBiasBuf_; // Store value after adding bias
+    TBuf<TPosition::VECCALC> xNormBuf_;         // Store value after computing sigmoid or softmax
+    TBuf<TPosition::VECCALC> sortedInGroupBuf_; // Store sorted results within groups
     TBuf<TPosition::VECCALC> topKExpertIdBuf_;
     TBuf<TPosition::VECCALC> sortedGroupIndexBuf_;
     TBuf<TPosition::VECCALC> calcTmpBuf_;
@@ -280,10 +280,10 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKGroupIndex()
     SetFlag<HardEvent::V_S>(eventIdVToS);
     WaitFlag<HardEvent::V_S>(eventIdVToS);
 
-    uint64_t rsvdCnt = 0; // 用于保存筛选后保留下来的元素个数
+    uint64_t rsvdCnt = 0; // Used to store the number of elements retained after filtering
     PipeBarrier<PIPE_V>();
     if (groupSelectMode_ == 1) {              // top2 sum
-                                                          // 提取每组组前两个元素
+                                                          // Extract the first two elements of each group
         maskTensor.SetValue(0, static_cast<uint32_t>(5)); // b0101
         maskTensor.SetValue(1, static_cast<uint32_t>(0));
         event_t eventIdSToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
@@ -300,10 +300,10 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKGroupIndex()
                    static_cast<uint32_t>(ONE_REPEAT_SORT_NUM * CONSTANT_TWO), gatherMaskParams, rsvdCnt);
         PipeBarrier<PIPE_V>();
 
-        // 计算每个组前两个数的和
+        // Calculate the sum of the first two numbers in each group
         PairReduceSum(topValueInGroupTensor, valueSelectedFromGroupTensor,
                       Ceil(groupCount_ * sizeof(float) * 2, REPEAT_BYTES), REPEAT_BYTES / sizeof(float), 1, 1,
-                      CONSTANT_EIGHT); // 计算每个组内最大的两个数之和
+                      CONSTANT_EIGHT); // Calculate the sum of the two largest numbers in each group
     } else {
         maskTensor.SetValue(0, static_cast<uint32_t>(1)); // b0101
         maskTensor.SetValue(1, static_cast<uint32_t>(0));
@@ -311,7 +311,7 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKGroupIndex()
         event_t eventIdSToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
         SetFlag<HardEvent::S_V>(eventIdSToV);
         WaitFlag<HardEvent::S_V>(eventIdSToV);
-        uint64_t rsvdCnt = 0; // 用于保存筛选后保留下来的元素个数
+        uint64_t rsvdCnt = 0; // Used to store the number of elements retained after filtering
         GatherMaskParams gatherMaskParams;
         gatherMaskParams.repeatTimes = groupCount_;
         gatherMaskParams.src0BlockStride = 1;
@@ -322,9 +322,9 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKGroupIndex()
     }
 
     PipeBarrier<PIPE_V>();
-    // 生成组索引
+    // Generate group indices
     ArithProgression(groupIndex.ReinterpretCast<int32_t>(), static_cast<int32_t>(0), static_cast<int32_t>(1),
-                     groupCount_); // 生成组索引
+                     groupCount_); // Generate group indices
     PipeBarrier<PIPE_V>();
 
     int64_t duplicateNum = groupCount_ % ONE_REPEAT_SORT_NUM;
@@ -340,12 +340,12 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKGroupIndex()
     }
     PipeBarrier<PIPE_V>();
 
-    // 排序
+    // Sort
     Sort<float, true>(sortedTopValue, topValueInGroupTensor, groupIndex, sortTmp, Ceil(groupCount_, 32));
     PipeBarrier<PIPE_V>();
 
-    // 提取组序号
-    uint8_t src1Pattern = 2; // 内置固定模式
+    // Extract group indices
+    uint8_t src1Pattern = 2; // Built-in fixed pattern
     GatherMask(groupIndex, sortedTopValue.template ReinterpretCast<uint32_t>(), src1Pattern, false,
                static_cast<uint32_t>(0),
                {1, static_cast<uint8_t>(Ceil(kGroup_ * sizeof(float) * CONSTANT_TWO, 256)), REPEAT_BLOCKS, 0}, rsvdCnt);
@@ -361,7 +361,7 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKGroupIndex()
         Duplicate(groupIndex.ReinterpretCast<int32_t>()[duplicateIndex], FLOAT32_NEG_INF, mask, 1, 1, REPEAT_BLOCKS);
     }
 
-    // 将筛选出来的组序号降序排列
+    // Sort the selected group indices in descending order
     LocalTensor<float> sortedGroupIndex = sortedGroupIndexBuf_.Get<float>();
     PipeBarrier<PIPE_V>();
     Sort<float, true>(sortedGroupIndex, groupIndex.ReinterpretCast<float>(), groupIndex, sortTmp, Ceil(kGroup_, 32));
@@ -507,8 +507,8 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKExpertIdx()
     gatherMaskParams.src0RepeatStride = REPEAT_BLOCKS;
     gatherMaskParams.src1RepeatStride = 0;
 
-    uint64_t rsvdCnt = 0;    // 用于保存筛选后保留下来的元素个数
-    uint8_t src1Pattern = 2; // 内置固定模式
+    uint64_t rsvdCnt = 0;    // Used to store the number of elements retained after filtering
+    uint8_t src1Pattern = 2; // Built-in fixed pattern
     PipeBarrier<PIPE_V>();
     GatherMask(topKExpertId, dstTensor.template ReinterpretCast<int32_t>(), src1Pattern, false,
                static_cast<uint32_t>(0), gatherMaskParams, rsvdCnt);
@@ -526,8 +526,8 @@ __aicore__ inline void MoeGatingTopKGenerlized<T>::SelectTopKExpertScore()
     PipeBarrier<PIPE_V>();
     Gather(yOutTensor, xNormTensor, topKExpertIdWithByte.template ReinterpretCast<uint32_t>(), static_cast<uint32_t>(0),
            k_);
-    bool needRenorm = (normType_ == 1 ) ||  // 情况1：sigmoid + renorm
-                      (normType_ == 0 && renorm_ == 1);   // 情况3：softmax + renorm
+    bool needRenorm = (normType_ == 1 ) ||  // Case 1: sigmoid + renorm
+                      (normType_ == 0 && renorm_ == 1);   // Case 3: softmax + renorm
     if (needRenorm) {       
         LocalTensor<float> maxValueTensor = calcTmpBuf_.Get<float>();
         LocalTensor<float> tmpTensor = calcTmpBuf_.Get<float>()[32];

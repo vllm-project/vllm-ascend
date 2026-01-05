@@ -9,7 +9,7 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-# random.seed(450)
+
 seed = 45
 random.seed(seed)
 numpy.random.seed(seed)
@@ -17,7 +17,6 @@ torch.manual_seed(seed)
 
 
 def softmax_func(x, axis=None):
-    # print("before softmax:",x)
     if "float16" in x.dtype.name:
         x = x.astype(numpy.float32)
     x_max = x.max(axis=axis, keepdims=True)
@@ -74,11 +73,11 @@ class TestNpuMoeGatingTopK(TestCase):
                 kind='stable')[:, :k_group]  # Indices of top-k_group
 
             mask = numpy.ones((x.shape[0], group_count),
-                              dtype=bool)  # 创建全 1 的掩码
+                              dtype=bool)  # Create a mask of all 1s
             mask[numpy.arange(x.shape[0])[:, None],
-                 indices] = False  # 在指定索引处设置为 False
+                 indices] = False  # Set to False at specified indices
             x = numpy.where(mask[..., None], float('-inf'),
-                            x)  # 用 -inf 填充掩码为 True 的位置
+                            x)  # Fill positions where mask is True with -inf
             x = x.reshape(x.shape[0], -1)
 
         _, indices = torch.sort(torch.from_numpy(x),
@@ -110,7 +109,7 @@ class TestNpuMoeGatingTopK(TestCase):
         x_dim0_range = range(1, 17)  # 1~16
         x_dim1_range = [256, 128, 64, 208, 192, 160]
 
-        # 所有参数组合
+        # All parameter combinations
         param_product = itertools.product(group_select_modes, renorms,
                                           norm_types, group_counts, k_ranges,
                                           x_dim0_range, x_dim1_range)
@@ -123,7 +122,7 @@ class TestNpuMoeGatingTopK(TestCase):
             if k > dim1 // group_count:
                 continue
 
-            # ---- 构造输入 ----
+            # ---- Construct inputs ----
             x = numpy.random.uniform(-2, 2, (dim0, dim1)).astype(numpy.float32)
             bias = numpy.random.uniform(-2, 2, (dim1, )).astype(numpy.float32)
 
@@ -146,7 +145,7 @@ class TestNpuMoeGatingTopK(TestCase):
 
             # k_group = 1
 
-            # ---- numpy 结果 ----
+            # ---- NumPy results ----
             y, expert_idx, out = self.moe_gating_top_k_numpy(
                 x_tensor,
                 k,
@@ -161,7 +160,7 @@ class TestNpuMoeGatingTopK(TestCase):
                 eps=eps,
             )
 
-            # ---- npu 结果 ----
+            # ---- NPU results ----
 
             y_npu, expert_idx_npu, out_npu = torch.ops._C_ascend.moe_gating_top_k(
                 x_tensor.npu(),
@@ -178,7 +177,7 @@ class TestNpuMoeGatingTopK(TestCase):
                 if bias_tensor is not None else None,
             )
 
-            # ---- 输出当前 case 信息 ----
+            # ---- Output current case information ----
             print(
                 f"[Case] x=({dim0},{dim1}), k={k}, "
                 f"group_count={group_count}, select_mode={group_select_mode}, "
@@ -189,7 +188,7 @@ class TestNpuMoeGatingTopK(TestCase):
             print(y)
             print(y_npu.cpu())
             print(y - y_npu.cpu())
-            # ---- 校验 ----
+            # ---- Validation ----
             self.assertRtolEqual(y, y_npu.cpu())
             self.assertRtolEqual(expert_idx, expert_idx_npu.cpu().numpy())
             print("ok\n")

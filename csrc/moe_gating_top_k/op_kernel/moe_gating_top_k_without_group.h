@@ -44,10 +44,10 @@ private:
     TQue<QuePosition::VECOUT, 1> expertIdxOutQueue_;
     TQue<QuePosition::VECOUT, 1> outOutQueue_;
 
-    TBuf<TPosition::VECCALC> biasBuf_;          // 存放输入bias
-    TBuf<TPosition::VECCALC> expertIdBuf_;      // 专家编号
-    TBuf<TPosition::VECCALC> xNormWithBiasBuf_; // 存放加了bias之后的值
-    TBuf<TPosition::VECCALC> xNormBuf_;         // 存放计算sigmoid或softmax的值
+    TBuf<TPosition::VECCALC> biasBuf_;          // Store input bias
+    TBuf<TPosition::VECCALC> expertIdBuf_;      // Expert ID
+    TBuf<TPosition::VECCALC> xNormWithBiasBuf_; // Store value after adding bias
+    TBuf<TPosition::VECCALC> xNormBuf_;         // Store value after computing sigmoid or softmax
     TBuf<TPosition::VECCALC> topKExpertIdBuf_;
     TBuf<TPosition::VECCALC> calcTmpBuf_;
 
@@ -206,8 +206,8 @@ __aicore__ inline void MoeGatingTopKWithoutGroup<T>::SelectTopKExpertIdx()
     gatherMaskParams.src0RepeatStride = REPEAT_BLOCKS;
     gatherMaskParams.src1RepeatStride = 0;
 
-    uint64_t rsvdCnt = 0;    // 用于保存筛选后保留下来的元素个数
-    uint8_t src1Pattern = 2; // 内置固定模式
+    uint64_t rsvdCnt = 0;    // Used to store the number of elements retained after filtering
+    uint8_t src1Pattern = 2; // Built-in fixed pattern
     PipeBarrier<PIPE_V>();
     GatherMask(topKExpertId, sortedScore.template ReinterpretCast<int32_t>(), src1Pattern, false,
                static_cast<uint32_t>(0), gatherMaskParams, rsvdCnt);
@@ -229,8 +229,8 @@ __aicore__ inline void MoeGatingTopKWithoutGroup<T>::SelectTopKExpertScore()
     Gather(yOutTensor, xNormTensor, topKExpertIdWithByte.template ReinterpretCast<uint32_t>(), static_cast<uint32_t>(0),
            k_);
 
-    bool needRenorm = (normType_ == 1 ) ||  // 情况1：sigmoid + renorm
-            (normType_ == 0 && renorm_ == 1);   // 情况3：softmax + renorm
+    bool needRenorm = (normType_ == 1 ) ||  // Case 1: sigmoid + renorm
+            (normType_ == 0 && renorm_ == 1);   // Case 3: softmax + renorm
     if (needRenorm == 1) {
         LocalTensor<float> maxValueTensor = calcTmpBuf_.Get<float>();
         LocalTensor<float> tmpTensor = calcTmpBuf_.Get<float>()[BLOCK_BYTES];

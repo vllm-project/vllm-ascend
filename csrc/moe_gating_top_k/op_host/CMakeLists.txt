@@ -15,7 +15,7 @@ add_ops_compile_options(
                 -Werror
 )
 
-# Host 侧算子实现（aclnn）
+# Host （aclnn）
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE
             moe_gating_top_k_def.cpp
@@ -26,7 +26,7 @@ if (BUILD_OPEN_PROJECT)
     
 
 
-    # Tiling 模块
+    # Tiling
     target_sources(optiling PRIVATE
             moe_gating_top_k_tiling.cpp
             moe_gating_top_k_tiling_base.cpp

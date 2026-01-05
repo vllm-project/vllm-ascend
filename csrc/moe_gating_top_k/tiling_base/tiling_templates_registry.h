@@ -319,31 +319,31 @@ private:
 } // namespace Transformer
 } // namespace Ops
 
-// op_type: 算子名称， class_name: 注册的 tiling 类, soc_version：芯片版本号
-// priority: tiling 类的优先级, 越小表示优先级越高, 即会优先选择这个tiling类
+// op_type: operator name, class_name: registered tiling class, soc_version: chip version number
+// priority: priority of tiling class, smaller value means higher priority, i.e., this tiling class will be selected first
 #define REGISTER_TILING_TEMPLATE_WITH_SOCVERSION(op_type, class_name, soc_versions, priority)    \
     [[maybe_unused]] uint32_t op_impl_register_template_##op_type##_##class_name##priority;      \
     static Ops::Transformer::OpTiling::RegisterNew VAR_UNUSED##op_type##class_name##priority_register = \
         Ops::Transformer::OpTiling::RegisterNew(#op_type).tiling<class_name>(priority, soc_versions)
 
-// op_type: 算子名称， class_name: 注册的 tiling 类,
-// priority: tiling 类的优先级, 越小表示优先级越高, 即被选中的概率越大
+// op_type: operator name, class_name: registered tiling class
+// priority: priority of tiling class, smaller value means higher priority, i.e., higher probability of being selected
 #define REGISTER_TILING_TEMPLATE(op_type, class_name, priority)                                \
     [[maybe_unused]] uint32_t op_impl_register_template_##op_type##_##class_name##priority;      \
     static Ops::Transformer::OpTiling::Register VAR_UNUSED##op_type_##class_name##priority_register = \
         Ops::Transformer::OpTiling::Register(op_type).tiling<class_name>(priority)
 
-// op_type: 算子名称， class_name: 注册的 tiling 类,
-// soc_version: soc版本，用于区分不同的soc
-// priority: tiling 类的优先级, 越小表示优先级越高, 即会优先选择这个tiling类
+// op_type: operator name, class_name: registered tiling class
+// soc_version: SOC version, used to distinguish different SOCs
+// priority: priority of tiling class, smaller value means higher priority, i.e., this tiling class will be selected first
 #define REGISTER_TILING_TEMPLATE_NEW(op_type, class_name, soc_version, priority)                 \
     [[maybe_unused]] uint32_t op_impl_register_template_##op_type##_##class_name##priority;      \
     static Ops::Transformer::OpTiling::RegisterNew VAR_UNUSED##op_type##class_name##priority_register = \
         Ops::Transformer::OpTiling::RegisterNew(#op_type).tiling<class_name>(priority, soc_version)
 
-// op_type: 算子名称， class_name: 注册的 tiling 类,
-// priority: tiling 类的优先级, 越小表示优先级越高, 即被选中的概率越大
-// 取代 REGISTER_TILING_TEMPLATE , 传入的op_type如果是字符串常量，需要去掉引号
+// op_type: operator name, class_name: registered tiling class
+// priority: priority of tiling class, smaller value means higher priority, i.e., higher probability of being selected
+// Replaces REGISTER_TILING_TEMPLATE, if op_type is a string constant, remove the quotes
 #define REGISTER_OPS_TILING_TEMPLATE(op_type, class_name, priority)                       \
     [[maybe_unused]] uint32_t op_impl_register_template_##op_type##_##class_name##priority;      \
     static Ops::Transformer::OpTiling::Register                                                  \

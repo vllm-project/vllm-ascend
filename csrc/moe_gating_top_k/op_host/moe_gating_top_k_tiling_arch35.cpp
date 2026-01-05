@@ -84,19 +84,19 @@ protected:
         }
         return true;
     }
-    // 1、获取平台信息比如CoreNum、UB/L1/L0C资源大小
+
     ge::graphStatus GetPlatformInfo() override;
-    // 2、获取INPUT/OUTPUT/ATTR信息
+
     ge::graphStatus GetShapeAttrsInfo() override;
-    // 3、计算数据切分TilingData
+
     ge::graphStatus DoOpTiling() override;
-    // 4、计算高阶API的TilingData
+
     ge::graphStatus DoLibApiTiling() override;
-    // 5、计算TilingKey
+
     uint64_t GetTilingKey() const override;
-    // 6、计算Workspace 大小
+
     ge::graphStatus GetWorkspaceSize() override;
-    // 7、保存Tiling数据
+
     ge::graphStatus PostTiling() override;
     void Reset();
 
@@ -141,7 +141,7 @@ ge::graphStatus MoeGatingTopKTilingRegbase::CheckInputShape()
                 OP_LOGE(context_, "The dim number of x is: %zu, but should be %zu.", xDimNum, X_INPUT_DIMS),
                 return ge::GRAPH_FAILED);
 
-    // 通过输入获取rows 和 expertCount
+
     rows_ = xShape_->GetDim(0);
     expertCount_ = xShape_->GetDim(1);
     moeGatingTopKTilingData_.set_rowCount(rows_);
@@ -238,14 +238,14 @@ ge::graphStatus MoeGatingTopKTilingRegbase::CheckAttr()
 ge::graphStatus MoeGatingTopKTilingRegbase::GetShapeAttrsInfo()
 {
     opName_ = context_->GetNodeName();
-    // 获取输入shape信息
+
     auto xShapePtr = context_->GetInputShape(X_INPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr);
     xShape_ = &xShapePtr->GetStorageShape();
     auto biasShapePtr = context_->GetOptionalInputShape(BIAS_INPUT_INDEX);
     biasShape_ = biasShapePtr == nullptr ? nullptr : &biasShapePtr->GetStorageShape();
 
-    // 获取输出shape
+
     auto yShapePtr = context_->GetOutputShape(Y_OUTPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, yShapePtr);
     yShape_ = &yShapePtr->GetStorageShape();
@@ -292,7 +292,7 @@ ge::graphStatus MoeGatingTopKTilingRegbase::GetShapeAttrsInfo()
                      ge::TypeUtils::DataTypeToSerialString(expertIdDtype).c_str()),
                 return ge::GRAPH_FAILED);
 
-    // 获取属性
+
     auto attrs = context_->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
 
@@ -490,7 +490,7 @@ ge::graphStatus MoeGatingTopKTilingRegbase::DoLibApiTiling()
 
 ge::graphStatus MoeGatingTopKTilingRegbase::GetWorkspaceSize()
 {
-    // 计算workspace大小
+
     workspaceSize_ = DEFAULT_WORKSPACE_SIZE;
     return ge::GRAPH_SUCCESS;
 }
