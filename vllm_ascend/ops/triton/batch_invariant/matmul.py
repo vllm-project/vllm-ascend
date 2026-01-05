@@ -24,124 +24,123 @@ from triton.runtime.driver import driver
 
 @triton.jit
 def matmul_bias_persistent_kernel(
-    # 输入张量指针
+    # Input tensor pointers
     x_ptr,
     y_ptr,
     bias_ptr,
     output_ptr,
-    # 矩阵维度
+    # Matrix dimensions
     M,
     N,
     K,
-    # 步长信息
+    # Stride information
     stride_xm,
-    stride_xk,  # x的步长: [M, K]
+    stride_xk,  # strides of x: [M, K]
     stride_yk,
-    stride_yn,  # y的步长: [K, N]  
-    stride_bias,  # bias的步长: [N]
+    stride_yn,  # strides of y: [K, N]
+    stride_bias,  # stride of bias: [N]
     stride_outm,
-    stride_outn,  # 输出的步长: [M, N]
-    # 是否使用偏置
+    stride_outn,  # strides of output: [M, N]
+    # Whether to use bias
     has_bias: tl.constexpr,
-    # 分块大小（常量表达式）
+    # Block sizes
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    # 获取程序ID（2D网格）
-    pid_m = tl.program_id(0)  # 行分块ID
-    pid_n = tl.program_id(1)  # 列分块ID
+    pid_m = tl.program_id(0)  # Row block ID
+    pid_n = tl.program_id(1)  # Column block ID
 
-    # 计算当前块在矩阵中的起始位置
+    # Calculate the starting position of the current block in the matrix
     rm_start = pid_m * BLOCK_M
     rn_start = pid_n * BLOCK_N
 
-    # 创建索引范围
-    rm = rm_start + tl.arange(0, BLOCK_M)  # 行索引范围 [BLOCK_M]
-    rn = rn_start + tl.arange(0, BLOCK_N)  # 列索引范围 [BLOCK_N]
-    rk = tl.arange(0, BLOCK_K)  # K维度索引范围 [BLOCK_K]
+    # Create index ranges
+    rm = rm_start + tl.arange(0, BLOCK_M)  # Row index range [BLOCK_M]
+    rn = rn_start + tl.arange(0, BLOCK_N)  # Column index range [BLOCK_N]
+    rk = tl.arange(0, BLOCK_K)  # K dimension index range [BLOCK_K]
 
-    # 初始化累加器为0
+    # Initialize accumulator to 0
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # 在K维度上进行循环，每次处理BLOCK_K个元素
+    # Loop over the K dimension, processing BLOCK_K elements per iteration
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         k_start = k * BLOCK_K
-        # 计算x的指针偏移量（行主序）
+        # Calculate pointer offsets for x (row-major)
         x_ptrs = x_ptr + rm[:, None] * stride_xm + (rk[None, :] +
                                                     k_start) * stride_xk
-        # 计算y的指针偏移量（行主序）
+        # Calculate pointer offsets for y (row-major)
         y_ptrs = y_ptr + (rk[:, None] +
                           k_start) * stride_yk + rn[None, :] * stride_yn
 
-        # 创建掩码以防止越界访问
+        # Create masks to prevent out-of-bounds access
         x_mask = (rm[:, None] < M) & ((rk[None, :] + k_start) < K)
         y_mask = ((rk[:, None] + k_start) < K) & (rn[None, :] < N)
 
-        # 从全局内存加载数据块
+        # Load data chunks from global memory
         x_chunk = tl.load(x_ptrs, mask=x_mask, other=0.0).to(tl.float32)
         y_chunk = tl.load(y_ptrs, mask=y_mask, other=0.0).to(tl.float32)
 
-        # 计算矩阵乘法累加
+        # Compute matrix multiplication accumulation
         acc += tl.dot(x_chunk, y_chunk, allow_tf32=False)
 
-    # 根据has_bias标志决定是否添加偏置
+    # Add bias if the has_bias flag is set
     if has_bias:
-        # 加载偏置值（广播到所有行）
+        # Load bias values (broadcast to all rows)
         bias_ptrs = bias_ptr + rn * stride_bias
-        bias_mask = rn < None
+        bias_mask = rn < N
         bias_vals = tl.load(bias_ptrs, mask=bias_mask,
                             other=0.0).to(tl.float32)
-        # 将偏置加到累加器上（自动广播）
+        # Add bias to accumulator (automatic broadcasting)
         acc += bias_vals[None, :]
 
-    # 计算输出指针位置
+    # Calculate output pointer positions
     out_ptrs = output_ptr + rm[:,
                                None] * stride_outm + rn[None, :] * stride_outn
     out_mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-    # 将结果存储到全局内存
+    # Store result to global memory
     tl.store(out_ptrs, acc.to(out_ptrs.dtype.element_ty), mask=out_mask)
 
 
 def matmul_persistent(x, y, bias=None):
     """
-    使用Triton实现矩阵乘法加可选偏置: x @ y + bias (如果bias不为None)
+    Implement matrix multiplication with optional bias using Triton: x @ y + bias (if bias is not None)
                 
-    参数:
-        x: torch.Tensor, 形状为 [M, K]
-        y: torch.Tensor, 形状为 [K, N] 
-        bias: torch.Tensor, 形状为 [N] 或 None
+    Parameters:
+        x: torch.Tensor, shape [M, K]
+        y: torch.Tensor, shape [K, N]
+        bias: torch.Tensor, shape [N] or None
                                                 
-    返回:
-        output: torch.Tensor, 形状为 [M, N]
+    Returns:
+        output: torch.Tensor, shape [M, N]
     """
-    # 验证输入形状
-    assert x.dim() == 2, "x必须是2D张量"
-    assert y.dim() == 2, "y必须是2D张量"
+    # Validate input shapes
+    assert x.dim() == 2, "x must be a 2D tensor"
+    assert y.dim() == 2, "y must be a 2D tensor"
     assert x.shape[1] == y.shape[
-        0], f"矩阵维度不匹配: x.shape[1]={x.shape[1]}, y.shape[0]={y.shape[0]}"
+        0], f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[0]={y.shape[0]}"
 
     M, K = x.shape
     _, N = y.shape
-    # 验证bias形状（如果不为None）
+    # Validate bias shape (if not None)
     if bias is not None:
-        assert bias.dim() == 1, "bias必须是1D张量"
+        assert bias.dim() == 1, "bias must be a 1D tensor"
         assert y.shape[1] == bias.shape[
-            0], f"偏置维度不匹配: y.shape[1]={y.shape[1]}, bias.shape[0]={bias.shape[0]}"
+            0], f"Bias dimension mismatch: y.shape[1]={y.shape[1]}, bias.shape[0]={bias.shape[0]}"
 
-    # 分配输出张量（与x相同的数据类型）
+    # Allocate output tensor (same data type as x)
     output = torch.empty((M, N), dtype=x.dtype, device=x.device)
 
-    # 定义分块大小（可根据硬件调整）
+    # Define block sizes (can be adjusted based on hardware)
     BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 128
 
-    # 计算网格大小（每个分块一个线程）
+    # Calculate grid size (one thread per block)
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
-    # 处理bias为None的情况
+    # Handle case when bias is None
     if bias is None:
-        # 创建一个虚拟的bias张量（不会被使用，因为has_bias=False）
+        # Create a dummy bias tensor (will not be used as has_bias=False)
         dummy_bias = torch.empty(0, dtype=x.dtype, device=x.device)
         has_bias = False
         bias_stride = 0
@@ -150,23 +149,23 @@ def matmul_persistent(x, y, bias=None):
         has_bias = True
         bias_stride = bias.stride(0)
         bias_to_pass = bias
-    # 启动kernel
+    # Launch kernel
     matmul_bias_persistent_kernel[grid](
         x,
         y,
         bias_to_pass,
-        output,  # 输入输出张量
+        output,  # Input/Output tensors
         M,
         N,
-        K,  # 矩阵维度
+        K,  # Matrix dimensions
         x.stride(0),
-        x.stride(1),  # x的步长
+        x.stride(1),  # Strides of x
         y.stride(0),
-        y.stride(1),  # y的步长  
-        bias_stride,  # bias的步长（如果bias为None则为0）
+        y.stride(1),  # Strides of y
+        bias_stride,  # Stride of bias (0 if bias is None)
         output.stride(0),
-        output.stride(1),  # 输出的步长
-        has_bias,  # 是否使用偏置的标志
+        output.stride(1),  # Strides of output
+        has_bias,  # Flag indicating whether to use bias
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
@@ -177,118 +176,117 @@ def matmul_persistent(x, y, bias=None):
 
 @triton.jit
 def linear_persistent_kernel(
-        a_ptr,  # 指针指向张量 a，形状 [M, K]
-        b_ptr,  # 指针指向张量 b，形状 [N, K]
-        c_ptr,  # 指针指向输出张量 c，形状 [M, N]
-        M,  # 张量 a 的行数
-        N,  # 张量 b 的行数（输出 c 的列数）
-        K,  # 张量 a 的列数和张量 b 的列数
-        stride_am,  # 张量 a 在维度 M 的步长（通常为 K）
-        stride_ak,  # 张量 a 在维度 K 的步长（通常为 1）
-        stride_bn,  # 张量 b 在维度 N 的步长（通常为 K）
-        stride_bk,  # 张量 b 在维度 K 的步长（通常为 1）
-        stride_cm,  # 张量 c 在维度 M 的步长（通常为 N）
-        stride_cn,  # 张量 c 在维度 N 的步长（通常为 1）
-        BLOCK_M: tl.constexpr,  # 阻塞大小 for M 维度
-        BLOCK_N: tl.constexpr,  # 阻塞大小 for N 维度
-        BLOCK_K: tl.constexpr,  # 阻塞大小 for K 维度
-        NUM_BLOCKS_M: tl.constexpr,  # 新增：M 维度的块数
-        NUM_BLOCKS_N: tl.constexpr,  # 新增：N 维度的块数
-        GRID_SIZE: tl.constexpr,  # 新增：固定的一维网格大小
+        a_ptr,  # Pointer to tensor a, shape [M, K]
+        b_ptr,  # Pointer to tensor b, shape [N, K]
+        c_ptr,  # Pointer to output tensor c, shape [M, N]
+        M,  # Number of rows in tensor a
+        N,  # Number of rows in tensor b (number of columns in output c)
+        K,  # Number of columns in both tensor a and tensor b
+        stride_am,  # Stride of tensor a along dimension M (typically K)
+        stride_ak,  # Stride of tensor a along dimension K (typically 1)
+        stride_bn,  # Stride of tensor b along dimension N (typically K)
+        stride_bk,  # Stride of tensor b along dimension K (typically 1)
+        stride_cm,  # Stride of tensor c along dimension M (typically N)
+        stride_cn,  # Stride of tensor c along dimension N (typically 1)
+        BLOCK_M: tl.constexpr,  # block size for M dimension
+        BLOCK_N: tl.constexpr,  # block size for N dimension
+        BLOCK_K: tl.constexpr,  # block size for K dimension
+        NUM_BLOCKS_M: tl.constexpr,  # New: Number of blocks in M dimension
+        NUM_BLOCKS_N: tl.constexpr,  # New: Number of blocks in N dimension
+        GRID_SIZE: tl.constexpr,  # New: Fixed 1D grid size
 ):
-    # 获取当前程序的一维索引（一维网格）
+    # Get current program's 1D index (1D grid)
     pid = tl.program_id(0)
-    total_blocks = NUM_BLOCKS_M * NUM_BLOCKS_N  # 总输出块数
+    total_blocks = NUM_BLOCKS_M * NUM_BLOCKS_N  # Total number of output blocks
 
-    # 循环处理分配给当前 program 的多个块（类似知识片段7的循环策略）
+    # Loop over multiple blocks assigned to the current program
     for block_index in range(pid, total_blocks, GRID_SIZE):
-        # 将一维块索引转换为二维坐标 (m_block, n_block)
+        # Convert 1D block index to 2D coordinates (m_block, n_block)
         m_block = block_index // NUM_BLOCKS_N
         n_block = block_index % NUM_BLOCKS_N
 
-        # 计算当前输出块的起始索引
+        # Calculate starting indices of the current output block
         start_m = m_block * BLOCK_M
         start_n = n_block * BLOCK_N
 
-        # 创建当前块内的行和列索引范围
+        # Create row and column index ranges within the current block
         m_indices = start_m + tl.arange(0, BLOCK_M)
         n_indices = start_n + tl.arange(0, BLOCK_N)
 
-        # 创建掩码以处理边界
+        # Create masks to handle boundaries
         m_mask = m_indices < M
         n_mask = n_indices < N
 
-        # 初始化累加器为0
+        # Initialize accumulator to 0
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-        # 循环遍历 K 维度，以 BLOCK_K 为步长进行阻塞
+        # Loop over K dimension with step size BLOCK_K
         for k_offset in range(0, K, BLOCK_K):
             k_indices = k_offset + tl.arange(0, BLOCK_K)
             k_mask = k_indices < K
 
-            # 加载张量 a 的块：形状 [BLOCK_M, BLOCK_K]
+            # Load block of tensor a: shape [BLOCK_M, BLOCK_K]
             a_ptrs = a_ptr + m_indices[:, None] * stride_am + k_indices[
                 None, :] * stride_ak
             a_vals = tl.load(a_ptrs,
                              mask=m_mask[:, None] & k_mask[None, :],
                              other=0.0)
 
-            # 加载张量 b 的块：形状 [BLOCK_N, BLOCK_K]
+            # Load block of tensor b: shape [BLOCK_N, BLOCK_K]
             b_ptrs = b_ptr + n_indices[:, None] * stride_bn + k_indices[
                 None, :] * stride_bk
             b_vals = tl.load(b_ptrs,
                              mask=n_mask[:, None] & k_mask[None, :],
                              other=0.0)
 
-            # 使用 tl.trans 显式转置 b 矩阵：形状变为 [BLOCK_K, BLOCK_N]
+            # Explicitly transpose b matrix using tl.trans: shape becomes [BLOCK_K, BLOCK_N]
             b_vals_transposed = tl.trans(b_vals)
 
-            # 计算矩阵乘法：a_vals × b_vals_transposed
+            # Compute matrix multiplication: a_vals × b_vals_transposed
             product = tl.dot(a_vals, b_vals_transposed)
             acc += product
-        # 将结果存储到输出张量 c
+        # Store result to output tensor c
         c_ptrs = c_ptr + m_indices[:, None] * stride_cm + n_indices[
             None, :] * stride_cn
         tl.store(c_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
 
-
 def linear_persistent(x, y):
     """
-    使用Triton实现矩阵乘法加可选偏置: x @ y^T
-    使用固定大小的一维网格
+    Implement matrix multiplication with Triton: x @ y^T
+    Uses a fixed-size 1D grid
                     
-    参数:
-        x: torch.Tensor, 形状为 [M, K]
-        y: torch.Tensor, 形状为 [N, K] 
+    Parameters:
+        x: torch.Tensor, shape [M, K]
+        y: torch.Tensor, shape [N, K]
                                                     
-    返回:
-        output: torch.Tensor, 形状为 [M, N]
+    Returns:
+        output: torch.Tensor, shape [M, N]
     """
-    # 验证输入形状
-    assert x.dim() == 2, "x必须是2D张量"
-    assert y.dim() == 2, "y必须是2D张量"
+    # Validate input shapes
+    assert x.dim() == 2, "x must be a 2D tensor"
+    assert y.dim() == 2, "y must be a 2D tensor"
     assert x.shape[1] == y.shape[
-        1], f"矩阵维度不匹配: x.shape[1]={x.shape[1]}, y.shape[1]={y.shape[1]}"
+        1], f"Matrix dimension mismatch: x.shape[1]={x.shape[1]}, y.shape[1]={y.shape[1]}"
 
     M, K = x.shape
     N, _ = y.shape
 
-    # 分配输出张量（与x相同的数据类型）
+    # Allocate output tensor (same data type as x)
     output = torch.zeros((M, N), dtype=x.dtype, device=x.device)
 
-    # 定义分块大小（可根据硬件调整）
+    # Define block sizes (can be adjusted based on hardware)
     BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 128
 
-    # 计算每个维度的块数（向上取整）
+    # Calculate number of blocks per dimension (ceil division)
     num_blocks_m = triton.cdiv(M, BLOCK_M)
     num_blocks_n = triton.cdiv(N, BLOCK_N)
 
-    # 设置固定的一维网格
+    # Set fixed 1D grid size
     grid_size = driver.active.utils.get_device_properties(
         torch.npu.current_device())["num_vectorcore"] // 2
     grid = (grid_size, )
 
-    # 启动kernel
+    # Launch kernel
     linear_persistent_kernel[grid](
         a_ptr=x,
         b_ptr=y,
@@ -305,9 +303,9 @@ def linear_persistent(x, y):
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        NUM_BLOCKS_M=num_blocks_m,  # 传入M维度块数
-        NUM_BLOCKS_N=num_blocks_n,  # 传入N维度块数
-        GRID_SIZE=grid_size,  # 传入固定网格大小
+        NUM_BLOCKS_M=num_blocks_m,  # Number of blocks in M dimension
+        NUM_BLOCKS_N=num_blocks_n,  # Number of blocks in N dimension
+        GRID_SIZE=grid_size,  # Fixed grid size
     )
 
     return output
