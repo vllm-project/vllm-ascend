@@ -68,15 +68,6 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test (non triton)
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-        if: ${{ inputs.type == 'full' }}
-        run: |
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
-
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
@@ -94,6 +85,8 @@ jobs:
         run: |
           # pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           # pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
           pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_qwen_pooling_classify_correctness
 
