@@ -8,7 +8,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
                                              init_model_parallel_group)
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import (enable_sp, flashcomm2_enable,
+from vllm_ascend.utils import (enable_dsa_cp_with_shard, flashcomm2_enable,
                                flashcomm2_o_shared_enabled)
 
 # Currently, mc2 op need their own group coordinator.
@@ -37,7 +37,6 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    vllm_config = get_current_vllm_config()
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
@@ -166,10 +165,10 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                          group_name=group_name)
 
     global _SHARED_WEIGHT
-    # TODO: Check if the model is Deepseek V3.2 with enabled SFA CP and activated shared weights. It will then be normalized within the PCP parameters. -- clrs97
-    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
-    if enable_sp() and is_ds_v32 and _SHARED_WEIGHT is None:
+
+    if enable_dsa_cp_with_shard():
         _SHARED_WEIGHT = _create_shared_weight_group("CP_shared_weight")
+
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config(
@@ -225,9 +224,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         # Create shared weight group for flashcomm2 oproj
         if flashcomm2_o_shared_enabled():
             assert flashcomm2_otp_size == 1, "flashcomm2_o_shared is only supported when flashcomm2_otp_size is 1"
-            if _SHARED_WEIGHT is None:
-                _SHARED_WEIGHT = _create_shared_weight_group(
-                    "flashcomm2_o_shared")
+            _SHARED_WEIGHT = _create_shared_weight_group("flashcomm2_o_shared")
 
     if get_ascend_config().multistream_overlap_gate:
         global _FC3_QUANT_X
