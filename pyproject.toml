@@ -27,7 +27,8 @@ requires = [
     "numba",
     "fastapi<0.124.0",
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
-    "compressed_tensors>=0.11.0"
+    "compressed_tensors>=0.11.0",
+    "arctic-inference==0.1.1"
 ]
 build-backend = "setuptools.build_meta"
 
