@@ -6,7 +6,6 @@ import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                vllm_version_is)
 
