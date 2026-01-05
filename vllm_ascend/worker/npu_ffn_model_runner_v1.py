@@ -145,8 +145,9 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             #     return
             
             if self.use_aclgraph and not is_ubatch:
-                # mock
+                # TODO(yxj):use _acl_graphs_full replay
                 self._ffn_forward(aclgraph_runtime_mode=CUDAGraphMode.NONE,is_ubatch=is_ubatch)
+                self.replay_cnt += 1
                 print(f"ffn replay,replay_cnt is {self.replay_cnt}",flush=True)
                 return
             elif self.use_aclgraph and is_ubatch:
