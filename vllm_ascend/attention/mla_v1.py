@@ -912,6 +912,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
         self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
+        # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
+        # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
+        # referenced, so drop them to save memory.
+        ascend_config = get_ascend_config()
+        if self.vllm_config.kv_transfer_config is not None and \
+                self.vllm_config.kv_transfer_config.is_kv_consumer and \
+                ascend_config.recompute_scheduler_enable:
+            self.fused_qkv_a_proj.weight = None
+            self.fused_qkv_a_proj.deq_scale = None
+            self.fused_qkv_a_proj.quant_bias = None
+            self.q_proj.weight = None
+            self.q_proj.deq_scale = None
+            self.q_proj.quant_bias = None
+            torch.npu.empty_cache()
+
     def get_context_seq_len_npu(self, index: int,
                                 attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill
