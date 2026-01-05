@@ -36,12 +36,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE":
     lambda: os.getenv("CMAKE_BUILD_TYPE"),
-    # Whether to compile custom kernels. If not set, the default value is True.
-    # If set to False, the custom kernels will not be compiled. Please note that
-    # the sleep mode feature will be disabled as well if custom kernels are not
-    # compiled.
-    "COMPILE_CUSTOM_KERNELS":
-    lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER":
@@ -74,14 +68,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable the trace recompiles from pytorch.
-    "VLLM_ASCEND_TRACE_RECOMPILES":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
-    # Whether to enable fused_experts_allgather_ep. MoeInitRoutingV3 and
-    # GroupedMatmulFinalizeRouting operators are combined to implement EP.
-    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
-                 ),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
@@ -92,21 +78,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-    # The tolerance of the kv cache size, if the difference between the
-    # actual kv cache size and the cached kv cache size is less than this value,
-    # then the cached kv cache size will be used.
-    "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
-    lambda: int(
-        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
-    # Whether to enable the topk optimization. It's enabled by default. Please set to False if you hit any issue.
-    # We'll remove this flag in the future once it's stable enough.
-    "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
-    lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '1'))),
-    # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
-    # and the mla_pa will be the default path of deepseek decode path.
-    "VLLM_ASCEND_MLA_PA":
-    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0)),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
@@ -121,6 +92,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    # This feature is bound to the previous VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE, and it adds the shared weight feature,
+    # which can eliminate redundant storage of weights. More detailed information can be found in PR#4188.
+    # We recommend that you enable it when Flashcomm2 is enabled and the VRAM capacity is limited.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED", "0"))),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
@@ -132,25 +108,15 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE":
     lambda: int(
         os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
-    # Whether to enable dense model and general optimizations for better performance.
-    # Since we modified the base parent class `linear`, this optimization is also applicable to other model types.
-    # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
-    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
-    # Whether to enable mlp optimize when tensor parallel is enabled.
-    # this feature in eager mode will get better performance.
-    "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
-    # Determine the number of physical devices in a non-full-use scenario
-    # caused by the initialization of the Mooncake connector.
-    "PHYSICAL_DEVICES":
-    lambda: os.getenv("PHYSICAL_DEVICES", None),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
-    # Whether to enable transpose weight and cast format to FRACTAL_NZ.
+    # Whether to enable weight cast format to FRACTAL_NZ.
+    # 0: close nz;
+    # 1: only quant case enable nz;
+    # 2: enable nz as long as possible.
     "VLLM_ASCEND_ENABLE_NZ":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
@@ -159,6 +125,18 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable fused mc2(`dispatch_gmm_combine_decode`/`dispatch_ffn_combine` operator)
+    # 0, or not set: default ALLTOALL and MC2 will be used.
+    # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
+    # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=16, non-mtp, non-dynamic-eplb.
+    # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
+    # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
+    # with W8A8, non-dynamic-eplb. And MTP layer must be W8A8.
+    "VLLM_ASCEND_ENABLE_FUSED_MC2":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
+    # Whether to anbale balance scheduling
+    "VLLM_ASCEND_BALANCE_SCHEDULING":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
 }
 
 # end-env-vars-definition

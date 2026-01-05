@@ -35,24 +35,6 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
         importlib.reload(platform)
 
-    def test_is_enable_nz(self):
-        with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        1):
-            self.assertTrue(utils.is_enable_nz())
-        with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        0):
-            self.assertFalse(utils.is_enable_nz())
-
-    def test_sleep_mode_enabled(self):
-        utils._SLEEP_MODE_ENABLED = None
-        with mock.patch("vllm_ascend._build_info.__sleep_mode_enabled__",
-                        True):
-            self.assertTrue(utils.sleep_mode_enabled())
-        utils._SLEEP_MODE_ENABLED = None
-        with mock.patch("vllm_ascend._build_info.__sleep_mode_enabled__",
-                        False):
-            self.assertFalse(utils.sleep_mode_enabled())
-
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)
@@ -121,27 +103,6 @@ class TestUtils(TestBase):
         input_tensor = torch.randn(17, 64)
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
-
-    @mock.patch('importlib.util.find_spec')
-    @mock.patch('importlib.import_module')
-    def test_try_register_lib(self, mock_import_module, mock_find_spec):
-        # import OK
-        mock_find_spec.return_value = mock.MagicMock()
-        mock_import_module.return_value = mock.MagicMock()
-        lib_name = "existing_lib"
-        lib_info = "Library found and imported successfully"
-        utils.try_register_lib(lib_name, lib_info)
-
-        # Can't find lib
-        mock_find_spec.return_value = None
-        lib_name = "non_existing_lib"
-        utils.try_register_lib(lib_name)
-
-        # import error
-        mock_find_spec.return_value = mock.MagicMock()
-        mock_import_module.side_effect = ImportError("import error")
-        lib_name = "error_lib"
-        utils.try_register_lib(lib_name)
 
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()

@@ -25,6 +25,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -40,7 +41,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -48,7 +49,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -67,47 +68,68 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Run vllm-project/vllm-ascend test (non triton)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        if: ${{ inputs.type == 'full' }}
+        run: |
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
-          # pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          # pytest -sv tests/e2e/singlecard/test_quantization.py
-          pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
-          pytest -sv tests/e2e/singlecard/pooling/test_classification.py::test_classify_correctness
+          # pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
+          # pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_qwen_pooling_classify_correctness
 
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
 
-          pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv tests/e2e/singlecard/test_camem.py
-          # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv --durations=0 tests/e2e/nightly/single_node/ops/singlecard_ops/triton/
+          pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
+          # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
+          # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
-          pytest -sv tests/e2e/singlecard/test_quantization.py
-          pytest -sv tests/e2e/singlecard/test_sampler.py
-          pytest -sv tests/e2e/singlecard/test_vlm.py
-          pytest -sv tests/e2e/singlecard/multi-modal/test_internvl.py
-          pytest -sv tests/e2e/singlecard/test_xlite.py
-          pytest -sv tests/e2e/singlecard/pooling/
+          #pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
-          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
-          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
+          pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
+
+          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
 
   e2e-2-cards:
     name: multicard-2
@@ -118,6 +140,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HCCL_BUFFSIZE: 1024
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -135,7 +158,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -143,7 +166,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -162,47 +185,57 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Run vllm-project/vllm-ascend test (non triton)
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 tests/e2e/multicard/test_aclgraph_capture_replay.py
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+          pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
-          pytest -sv tests/e2e/multicard/test_quantization.py
-          pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
-          pytest -sv tests/e2e/multicard/test_full_graph_mode.py
-          pytest -sv tests/e2e/multicard/test_data_parallel.py
-          pytest -sv tests/e2e/multicard/test_expert_parallel.py
-          pytest -sv tests/e2e/multicard/test_external_launcher.py
-          pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
-          pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_quantization.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_full_graph_mode.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_expert_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_external_launcher.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_single_request_aclgraph.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          #pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W8A8
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC_new_version
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC_old_version
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_fc2_for_qwen3_moe
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_flashcomm_v1
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
 
-          pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
-          pytest -sv tests/e2e/multicard/test_prefix_caching.py
-          pytest -sv tests/e2e/multicard/test_qwen3_moe.py
-          pytest -sv tests/e2e/multicard/test_offline_weight_load.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_prefix_caching.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_pipeline_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_weight_load.py
 
   e2e-4-cards:
     name: multicard-4
@@ -214,6 +247,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -229,7 +263,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           path: ./vllm-ascend
 
@@ -239,7 +273,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -258,30 +292,25 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20251225.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
-          # pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
-          # pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_W8A8_WITH_EP
-          pytest -sv tests/e2e/multicard/test_data_parallel_tp2.py
-
-      - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
-        shell: bash -l {0}
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl"
-
-      - name: Run vllm-project/vllm-ascend Qwen3 Next test
-        working-directory: ./vllm-ascend
-        shell: bash -el {0}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-          pytest -sv tests/e2e/multicard/test_qwen3_next.py
+          pytest -sv --durations=0 tests/e2e/multicard/spec_decode/test_mtp_qwen3_next.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_kimi_k2_thinking_w4a16_tp4
+          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_mtp.py
+          pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_next.py

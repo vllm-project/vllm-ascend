@@ -107,6 +107,8 @@ def _run_worker_process(
             quantization="ascend" if "W8A8" in model_path else None,
             enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
+            # vllm enables async scheduling by default, remove below when vllm >= 0.14.0
+            async_scheduling=False,
         )
 
         # Expose model config to the main test process
@@ -134,7 +136,7 @@ def _run_worker_process(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
-def test_aclgraph_capture_replay_dp2(
+def test_models_aclgraph_capture_replay_metrics_dp2(
     model: str,
     max_tokens: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -215,7 +217,7 @@ def test_aclgraph_capture_replay_dp2(
     # Part A: Warmup runs (Profile run + 2 runs per captured graph)
     warmup_runs = 1 + (2 * max_batch_sizes)
     soc_version = get_ascend_device_type()
-    if soc_version in {AscendDeviceType._910_93} and "DeepSeek" in model:
+    if soc_version in {AscendDeviceType.A3} and "DeepSeek" in model:
         # An extra warmup run is needed for MC2 warmup here
         warmup_runs += 1
 

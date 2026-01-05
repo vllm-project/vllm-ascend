@@ -62,7 +62,7 @@ class CamMoeDistributeCombine
 public:
     __aicore__ inline CamMoeDistributeCombine(){};
     __aicore__ inline void Init(GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx, GM_ADDR epSendCount,
-                                GM_ADDR tpSendCount, GM_ADDR scales, GM_ADDR XOut, GM_ADDR workspaceGM, TPipe *pipe,
+                                GM_ADDR tpSendCount, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR XOut, GM_ADDR workspaceGM, TPipe *pipe,
                                 const DispatchGmmCombineDecodeTilingData *tilingData);
     __aicore__ inline void Process();
     __aicore__ inline void AllToAllSend();
@@ -145,6 +145,7 @@ private:
     GlobalTensor<ExpandIdxType> epSendCountGM_;
     GlobalTensor<ExpandIdxType> tpSendCountGM_;
     GlobalTensor<float> expandScalesGM_;
+    GlobalTensor<bool> xActiveMaskGM_;
     GlobalTensor<ExpandXType> expandOutGlobal_;
     GlobalTensor<ExpandXType> rankWindow_;
     GlobalTensor<int32_t> rankStates_;
@@ -169,6 +170,8 @@ private:
     CombineCalcInfo calcInfo_;
     uint32_t axisBS_{0};
     uint32_t axisMaxBs_{0};
+    uint32_t axisBsAlignSize_{0};
+    uint64_t activeMaskBsCnt_{0};
     uint32_t axisH_{0};
     uint32_t axisK_{0};
     uint32_t aivNum_{0};
@@ -224,6 +227,9 @@ private:
     TBuf<> gatherMaskOutBuf_;  // gather mask output buf
     TBuf<> gatherTmpBuf_;
     TBuf<> statusSumOutBuf_;
+    TBuf<> xActMaskTBuf_;
+    TBuf<> xActMaskCastTBuf_;
+    TBuf<> xActMaskSumTBuf_;
     float sumTarget_{0.0};
     int32_t epStateValue_;
     bool isShardExpert_{false};
@@ -231,7 +237,7 @@ private:
 
 template <TemplateMC2TypeClass>
 __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
-    GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx, GM_ADDR epSendCount, GM_ADDR tpSendCount, GM_ADDR scales,
+    GM_ADDR expandX, GM_ADDR expertIds, GM_ADDR expandIdx, GM_ADDR epSendCount, GM_ADDR tpSendCount, GM_ADDR scales, GM_ADDR xActiveMask,
     GM_ADDR XOut, GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData)
 {
     tpipe_ = pipe;
@@ -264,8 +270,10 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     expandIdxGM_.SetGlobalBuffer((__gm__ ExpandIdxType *)expandIdx);
     epSendCountGM_.SetGlobalBuffer((__gm__ int32_t *)epSendCount);
     expandScalesGM_.SetGlobalBuffer((__gm__ float *)scales);
+    xActiveMaskGM_.SetGlobalBuffer((__gm__ bool*)xActiveMask);
     expandOutGlobal_.SetGlobalBuffer((__gm__ ExpandXType *)XOut);
     axisBS_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.bs;
+    activeMaskBsCnt_ = axisBS_;
     axisH_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
     axisK_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.k;
     if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {
@@ -395,6 +403,27 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::AlltoAllBuf
     tpipe_->InitBuffer(gatherMaskOutBuf_, epWorldSize_ * sizeof(float));
     tpipe_->InitBuffer(gatherTmpBuf_, sizeof(uint32_t));
     tpipe_->InitBuffer(statusSumOutBuf_, sizeof(float));
+
+    if constexpr (EXEC_FLAG & EXEC_FLAG_X_ACTIVE_MASK) {
+        axisBsAlignSize_ = Ceil(axisBS_ * sizeof(bool), UB_ALIGN) * UB_ALIGN;
+        tpipe_->InitBuffer(xActMaskTBuf_, axisBsAlignSize_);
+        tpipe_->InitBuffer(xActMaskCastTBuf_, axisBsAlignSize_ * sizeof(half));
+        tpipe_->InitBuffer(xActMaskSumTBuf_, axisBsAlignSize_ * sizeof(half));
+        LocalTensor<bool> xActiveMaskTensor = xActMaskTBuf_.Get<bool>();
+        LocalTensor<half> tempTensor = xActMaskCastTBuf_.Get<half>();
+        LocalTensor<half> sumOutTensor = xActMaskSumTBuf_.Get<half>();
+        DataCopyExtParams xActiveMaskParams{1U, static_cast<uint32_t>(axisBS_ * sizeof(bool)), 0U, 0U, 0U};
+        DataCopyPadExtParams<bool> xActiveMaskCopyPadParams{false, 0U, 0U, 0U};
+        DataCopyPad(xActiveMaskTensor, xActiveMaskGM_, xActiveMaskParams, xActiveMaskCopyPadParams);
+        SyncFunc<AscendC::HardEvent::MTE2_V>();
+        LocalTensor<int8_t> xActiveMaskInt8Tensor = xActiveMaskTensor.ReinterpretCast<int8_t>();
+        Cast(tempTensor, xActiveMaskInt8Tensor, RoundMode::CAST_NONE, axisBS_);
+        PipeBarrier<PIPE_V>();
+        SumParams params{1, axisBsAlignSize_, axisBS_};
+        Sum(sumOutTensor, tempTensor, params);
+        SyncFunc<AscendC::HardEvent::V_S>();
+        activeMaskBsCnt_ = static_cast<int32_t>(sumOutTensor.GetValue(0));
+    }
 }
 
 template <TemplateMC2TypeClass>
@@ -645,13 +674,16 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::WaitDispatc
 template <TemplateMC2TypeClass>
 __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::LocalWindowCopy()
 {
+    if (activeMaskBsCnt_ == 0U) {
+        return;
+    }
     uint32_t beginIndex = 0;
     uint32_t endIndex = 0;
     uint32_t processLen = 0;
     uint32_t tokenOffset = 0;
-    if (axisBS_ < aivNum_) {
-        uint32_t aivNumPerToken = aivNum_ / axisBS_;  // axisBS_ < aivNum_
-        if (coreIdx_ >= (axisBS_ * aivNumPerToken)) {
+    if (activeMaskBsCnt_ < aivNum_) {
+        uint32_t aivNumPerToken = aivNum_ / activeMaskBsCnt_;  // activeMaskBsCnt_ < aivNum_
+        if (coreIdx_ >= (activeMaskBsCnt_ * aivNumPerToken)) {
             return;
         }
         uint32_t tokenIndex = coreIdx_ / aivNumPerToken;
@@ -663,8 +695,8 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::LocalWindow
         beginIndex = tokenIndex;
         endIndex = beginIndex + 1U;
     } else {
-        uint32_t tokenPerAivNum = axisBS_ / aivNum_;
-        uint32_t remainderToken = axisBS_ % aivNum_;
+        uint32_t tokenPerAivNum = activeMaskBsCnt_ / aivNum_;
+        uint32_t remainderToken = activeMaskBsCnt_ % aivNum_;
         beginIndex = tokenPerAivNum * coreIdx_;
         if (coreIdx_ < remainderToken) {
             tokenPerAivNum++;
@@ -723,10 +755,10 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::LocalWindow
         }
         LocalTensor<ExpandXType> rowTmpLocal = tokenBuf_.Get<ExpandXType>();
         if (sharedExpertRankNum_ > 0U) {
-            uint32_t temp = (epRankId_ * axisBS_) / sharedExpertRankNum_;
-            uint32_t moeOnShareRank = Ceil((tokenIndex + 1 + temp) * sharedExpertRankNum_, axisBS_) - 1 - epRankId_;
-            uint32_t preCnt = (moeOnShareRank + epRankId_) * axisBS_ / sharedExpertRankNum_ -
-                              epRankId_ * axisBS_ / sharedExpertRankNum_;
+            uint32_t temp = (epRankId_ * activeMaskBsCnt_) / sharedExpertRankNum_;
+            uint32_t moeOnShareRank = Ceil((tokenIndex + 1 + temp) * sharedExpertRankNum_, activeMaskBsCnt_) - 1 - epRankId_;
+            uint32_t preCnt = (moeOnShareRank + epRankId_) * activeMaskBsCnt_ / sharedExpertRankNum_ -
+                              epRankId_ * activeMaskBsCnt_ / sharedExpertRankNum_;
             __gm__ ExpandXType *shareAddr =
                 (__gm__ ExpandXType *)(epWindowGM_ + moeOnShareRank * expertPerSizeOnWin_ * moeExpertPerRankNum_) +
                 (tokenIndex - preCnt) * axisH_ + tokenOffset;
