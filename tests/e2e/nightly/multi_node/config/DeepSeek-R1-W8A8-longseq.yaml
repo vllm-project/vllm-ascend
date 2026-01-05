@@ -34,7 +34,7 @@ deployment:
           --seed 1024
           --quantization ascend
           --max-num-seqs 4
-          --max-model-len 32768
+          --max-model-len 36864
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
@@ -72,7 +72,7 @@ deployment:
         --seed 1024
         --quantization ascend
         --max-num-seqs 4
-        --max-model-len 32768
+        --max-model-len 36864
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
