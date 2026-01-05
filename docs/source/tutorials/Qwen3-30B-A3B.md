@@ -7,7 +7,10 @@ Run docker container:
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A2 machines:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
