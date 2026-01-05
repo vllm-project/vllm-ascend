@@ -117,7 +117,7 @@ class AscendQuantConfig(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
-        
+
         if model_type in ["minimax", "minimax_m2"]:
             prefix = prefix.replace("mlp", "block_sparse_moe")
 
@@ -128,7 +128,7 @@ class AscendQuantConfig(QuantizationConfig):
             if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
                 parts = parts[:exp_idx + 1]
                 prefix = ".".join(parts)
-        
+
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
