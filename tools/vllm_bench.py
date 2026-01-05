@@ -89,18 +89,24 @@ class VllmbenchRunner:
         except subprocess.TimeoutExpired:
             # force kill if needed
             self.proc.kill()
+
     def _wait_for_task(self):
         """Wait for the vllm bench command to complete and check the execution result"""
 
         stdout, stderr = self.proc.communicate()
-        
+
         if self.proc.returncode != 0:
-            logging.error(f"vllm bench command failed, return code: {self.proc.returncode}")
+            logging.error(
+                f"vllm bench command failed, return code: {self.proc.returncode}"
+            )
             logging.error(f"Standard output: {stdout}")
             logging.error(f"Standard error: {stderr}")
-            raise RuntimeError(f"vllm bench command execution failed: {stderr}")
-        
-        logging.info(f"vllm bench command completed, return code: {self.proc.returncode}")
+            raise RuntimeError(
+                f"vllm bench command execution failed: {stderr}")
+
+        logging.info(
+            f"vllm bench command completed, return code: {self.proc.returncode}"
+        )
         if stdout:
             lines = stdout.split('\n')
             last_lines = lines[-100:] if len(lines) > 100 else lines
@@ -123,6 +129,7 @@ class VllmbenchRunner:
             output_throughput
         ) >= self.baseline * self.threshold, f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
 
+
 def run_vllm_bench_case(model_name,
                         port,
                         config,
@@ -130,7 +137,10 @@ def run_vllm_bench_case(model_name,
                         model_path="",
                         host_ip="localhost"):
     try:
-        with VllmbenchRunner(model_name, port, config, baseline,
+        with VllmbenchRunner(model_name,
+                             port,
+                             config,
+                             baseline,
                              host_ip=host_ip) as vllm_bench:
             vllm_bench_result = vllm_bench.result
     except Exception as e:
