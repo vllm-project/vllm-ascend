@@ -24,10 +24,8 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "Qwen/Qwen3-32B",
+    "Qwen/Qwen3-8B",
 ]
-
-TENSOR_PARALLELS = [4]
 
 prompts = [
     "San Francisco is a",
@@ -62,8 +60,7 @@ aisbench_cases = [{
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-async def test_models(model: str, tp_size: int) -> None:
+async def test_models(model: str) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
@@ -71,11 +68,9 @@ async def test_models(model: str, tp_size: int) -> None:
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "PAGED_ATTENTION_MASK_LEN": "5500",
         "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     }
     server_args = [
-        "--no-enable-prefix-caching", "--tensor-parallel-size",
-        str(tp_size), "--port",
+        "--no-enable-prefix-caching", "--tensor-parallel-size", "1", "--port",
         str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
         "36864", "--block-size", "128", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9", "--additional-config",
