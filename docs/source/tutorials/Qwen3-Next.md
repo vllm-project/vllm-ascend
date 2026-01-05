@@ -27,7 +27,10 @@ If the machine environment is an Atlas 800I A3(64G*16), the deployment approach 
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A2 machines:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
 --shm-size=1g \
 --name vllm-ascend-qwen3 \
@@ -60,7 +63,7 @@ Install the Ascend BiSheng toolkit, execute the command:
 BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
 BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
 wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-source /usr/local/Ascend/8.5.0/bisheng_toolkit/set_env.sh
+export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
 ```
 
 Install Triton Ascend:
@@ -71,12 +74,6 @@ pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -
 ```
 
 ### Inference
-
-Please make sure you have already executed the command:
-
-```bash
-source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
-```
 
 :::::{tab-set}
 ::::{tab-item} Online Inference
