@@ -67,9 +67,6 @@ class AscendAttentionBackend(AttentionBackend):
             from vllm_ascend.attention.attention_cp import \
                 AscendAttentionCPImpl
             return AscendAttentionCPImpl
-        if vllm_is_batch_invariant():
-            from vllm_ascend.attention.batch_invariant.flash_attn import BatchInvariantBackendImpl
-            return BatchInvariantBackendImpl
         return AscendAttentionBackendImpl
 
     @staticmethod

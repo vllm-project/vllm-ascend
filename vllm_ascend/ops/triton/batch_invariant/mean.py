@@ -43,7 +43,7 @@ def mean_kernel(
     pid = tl.program_id(0)
 
     # Compute output indices
-    m_idx = pid // k
+    m_idx = pid // K
     k_idx = pid % K
 
     # Bounds check
@@ -67,10 +67,12 @@ def mean_kernel(
     tl.store(output_ptr + output_idx, mean_val)
 
 
-def mean_dim(input: torch.Tensor,
-             dim: int,
-             keepdim: bool = False,
-             dtype: torch.dtype = torch.float16) -> torch.Tensor:
+def mean_dim(
+    input_: torch.Tensor,
+    dim: int,
+    keepdim: bool = False,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
     """
     Triton implementation of torch.mean with single dimension reduction.
 
@@ -84,25 +86,24 @@ def mean_dim(input: torch.Tensor,
         Tensor with mean values along specified dimension
     """
     # Validate inputs
-    assert -input.ndim <= dim < input.ndim, (
-        f"Invalid dimension {dim} for tensor with {input.ndim} dimensions")
+    assert -input_.ndim <= dim < input_.ndim, (
+        f"Invalid dimension {dim} for tensor with {input_.ndim} dimensions")
 
     # Handle negative dim
     if dim < 0:
-        dim = dim + input.ndim
+        dim = dim + input_.ndim
     # Handle dtype
     if dtype is None:
-        if input.dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
+        if input_.dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
             dtype = torch.float32
         else:
-            dtype = input.dtype
+            dtype = input_.dtype
     # Convert input to appropriate dtype if needed
-    if input.dtype != dtype:
-        input = input.to(dtype)
+    if input_.dtype != dtype:
+        input_ = input_.to(dtype)
 
     # Get input shape and strides
-    shape = list(input.shape)
-
+    shape = list(input_.shape)
     # Calculate dimensions for kernel
     M = 1
     for i in range(dim):
@@ -115,7 +116,7 @@ def mean_dim(input: torch.Tensor,
         K *= shape[i]
 
     # Reshape input to 3D view (M, N, K)
-    input_3d = input.reshape(M, N, K)
+    input_3d = input_.reshape(M, N, K)
 
     # Create output shape
     if keepdim:
@@ -125,7 +126,7 @@ def mean_dim(input: torch.Tensor,
         output_shape = shape[:dim] + shape[dim + 1:]
 
     # Create output tensor
-    output = torch.empty(output_shape, dtype=dtype, device=input.device)
+    output = torch.empty(output_shape, dtype=dtype, device=input_.device)
 
     # Reshape output for kernel
     if keepdim:
@@ -154,21 +155,23 @@ def mean_dim(input: torch.Tensor,
     return output
 
 
-def mean_batch_invariant(input,
-                         dim,
-                         keepdim=False,
-                         dtype: torch.dtype = torch.float16):
+def mean_batch_invariant(
+    input_: torch.Tensor,
+    dim: list[int],
+    keepdim: bool = False,
+    dtype: torch.dtype = torch.float16,
+):
     assert dtype is None or dtype == torch.float32, f"unsupported dtype: {dtype}"
     if len(dim) == 1:
-        return mean_dim(input, dim[0], keepdim=keepdim)
+        return mean_dim(input_, dim[0], keepdim=keepdim)
     else:
-        assert input.dtype in {torch.float16, torch.bfloat16, torch.float32
-                               }, ("only float types supported for now")
+        assert input_.dtype in {torch.float16, torch.bfloat16, torch.float32
+                                }, ("only float types supported for now")
         if len(dim) == 0:
-            dim = list(range(input.ndim))
+            dim = list(range(input_.ndim))
         n_elems = 1
         for d in dim:
-            n_elems *= input.shape[d]
-        return torch.sum(input, dim=dim, keepdim=keepdim,
+            n_elems *= input_.shape[d]
+        return torch.sum(input_, dim=dim, keepdim=keepdim,
                          dtype=torch.float32).to(dtype
-                                                 or input.dtype) / n_elems
+                                                 or input_.dtype) / n_elems

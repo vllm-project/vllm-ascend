@@ -19,6 +19,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+from triton.runtime.driver import driver
 
 
 @triton.jit
@@ -395,8 +396,8 @@ def matmul_batch_invariant(a, b, *, out=None):
             f"got shapes {a.shape} and {b.shape}")
 
 
-def linear_batch_invariant(input, weight, bias=None):
-    output = linear_persistent(input, weight)
+def linear_batch_invariant(input_, weight, bias=None):
+    output = linear_persistent(input_, weight)
 
     if bias is not None:
         output = output + bias

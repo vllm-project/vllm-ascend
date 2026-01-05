@@ -50,6 +50,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
@@ -59,7 +60,6 @@ from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
                                enable_sp, get_ascend_device_type,
                                register_ascend_customop)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.batch_invariant import init_batch_invariance
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
