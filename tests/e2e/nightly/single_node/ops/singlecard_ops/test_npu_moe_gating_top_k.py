@@ -9,7 +9,6 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-
 seed = 45
 random.seed(seed)
 numpy.random.seed(seed)

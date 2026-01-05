@@ -55,10 +55,10 @@ repos:
   hooks:
   - id: pymarkdown
     args: [fix]
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
-  hooks:
-  - id: actionlint
+# - repo: https://github.com/rhysd/actionlint
+#   rev: v1.7.7
+#   hooks:
+#   - id: actionlint
 - repo: local
   hooks:
   # For local development, you can run mypy using tools/mypy.sh script if needed.

@@ -209,8 +209,14 @@ def _select_experts_with_fusion_ops(
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
     renorm = int(renormalize)
-    if scoring_func == "sigmoid" and renorm==0:
-        raise ValueError(f"Unsupported scoring function type: {scoring_func} and renormalize: {renormalize}")#sigmoid + renorm=0 is not supported in current branch
+    if scoring_func == "sigmoid" and renorm == 0:
+
+        raise ValueError(
+
+            f"Unsupported scoring function type: {scoring_func} and renormalize: {renormalize}"
+            
+        )  #sigmoid + renorm=0 is not supported in current branch
+
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and \
         e_score_correction_bias.dtype != router_logits.dtype:
