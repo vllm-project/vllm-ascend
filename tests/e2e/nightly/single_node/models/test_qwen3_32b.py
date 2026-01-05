@@ -69,9 +69,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "TASK_QUEUE_ENABLE": "1",
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PAGED_ATTENTION_MASK_LEN": "5500",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+        "PAGED_ATTENTION_MASK_LEN": "5500"
     }
     server_args = [
         "--no-enable-prefix-caching", "--tensor-parallel-size",
