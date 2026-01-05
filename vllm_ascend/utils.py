@@ -983,6 +983,14 @@ def calculate_dp_buffer_size() -> int:
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
+# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
+# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
+# significantly improve communication performance of MC2 ops dispatch/combine.
+def is_hierarchical_communication_enabled():
+    return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+
+
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
