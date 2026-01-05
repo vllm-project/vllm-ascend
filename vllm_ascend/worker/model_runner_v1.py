@@ -1096,6 +1096,12 @@ class NPUModelRunner(GPUModelRunner):
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
+        device_group = get_tp_group().device_group
+        backend = device_group._get_backend(torch.device("npu"))
+        local_rank = torch.distributed.get_rank(group=device_group)
+        tp_group_name = backend.get_hccl_comm_name(ocal_rank)
+        tp_size = get_tensor_model_parallel_world_size()
+
         assert self.model is not None
         hidden_states = self.model(
             input_ids=input_ids,
@@ -1135,6 +1141,12 @@ class NPUModelRunner(GPUModelRunner):
             pad_size = get_forward_context().pad_size
             if pad_size > 0:
                 hidden_states = hidden_states[:-pad_size, :]
+        ascend_compilation_config: dict = config.additional_config.get(
+            "ascend_compilation_config", {})
+        if ascend_compilation_config.get("fuse_allreduce_rms", True) and not isinstance(
+                hidden_states, IntermediateTensors):
+            # hidden_states = torch.ops._C_ascend.fuse_atten_allgather(hidden_states,
+            #    tp_group_name, tp_size, local_rank)
         return hidden_states if self.pcp_size == 1 else self.pcp_manager.get_restore_hidden_states(
             hidden_states)
 
