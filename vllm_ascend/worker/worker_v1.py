@@ -239,26 +239,39 @@ class NPUWorker(WorkerBase):
             print(self.profiler.key_averages().table(
                 sort_by="self_cuda_time_total"))
 
-        import threading
-        self._ffn_shutdown_event = threading.Event()
+        # import threading
+        # self._ffn_shutdown_event = threading.Event()
 
-        def ffn_worker_loop():
-            # Set NPU device for this thread (thread-local context)
-            device = torch.device(f"npu:{self.local_rank}")
-            NPUPlatform.set_device(device)
-            logger.info("FFN worker loop started")
+        # def ffn_worker_loop():
+        #     # Set NPU device for this thread (thread-local context)
+        #     device = torch.device(f"npu:{self.local_rank}")
+        #     NPUPlatform.set_device(device)
+        #     logger.info("FFN worker loop started")
 
-            try:
-                while not self._ffn_shutdown_event.is_set():
-                    # Execute FFN computation
-                    self.model_runner.execute_model(scheduler_output=None)
-            except Exception as e:
-                logger.error("FFN worker loop error: %s", e)
-                raise
+        #     try:
+        #         while not self._ffn_shutdown_event.is_set():
+        #             # Execute FFN computation
+        #             self.model_runner.execute_model(scheduler_output=None)
+        #     except Exception as e:
+        #         logger.error("FFN worker loop error: %s", e)
+        #         raise
 
-        self._ffn_thread = threading.Thread(target=ffn_worker_loop,
-                                            daemon=True)
-        self._ffn_thread.start()
+        # self._ffn_thread = threading.Thread(target=ffn_worker_loop,
+        #                                     daemon=True)
+        # self._ffn_thread.start()
+        device = torch.device(f"npu:{self.local_rank}")
+        NPUPlatform.set_device(device)
+        cnt = 0
+        while True:
+            # 计算源rank
+            rank = self.model_runner.connector.process_group.rank_in_group
+            world_size = self.model_runner.connector.process_group.world_size
+            src = (rank - 1) % world_size
+            print(f"[主线程] 等待接收...",flush=True)
+            # 阻塞接收
+            is_ubatch = self.model_runner.connector.process_group.recv_object(src)
+            print(f"is_ubatch in start_ffn_server_loop is {is_ubatch},self.local_rank is {self.local_rank}",flush=True)
+            self.model_runner.execute_model(is_ubatch=is_ubatch)
         logger.info("FFN server loop started in worker")
 
     def stop_ffn_server_loop(self) -> None:

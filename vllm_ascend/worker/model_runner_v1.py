@@ -1353,11 +1353,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 uniform_decode=uniform_decode,
                 num_scheduled_tokens_per_request=num_scheduled_tokens,
             )
-        # # send is_ubatch to ffn side
-        # dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
-        # is_ubatch = True if ubatch_slices else False
-        # self.afd_connector.process_group.send_object(is_ubatch,dst)
-        # print(f'send is_ubatch in prepare input is {is_ubatch}')
+        # send is_ubatch to ffn side
+        dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
+        is_ubatch = True if ubatch_slices else False
+        self.afd_connector.process_group.send_object(is_ubatch,dst)
+        print(f'send is_ubatch in prepare input is {is_ubatch}')
         
         
 
@@ -2616,11 +2616,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # if aclgraph_capture_sizes:
             #     update_graph_params(aclgraph_capture_sizes)
         logger.info(f"dummy_run, ubatch_slices: {ubatch_slices}")
-        # # send is_ubatch to ffn side
-        # dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
-        # is_ubatch = True if ubatch_slices else False
-        # self.afd_connector.process_group.send_object(is_ubatch,dst)
-        # print(f'send is_ubatch in dummy_run is {is_ubatch}',flush=True)
+        # send is_ubatch to ffn side
+        dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
+        is_ubatch = True if ubatch_slices else False
+        self.afd_connector.process_group.send_object(is_ubatch,dst)
+        print(f'send is_ubatch in dummy_run is {is_ubatch}',flush=True)
         
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:

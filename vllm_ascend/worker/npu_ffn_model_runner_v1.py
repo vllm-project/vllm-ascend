@@ -145,25 +145,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             #     return
             
             if self.use_aclgraph and not is_ubatch:
-                #mock
-                # self._ffn_forward(aclgraph_runtime_mode=CUDAGraphMode.NONE,is_ubatch=is_ubatch)
-                # self._dummy_run(num_tokens,
-                #                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
-                #                 force_attention=force_attention,
-                #                 uniform_decode=uniform_decode,
-                #                 is_ubatch=is_ubatch)
-                # # TODO(yxj):ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
-                # replay
-                if self.connector_name == "camm2nconnector":
-                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size) * (self.attn_size // self.ffn_size)
-                elif self.connector_name == "camp2pconnector":
-                    max_num_tokens = self.max_num_tokens
-                else:
-                    max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
-                acl_graph_info = self._acl_graphs_full.get(max_num_tokens)
-                graph = acl_graph_info['graph']
-                graph.replay()
-                self.replay_cnt += 1
+                # mock
+                self._ffn_forward(aclgraph_runtime_mode=CUDAGraphMode.NONE,is_ubatch=is_ubatch)
                 print(f"ffn replay,replay_cnt is {self.replay_cnt}",flush=True)
                 return
             elif self.use_aclgraph and is_ubatch:
@@ -573,9 +556,9 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                    **kwargs):
         
         # recv self.is_ubatch form attn side
-        # src = (self.connector.process_group.rank_in_group - 1) % self.connector.process_group.world_size
-        # is_ubatch = self.connector.process_group.recv_object(src)
-        # print(f'yxj src in _dummy_run is {src}')
+        src = (self.connector.process_group.rank_in_group - 1) % self.connector.process_group.world_size
+        is_ubatch = self.connector.process_group.recv_object(src)
+        print(f'yxj src in _dummy_run is {src}')
         print(f'yxj is_ubatch in _dummy_run is {is_ubatch}')
         
         # only support eager mode and piecewise graph now
@@ -662,7 +645,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                      aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
                      is_ubatch:bool=False):
         print(f'yxj is_ubatch in _ffn_forward is {is_ubatch}',flush=True)
-        ubatch_nums = 2
+        if is_ubatch:
+            ubatch_nums = 2
+        else:
+            ubatch_nums = 1
         cur_num_stages = 0
         for layer_idx in range(self.first_k_dense_replace,self.num_layers):
             for ubatch_idx in range(ubatch_nums):
