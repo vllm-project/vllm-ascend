@@ -195,10 +195,13 @@ class AscendW8A8DynamicFusedMoEMethod:
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-        mix_placement = getattr(layer.ascend_config, "mix_placement", False)
-        n_shared_experts = 1 if mix_placement else 0
-        assert router_logits.shape[
-            1] == global_num_experts - global_redundant_expert_num - n_shared_experts, "Number of global experts mismatch (excluding redundancy)"
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
+        n_shared_experts = layer.n_shared_experts
+        valid_global_expert_num = global_num_experts - global_redundant_expert_num - n_shared_experts
+        if zero_expert_num == 0 or zero_expert_type is None:
+            assert router_logits.shape[1] == valid_global_expert_num, \
+                "Number of global experts mismatch (excluding redundancy)"
 
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
@@ -217,9 +220,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                mix_placement=getattr(layer.ascend_config, "mix_placement",
-                                      False),
+                mix_placement=layer.mix_placement,
                 num_logical_experts=router_logits.shape[1],
+                num_shared_experts=n_shared_experts,
                 global_num_experts=global_num_experts)
         assert topk_ids is not None
         assert topk_weights is not None

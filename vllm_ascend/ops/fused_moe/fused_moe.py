@@ -141,6 +141,7 @@ class AscendFusedMoE(FusedMoE):
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
+        num_shared_experts = kwargs.get("n_shared_experts", 0)
 
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
@@ -161,53 +162,32 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
-        self.ascend_config = get_ascend_config()
-        self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
-        self.expert_map_path = self.ascend_config.expert_map_path
-        self.global_redundant_expert_num = self.ascend_config.init_redundancy_expert
-        self.global_num_experts = num_experts + self.global_redundant_expert_num
+        self.moe_config.supports_eplb = self.quant_method.supports_eplb
+        ascend_config = get_ascend_config()
+        # flashcommon3 gate stream
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
+            AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.custom_routing_function is None and self.e_score_correction_bias is not None:
             vllm_config = get_current_vllm_config()
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype)
 
-        # init moe.
-        self.local_num_experts, self.expert_map, _ = determine_expert_map(
-            self.ep_size, self.ep_rank, self.global_num_experts)
-        # TODO: Temporary flag to indicate if static EPLB is enabled. This is a
-        # workaround to bypass a quantization check that fails with float weights.
-        init_eplb_enable = False
-        num_experts += 1 if getattr(self.ascend_config, "mix_placement",
-                                    False) else 0
-        # static eplb initializing with expert_map_path
-        if self.expert_map_path and os.path.exists(
-                self.expert_map_path) and os.access(self.expert_map_path,
-                                                    os.R_OK):
-            self.expert_load_balancer = ExpertLoadBalancer(
-                self.expert_map_path, num_experts)
-            self.expert_load_balancer.check_expert_map_tensor()
-            self.global_redundant_expert_num = (
-                self.expert_load_balancer.get_global_redundant_expert_num())
-            self.global_num_experts = num_experts + self.global_redundant_expert_num
-            try:
-                self.local_num_experts, self.expert_map = (
-                    self.expert_load_balancer.get_rank_placement_map(
-                        self.moe_instance_id, self.ep_rank))
-                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
-                    self.moe_instance_id, self.ep_rank).npu()
-                init_eplb_enable = True
-            except Exception as e:
-                logger.warning(
-                    f"Init expert map of mtp/eagle when using sample.{e}")
-                self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
-        else:
-            # dynamic eplb initializing with not expert_map_path
-            if self.dynamic_eplb:
-                self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
-        if self.expert_map is not None and isinstance(self.expert_map,
-                                                      torch.Tensor):
+        # init moe
+        self.mix_placement = getattr(ascend_config,"mix_placement",False)
+        self.n_shared_experts = num_shared_experts
+        num_experts += num_shared_experts if self.mix_placement else 0
+        self.moe_config.num_experts = num_experts
+        self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
+            ascend_config, self.moe_instance_id, self.moe_config)
+        self.global_num_experts = num_experts + self.global_redundant_expert_num
+        self.dynamic_eplb = (ascend_config.dynamic_eplb
+                             or ascend_config.expert_map_record_path) and (
+                                 self.log2phy is not None)
+        self.local_num_experts = (torch.sum(
+            self._expert_map != -1).item() if self._expert_map is not None else
+                                  self.global_num_experts)
+        if self._expert_map is not None:
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
@@ -245,7 +225,7 @@ class AscendFusedMoE(FusedMoE):
             moe_quant_params["intermediate_size_full"] = intermediate_size
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        self.enable_shared_expert_dp = self.ascend_config.enable_shared_expert_dp
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
@@ -403,9 +383,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
-        self.ascend_config = get_ascend_config()
-        self.multistream_overlap_shared_expert = self.ascend_config.multistream_overlap_shared_expert
-        self.multistream_overlap_gate = self.ascend_config.multistream_overlap_gate
+        ascend_config = get_ascend_config()
+        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
@@ -475,6 +455,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
+
         if not self.multistream_overlap_gate:
             # Make sure the default stream waits for the shared experts stream to finish.
             if self.multistream_overlap_shared_expert:
@@ -492,6 +473,5 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             assert fc3_context is not None
             shared_out = fc3_context.shared_out
         if shared_out is None:
-            return fused_output
-        else:
-            return shared_out, fused_output
+            return routed_out
+        return shared_out, routed_out

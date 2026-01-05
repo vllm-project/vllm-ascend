@@ -188,13 +188,14 @@ class AscendCompilationConfig:
     def __init__(self, enable_quantization_fusion: bool = True, **kwargs):
         """
         Initialize the configuration.
-
+        
         Args:
             enable_quantization_fusion (bool): Whether to enable quantization fusion optimization.
                 When set to True, the system will optimize quantization-related operations,
                 reducing the number of quantization/dequantization nodes.
                 Default: True
-
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.enable_quantization_fusion = enable_quantization_fusion
