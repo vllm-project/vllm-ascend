@@ -560,16 +560,15 @@ class AscendMlaCPImpl(AscendMLAImpl):
         ] and self.speculative_config is not None:
             input_layout = "TND"
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
-            q_pe = q_pe.view(num_tokens, self.num_heads, -1)
+            q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
+            q_pe = q_pe.view(num_tokens, num_heads, -1)
             sparse_mode = 3
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
             input_layout = "BNSD"
-            q_nope = q_nope.view(num_tokens, self.num_heads, 1,
-                                 -1).contiguous()
-            q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+            q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
+            q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
 
@@ -607,10 +606,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params.events[num_tokens].append(event)
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
-                workspace = torch_npu.atb._npu_multi_head_latent_attention_get_workspace(
-                    q_nope, q_pe, k_nope, k_pe, decode_meta.block_table,
-                    seq_len, num_heads, self.scale, self.num_kv_heads,
-                    **common_kwargs)
+                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                    q_nope, k_nope, k_nope, **common_kwargs)
                 update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
             if common_kwargs["input_layout"] == "BNSD":
@@ -623,10 +620,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
                                            device=q_nope.device)
             
             graph_params.attn_params[num_tokens].append(
-                (weak_ref_tensors(q_nope), weak_ref_tensors(q_pe),
-                 weak_ref_tensors(k_nope), weak_ref_tensors(k_pe),
+                (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
+                 weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
                  num_heads, self.num_kv_heads, input_layout, spec_attn_mask,
                  sparse_mode, self.scale, decode_meta.block_table, block_size,
+                 actual_seq_lengths, actual_seq_lengths_kv,
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
@@ -645,7 +643,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
-        if input_layout == "TND": 
+        if input_layout == "BNSD": 
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
 
