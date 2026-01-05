@@ -13,16 +13,6 @@ spec:
         labels:
           role: leader
       spec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: kubernetes.io/hostname
-                  operator: NotIn
-                  values:
-                  - 172.22.5.7
-                  - 172.22.5.237
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
@@ -82,15 +72,6 @@ spec:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: kubernetes.io/hostname
-                  operator: NotIn
-                  values:
-                  - 172.22.5.7
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
