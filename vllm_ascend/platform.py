@@ -329,7 +329,7 @@ class NPUPlatform(Platform):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
+                "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
         if is_vl_model(vllm_config):
