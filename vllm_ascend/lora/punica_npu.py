@@ -9,6 +9,7 @@ from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                vllm_version_is)
 
+
 # The platforms that are compatible with the PyTorch-native implementation can
 # inherit this class
 class PunicaWrapperNPU(PunicaWrapperBase):
