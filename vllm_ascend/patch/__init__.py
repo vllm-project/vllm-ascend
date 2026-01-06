@@ -184,19 +184,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 7. File: worker/patch_weight_loader.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.linear.UnquantizedLinearMethod`
-#    Why:
-#       vLLM Ascend doesn't work with weight loader v2
-#    How：
-#       patch it to fix the bug.
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only.  We should fix it soon
-#    Future Plan:
-#       Remove this patch when the bug is fixed.
-#
-# ** 8. File: worker/patch_qwen3_next_mtp.py**
+# ** 7. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -209,7 +197,7 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 9. File: worker/patch_module.py**
+# ** 8. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
@@ -225,7 +213,7 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
-# ** 10. File: worker/patch_rejection_sampler.py**
+# ** 9. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.rejection_sampler`
 #    Why:
@@ -241,7 +229,7 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-# ** 11.File: worker/patch_qwen3_next.py**
+# ** 10.File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
 #    Why:
@@ -253,7 +241,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 12. File: worker/patch_qwen3_next.py**
+# ** 11. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
