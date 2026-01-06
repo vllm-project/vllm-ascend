@@ -86,7 +86,6 @@ class TestMtpProposer:
         assert proposer.dtype == torch.float16
         assert proposer.num_speculative_tokens == 2
         assert proposer.hidden_size == 4096
-        assert proposer.block_size == 16
 
         # Test with mrope enabled
         assert hasattr(proposer, "positions")

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-MODELS = ["Qwen/Qwen3-0.6B"]
+MODELS = ["Qwen/Qwen3-30B-A3B"]
 
 
 @pytest.mark.parametrize("model", MODELS)
