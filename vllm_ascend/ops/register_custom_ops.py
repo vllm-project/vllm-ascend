@@ -16,27 +16,6 @@ from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
 
-def _maybe_chunk_residual_impl(x: torch.Tensor,
-                               residual: torch.Tensor) -> torch.Tensor:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return residual
-
-    if x.size(0) != residual.size(0):
-        sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
-        pad_size = forward_context.pad_size
-        if pad_size > 0:
-            residual = F.pad(residual, (0, 0, 0, pad_size))
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
-
-    return residual
-
-
 def _maybe_all_gather_and_maybe_unpad_impl(
         x: torch.Tensor,
         label: bool,
@@ -306,12 +285,6 @@ def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
     return torch_npu.npu_quantize(in_tensor, input_scale_reciprocal,
                                   input_offset, torch.qint8, -1, False)
 
-
-direct_register_custom_op(op_name="maybe_chunk_residual",
-                          op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: x,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,

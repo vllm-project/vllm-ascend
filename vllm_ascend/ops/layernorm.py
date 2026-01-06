@@ -18,8 +18,12 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
+from vllm.forward_context import get_forward_context
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 
 
 class AscendRMSNorm(RMSNorm):
@@ -50,7 +54,16 @@ class AscendRMSNorm(RMSNorm):
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            if x.size(0) != residual.size(0):
+                sp_enabled = get_forward_context().sp_enabled
+                assert sp_enabled is True, ("Currently, this situation only occurs "
+                                            "when sp is enabled")
+                pad_size = get_forward_context().pad_size
+                if pad_size > 0:
+                    residual = F.pad(residual, (0, 0, 0, pad_size))
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
             if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
