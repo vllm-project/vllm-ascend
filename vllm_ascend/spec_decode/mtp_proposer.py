@@ -511,7 +511,7 @@ class MtpProposer(EagleProposer):
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             if self.pcp_size * self.dcp_size > 1:
-                # update local seq_len and batch_seq_mask
+                # update local seq_len
                 num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
                     ori_seq_len + step + 1,
                     self.pcp_size,
@@ -520,14 +520,7 @@ class MtpProposer(EagleProposer):
                 )
                 cp_seq_len = \
                     num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank]
-                batch_seq_mask = (cp_seq_len == 0)
-                builder.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
-                    batch_seq_mask, non_blocking=True)
-                batch_seq_mask = builder.batch_seq_mask_buf[:batch_seq_mask.
-                                                            shape[0]]
-                cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
                 attn_metadata_i.decode.cp_seq_len = cp_seq_len
-                attn_metadata_i.decode.batch_seq_mask = batch_seq_mask
                 # update slot_mapping
                 slot_indices += self.pcp_size
                 slot_mapping = mtp_slot_mapping[slot_indices]
