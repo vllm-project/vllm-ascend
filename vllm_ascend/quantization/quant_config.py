@@ -117,7 +117,7 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        model_type = vllm_config.model_config.hf_text_config.model_type
 
         if model_type in ["minimax", "minimax_m2"]:
             prefix = prefix.replace("mlp", "block_sparse_moe")
