@@ -371,9 +371,9 @@ class NPUWorker(WorkerBase):
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.
         self.model_runner.eplb_warmup()
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
-                            or []).copy()
+        warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
+                        or []).copy()
+        if not self.model_config.enforce_eager:
             cg_capture_sizes: list[int] = []
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
@@ -393,9 +393,9 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-            for size in sorted(warmup_sizes, reverse=True):
-                logger.info("Compile and warming up model for size %d", size)
-                self.model_runner._dummy_run(size)
+        for size in sorted(warmup_sizes, reverse=True):
+            logger.info("Compile and warming up model for size %d", size)
+            self.model_runner._dummy_run(size)
 
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
