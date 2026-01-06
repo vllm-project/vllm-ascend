@@ -1847,54 +1847,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states, attn_metadata, aux_hidden_states)
         return draft_token_ids
 
-    def get_afd_padding(
-            self, afd_tokens_start_loc: list[int],
-            afd_tokens_lens: list[int]) -> tuple[int, list[int], list[int]]:
-
-        afd_tokens_start_loc = list(afd_tokens_start_loc)
-        afd_tokens_lens = list(afd_tokens_lens)
-        original_max_end_loc = afd_tokens_start_loc[-1]
-
-        # 1. Stage count padding: pad to reach required num_stages by adding
-        # dummy stages.
-        if len(afd_tokens_start_loc) - 1 < self.num_stages:
-            missing = self.num_stages - (len(afd_tokens_start_loc) - 1)
-            for _ in range(missing):
-                afd_tokens_lens.append(0)
-
-        # 2. Stage-wise DP padding: pad each stage to max tokens across DP
-        # ranks.
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
-            dp_size = self.vllm_config.parallel_config.data_parallel_size
-            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-            _, max_tokens_cpu = DPMetadata.num_stage_tokens_across_dp(
-                afd_tokens_lens, dp_size, dp_rank)
-            afd_tokens_lens = max_tokens_cpu.tolist()
-
-        # 3. If using CUDA graphs on attention server, pad each stage length
-        # up to the next configured cudagraph capture size so that each stage
-        # matches a captured graph size.
-        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                and self.afd_config and self.afd_config.is_attention_server):
-
-            def pad_to_capture_size(n: int) -> int:
-                for s in self.aclgraph_batch_sizes:
-                    if n <= s // self.num_stages:
-                        return s // self.num_stages
-                return n
-
-            afd_tokens_lens = [pad_to_capture_size(n) for n in afd_tokens_lens]
-
-        # Recompute start locations from lengths to ensure consistency after
-        # padding.
-        new_start_loc = [afd_tokens_start_loc[0]]
-        running = afd_tokens_start_loc[0]
-        for length in afd_tokens_lens:
-            running += length
-            new_start_loc.append(running)
-
-        num_pad = new_start_loc[-1] - original_max_end_loc
-        return num_pad, new_start_loc, afd_tokens_lens
 
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just pads
