@@ -61,9 +61,12 @@ jobs:
           cat /tmp/new_models.txt || true
 
       - name: Download new models (CLI)
-        if: hashFiles('/tmp/new_models.txt') != ''
         run: |
           set -euo pipefail
+          if [ ! -s /tmp/new_models.txt ]; then
+            echo "No new models to download."
+            exit 0
+          fi
 
           while read -r model; do
             [ -z "$model" ] && continue
