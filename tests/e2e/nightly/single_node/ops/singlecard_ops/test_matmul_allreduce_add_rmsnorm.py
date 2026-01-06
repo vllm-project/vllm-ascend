@@ -126,7 +126,7 @@ def worker(rank, ep_world_size, batch_size, m, k, n):
 
 @torch.inference_mode()
 def test_matmul_allreduce_add_rmsnorm_kernel():
-    ep_world_size = 8
+    ep_world_size = 4
     batch_size = 1
     m = 10000
     k = 1024

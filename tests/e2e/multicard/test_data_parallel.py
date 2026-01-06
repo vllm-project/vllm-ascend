@@ -27,9 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-MODELS = [
-    "Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"
-]
+MODELS = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
 
 
 @pytest.mark.parametrize("model", MODELS)

@@ -1,6 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
+# Copyright 2025 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,6 +54,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
@@ -106,14 +107,13 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method)
+                               set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType, get_mc2_tokens_capacity, select_moe_comm_method,
     set_ascend_forward_context, set_mc2_mask, set_mc2_tokens_capacity)
-
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -183,8 +183,15 @@ class ExecuteModelState(NamedTuple):
 class NPUModelRunner(GPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # TODO(qcs): These manual pad and unpad for GPUModelRunner are
+        # used to expand some buffers, which need to be reverted after
+        # the following PR is merged:
+        # https://github.com/vllm-project/vllm/pull/28988
+        max_pcp_pad_tokens = vllm_config.parallel_config.prefill_context_parallel_size * 2 * vllm_config.scheduler_config.max_num_seqs
+        vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        vllm_config.scheduler_config.max_num_batched_tokens -= max_pcp_pad_tokens
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -894,9 +901,6 @@ class NPUModelRunner(GPUModelRunner):
         self.logits_indices = logits_indices
 
         # Used in the below loop.
-        # query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
-        num_computed_tokens_cpu = (
-            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         self.spec_decode_common_attn_metadata = None
         if use_spec_decode and self.need_accepted_tokens:
             self.num_accepted_tokens.np[:num_reqs] = (
@@ -991,7 +995,8 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
                 slot_mapping=slot_mapping,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_computed_tokens_cpu=self.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
                 positions=self.positions.gpu,
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
@@ -1092,12 +1097,20 @@ class NPUModelRunner(GPUModelRunner):
                                              intermediate_tensors,
                                              inputs_embeds):
         assert self.model is not None
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **self._init_model_kwargs(maybe_padded_num_tokens))
+        if vllm_version_is('0.13.0'):
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **self._init_model_kwargs(maybe_padded_num_tokens))
+        else:
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **self._init_model_kwargs())
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
@@ -1252,6 +1265,7 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
+    # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
         valid_sampled_token_ids: torch.Tensor | list[list[int]],
@@ -1268,10 +1282,147 @@ class NPUModelRunner(GPUModelRunner):
             # Speculative decoding is not enabled.
             draft_token_ids = None
         else:
-            draft_token_ids = self.drafter.generate_token_ids(
-                valid_sampled_token_ids, sampling_metadata, scheduler_output,
-                spec_decode_metadata, positions, num_scheduled_tokens,
-                hidden_states, aux_hidden_states)
+            if self.speculative_config.method in ("suffix", "ngram"):
+                draft_token_ids = self.drafter.generate_token_ids(
+                    valid_sampled_token_ids, sampling_metadata,
+                    scheduler_output, spec_decode_metadata, positions,
+                    num_scheduled_tokens, hidden_states, aux_hidden_states)
+
+            elif self.speculative_config.use_eagle():
+                common_attn_metadata = self.spec_decode_common_attn_metadata
+                sampled_token_ids = valid_sampled_token_ids
+
+                if self.vllm_config.speculative_config.disable_padded_drafter_batch:
+                    # When padded-batch is disabled, the sampled_token_ids should be
+                    # the cpu-side list[list[int]] of valid sampled tokens for each
+                    # request, with invalid requests having empty lists.
+                    assert isinstance(sampled_token_ids, list), \
+                        "sampled_token_ids should be a python list when" \
+                        "padded-batch is disabled."
+                    assert self.drafter is not None
+                    next_token_ids = self.drafter.prepare_next_token_ids_cpu(
+                        sampled_token_ids, self.requests, self.input_batch,
+                        scheduler_output.num_scheduled_tokens)
+                else:
+                    # When using padded-batch, the sampled_token_ids should be
+                    # the gpu tensor of sampled tokens for each request, of shape
+                    # (num_reqs, num_spec_tokens + 1) with rejected tokens having
+                    # value -1.
+                    assert isinstance(sampled_token_ids, torch.Tensor), \
+                        "sampled_token_ids should be a torch.Tensor when" \
+                        "padded-batch is enabled."
+                    assert self.drafter is not None
+                    next_token_ids, valid_sampled_tokens_count = \
+                        self.drafter.prepare_next_token_ids_padded(
+                            common_attn_metadata,
+                            sampled_token_ids,
+                            self.requests,
+                            self.input_batch,
+                            self.discard_request_indices.gpu,
+                            self.num_discarded_requests
+                        )
+                    self._copy_valid_sampled_token_count(
+                        next_token_ids, valid_sampled_tokens_count)
+
+                req_scheduled_tokens = scheduler_output.num_scheduled_tokens
+                if self.pcp_size * self.dcp_size > 1:
+                    long_seq_metadata = self.long_seq_metadata  # type: ignore
+                    input_ids_pcp_full = self.pcp_manager.input_ids_pcp_full.gpu
+                    query_start_loc_pcp_full = self.pcp_manager.query_start_loc_pcp_full.gpu
+                    query_start_loc_pcp_full_cpu = self.pcp_manager.query_start_loc_pcp_full.cpu
+                    num_reqs = self.input_batch.num_reqs
+                    ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
+                        query_start_loc_pcp_full_cpu[:num_reqs]
+                    num_prefill_reqs = (ori_query_lens
+                                        > self.decode_threshold).sum().item()
+                    num_decode_reqs = num_reqs - num_prefill_reqs
+                else:
+                    long_seq_metadata = None  # type: ignore
+                    num_prefill_reqs = 0
+                    num_decode_reqs = 0
+                if spec_decode_metadata is None:
+                    # update pcp related params
+                    if self.pcp_size > 1:
+                        token_indices_to_sample = \
+                            query_start_loc_pcp_full[1:num_reqs + 1] - 1
+                        target_token_ids = input_ids_pcp_full[:
+                                                              num_scheduled_tokens]
+                        target_positions = positions[:num_scheduled_tokens]
+                        target_hidden_states = hidden_states
+                    else:
+                        token_indices_to_sample = None
+                        # input_ids can be None for multimodal models.
+                        target_token_ids = self.input_ids.gpu[:
+                                                              num_scheduled_tokens]
+                        target_positions = positions[:num_scheduled_tokens]
+                        if self.use_aux_hidden_state_outputs:
+                            target_hidden_states = torch.cat([
+                                h[:num_scheduled_tokens]
+                                for h in aux_hidden_states
+                            ],
+                                                             dim=-1)
+                        else:
+                            target_hidden_states = hidden_states[:
+                                                                 num_scheduled_tokens]
+                else:
+                    if self.pcp_size > 1:
+                        assert common_attn_metadata is not None
+                        common_attn_metadata.query_start_loc_cpu[:num_reqs + 1] = \
+                            query_start_loc_pcp_full_cpu[:num_reqs + 1]
+                        assert common_attn_metadata is not None
+                        common_attn_metadata.query_start_loc[:num_reqs + 1] = \
+                            query_start_loc_pcp_full[:num_reqs + 1]
+                    if self.vllm_config.speculative_config.disable_padded_drafter_batch:
+                        # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
+                        token_indices_to_sample = None
+                        assert self.drafter is not None
+                        common_attn_metadata, token_indices =\
+                            self.drafter.prepare_inputs(
+                                common_attn_metadata,
+                                sampled_token_ids,
+                                spec_decode_metadata.num_draft_tokens)
+                    else:
+                        assert self.drafter is not None
+                        common_attn_metadata, token_indices, \
+                            token_indices_to_sample =\
+                                self.drafter.prepare_inputs_padded(
+                                    common_attn_metadata,
+                                    spec_decode_metadata,
+                                    valid_sampled_tokens_count)
+                    if self.pcp_size > 1:
+                        target_token_ids = input_ids_pcp_full[token_indices]
+                        target_positions = positions
+                        target_hidden_states = hidden_states
+                    else:
+                        target_token_ids = self.input_ids.gpu[token_indices]
+                        target_positions = positions[token_indices]
+                        if self.use_aux_hidden_state_outputs:
+                            target_hidden_states = torch.cat(
+                                [h[token_indices] for h in aux_hidden_states],
+                                dim=-1)
+                        else:
+                            target_hidden_states = hidden_states[token_indices]
+                assert self.drafter is not None
+                draft_token_ids = self.drafter._propose(
+                    target_token_ids=target_token_ids,
+                    target_positions=target_positions,
+                    target_hidden_states=target_hidden_states,
+                    next_token_ids=next_token_ids,
+                    last_token_indices=token_indices_to_sample,
+                    common_attn_metadata=common_attn_metadata,
+                    sampling_metadata=sampling_metadata,
+                    req_scheduled_tokens=req_scheduled_tokens,
+                    long_seq_metadata=long_seq_metadata,
+                    num_prefill_reqs=num_prefill_reqs,
+                    num_decode_reqs=num_decode_reqs,
+                    scheduler_output=scheduler_output,
+                    num_scheduled_tokens=num_scheduled_tokens,
+                )
+
+            else:
+                raise ValueError("Unknown speculative decoding method: "
+                                 f"{self.speculative_config.method}")
+
         return draft_token_ids
 
     @staticmethod
@@ -1405,10 +1556,16 @@ class NPUModelRunner(GPUModelRunner):
                 logits = None
             else:
                 if self.input_batch.pooling_params:
-                    pool_output = self._pool(
-                        hidden_states,
-                        scheduler_output.total_num_scheduled_tokens,
-                        num_scheduled_tokens_np)
+                    if vllm_version_is('0.13.0'):
+                        pool_output = self._pool(
+                            hidden_states,
+                            scheduler_output.total_num_scheduled_tokens,
+                            num_scheduled_tokens_np)
+                    else:
+                        pool_output = self._pool(
+                            hidden_states,
+                            scheduler_output.total_num_scheduled_tokens,
+                            num_scheduled_tokens_np, kv_connector_output)
                     if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
@@ -1773,9 +1930,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
-                self.cp_kv_recover_idx = torch.zeros(self.max_num_tokens,
-                                                     dtype=torch.int32,
-                                                     device=self.device)
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
                     num_tokens, self.query_lens, self.attn_mask,
                     self.input_batch)
@@ -1822,7 +1976,11 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
                         self.speculative_config.method == "mtp":
-                    attn_state = AscendAttentionState.SpecDecoding
+                    # `AscendAttentionState.SpecDecoding` is only designed for mla
+                    if self.vllm_config.model_config.use_mla:
+                        attn_state = AscendAttentionState.SpecDecoding
+                    else:
+                        attn_state = AscendAttentionState.ChunkedPrefill
 
                 common_metadata = CommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
@@ -2240,9 +2398,10 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
+        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
-                      self.kv_caches)
+                      self.kv_caches, num_attn_module)
         return kv_caches
 
     def _allocate_kv_cache_tensors(
