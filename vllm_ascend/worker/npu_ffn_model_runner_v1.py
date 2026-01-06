@@ -113,10 +113,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         #         torch_npu.profiler.ProfilerActivity.CPU,
         #         torch_npu.profiler.ProfilerActivity.NPU
         #     ],
-        #     schedule=torch_npu.profiler.schedule(wait=5, warmup=2, active=20, repeat=1, skip_first=20),
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=5, repeat=1, skip_first=120),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
-        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/dl/y00889327/profile/prof_ffn")
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof_ffn")
         # )
         # self.prof.start()
 
@@ -129,9 +129,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
     def _get_current_layer_idx(self) -> int:
         return (self._counter // self._current_num_ubatches) % self.num_layers
     
-    def profile_run(self,is_ubatch:bool=False):
-        print(f'yxj is_ubatch in profile_run is {is_ubatch}')
-        self._dummy_run(self.max_num_tokens,is_ubatch=is_ubatch)
+    def profile_run(self):
+        self._dummy_run(self.max_num_tokens)
 
         
     @torch.inference_mode()
@@ -140,15 +139,14 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         # self.prof.step()
         current_layer_idx = self._get_current_layer_idx()
         try:
-            # skip dense layer
+            # TODO(yxj)；support eager mode
             # if current_layer_idx < self.first_k_dense_replace:
             #     return
             
             if self.use_aclgraph and not is_ubatch:
                 # TODO(yxj):use _acl_graphs_full replay
                 self._ffn_forward(aclgraph_runtime_mode=CUDAGraphMode.NONE,is_ubatch=is_ubatch)
-                # self.replay_cnt += 1
-                print(f"_ffn_forward ",flush=True)
+                print(f"is_ubatch is false eager",flush=True)
                 return
             elif self.use_aclgraph and is_ubatch:
                 # TODO(yxj):ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
@@ -315,8 +313,6 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             ) from e
         finally:
             self._counter += 1
-            # if (self._counter == self.num_layers *
-            #         self.afd_config.num_afd_stages):
             if (self._counter == self.num_layers *
                     self._current_num_ubatches):
                 self._counter = 0
@@ -461,14 +457,14 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
     
 
     
-    def capture_model(self,is_ubatch:bool=False) -> int:
+    def capture_model(self) -> int:
         """Capture ACL graphs for FFN operations."""
         
         logger.debug("Starting ACL graph capture for FFN operations...")
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
         
-        self._capture_model(is_ubatch)
+        self._capture_model()
         
         end_time = time.perf_counter()
         end_free_npu_memory = torch.npu.mem_get_info()[0]
@@ -480,7 +476,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
 
         return npu_graph_size
 
-    def _capture_model(self,is_ubatch:bool=False):
+    def _capture_model(self):
         if self.graph_pool is None:
             self.graph_pool = current_platform.get_global_graph_pool()
         if not self.use_aclgraph:
@@ -509,14 +505,14 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     compilation_cases=compilation_cases_decode,
                     aclgraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=True,
-                    is_ubatch=is_ubatch)
+                    )
            
         set_cudagraph_capturing_enabled(False)
         
     def _capture_aclgraphs(self, compilation_cases: list[int],
                            aclgraph_runtime_mode: CUDAGraphMode,
                            uniform_decode: bool,
-                           is_ubatch:bool=False):
+                           ):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
             aclgraph_runtime_mode in [CUDAGraphMode.FULL,
                                       CUDAGraphMode.PIECEWISE]
@@ -541,26 +537,19 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
-                                is_ubatch=is_ubatch)
+                                )
             self._dummy_run(num_tokens,
                             aclgraph_runtime_mode=CUDAGraphMode.FULL,
                             force_attention=force_attention,
-                            uniform_decode=uniform_decode,
-                            is_ubatch=is_ubatch)
+                            uniform_decode=uniform_decode
+                            )
     
     def _dummy_run(self, 
                    num_tokens: int = 1, 
                    aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
                    force_attention: bool = False,
                    uniform_decode: bool = False,
-                   is_ubatch:bool=False,
                    **kwargs):
-        
-        # recv self.is_ubatch form attn side
-        # if self.connector.rank >= self.connector.attn_size:
-        #     src = self.connector.p2p_rank % self.connector.min_size
-        #     group = self.connector.p2p_pg
-        #     is_ubatch = self.connector.recv_metadata(src,group)
         src = (self.connector.process_group.rank_in_group - 1) % self.connector.process_group.world_size
         is_ubatch = self.connector.process_group.recv_object(src)
         print(f'yxj src in _dummy_run is {src}')
@@ -649,14 +638,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                      batch_descriptor=None,
                      aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
                      is_ubatch:bool=False):
-        print(f'yxj is_ubatch in _ffn_forward is {is_ubatch}',flush=True)
-        if is_ubatch:
-            ubatch_nums = 2
-        else:
-            ubatch_nums = 1
+        afd_num_stage = 2 if is_ubatch else 1
         cur_num_stages = 0
         for layer_idx in range(self.first_k_dense_replace,self.num_layers):
-            for ubatch_idx in range(ubatch_nums):
+            for ubatch_idx in range(afd_num_stage):
                 # recv
                 if self.connector_name == "m2nconnector":
                     hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \

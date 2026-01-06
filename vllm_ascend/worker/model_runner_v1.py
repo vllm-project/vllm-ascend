@@ -563,10 +563,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #         torch_npu.profiler.ProfilerActivity.CPU,
         #         torch_npu.profiler.ProfilerActivity.NPU
         #     ],
-        #     schedule=torch_npu.profiler.schedule(wait=5, warmup=2, active=20, repeat=1, skip_first=20),
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=5, repeat=1, skip_first=120),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
-        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/dl/y00889327/profile/prof")
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof")
         # )
         # self.prof.start()
 
@@ -1354,17 +1354,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_scheduled_tokens_per_request=num_scheduled_tokens,
             )
         # send is_ubatch to ffn side
-        dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
         is_ubatch = True if ubatch_slices else False
-        self.afd_connector.process_group.send_object(is_ubatch,dst)
-        # is_ubatch = True if ubatch_slices else False
-        # dst_list = self.afd_connector.dst_list
-        # if self.afd_connector.ffn_size <= self.afd_connector.rank < self.afd_connector.ffn_size + self.afd_connector.min_size:
-        #     for dst in dst_list:
-        #         self.afd_connector.send_metadata(metadata,dst,self.afd_connector.p2p_pg)
-        print(f'send is_ubatch in prepare input is {is_ubatch}')
-        
-        
+        self.afd_connector.send_is_ubatch(is_ubatch)
+        logger.debug(f'send is_ubatch in prepare input is {is_ubatch}')
 
         self.seq_lens_np[:num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1996,8 +1988,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              max_query_len, ubatch_slices
              ) = self._prepare_inputs(scheduler_output)
 
-        if self.dynamic_eplb:
-            self.eplb_updator.take_update_info_from_eplb_process()
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
             
         dp_rank = self.parallel_config.data_parallel_rank
         if ubatch_slices:
@@ -2567,22 +2559,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 uniform_decode=uniform_decode,
                 num_scheduled_tokens_per_request=num_scheduled_tokens,
             )
-            # # update 
-            # aclgraph_capture_sizes: set[int] = set()
-            # aclgraph_capture_sizes = self.update_aclgraph_capture_sizes(ubatch_slices)
-            # if aclgraph_capture_sizes:
-            #     update_graph_params(aclgraph_capture_sizes)
         logger.info(f"dummy_run, ubatch_slices: {ubatch_slices}")
         # send is_ubatch to ffn side
-        dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
         is_ubatch = True if ubatch_slices else False
-        self.afd_connector.process_group.send_object(is_ubatch,dst)
-        # is_ubatch = True if ubatch_slices else False
-        # dst_list = self.afd_connector.dst_list
-        # if self.afd_connector.ffn_size <= self.afd_connector.rank < self.afd_connector.ffn_size + self.afd_connector.min_size:
-        #     for dst in dst_list:
-        #         self.afd_connector.send_metadata(is_ubatch,dst,self.afd_connector.p2p_pg)
-        print(f'send is_ubatch in prepare input is {is_ubatch}')
+        self.afd_connector.send_is_ubatch(is_ubatch)
+        logger.debug(f'send is_ubatch in prepare input is {is_ubatch}')
         
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:
@@ -2880,7 +2861,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
             and not self.parallel_config.enable_dbo:
-            print("case 1 ")
             self.update_stream = torch.npu.Stream()
             set_graph_params(self.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
@@ -2888,13 +2868,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                          runtime_mode=CUDAGraphMode.FULL)
         elif self.parallel_config.enable_dbo:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                print("case 2 ")
                 self.update_stream = torch.npu.Stream()
                 set_graph_params(self.compilation_config.cudagraph_capture_sizes)
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.FULL, self.device)
             else:
-                print("case 3 ")
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.NONE, self.device)
 
@@ -3881,11 +3859,3 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self, 'afd_connector') and self.afd_connector:
             self.afd_connector.init_afd_connector()
             
-    def update_aclgraph_capture_sizes(self,ubatch_slices) -> set[int]:
-        aclgraph_capture_sizes: set[int] = set()
-        if not ubatch_slices:
-            return None
-        aclgraph_capture_sizes.update(self.compilation_config.cudagraph_capture_sizes)
-        for ubatch_slice in ubatch_slices:
-            aclgraph_capture_sizes.add(ubatch_slice.num_tokens)
-        return aclgraph_capture_sizes

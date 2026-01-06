@@ -174,7 +174,6 @@ def _make_metadata_with_slice(
     last_req = request_slice.stop - 1
     last_tok = token_slice.stop - 1
 
-    print(f"jcz _make_metadata_with_slice request_slice:{request_slice} token_slice:{token_slice} start_locs:{start_locs}")
     assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], \
         "Token slice start outside of first request"
     assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \

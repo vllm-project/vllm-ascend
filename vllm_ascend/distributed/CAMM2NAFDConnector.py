@@ -258,6 +258,11 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         
         return output1, afdmetadata
     
+    def send_is_ubatch(self,is_ubatch):
+        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+        self.process_group.send_object(is_ubatch,dst)
+        
+    #TODO(yxj):to support inequal AF
     def send_metadata(self,data,dst,group):
         # Serialize object to tensor and get the size as well
         object_tensor = torch.frombuffer(pickle.dumps(data), dtype=torch.uint8)
@@ -274,7 +279,8 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         torch.distributed.send(object_tensor,
                                 dst=dst,
                                 group=group)
-        
+    
+    #TODO(yxj):to support inequal AF
     def recv_metadata(self):
         src = self.p2p_rank % self.min_size
         print(f'src in recv_metadata is {src}')

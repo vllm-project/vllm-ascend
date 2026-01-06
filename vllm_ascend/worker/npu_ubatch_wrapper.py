@@ -227,17 +227,14 @@ class UBatchWrapper:
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
             with ubatch_metadata.context:
-                print(f"jcz _run_ubatches _ubatch_thread 1")
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
                     positions=ubatch_metadata.positions,
                     intermediate_tensors=ubatch_metadata.intermediate_tensors,
                     inputs_embeds=ubatch_metadata.inputs_embeds,
                 )
-            print(f"jcz _run_ubatches _ubatch_thread 2")
             results.append((ubatch_metadata.context.id, model_output))
             torch.npu.synchronize()
-            print(f"jcz _run_ubatches _ubatch_thread 3")
 
         results: list[tuple[int, torch.Tensor]] = []
 
@@ -260,11 +257,9 @@ class UBatchWrapper:
             self.ready_barrier.wait()  # Wait for both threads to be ready
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
-                print(f"jcz _run_ubatches metadata i:{i}")
                 thread.join()
                 i += 1
 
-            print(f"jcz _run_ubatches end")
             sorted_results = [value for position, value in sorted(results)]
             result = torch.cat(sorted_results, dim=0)
             return result
@@ -349,7 +344,6 @@ class UBatchWrapper:
         ubatch_slices = forward_context.ubatch_slices
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
         afd_metadata = forward_context.afd_metadata
-        print(f"__call__ 1 ubatch_slices is {ubatch_slices} aclgraph_runtime_mode:{aclgraph_runtime_mode}")
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
 
@@ -384,11 +378,9 @@ class UBatchWrapper:
 
         # We shouldn't be here unless we are running with multiple DP ranks
         assert dp_metadata is not None
-        print(f"jcz __call__ 1 num_tokens is {num_tokens} aclgraph_runtime_mode:{aclgraph_runtime_mode}")
 
         if num_tokens not in self.aclgraphs \
             and aclgraph_runtime_mode is CUDAGraphMode.FULL:
-            print(f"jcz __call__ 2 num_tokens is {num_tokens} attn_metadata is {type(attn_metadata)}")
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
@@ -404,13 +396,11 @@ class UBatchWrapper:
             return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.aclgraphs \
             and aclgraph_runtime_mode is CUDAGraphMode.FULL:
-            print(f"jcz __call__ 3 num_tokens is {num_tokens} aclgraphs is {self.aclgraphs}")
             aclgraph_metadata = self.aclgraphs[num_tokens]
             aclgraph_metadata.aclgraph.replay()
             print("UBatchWrapper replay")
             return aclgraph_metadata.outputs
         else:
-            print(f"jcz __call__ 4 num_tokens is {num_tokens}")
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
