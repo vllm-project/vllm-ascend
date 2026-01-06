@@ -33,7 +33,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendMetadataForDecode,
