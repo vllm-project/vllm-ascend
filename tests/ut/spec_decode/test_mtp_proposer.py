@@ -262,6 +262,7 @@ class TestMtpProposer:
                                             device=torch.device("cpu"))
         assert torch.equal(next_token_ids, expected_next_tokens)
 
+    @patch("vllm_ascend.spec_decode.eagle_proposer.HAS_TRITON", False)
     @patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
     def test_prepare_inputs_padded(self, mock_cpu_gpu_buffer):
         mock_buffer_instance = MagicMock()
