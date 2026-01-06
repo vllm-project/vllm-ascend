@@ -60,7 +60,7 @@ The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you
 Install the Ascend BiSheng toolkit, execute the command:
 
 ```bash
-BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20251225.run"
+BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
 BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
 wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
 export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
@@ -69,8 +69,7 @@ export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
 Install Triton Ascend:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
-pip install triton_ascend-3.2.0.dev20251229-cp311-cp311-manylinux_2_27_$(uname -i).manylinux_2_28_$(uname -i).whl
+python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 ```
 
 ### Inference
