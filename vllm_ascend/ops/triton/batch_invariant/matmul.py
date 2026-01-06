@@ -18,8 +18,8 @@
 #
 
 import torch
+from triton.runtime import driver
 from vllm.triton_utils import tl, triton
-from triton.runtime.driver import driver
 
 
 @triton.jit
@@ -249,6 +249,7 @@ def linear_persistent_kernel(
         c_ptrs = c_ptr + m_indices[:, None] * stride_cm + n_indices[
             None, :] * stride_cn
         tl.store(c_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
+
 
 def linear_persistent(x, y):
     """
