@@ -935,22 +935,21 @@ class NPUModelRunner(GPUModelRunner):
                 blk_table_tensor = blk_table.get_device_tensor()
                 slot_mapping = blk_table.slot_mapping.gpu[:
                                                           maybe_pcp_full_tokens]
-                if self.pcp_size * self.dcp_size == 1:
+                if self.pcp_size == 1:
                     slot_mapping[
                         total_num_scheduled_tokens:num_input_tokens].fill_(-1)
-                slot_mapping = blk_table.slot_mapping.gpu
             if self.pcp_size * self.dcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
                     self.attn_mask, self.input_batch)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
-                slot_mapping = slot_mapping[:maybe_pcp_full_tokens]
-                slot_mapping = self.pcp_manager.get_padded_slot_mapping(
-                    total_num_scheduled_tokens,
-                    slot_mapping,
-                )
-                blk_table.slot_mapping.gpu[:self.pcp_manager.
-                                           num_actual_tokens_pcp_padded] = slot_mapping
+                if self.pcp_size > 1:
+                    slot_mapping = self.pcp_manager.get_padded_slot_mapping(
+                        total_num_scheduled_tokens,
+                        slot_mapping,
+                    )
+                    blk_table.slot_mapping.gpu[:self.pcp_manager.
+                                               num_actual_tokens_pcp_padded] = slot_mapping
 
             # NOTE: This is a temporary hack, now in GPUModelRunner, this prepare_inputs
             # has been split to multiple parts, and there are 3 parts that is related to this
@@ -3034,7 +3033,7 @@ def _torch_cuda_wrapper():
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
         yield
-    except Exception:
+    except Exception as e:
         torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         torch.cuda.default_stream = _StreamPlaceholder
@@ -3042,6 +3041,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
+        raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
         # if anything goes wrong, just patch it with a placeholder
         torch.cuda.Event = _EventPlaceholder
