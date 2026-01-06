@@ -24,22 +24,21 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
 
     steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Install dependencies
         run: |
           apt-get update -y && apt-get install git -y
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           pip install modelscope jq
 
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Extract new models from PR
         id: diff
         run: |
           set -euo pipefail
-          sleep 10000
 
           JSON_PATH=".github/workflows/misc/model_list.json"
 
