@@ -18,7 +18,7 @@
 #
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Tuple
 
 import numpy as np
 import torch
@@ -51,12 +51,9 @@ def build_attn_metadata(
     query_start_loc_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
-    num_computed_tokens_cpu: torch.Tensor,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
-    decode_token_per_req: int,
-    actual_seq_lengths_q: list[int],
     positions: torch.Tensor | None = None,
     attn_mask: torch.Tensor
     | None = None,
@@ -83,14 +80,11 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu[:num_reqs],
             seq_lens=seq_lens[:num_reqs],
-            num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            decode_token_per_req=decode_token_per_req,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
-            actual_seq_lengths_q=actual_seq_lengths_q,
             positions=positions,
             attn_mask=attn_mask,
             spec_attn_mask=spec_attn_mask,

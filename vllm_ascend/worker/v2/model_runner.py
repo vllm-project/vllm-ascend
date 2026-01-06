@@ -86,8 +86,6 @@ class NPUModelRunner(GPUModelRunner):
         self.sampler: AscendSampler = AscendSampler(
             logprobs_mode=self.model_config.logprobs_mode, )
 
-        # actual seq lengths for query (used in attention backends).
-        self.actual_seq_lengths_q: list[int] = []
         # decode token per request (used in attention backends).
         self.decode_token_per_req = 1
 
@@ -267,15 +265,11 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_cpu=self.input_buffers.seq_lens_cpu,
-            actual_seq_lengths_q=self.actual_seq_lengths_q,
-            num_computed_tokens_cpu=self.req_states.
-            num_computed_tokens_cpu[idx_mapping_cpu],
             block_tables=block_tables,
             # torch_npu._reshape_and_cache operator requires slot_mappings to
             # be torch.int32.
             slot_mappings=slot_mappings.to(torch.int32),
             kv_cache_config=self.kv_cache_config,
-            decode_token_per_req=self.decode_token_per_req,
             attn_mask=attn_mask,
             attn_state=attn_state,
         )

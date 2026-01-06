@@ -16,17 +16,22 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from typing import Any
 import torch
 from vllm.v1.worker.gpu.spec_decode.eagle import EagleSpeculator
 from vllm.config import VllmConfig
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm_ascend.worker.v2.attn_utils import make_attention_mask
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
 class AscendEagleSpeculator(EagleSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-        self.main_model_attn_metadata = None
+        # when in decode phase of eagle speculator, we need some value in
+        # main model's input_batch. so we keep a reference here.
+        self.input_batch: InputBatch | None = None
 
     def propose(
         self,
@@ -40,10 +45,11 @@ class AscendEagleSpeculator(EagleSpeculator):
         next_prefill_tokens,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
-        because npu attention backends need seq_lens_cpu to work.
+        because npu attention metadata needs more information,
+        we need to cache input_batch, so we can use it later in
+        generate_draft.
         """
-        seq_lens_cpu = input_batch.attn_metadata.seq_lens_cpu
-        self.input_buffers.seq_lens_cpu = seq_lens_cpu.clone()
+        self.input_batch = input_batch
         return super().propose(
             input_batch,
             sampling_metadata,
@@ -55,13 +61,66 @@ class AscendEagleSpeculator(EagleSpeculator):
             next_prefill_tokens,
         )
 
-    def generate_draft(self, num_reqs, attn_metadata, num_tokens_across_dp):
+    def generate_draft(
+        self,
+        num_reqs: int,
+        attn_metadata: dict[str, Any],
+        num_tokens_across_dp,
+    ):
         """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
-        npu attention backends need seq_lens_cpu to work.
+        attn_metadata is created in super propose method, it does not have some
+        attribute that Ascend attention backend needs, so we update it.
         """
-        attn_metadata.seq_lens_cpu = self.input_buffers.seq_lens_cpu
+        self._update_decode_attn_metadata(attn_metadata)
+
         return super().generate_draft(
             num_reqs,
             attn_metadata,
             num_tokens_across_dp,
         )
+
+    @torch.inference_mode()
+    def run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any],
+        num_tokens_across_dp: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Overrride GPU EagleSpeculator.run_model for Ascend NPUs, because
+        in decode phase, we need to update seq_lens_cpu in attn_metadata after
+        run model.
+        """
+        last_hidden_states, hidden_states = super().run_model(
+            num_tokens,
+            attn_metadata,
+            num_tokens_across_dp,
+        )
+        for attn_meta in attn_metadata.values():
+            attn_meta["seq_lens_cpu"] = attn_meta["seq_lens_cpu"] + 1
+        return last_hidden_states, hidden_states
+
+    def _update_decode_attn_metadata(
+        self,
+        attn_metadata: dict[str, Any],
+    ):
+        """Update attention metadata for decode phase on Ascend NPUs."""
+        attn_state = AscendAttentionState.DecodeOnly
+        attn_mask = make_attention_mask(
+            self.vllm_config,
+            attn_state,
+            self.dtype,
+            self.device,
+        )
+        seq_lens_cpu = self._get_seq_lens_cpu()
+        # attn_metadata is build in vllm's super class.
+        # We need to update attn_mask, attn_state for each layer's metadata.
+        for metadata in attn_metadata.values():
+            metadata["attn_mask"] = attn_mask
+            metadata["attn_state"] = attn_state
+            metadata["seq_lens_cpu"] = seq_lens_cpu
+
+    def _get_seq_lens_cpu(self) -> torch.Tensor:
+        """Get seq_lens_cpu from input_batch."""
+        assert self.input_batch is not None
+        seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
+        return seq_lens_cpu
