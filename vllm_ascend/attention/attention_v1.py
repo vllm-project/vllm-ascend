@@ -574,11 +574,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            pre_tokens=self.sliding_window
-            if self.sliding_window else SWA_INT_MAX,
-            next_tokens=0 if self.sliding_window else SWA_INT_MAX,
-            atten_mask=attn_metadata.swa_mask
-            if self.sliding_window else attn_metadata.attn_mask,
+            atten_mask=attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
@@ -587,7 +583,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=4 if self.sliding_window else 3,
+            sparse_mode=3,
         )
 
         attn_output = attn_output.view(num_tokens, self.num_heads,
