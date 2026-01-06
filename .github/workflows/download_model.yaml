@@ -19,7 +19,7 @@ jobs:
   download-models:
     if: contains(github.event.pull_request.labels.*.name, 'model-download')
     name: Download models from ModelScope
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a2-0
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
 
