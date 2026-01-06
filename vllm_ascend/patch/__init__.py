@@ -289,4 +289,3 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-from vllm_ascend.patch.worker import patch_deepseekv3

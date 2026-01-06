@@ -102,18 +102,19 @@ def select_experts(hidden_states: torch.Tensor,
         shared_expert_routing_factor = 0.4
         batch_size = topk_ids.shape[0]
         pad_shared_expert_ids = torch.arange(
-                                        num_logical_experts,
-                                        num_logical_experts + num_shared_experts,
-                                        dtype=topk_ids.dtype,
-                                        device=topk_ids.device
-                                        ).repeat(batch_size,1)
+            num_logical_experts,
+            num_logical_experts + num_shared_experts,
+            dtype=topk_ids.dtype,
+            device=topk_ids.device).repeat(batch_size, 1)
 
-        pad_shared_expert_weights = torch.full((topk_weights.shape[0], num_shared_experts),
-                                               shared_expert_routing_factor,
-                                               dtype=topk_weights.dtype,
-                                               device=topk_weights.device)
+        pad_shared_expert_weights = torch.full(
+            (topk_weights.shape[0], num_shared_experts),
+            shared_expert_routing_factor,
+            dtype=topk_weights.dtype,
+            device=topk_weights.device)
+
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
-        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], 
+        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights],
                                  dim=1)
     return topk_weights, topk_ids
 
