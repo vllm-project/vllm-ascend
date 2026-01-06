@@ -19,11 +19,16 @@
 import os
 
 import torch
+from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.ops.triton.batch_invariant.matmul import (
-    addmm_batch_invariant, bmm_batch_invariant, linear_batch_invariant,
-    matmul_batch_invariant, mm_batch_invariant)
+logger = init_logger(__name__)
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.batch_invariant.matmul import (
+        addmm_batch_invariant, bmm_batch_invariant, linear_batch_invariant,
+        matmul_batch_invariant, mm_batch_invariant)
 
 
 def override_envs_for_invariance():
@@ -66,5 +71,12 @@ def init_batch_invariance():
     environment variable to enable automatically.
     """
     if vllm_is_batch_invariant():
-        override_envs_for_invariance()
-        enable_batch_invariant_mode()
+        if HAS_TRITON:
+            logger.info(
+                "Enabling batch-invariant mode for vLLM on Ascend NPU.", )
+            override_envs_for_invariance()
+            enable_batch_invariant_mode()
+        else:
+            logger.warning(
+                "Batch-invariant mode requested but Triton is not available."
+                "skipping batch-invariant initialization.", )
