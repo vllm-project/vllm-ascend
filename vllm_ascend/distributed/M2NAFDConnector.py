@@ -22,6 +22,7 @@ from vllm.distributed.parallel_state import init_afd_process_group, init_model_p
 
 from vllm.logger import init_logger
 from vllm.config import VllmConfig,CUDAGraphMode,CompilationLevel
+from vllm_ascend.utils import npu_stream_switch_within_graph
 logger = init_logger(__name__)
 
 
@@ -129,6 +130,13 @@ class M2NAFDConnector(AFDConnectorBase):
         self.server_rank_size = math.gcd(self.attn_size, self.ffn_size)
         logger.info("m2n connector initialized")
 
+        self.comm_stream = None
+        if self.config.afd_config.is_multistream:
+            self.comm_stream = torch.npu.Stream()
+            aic_num = int(self.config.afd_config.multistream_info["core_num"])
+            aiv_num = 2 * aic_num
+            torch.npu.set_stream_limit(self.comm_stream, aic_num, aiv_num)
+
         self._initialized = True
     
     def is_initialized(self) -> bool:
@@ -176,21 +184,20 @@ class M2NAFDConnector(AFDConnectorBase):
         
         if dynamic_scales is None:
             dynamic_scales = torch.tensor([], dtype=torch.float32, device='npu')
-        recv_counts = torch_npu.npu_m2n_distribute_send(x=hidden_states,
-                                                        expert_ids=topk_ids,
-                                                        expert_scales=topk_weights,
-                                                        group_ep=self.hccl_comm_name,
-                                                        world_size=self.attn_size + self.ffn_size,
-                                                        moe_world_size=self.ffn_size,
-                                                        ep_rank_id=self.rank,
-                                                        moe_expert_num=moe_expert_num,
-                                                        quant_mode=quant_mode,
-                                                        aiv_num=aiv_num,
-                                                        server_rank_size = self.server_rank_size,
-                                                        dynamic_scales=dynamic_scales)
-        
-        
-        
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            recv_counts = torch_npu.npu_m2n_distribute_send(x=hidden_states,
+                                                            expert_ids=topk_ids,
+                                                            expert_scales=topk_weights,
+                                                            group_ep=self.hccl_comm_name,
+                                                            world_size=self.attn_size + self.ffn_size,
+                                                            moe_world_size=self.ffn_size,
+                                                            ep_rank_id=self.rank,
+                                                            moe_expert_num=moe_expert_num,
+                                                            quant_mode=quant_mode,
+                                                            aiv_num=aiv_num,
+                                                            server_rank_size = self.server_rank_size,
+                                                            dynamic_scales=dynamic_scales)
         return recv_counts
 
     # MOE发给ATTN（ATTN接收）
@@ -199,16 +206,17 @@ class M2NAFDConnector(AFDConnectorBase):
         handle = metadata.m2n_afdconnector_data.handle
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
         aiv_num = metadata.m2n_afdconnector_data.aiv_num
-        
-        xOut = torch_npu.npu_n2m_distribute_recv(x=hidden_states,
-                                                ep_recv_counts=handle,
-                                                group_ep=self.hccl_comm_name,
-                                                world_size=self.attn_size + self.ffn_size,
-                                                moe_world_size=self.ffn_size,
-                                                ep_rank_id=self.rank,
-                                                moe_expert_num=moe_expert_num,
-                                                server_rank_size = self.server_rank_size,
-                                                aiv_num=aiv_num)
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            xOut = torch_npu.npu_n2m_distribute_recv(x=hidden_states,
+                                                    ep_recv_counts=handle,
+                                                    group_ep=self.hccl_comm_name,
+                                                    world_size=self.attn_size + self.ffn_size,
+                                                    moe_world_size=self.ffn_size,
+                                                    ep_rank_id=self.rank,
+                                                    moe_expert_num=moe_expert_num,
+                                                    server_rank_size = self.server_rank_size,
+                                                    aiv_num=aiv_num)
         return xOut
     
     # MOE发给ATTN(MOE发送) 
@@ -220,19 +228,20 @@ class M2NAFDConnector(AFDConnectorBase):
         aiv_num = metadata.aiv_num
         k = metadata.k
         handle = metadata.handle
-        
-        torch_npu.npu_n2m_distribute_send(expandX=ffn_output,
-                                        ep_send_counts=handle,
-                                        expert_scales=topk_weights,
-                                        group_ep=self.hccl_comm_name,
-                                        world_size=self.attn_size + self.ffn_size,
-                                        moe_world_size=self.ffn_size,
-                                        ep_rank_id=self.rank,
-                                        moe_expert_num=moe_expert_num,# config
-                                        batch_size=batch_size,# config
-                                        k=k,# config
-                                        server_rank_size = self.server_rank_size,
-                                        aiv_num=aiv_num)# config 未分核48 
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            torch_npu.npu_n2m_distribute_send(expandX=ffn_output,
+                                            ep_send_counts=handle,
+                                            expert_scales=topk_weights,
+                                            group_ep=self.hccl_comm_name,
+                                            world_size=self.attn_size + self.ffn_size,
+                                            moe_world_size=self.ffn_size,
+                                            ep_rank_id=self.rank,
+                                            moe_expert_num=moe_expert_num,# config
+                                            batch_size=batch_size,# config
+                                            k=k,# config
+                                            server_rank_size = self.server_rank_size,
+                                            aiv_num=aiv_num)# config 未分核48 
         return
     
     # ATTN发给MOE(MOE接收)
@@ -275,19 +284,21 @@ class M2NAFDConnector(AFDConnectorBase):
         h = metadata.h
         expert_token_nums_type = metadata.expert_token_nums_type
         #npu::npu_m2n_distribute_recv(Tensor x, str group_ep, int world_size, int server_rank_size, int moe_world_size, int ep_rank_id, int moe_expert_num, int quant_mode, int batch_size, int h, int k, int expert_token_nums_type, int aiv_num) -> (Tensor, Tensor, Tensor, Tensor, Tensor)
-        expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales = torch_npu.npu_m2n_distribute_recv(x = torch.tensor([], dtype=x_type, device='npu'),
-                                                                                group_ep=self.hccl_comm_name,
-                                                                                world_size=self.attn_size + self.ffn_size,
-                                                                                moe_world_size=self.ffn_size,
-                                                                                ep_rank_id=self.rank,
-                                                                                moe_expert_num=moe_expert_num,
-                                                                                quant_mode=quant_mode,
-                                                                                batch_size=batch_size,
-                                                                                h=h,
-                                                                                k=k,
-                                                                                expert_token_nums_type=expert_token_nums_type,
-                                                                                server_rank_size = self.server_rank_size,
-                                                                                aiv_num=aiv_num)
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+                expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales = torch_npu.npu_m2n_distribute_recv(x = torch.tensor([], dtype=x_type, device='npu'),
+                                                                                        group_ep=self.hccl_comm_name,
+                                                                                        world_size=self.attn_size + self.ffn_size,
+                                                                                        moe_world_size=self.ffn_size,
+                                                                                        ep_rank_id=self.rank,
+                                                                                        moe_expert_num=moe_expert_num,
+                                                                                        quant_mode=quant_mode,
+                                                                                        batch_size=batch_size,
+                                                                                        h=h,
+                                                                                        k=k,
+                                                                                        expert_token_nums_type=expert_token_nums_type,
+                                                                                        server_rank_size = self.server_rank_size,
+                                                                                        aiv_num=aiv_num)
         
         # recv_counts 返程路由
         return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales,afdConnectorMetadata
