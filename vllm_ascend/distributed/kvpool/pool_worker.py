@@ -96,7 +96,7 @@ class KVPoolWorker:
 
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
-            num_hidden_layers = model_config.hf_config.num_hidden_layers
+            num_hidden_layers = model_config.hf_text_config.num_hidden_layers
             partition_list_str = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
                 "prefill_pp_layer_partition", None)
             prefill_pp_size = int(

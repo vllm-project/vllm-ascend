@@ -197,6 +197,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config

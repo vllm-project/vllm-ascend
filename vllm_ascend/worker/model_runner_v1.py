@@ -107,7 +107,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method)
+                               set_weight_prefetch_method, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -253,7 +253,7 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
+        self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config,
                                   "index_topk")
         self.attn_backend = get_attn_backend(
             0,
@@ -1097,12 +1097,20 @@ class NPUModelRunner(GPUModelRunner):
                                              intermediate_tensors,
                                              inputs_embeds):
         assert self.model is not None
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **self._init_model_kwargs(maybe_padded_num_tokens))
+        if vllm_version_is('0.13.0'):
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **self._init_model_kwargs(maybe_padded_num_tokens))
+        else:
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **self._init_model_kwargs())
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
@@ -1548,10 +1556,16 @@ class NPUModelRunner(GPUModelRunner):
                 logits = None
             else:
                 if self.input_batch.pooling_params:
-                    pool_output = self._pool(
-                        hidden_states,
-                        scheduler_output.total_num_scheduled_tokens,
-                        num_scheduled_tokens_np)
+                    if vllm_version_is('0.13.0'):
+                        pool_output = self._pool(
+                            hidden_states,
+                            scheduler_output.total_num_scheduled_tokens,
+                            num_scheduled_tokens_np)
+                    else:
+                        pool_output = self._pool(
+                            hidden_states,
+                            scheduler_output.total_num_scheduled_tokens,
+                            num_scheduled_tokens_np, kv_connector_output)
                     if self.debugger is not None:
                         self.debugger.stop()
                         self.debugger.step()
@@ -2384,7 +2398,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
-        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
+        num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
                       self.kv_caches, num_attn_module)
@@ -2918,7 +2932,7 @@ class NPUModelRunner(GPUModelRunner):
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:
             if (self.vllm_config.speculative_config is not None
-                    and self.vllm_config.model_config.hf_config.model_type
+                    and self.vllm_config.model_config.hf_text_config.model_type
                     not in ["qwen3_next"]):
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")

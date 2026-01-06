@@ -17,6 +17,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLAPrefillMetadata,
                                           ChunkedContextMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendMLABackend(TestBase):
@@ -392,7 +393,10 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.model_config = model_config
         self.kv_cache_spec = MagicMock()
         self.kv_cache_spec.num_layers = 32
-        self.kv_cache_spec.head_size = 128
+        if vllm_version_is('0.13.0'):
+            self.kv_cache_spec.head_size = 128
+        else:
+            self.kv_cache_spec.head_size = 64
         self.kv_cache_spec.num_heads = 32
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")

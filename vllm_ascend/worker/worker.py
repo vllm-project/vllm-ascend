@@ -173,7 +173,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_config.hidden_size
+        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
         if tags is None or "weights" in tags:
             for name, param in model.named_parameters():
@@ -299,7 +299,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -318,7 +318,8 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, NoneType)):
+        if isinstance(output,
+                      (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)

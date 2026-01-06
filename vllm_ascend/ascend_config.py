@@ -96,7 +96,7 @@ class AscendConfig:
                 try:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_config.num_key_value_heads
+                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
                     self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
@@ -126,7 +126,7 @@ class AscendConfig:
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
-            use_sparse = hasattr(vllm_config.model_config.hf_config,
+            use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                  "index_topk")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError(

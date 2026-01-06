@@ -91,7 +91,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.prefix = prefix
-        hf_config = get_current_vllm_config().model_config.hf_config
+        hf_config = get_current_vllm_config().model_config.hf_text_config
         self.enable_shared_expert_dp = get_ascend_config(
         ).enable_shared_expert_dp
         self.tp_size = get_tensor_model_parallel_world_size()
