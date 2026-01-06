@@ -39,6 +39,7 @@ jobs:
         id: diff
         run: |
           set -euo pipefail
+          sleep 10000
 
           JSON_PATH=".github/workflows/misc/model_list.json"
 
