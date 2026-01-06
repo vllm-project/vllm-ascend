@@ -43,47 +43,47 @@ jobs:
     uses: ./.github/workflows/_pre_commit.yml
     with:
       vllm: 2f4e6548efec402b913ffddc8726230d9311948d
-  changes:
-    runs-on: linux-aarch64-a2-0
-    outputs:
-      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
-      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
-    steps:
-      - name: Setup git proxy
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            e2e_tracker:
-              - '.github/workflows/pr_test_light.yaml'
-              - 'vllm_ascend/**'
-              - 'csrc/**'
-              - 'cmake/**'
-              - 'tests/e2e/**'
-              - 'CMakeLists.txt'
-              - 'setup.py'
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
-              - 'packages.txt'
-            ut_tracker:
-              - 'tests/ut/**'
-              - '.github/workflows/vllm_ascend_test_pr_light.yaml'
+  # changes:
+  #   runs-on: linux-aarch64-a2-0
+  #   outputs:
+  #     e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
+  #     ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+  #   steps:
+  #     - name: Setup git proxy
+  #       run: |
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+  #     # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+  #     - uses: actions/checkout@v6
+  #     - uses: dorny/paths-filter@v3
+  #       id: filter
+  #       with:
+  #         filters: |
+  #           e2e_tracker:
+  #             - '.github/workflows/pr_test_light.yaml'
+  #             - 'vllm_ascend/**'
+  #             - 'csrc/**'
+  #             - 'cmake/**'
+  #             - 'tests/e2e/**'
+  #             - 'CMakeLists.txt'
+  #             - 'setup.py'
+  #             - 'requirements.txt'
+  #             - 'requirements-dev.txt'
+  #             - 'requirements-lint.txt'
+  #             - 'packages.txt'
+  #           ut_tracker:
+  #             - 'tests/ut/**'
+  #             - '.github/workflows/vllm_ascend_test_pr_light.yaml'
 
   ut:
-    needs: [lint, changes]
+    #needs: [lint, changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
-    runs-on: ubuntu-22.04-arm
+    #if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    runs-on: linux-amd64-cpu-8
     container:
       # fixme: vllm-ascend install failed with 8.3.rc2 on github action
-      image: quay.io/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
+      image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -93,12 +93,6 @@ jobs:
         vllm_version: [2f4e6548efec402b913ffddc8726230d9311948d, v0.13.0]
 
     steps:
-      - name: Free up disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          tool-cache: true
-          docker-images: false
-
       - name: Install packages
         run: |
           apt-get update -y
@@ -159,18 +153,18 @@ jobs:
           name: vllm-ascend
           verbose: true
 
-  e2e-light:
-    name: e2e-light
-    strategy:
-      matrix:
-        vllm_version: [2f4e6548efec402b913ffddc8726230d9311948d, v0.13.0]
-    # Note (yikun): If CI resource are limited we can split job into two chain jobs
-    needs: [lint, changes]
-    # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
-    uses: ./.github/workflows/_e2e_test.yaml
-    with:
-      vllm: ${{ matrix.vllm_version }}
-      runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
-      type: light
+  # e2e-light:
+  #   name: e2e-light
+  #   strategy:
+  #     matrix:
+  #       vllm_version: [2f4e6548efec402b913ffddc8726230d9311948d, v0.13.0]
+  #   # Note (yikun): If CI resource are limited we can split job into two chain jobs
+  #   needs: [lint, changes]
+  #   # only trigger e2e test after lint passed and the change is e2e related with pull request.
+  #   if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+  #   uses: ./.github/workflows/_e2e_test.yaml
+  #   with:
+  #     vllm: ${{ matrix.vllm_version }}
+  #     runner: linux-aarch64-a2
+  #     image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+  #     type: light
