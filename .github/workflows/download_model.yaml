@@ -31,6 +31,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          apt-get update -y && apt-get install git -y
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           pip install modelscope jq
 
