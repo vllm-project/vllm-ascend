@@ -155,7 +155,9 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
         bias_opt=bias_tensor.npu() if bias_tensor is not None else None,
     )
 
-
+    assert numpy.allclose(y.cpu().numpy(), y_npu.cpu().numpy(), rtol=1e-3, atol=1e-5)
+    assert numpy.allclose(expert_idx, expert_idx_npu.cpu().numpy(), rtol=1e-3, atol=1e-5)
+    
 if __name__ == "__main__":
     # Execute pytest tests
     pytest.main([__file__, "-sv"])
