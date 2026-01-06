@@ -111,7 +111,7 @@ def test_models_with_xlite_full_mode(
         "Hello, my name is Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the",
         'The president of the United States is the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president',
         'The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital',
-        "The future of AI is not just about the technology itself, but about how we use it to solve real-world problems. As AI continues to evolve, it's important to consider the ethical"
+        "The future of AI is not just a technological challenge but a profound transformation of how we live, work, and interact with the world. As we stand at the intersection of artificial intelligence and"
     ]
 
     vllm_eager_outputs_list = []

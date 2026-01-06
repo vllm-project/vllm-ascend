@@ -19,12 +19,14 @@ from typing import Any, Callable, Tuple
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size,
+from vllm.distributed import (get_ep_group,
+                              get_tensor_model_parallel_world_size,
                               get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime
+from xlite._C import (AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime,
+                      ScoringFuncSoftmax)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -47,67 +49,8 @@ class LlamaXliteModel(XliteModel):
             self, runnable: nn.Module,
             vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
         dtype = vllm_config.model_config.dtype
-        params_dict = dict(runnable.named_parameters())
-
-        if hasattr(runnable, "language_model"):
-            layers = runnable.language_model.model.layers
-            model_prefix = "language_model."
-        else:
-            layers = runnable.model.layers
-            model_prefix = ""
-
         config = self._build_model_config(vllm_config)
-        xlite_model = Model()
-        xlite_model.embed = params_dict.get(model_prefix +
-                                            "model.embed_tokens.weight")
-        xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
-        if vllm_config.model_config.hf_config.tie_word_embeddings:
-            xlite_model.head = xlite_model.embed
-        else:
-            xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
-        xlite_model.attn_norm = [
-            layer.input_layernorm.weight for layer in layers
-        ]
-        xlite_model.attn_out = [
-            layer.self_attn.o_proj.weight for layer in layers
-        ]
-        xlite_model.mha_qkv = [
-            layer.self_attn.qkv_proj.weight for layer in layers
-        ]
-        xlite_model.mlp_norm = [
-            layer.post_attention_layernorm.weight for layer in layers
-        ]
-        xlite_model.mlp_up_gate = [
-            layer.mlp.gate_up_proj.weight for layer in layers
-        ]
-        xlite_model.mlp_down = [layer.mlp.down_proj.weight for layer in layers]
-        mha_qkv_bias = [
-            layer.self_attn.qkv_proj.bias for layer in layers
-            if hasattr(layer.self_attn.qkv_proj, "bias")
-            and layer.self_attn.qkv_proj.bias is not None
-        ]
-        q_norm = [
-            layer.self_attn.q_norm.weight for layer in layers
-            if hasattr(layer.self_attn, "q_norm")
-        ]
-        k_norm = [
-            layer.self_attn.k_norm.weight for layer in layers
-            if hasattr(layer.self_attn, "k_norm")
-        ]
-
-        if len(mha_qkv_bias) != config.n_layers:
-            config.qkv_bias = False
-        else:
-            config.qkv_bias = True
-            xlite_model.mha_qkv_bias = mha_qkv_bias
-
-        if (len(q_norm) != config.n_layers or len(k_norm) != config.n_layers):
-            config.qk_norm = False
-        else:
-            config.qk_norm = True
-            xlite_model.mha_q_norm = q_norm
-            xlite_model.mha_k_norm = k_norm
-
+        xlite_model = self._build_model(runnable, vllm_config, config)
         rank = torch.distributed.get_rank()
         xlite_model.init(config, rank)
 
@@ -153,6 +96,76 @@ class LlamaXliteModel(XliteModel):
         config.block_size = vllm_config.cache_config.block_size
         return config
 
+    def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig,
+                     config: ModelConfig) -> Model:
+        params_dict = dict(runnable.named_parameters())
+
+        if hasattr(runnable, "language_model"):
+            layers = runnable.language_model.model.layers
+            model_prefix = "language_model."
+        else:
+            layers = runnable.model.layers
+            model_prefix = ""
+
+        xlite_model = Model()
+        xlite_model.embed = params_dict.get(model_prefix +
+                                            "model.embed_tokens.weight")
+        xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
+        if vllm_config.model_config.hf_config.tie_word_embeddings:
+            xlite_model.head = xlite_model.embed
+        else:
+            xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
+        xlite_model.attn_norm = [
+            layer.input_layernorm.weight for layer in layers
+        ]
+        xlite_model.attn_out = [
+            layer.self_attn.o_proj.weight for layer in layers
+        ]
+        xlite_model.mha_qkv = [
+            layer.self_attn.qkv_proj.weight for layer in layers
+        ]
+        xlite_model.mlp_norm = [
+            layer.post_attention_layernorm.weight for layer in layers
+        ]
+        xlite_model.mlp_up_gate = [
+            layer.mlp.gate_up_proj.weight for layer in layers
+            if hasattr(layer.mlp, "gate_up_proj")
+            and layer.mlp.gate_up_proj.weight is not None
+        ]
+        xlite_model.mlp_down = [
+            layer.mlp.down_proj.weight for layer in layers
+            if hasattr(layer.mlp, "down_proj")
+            and layer.mlp.down_proj.weight is not None
+        ]
+        mha_qkv_bias = [
+            layer.self_attn.qkv_proj.bias for layer in layers
+            if hasattr(layer.self_attn.qkv_proj, "bias")
+            and layer.self_attn.qkv_proj.bias is not None
+        ]
+        q_norm = [
+            layer.self_attn.q_norm.weight for layer in layers
+            if hasattr(layer.self_attn, "q_norm")
+        ]
+        k_norm = [
+            layer.self_attn.k_norm.weight for layer in layers
+            if hasattr(layer.self_attn, "k_norm")
+        ]
+
+        if len(mha_qkv_bias) != config.n_layers:
+            config.qkv_bias = False
+        else:
+            config.qkv_bias = True
+            xlite_model.mha_qkv_bias = mha_qkv_bias
+
+        if (len(q_norm) != config.n_layers or len(k_norm) != config.n_layers):
+            config.qk_norm = False
+        else:
+            config.qk_norm = True
+            xlite_model.mha_q_norm = q_norm
+            xlite_model.mha_k_norm = k_norm
+
+        return xlite_model
+
     def _precompute_freqs_cis(self,
                               dim: int,
                               end: int,
@@ -167,6 +180,61 @@ class LlamaXliteModel(XliteModel):
         freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
         return freq_cis.to(device='npu')
 
+class QwenMoeXliteModel(LlamaXliteModel):
+
+    def initialize(
+            self, runnable: nn.Module,
+            vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
+            architecture = vllm_config.model_config.architectures[0]
+            raise ValueError(
+                f"{architecture} not support VLLM_ASCEND_ENABLE_NZ = 2!")
+        dtype = vllm_config.model_config.dtype
+        config = self._build_model_config(vllm_config)
+        xlite_model = self._build_model(runnable, vllm_config, config)
+        rank = torch.distributed.get_rank()
+        xlite_model.init(config, rank)
+
+        freq_cis = super()._precompute_freqs_cis(config.head_dim,
+                                                 config.max_seq_len, dtype,
+                                                 config.rope_theta)
+
+        return (xlite_model, freq_cis, config.hidden_size, dtype)
+
+    def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
+        config = super()._build_model_config(vllm_config)
+        hf_config = vllm_config.model_config.hf_config
+        ep_group = get_ep_group()
+        config.n_layers = hf_config.max_window_layers
+        config.n_dense_layers = 0
+        config.n_routed_experts = hf_config.num_experts
+        config.n_shared_experts = 0
+        config.n_act_experts = hf_config.num_experts_per_tok
+        config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
+        config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
+        config.experts_weight_transpose = True
+        config.moe_intermediate_size = hf_config.moe_intermediate_size
+        config.norm_topk_prob = hf_config.norm_topk_prob
+        config.scoring_func = ScoringFuncSoftmax
+        return config
+
+    def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig,
+                     config: ModelConfig) -> Model:
+        xlite_model = super()._build_model(runnable, vllm_config, config)
+        layers = runnable.model.layers
+        xlite_model.gate = [
+            layer.mlp.gate.weight.to(torch.float32) for layer in layers
+        ]
+        xlite_model.re_up_gate = [
+            layer.mlp.experts.w13_weight[i] for layer in layers
+            for i in range(layer.mlp.experts.local_num_experts)
+        ]
+        xlite_model.re_down = [
+            layer.mlp.experts.w2_weight[i] for layer in layers
+            for i in range(layer.mlp.experts.local_num_experts)
+        ]
+
+        return xlite_model
 
 def xlite_model_init(
         runnable: nn.Module,
@@ -176,6 +244,7 @@ def xlite_model_init(
         "Qwen2ForCausalLM": LlamaXliteModel,
         "Qwen3ForCausalLM": LlamaXliteModel,
         "Qwen3VLForConditionalGeneration": LlamaXliteModel,
+        "Qwen3MoeForCausalLM": QwenMoeXliteModel,
     }
 
     architecture = vllm_config.model_config.architectures[0]
@@ -255,7 +324,7 @@ class XliteWrapper:
         ]
 
         if not with_prefill or self.full_mode:
-            batch = attn_metadata.num_prefills + attn_metadata.num_decodes
+            batch = torch.count_nonzero(attn_metadata.seq_lens).item()
             seq_lens = attn_metadata.seq_lens[:batch]
             seq_tensor = torch.cat([
                 torch.tensor([0]),
