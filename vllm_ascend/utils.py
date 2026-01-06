@@ -482,6 +482,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # TODO: Find out whether we need to solve allreduce function
     MAX_CAPTURE_SIZE = 1800
 
+    # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
+    CP_ADDITIONAL_STREAM_NUM = 100
+
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = \
@@ -540,9 +543,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     else:
         # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
         if parallel_config.prefill_context_parallel_size > 1:
-            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - 100
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
         if parallel_config.decode_context_parallel_size > 1:
-            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - 100
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
 
         # The above describes an empirical formula applicable to the A2 hardware.
         # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
