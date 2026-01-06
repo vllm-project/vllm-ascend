@@ -21,13 +21,15 @@ class MooncakeBackend(Backend):
 
     def __init__(self, parallel_config: ParallelConfig):
         try:
-            from mooncake.store import MooncakeDistributedStore  # type: ignore
+            from mooncake.store import MooncakeDistributedStore, ReplicateConfig  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
                 "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
                 "to run vLLM with MooncakeConnector.") from e
         self.config = MooncakeStoreConfig.load_from_env()
+        self.replica_config = ReplicateConfig()
+        self.replica_config.prefer_alloc_in_same_node = True
         self.store = MooncakeDistributedStore()
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
@@ -56,7 +58,7 @@ class MooncakeBackend(Backend):
     def put(self, keys: list[str], addrs: list[list[int]],
             sizes: list[list[int]]):
         try:
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, self.replica_config)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to put key {keys},res:{res}")
@@ -66,7 +68,7 @@ class MooncakeBackend(Backend):
     def get(self, keys: list[str], addrs: list[list[int]],
             sizes: list[list[int]]):
         try:
-            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes, True)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to get key {keys}, res:{res}")
