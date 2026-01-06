@@ -77,7 +77,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
         self.physical_expert_end = (self.physical_expert_start +
                                     self.n_local_physical_experts)
-        
+
         ascend_config = get_ascend_config()
         mix_placement = getattr(ascend_config, "mix_placement", False)
         if (config.n_shared_experts is None or mix_placement):
@@ -121,7 +121,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             if self.mix_placement else 0,
         )
 
-        
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -159,6 +159,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_dim)
+
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
@@ -302,6 +303,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if not is_fuse_shared_experts_layer:
                 loaded_params.add(name)
         return loaded_params
+
 
 class CustomDeepSeekMTP(DeepSeekMTP):
 
