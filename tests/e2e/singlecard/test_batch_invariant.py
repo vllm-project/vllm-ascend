@@ -22,6 +22,7 @@ import random
 import pytest
 import torch
 from vllm import LLM, SamplingParams
+
 from tests.e2e.conftest import cleanup_dist_env_and_memory
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
