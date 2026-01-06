@@ -1343,7 +1343,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                           ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
         ubatch_slices = None
         num_tokens_across_dp = None
-        if self.parallel_config.enable_dbo:
+        if self.parallel_config.use_ubatching:
             ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens_unpadded,
                 parallel_config=self.parallel_config,
@@ -2549,7 +2549,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # over a certain threshold.
         ubatch_slices = None
         num_tokens_across_dp = None
-        if self.parallel_config.enable_dbo and allow_microbatching:
+        if self.parallel_config.use_ubatching and allow_microbatching:
             ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_tokens_unpadded=total_num_scheduled_tokens,
                 parallel_config=self.vllm_config.parallel_config,
@@ -2860,13 +2860,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
-            and not self.parallel_config.enable_dbo:
+            and not self.parallel_config.use_ubatching:
             self.update_stream = torch.npu.Stream()
             set_graph_params(self.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
-        elif self.parallel_config.enable_dbo:
+        elif self.parallel_config.use_ubatching:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.update_stream = torch.npu.Stream()
                 set_graph_params(self.compilation_config.cudagraph_capture_sizes)
@@ -3630,7 +3630,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for num_tokens in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph and for uniform decode batches.
-            allow_microbatching = self.parallel_config.enable_dbo \
+            allow_microbatching = self.parallel_config.use_ubatching \
                 and aclgraph_runtime_mode == CUDAGraphMode.FULL \
                 and uniform_decode \
                 and check_ubatch_thresholds(
