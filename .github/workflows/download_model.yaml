@@ -1,0 +1,75 @@
+name: 'model downloader'
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/misc/model_list.json'
+      - '.github/workflows/download_model.yaml'
+    types: [labeled, synchronize]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ascend-${{ github.workflow_ref }}
+  cancel-in-progress: true
+
+jobs:
+  download-models:
+    if: contains(github.event.pull_request.labels.*.name, 'model-download')
+    name: Download models from ModelScope
+    runs-on: linux-aarch64-a3-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          pip install modelscope jq
+
+      - name: Extract new models from PR
+        id: diff
+        run: |
+          set -euo pipefail
+
+          JSON_PATH=".github/workflows/misc/model_list.json"
+
+          git fetch origin main
+
+          git show origin/main:$JSON_PATH > /tmp/models_main.json || \
+            echo '{"models":[]}' > /tmp/models_main.json
+
+          cp $JSON_PATH /tmp/models_pr.json
+
+          jq -r '
+            (.models // []) as $pr
+            | input
+            | (.models // []) as $main
+            | ($pr - $main)[]
+          ' /tmp/models_pr.json /tmp/models_main.json > /tmp/new_models.txt
+
+          echo "New models:"
+          cat /tmp/new_models.txt || true
+
+      - name: Download new models (CLI)
+        if: hashFiles('/tmp/new_models.txt') != ''
+        run: |
+          set -euo pipefail
+
+          while read -r model; do
+            [ -z "$model" ] && continue
+            echo "▶ Downloading $model"
+            modelscope download "$model"
+          done < /tmp/new_models.txt
+
+      - name: Summary
+        run: |
+          echo "Downloaded models:"
+          cat /tmp/new_models.txt || echo "No new models"
