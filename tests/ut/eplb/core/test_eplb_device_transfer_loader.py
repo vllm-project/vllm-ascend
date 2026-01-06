@@ -47,8 +47,8 @@ def test_generate_task_and_state_flow(mock_adaptor):
         loader_obj.state = loader.ExpertWeightUpdateState.WAITING
 
         loader_obj.generate_expert_d2d_transfer_task([], [], {}, 0)
-        assert loader_obj.comm_op_list is None
-        assert loader_obj.state == loader.ExpertWeightUpdateState.WAITING
+        assert not loader_obj.comm_op_list
+        assert loader_obj.state == loader.ExpertWeightUpdateState.READY
 
 
 def test_asyn_transfer_and_update(mock_adaptor):
