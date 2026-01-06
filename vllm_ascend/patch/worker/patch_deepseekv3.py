@@ -118,7 +118,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts
-            if self.mix_placement else 0,
+            if mix_placement else 0,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
