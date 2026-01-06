@@ -121,7 +121,6 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             if self.mix_placement else 0,
         )
 
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
