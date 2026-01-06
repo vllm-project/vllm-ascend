@@ -224,8 +224,8 @@ def select_moe_comm_method(num_tokens: int,
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     quant_type = getattr(
-        vllm_config.model_config.hf_config, 'moe_quantize',
-        getattr(vllm_config.model_config.hf_config, 'quantize', None))
+        vllm_config.model_config.hf_text_config, 'moe_quantize',
+        getattr(vllm_config.model_config.hf_text_config, 'quantize', None))
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
     ).world_size == 1:
