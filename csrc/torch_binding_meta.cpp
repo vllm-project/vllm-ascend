@@ -366,6 +366,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     return {expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale};
 }
 
+at::Tensor fuse_dense_allgather_meta(
+    const at::Tensor &x,
+    c10::string_view group_tp,
+    int64_t tp_rank_size,
+    int64_t tp_rank_id)
+{
+    at::Tensor output = at::empty_like(x);
+
+    return output;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -401,5 +412,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
     // moe_init_routing_custom
     ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
+    // fuse_dense_allgather
+    ops.impl("fuse_dense_allgather_meta", &vllm_ascend::meta::fuse_dense_allgather_meta);
 }
 }

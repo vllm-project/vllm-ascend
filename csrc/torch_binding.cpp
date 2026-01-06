@@ -1218,6 +1218,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale);
 }
 
+at::Tensor fuse_dense_allgather(const at::Tensor &x, c10::string_view group_tp, int64_t tp_rank_size,
+    int64_t tp_rank_id)
+{
+    at::Tensor output = at::empty_like(x);
+
+    std::string group_tp_str(group_tp);
+
+    char *group_tp_ptr = group_tp_str.data();
+
+    EXEC_NPU_CMD(aclnnFuseDenseAllgather,
+        x,
+        group_tp_ptr, tp_rank_size, tp_rank_id,
+        output);
+
+    return output;
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -1364,4 +1381,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int row_idx_type=0) -> (Tensor, Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_moe_init_routing_custom", torch::kPrivateUse1, &vllm_ascend::npu_moe_init_routing_custom);
+
+    ops.def("fuse_dense_allgather(Tensor x, str groupTp, int tpRankSize, int tpRankId) -> Tensor output");
+    ops.impl("fuse_dense_allgather", torch::kPrivateUse1, &vllm_ascend::fuse_dense_allgather);
 }
