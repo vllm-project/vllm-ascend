@@ -24,7 +24,6 @@ import pytest
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = [
     "Qwen/Qwen3-8B",
@@ -32,8 +31,6 @@ MODELS = [
 ]
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [10])
 def test_models_long_sequence_output_between_tp_and_cp(
