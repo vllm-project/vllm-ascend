@@ -9,6 +9,8 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 # Fix random seed to ensure test reproducibility
+RTOL_TOLERANCE = 1e-3
+ATOL_TOLERANCE = 1e-5
 seed = 45
 random.seed(seed)
 numpy.random.seed(seed)
@@ -38,7 +40,30 @@ def moe_gating_top_k_numpy_ref(x: torch.Tensor,
                                y2_flag: bool = False,
                                routed_scaling_factor: float = 1.0,
                                eps: float = 1e-20) -> tuple:
-    """NumPy reference implementation of MOE Gating TopK (for result comparison with NPU operator)"""
+    """NumPy reference implementation of MOE Gating TopK.
+
+    For result comparison with NPU operator, ensure the consistency
+    between NPU kernel and baseline implementation.
+
+    Args:
+        x: Input tensor of shape (num_tokens, num_experts)
+        k: Number of top-k experts to select
+        bias: Bias tensor of shape (num_experts,) (optional)
+        k_group: Number of top-k groups to select
+        group_count: Number of expert groups
+        group_select_mode: Group selection mode (0: max, 1: top2 sum)
+        renorm: Whether to renormalize the output (0/1)
+        norm_type: Normalization type (0: softmax, 1: sigmoid)
+        y2_flag: Whether to output original x as y2
+        routed_scaling_factor: Scaling factor for routing weights
+        eps: Small epsilon to avoid division by zero
+
+    Returns:
+        tuple: (y, indices, y2)
+            - y: Top-k weights of shape (num_tokens, k)
+            - indices: Top-k expert indices of shape (num_tokens, k)
+            - y2: Original x if y2_flag is True, else None
+    """
     dtype = x.dtype
     if dtype != torch.float32:
         x = x.to(dtype=torch.float32)
@@ -103,13 +128,27 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
                                      x_dim0_range: int,
                                      x_dim1_range: int,
                                      device: str = "npu"):
-    """Ascend NPU MOE Gating TopK operator test (compare with NumPy reference implementation)"""
+    """Ascend NPU MOE Gating TopK operator test.
+
+    Compare NPU kernel results with NumPy reference implementation
+    to verify the correctness of Ascend custom op.
+
+    Args:
+        group_select_mode: Group selection mode (0: max, 1: top2 sum)
+        renorm: Whether to renormalize output (fixed to 1 in test)
+        norm_type: Normalization type (0: softmax, 1: sigmoid)
+        group_count: Number of expert groups
+        k_ranges: Number of top-k experts to select
+        x_dim0_range: First dimension of input tensor (num_tokens)
+        x_dim1_range: Second dimension of input tensor (num_experts)
+        device: Target device (fixed to "npu" in test)
+    """
     # Simplify parameter names for better readability
     k = k_ranges
     dim0 = x_dim0_range
     dim1 = x_dim1_range
 
-    # Optimization 1: Remove redundant quotes in comments and fix comment format
+    # Skip invalid cases: k cannot exceed num_experts per group
     if k > dim1 // group_count:
         return
 
@@ -119,7 +158,7 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
 
     x_tensor = torch.tensor(x, dtype=torch.float32)
     bias_tensor = torch.tensor(bias, dtype=torch.float32)
-    # Optimization 2: Fix k_group value to avoid irreproducibility caused by random.randint
+    # Fix k_group value to avoid irreproducibility caused by random.randint
     k_group = min(1, group_count)
     out_flag = False
     routed_scaling_factor = 1.0
@@ -155,9 +194,17 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
         bias_opt=bias_tensor.npu() if bias_tensor is not None else None,
     )
 
-    assert numpy.allclose(y.cpu().numpy(), y_npu.cpu().numpy(), rtol=1e-3, atol=1e-5)
-    assert numpy.allclose(expert_idx, expert_idx_npu.cpu().numpy(), rtol=1e-3, atol=1e-5)
-    
+    # Verify consistency between NPU and NumPy results
+    assert numpy.allclose(y.cpu().numpy(),
+                          y_npu.cpu().numpy(),
+                          rtol=RTOL_TOLERANCE,
+                          atol=ATOL_TOLERANCE)
+    assert numpy.allclose(expert_idx,
+                          expert_idx_npu.cpu().numpy(),
+                          rtol=RTOL_TOLERANCE,
+                          atol=ATOL_TOLERANCE)
+
+
 if __name__ == "__main__":
-    # Execute pytest tests
+    # Execute pytest tests with verbose output
     pytest.main([__file__, "-sv"])
