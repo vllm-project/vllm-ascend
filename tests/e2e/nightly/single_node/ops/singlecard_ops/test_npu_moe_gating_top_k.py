@@ -155,9 +155,6 @@ def test_npu_moe_gating_topk_compare(group_select_mode: int,
         bias_opt=bias_tensor.npu() if bias_tensor is not None else None,
     )
 
-    # Optimization 3: Compatible with out_npu being None to avoid error when printing shape
-    out_shape = out_npu.shape if out_npu is not None else "None"
-
 
 if __name__ == "__main__":
     # Execute pytest tests

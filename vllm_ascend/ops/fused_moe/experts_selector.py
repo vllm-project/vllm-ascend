@@ -63,7 +63,7 @@ def select_experts(hidden_states: torch.Tensor,
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
         top_k=top_k,
-        renormalize: bool,
+        renormalize=renormalize,
         topk_group=topk_group,
         num_expert_group=num_expert_group,
         scoring_func=scoring_func,
@@ -107,7 +107,7 @@ def check_npu_moe_gating_top_k(
         num_expert_group: Optional[int] = None,
         scoring_func: str = "softmax",
         custom_routing_function: Optional[Callable] = None):
-    if scoring_func == "sigmoid" and not renormalize: #sigmoid + renorm=0 is not supported in current branch
+    if scoring_func == "sigmoid" and not renormalize:  #sigmoid + renorm=0 is not supported in current branch
         return False
     if custom_routing_function is not None:
         return False
@@ -223,10 +223,10 @@ def _select_experts_with_fusion_ops(
         k=top_k,
         k_group=topk_group,
         group_count=num_expert_group,
-        group_select_mode=1,  
-        renorm=renorm, 
+        group_select_mode=1,
+        renorm=renorm,
         norm_type=norm_type,  # 0: softmax; 1: sigmoid
-        out_flag=False,  
+        out_flag=False,
         routed_scaling_factor=routed_scaling_factor,
         eps=float(1e-20),
         bias_opt=e_score_correction_bias,
