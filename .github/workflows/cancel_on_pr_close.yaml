@@ -1,0 +1,14 @@
+name: Cancel Running Workflows on PR Close
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cancel-running-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel workflows for this PR
+        uses: peter-evans/workflow-run-cleanup-action@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
