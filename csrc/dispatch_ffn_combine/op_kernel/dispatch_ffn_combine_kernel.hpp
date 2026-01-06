@@ -569,7 +569,8 @@ private:
         uint32_t prevGroupSum1 = 0;
         uint32_t dequantSum = 0;
         int32_t syncLoopIdx = -1;
-        BlockEpilogue1 blockEpilogue(resource);
+        uint32_t n = params.problemShape.n();
+        BlockEpilogue1 blockEpilogue(resource, n);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             // The ith core reads data from the ith rank's peermem
             groupIdxDeq = groupIdx - 2;
@@ -668,7 +669,8 @@ private:
         typename BlockEpilogue2::Params epilogueParams{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
-            reinterpret_cast<__gm__ int32_t *>(params.ptrWorkspace)
+            reinterpret_cast<__gm__ int32_t *>(params.ptrWorkspace),
+            static_cast<int32_t>(n2)
         };
         BlockEpilogue2 blockEpilogue(resource, epilogueParams);
         int32_t prevGroupSum2 = 0;
