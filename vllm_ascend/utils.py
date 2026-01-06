@@ -1027,10 +1027,17 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     logger.info(
         f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}"
     )
-    if "o_proj" in (ascend_config.layer_sharding or []):
-        logger.info_once(
-            "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
-        )
+
+    layer_sharding = ascend_config.layer_sharding or []
+    if layer_sharding:
+        if layer_sharding == ["o_proj"]:
+            logger.info_once(
+                "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
+            )
+        else:
+            raise ValueError(
+                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
+                f"Found invalid layer_sharding: {layer_sharding}")
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
@@ -1157,6 +1164,7 @@ def singleton(cls):
         return instances[cls]
 
     return get_instance
+
 
 @lru_cache(maxsize=1)
 def get_current_model_config():

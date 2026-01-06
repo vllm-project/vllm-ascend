@@ -375,7 +375,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.local_num_heads = self.num_heads * self.tp_size
 
             self._replace_linear_class_for_sfa_cp()
-
+            self.layer_sharding_kwargs = []
             for layer_name in (get_ascend_config().layer_sharding or []):
                 if layer_name in kwargs:
                     self.layer_sharding_kwargs.append(kwargs[layer_name])
@@ -429,7 +429,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
-
         if self.enable_sfa_cp:
             for layer in (self.layer_sharding_kwargs or []):
                 if is_hidden_layer(layer):
