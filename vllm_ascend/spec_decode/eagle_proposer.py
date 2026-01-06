@@ -90,7 +90,7 @@ class EagleProposer(VllmEagleProposer):
             self.runner.max_num_tokens * self.pcp_size * self.dcp_size +
             self.pcp_size * self.dcp_size * self.runner.max_num_reqs)
 
-        self.use_sparse = hasattr(vllm_config.model_config.hf_config,
+        self.use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                   "index_topk")
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
