@@ -28,7 +28,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
+                                                        zero_experts_compute)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
@@ -183,6 +184,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -270,7 +272,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         fused_scale_flag = (get_forward_context().moe_comm_type
                             == MoECommType.FUSED_MC2
                             and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1)
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
             w1=w1,
@@ -288,6 +290,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            final_hidden_states += zero_expert_result
+        return final_hidden_states
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(

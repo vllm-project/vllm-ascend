@@ -28,7 +28,8 @@ from vllm.utils.network_utils import get_open_port
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
-    "Qwen/Qwen3-0.6B",
+    # Offline data parallel mode will be not supported/useful for dense models
+    # "Qwen/Qwen3-0.6B",
     "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 
@@ -107,6 +108,8 @@ def _run_worker_process(
             quantization="ascend" if "W8A8" in model_path else None,
             enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
+            # vllm enables async scheduling by default, remove below when vllm >= 0.14.0
+            async_scheduling=False,
         )
 
         # Expose model config to the main test process

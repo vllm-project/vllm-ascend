@@ -1,25 +1,16 @@
-import importlib
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import (CUDAGraphMode, get_layers_from_vllm_config,
-                         set_current_vllm_config)
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pcp_group
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import \
-    process_weights_after_loading
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -30,6 +21,8 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               update_attn_dcp_pcp_params,
+                                               update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -52,77 +45,28 @@ _MTP_MODELS = {
 }
 
 
-def _load_model(architecture):
-    if architecture not in _MTP_MODELS:
-        raise ValueError("Invalid architecture for mtp.")
-    module_name, model_name = _MTP_MODELS[architecture]
-    module = importlib.import_module(module_name)
-    model = getattr(module, model_name)
-    return model
-
-
 class MtpProposer(EagleProposer):
 
     # TODO: Find out why ModelRunner does not this explicit typing?
     model: Union[nn.Module, ACLGraphWrapper]
 
-    def load_model(self, model) -> None:
-        loader = get_model_loader(self.vllm_config.load_config)
-
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config,
-                                        AttentionLayerBase).keys())
-        target_indexer_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config,
-                                        DeepseekV32IndexerCache).keys())
-        draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
-        target_device = self.vllm_config.device_config.device
-
-        with set_default_torch_dtype(
-                draft_model_config.dtype), set_current_vllm_config(
-                    self.vllm_config):
-            self._init_mtp_model()
-        draft_attn_layer_names = (get_layers_from_vllm_config(
-            self.vllm_config, AttentionLayerBase).keys() -
-                                  target_attn_layer_names)
-        indexer_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                     DeepseekV32IndexerCache)
-        draft_indexer_layer_names = indexer_layers.keys(
-        ) - target_indexer_layer_names
-        # NOTE: Currently we don't have specific attention backend and attention metadata
-        # for deepseek v3.2 indexer, so we just exclude the indexer layers here.
-        draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
-
-        assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = list(draft_attn_layer_names)
-
-        self.model.load_weights(
-            loader.get_all_weights(
-                self.vllm_config.speculative_config.draft_model_config,
-                self.model))
-        process_weights_after_loading(self.model, draft_model_config,
-                                      target_device)
-
-        if self.vllm_config.model_config.is_deepseek_mla:
-            # check if mtp model use main model's embedding and LMhead
-            main_model = model
-            if get_pp_group().world_size == 1:
-                # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
-                if torch.equal(self.model.model.embed_tokens.weight,
-                               main_model.model.embed_tokens.weight):
-                    self.model.model.embed_tokens = main_model.model.embed_tokens
-            for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight,
-                               main_model.lm_head.weight):
-                    layer_module.shared_head.head = main_model.lm_head
-
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
-        ):
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(self.model,
-                                         self.vllm_config,
-                                         runtime_mode=CUDAGraphMode.FULL)
+    # update full-graph params for one spec token
+    def _update_full_graph_params(self, forward_context, num_tokens):
+        if self.vllm_config.model_config.use_mla:
+            if self.pcp_size * self.dcp_size > 1:
+                update_mla_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context, num_tokens)
+            else:
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       num_tokens,
+                                       self.vllm_config.speculative_config)
+        else:
+            if self.pcp_size * self.dcp_size > 1:
+                update_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           num_tokens)
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   num_tokens, self.vllm_config)
 
     @torch.inference_mode()
     def dummy_run(self,
@@ -141,7 +85,7 @@ class MtpProposer(EagleProposer):
             num_tokens_across_dp,
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
-        if self.use_async_scheduling:
+        if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
             # synchronization overhead.
@@ -179,14 +123,16 @@ class MtpProposer(EagleProposer):
                 if self.pcp_size * self.dcp_size > 1:
                     # update long_seq related params and flatten block_table
                     common_attn_metadata.prefill_context_parallel_metadata = \
-                        self.runner.long_seq_metadata
+                        self.runner.pcp_manager.long_seq_metadata
                     common_attn_metadata.block_table_tensor = \
                         self.runner.input_batch.block_table[0].get_device_tensor()[
                             :num_reqs * self.decode_threshold]
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
+                # `AscendAttentionState.SpecDecoding` is only designed for mla, `AscendAttentionState.ChunkedPrefill` is used in self-attention.
+                attn_state = AscendAttentionState.SpecDecoding if self.vllm_config.model_config.use_mla else AscendAttentionState.ChunkedPrefill
                 attn_metadata_mtp = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.SpecDecoding)
+                    common_attn_metadata, attn_state)
                 attn_metadata = {}
                 for layer_name in self.attn_layer_name:
                     attn_metadata[layer_name] = attn_metadata_mtp
@@ -222,17 +168,9 @@ class MtpProposer(EagleProposer):
                            hidden_states=previous_hidden_states)
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
-                    not forward_context.capturing:
-                    if self.vllm_config.model_config.use_mla and not self.use_sparse:
-                        if self.pcp_size * self.dcp_size > 1:
-                            update_mla_attn_dcp_pcp_params(
-                                self.update_stream, forward_context,
-                                num_tokens)
-                        else:
-                            update_mla_attn_params(
-                                self.update_stream, forward_context,
-                                num_tokens,
-                                self.vllm_config.speculative_config)
+                    not forward_context.capturing and not self.use_sparse:
+                    self._update_full_graph_params(forward_context, num_tokens)
+
                 if self.enable_shared_expert_dp:
                     positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         positions, True)
@@ -241,153 +179,6 @@ class MtpProposer(EagleProposer):
                 dummy_compute_logits(previous_hidden_states)
             if with_prefill:
                 break
-
-    def generate_token_ids(self,
-                           sampled_token_ids: torch.Tensor | list[list[int]],
-                           sampling_metadata: SamplingMetadata = None,
-                           scheduler_output: SchedulerOutput = None,
-                           spec_decode_metadata: SpecDecodeMetadata = None,
-                           positions: torch.Tensor = None,
-                           num_scheduled_tokens: int = 0,
-                           hidden_states: torch.Tensor = None,
-                           aux_hidden_states: torch.Tensor = None):
-        common_attn_metadata = self.runner.spec_decode_common_attn_metadata
-
-        if self.speculative_config.disable_padded_drafter_batch:
-            # When padded-batch is disabled, the sampled_token_ids should be
-            # the cpu-side list[list[int]] of valid sampled tokens for each
-            # request, with invalid requests having empty lists.
-            assert isinstance(sampled_token_ids, list), \
-                "sampled_token_ids should be a python list when" \
-                "padded-batch is disabled."
-            next_token_ids = self.prepare_next_token_ids_cpu(
-                sampled_token_ids, self.runner.requests,
-                self.runner.input_batch, scheduler_output.num_scheduled_tokens)
-        else:
-            # When using padded-batch, the sampled_token_ids should be
-            # the gpu tensor of sampled tokens for each request, of shape
-            # (num_reqs, num_spec_tokens + 1) with rejected tokens having
-            # value -1.
-            assert isinstance(sampled_token_ids, torch.Tensor), \
-                "sampled_token_ids should be a torch.Tensor when" \
-                "padded-batch is enabled."
-            next_token_ids, valid_sampled_tokens_count = \
-                self.prepare_next_token_ids_padded(
-                    common_attn_metadata,
-                    sampled_token_ids,
-                    self.runner.requests,
-                    self.runner.input_batch,
-                    self.runner.discard_request_indices.gpu,
-                    self.runner.num_discarded_requests
-                )
-            self._copy_valid_sampled_token_count(next_token_ids,
-                                                 valid_sampled_tokens_count)
-
-        req_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        if self.pcp_size * self.dcp_size > 1:
-            long_seq_metadata = self.runner.long_seq_metadata
-            input_ids_pcp_full = self.runner.input_ids_pcp_full.gpu
-            query_start_loc_pcp_full = self.runner.query_start_loc_pcp_full.gpu
-            query_start_loc_pcp_full_cpu = self.runner.query_start_loc_pcp_full.cpu
-            num_reqs = self.runner.input_batch.num_reqs
-            ori_query_lens = query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
-                query_start_loc_pcp_full_cpu[:num_reqs]
-            num_prefill_reqs = (ori_query_lens
-                                > self.decode_threshold).sum().item()
-            num_decode_reqs = num_reqs - num_prefill_reqs
-        else:
-            long_seq_metadata = None
-            num_prefill_reqs = 0
-            num_decode_reqs = 0
-        if spec_decode_metadata is None:
-            # update pcp related params
-            if self.pcp_size > 1:
-                token_indices_to_sample = \
-                    query_start_loc_pcp_full_cpu[1:num_reqs + 1] - 1
-                target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
-                target_positions = positions[:num_scheduled_tokens]
-                target_hidden_states = hidden_states
-            else:
-                token_indices_to_sample = None
-                # input_ids can be None for multimodal models.
-                target_token_ids = self.runner.input_ids.gpu[:
-                                                             num_scheduled_tokens]
-                target_positions = positions[:num_scheduled_tokens]
-                target_hidden_states = hidden_states[:num_scheduled_tokens]
-        else:
-            if self.pcp_size > 1:
-                common_attn_metadata.query_start_loc_cpu[:num_reqs + 1] = \
-                    query_start_loc_pcp_full_cpu[:num_reqs + 1]
-                common_attn_metadata.query_start_loc[:num_reqs + 1] = \
-                    query_start_loc_pcp_full[:num_reqs + 1]
-            if self.speculative_config.disable_padded_drafter_batch:
-                token_indices_to_sample = None
-                common_attn_metadata, token_indices =\
-                    self._prepare_inputs(
-                        common_attn_metadata,
-                        sampled_token_ids,
-                        spec_decode_metadata.num_draft_tokens)
-            else:
-                common_attn_metadata, token_indices, \
-                    token_indices_to_sample =\
-                        self.prepare_inputs_padded(
-                            common_attn_metadata,
-                            spec_decode_metadata,
-                            valid_sampled_tokens_count)
-            if self.pcp_size > 1:
-                target_token_ids = input_ids_pcp_full[token_indices]
-                target_positions = positions
-                target_hidden_states = hidden_states
-            else:
-                target_token_ids = self.runner.input_ids.gpu[token_indices]
-                target_positions = positions[token_indices]
-                target_hidden_states = hidden_states[token_indices]
-
-        draft_token_ids = self._propose(
-            target_token_ids=target_token_ids,
-            target_positions=target_positions,
-            target_hidden_states=target_hidden_states,
-            next_token_ids=next_token_ids,
-            last_token_indices=token_indices_to_sample,
-            common_attn_metadata=common_attn_metadata,
-            sampling_metadata=sampling_metadata,
-            req_scheduled_tokens=req_scheduled_tokens,
-            long_seq_metadata=long_seq_metadata,
-            num_prefill_reqs=num_prefill_reqs,
-            num_decode_reqs=num_decode_reqs,
-            scheduler_output=scheduler_output,
-            num_scheduled_tokens=num_scheduled_tokens,
-        )
-
-        return draft_token_ids
-
-    def _copy_valid_sampled_token_count(
-            self, next_token_ids: torch.Tensor,
-            valid_sampled_tokens_count: torch.Tensor) -> None:
-        if self.runner.valid_sampled_token_count_event is not None:
-            default_stream = torch.npu.current_stream()
-            # initialize a new stream to overlap the copy operation with
-            # prepare_input of draft model.
-            with torch.npu.stream(
-                    self.runner.valid_sampled_token_count_copy_stream):
-                self.runner.valid_sampled_token_count_copy_stream.wait_stream(
-                    default_stream)  # type: ignore
-                self.runner.valid_sampled_token_count_cpu[:
-                                                          valid_sampled_tokens_count
-                                                          .shape[0]].copy_(
-                                                              valid_sampled_tokens_count,
-                                                              non_blocking=True
-                                                          )
-                self.runner.valid_sampled_token_count_event.record()
-
-            self.runner.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(
-                1)
-
-    def _init_mtp_model(self):
-        architecture = self.vllm_config.model_config.architecture
-        target_device = self.vllm_config.device_config.device
-        model = _load_model(architecture)
-        self.model = model(vllm_config=self.vllm_config).to(target_device)
 
     def _prepare_inputs(
         self,
@@ -654,7 +445,7 @@ class MtpProposer(EagleProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.cudagraph_dispatcher.dispatch(num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-        if self.use_async_scheduling:
+        if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
             # synchronization overhead.
@@ -721,17 +512,9 @@ class MtpProposer(EagleProposer):
                                                positions=positions,
                                                hidden_states=hidden_states)
                     forward_context = get_forward_context()
-                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                        if self.vllm_config.model_config.use_mla and not self.use_sparse:
-                            if self.pcp_size * self.dcp_size > 1:
-                                update_mla_attn_dcp_pcp_params(
-                                    self.update_stream, forward_context,
-                                    num_input_tokens)
-                            else:
-                                update_mla_attn_params(
-                                    self.update_stream, forward_context,
-                                    num_input_tokens,
-                                    self.vllm_config.speculative_config)
+                    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
+                        self._update_full_graph_params(forward_context,
+                                                       num_input_tokens)
 
                     if self.enable_shared_expert_dp:
                         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -751,8 +534,8 @@ class MtpProposer(EagleProposer):
                 hidden_states = hidden_states[:num_tokens]
                 hidden_states = get_pcp_group().all_gather(hidden_states, 0)
                 hidden_states = torch.index_select(
-                    hidden_states, 0, self.runner.
-                    pcp_allgather_restore_idx[:hidden_states.shape[0]])
+                    hidden_states, 0, self.runner.pcp_manager.
+                    pcp_allgather_restore_idx.gpu[:hidden_states.shape[0]])
 
             sample_hidden_states = hidden_states[last_token_indices]
             logits = self.model.compute_logits(sample_hidden_states)
@@ -797,13 +580,13 @@ class MtpProposer(EagleProposer):
                     # (_generate_pcp_mtp_input), and use updated slot_indices
                     # to get corresponding slot_mapping in each step.
                     num_reject_tokens = torch.tensor(
-                        self.runner.cu_num_tokens_pcp_full,
+                        self.runner.pcp_manager.cu_num_tokens_pcp_full,
                         dtype=torch.int32).to(
                             self.device) - ori_last_token_indices - 1
                     num_accept_tokens = \
                         query_lens_d.to(self.device) - num_reject_tokens
                     ori_seq_len = attn_metadata_i.seq_lens
-                    mtp_slot_mapping = self.runner.mtp_slot_pad
+                    mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                     # slot_mapping index base offset:
                     # scheduled tokens + pre-allocated mtp tokens + accepted tokens
@@ -889,7 +672,7 @@ class MtpProposer(EagleProposer):
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             if self.pcp_size * self.dcp_size > 1:
                 # update local seq_len and batch_seq_mask
-                num_computed_tokens_of_pcp_dcp = self.runner._get_cp_local_seq_lens(
+                num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
                     ori_seq_len + step + 1,
                     self.pcp_size,
                     self.dcp_size,

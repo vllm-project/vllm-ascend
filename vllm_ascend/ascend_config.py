@@ -13,10 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class AscendConfig:
@@ -24,7 +27,7 @@ class AscendConfig:
     Configuration Object for additional_config from vllm.configs.
     """
 
-    def __init__(self, vllm_config):
+    def __init__(self, vllm_config: "VllmConfig"):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         self.mix_placement = additional_config.get("mix_placement",False)
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -120,6 +123,19 @@ class AscendConfig:
 
         self.enable_async_exponential = bool(
             additional_config.get("enable_async_exponential", False))
+
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
+        if self.enable_kv_nz:
+            use_sparse = hasattr(vllm_config.model_config.hf_config,
+                                 "index_topk")
+            if not vllm_config.model_config.is_deepseek_mla or use_sparse:
+                raise RuntimeError(
+                    "enable_kv_nz is only supported for mla currently.")
+            if vllm_config.kv_transfer_config is None \
+                or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise NotImplementedError(
+                    "enable_kv_nz is only supported in pd scenario and can "
+                    "only be used in D node.")
 
 
 class FinegrainedTPConfig:
