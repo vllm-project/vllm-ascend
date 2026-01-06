@@ -156,6 +156,7 @@ class AscendFusedMoE(FusedMoE):
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
+        num_shared_experts = kwargs.get("n_shared_experts", 0)
 
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
@@ -188,6 +189,10 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe
+        self.mix_placement = getattr(ascend_config,"mix_placement",False)
+        self.n_shared_experts = num_shared_experts
+        num_experts += num_shared_experts if self.mix_placement else 0
+        self.moe_config.num_experts = num_experts
         self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
             ascend_config, self.moe_instance_id, self.moe_config)
         self.global_num_experts = num_experts + self.global_redundant_expert_num
@@ -403,7 +408,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self.shared_expert_stream = None
         ascend_config = get_ascend_config()
         self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
@@ -431,11 +435,19 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared_out, fused_out = AscendFusedMoE.forward(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        if self._shared_experts is None:
+            fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            shared_out = None
+        else:
+            shared_out, fused_out = AscendFusedMoE.forward(
+                self,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
         return shared_out, fused_out
 
     def forward_impl(self, hidden_states: torch.Tensor,
@@ -451,7 +463,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                     shared_experts_calculation_stream(),
                     enabled=self.multistream_overlap_shared_expert):
                 # Use a separate stream to run shared experts.
-                shared_out = self._shared_experts(hidden_states)
+                # Note that currently we only support calculations in separate streams with aclgraph.
+                # Communication operations in another stream might cause unknown errors.
+                if self._shared_experts is None:
+                    shared_out = None
+                else:
+                    shared_out = self._shared_experts(hidden_states)
         else:
             set_flash_common3_context(shared_experts=self._shared_experts)
 
@@ -471,11 +488,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             forward_context = get_forward_context()
             moe_comm_type = forward_context.moe_comm_type
             if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
-                    and not shared_expert_dp_enabled():
+                    and not shared_expert_dp_enabled() and shared_out is not None:
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
         else:
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None
             shared_out = fc3_context.shared_out
-
+        if shared_out is None:
+            return routed_out
         return shared_out, routed_out
