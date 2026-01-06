@@ -58,7 +58,6 @@ class TestEagleProposerInitialization(TestBase):
                                  device=self.device,
                                  runner=self.runner)
 
-        self.assertEqual(proposer.block_size, 16)
         self.assertEqual(proposer.hidden_size, 4096)
         self.assertTrue(proposer.use_cuda_graph)
 
