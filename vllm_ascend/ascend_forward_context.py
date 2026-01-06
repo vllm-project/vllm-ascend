@@ -14,7 +14,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
-                               is_moe_model)
+                               is_moe_model,
+                               speculative_enable_dispatch_gmm_combine_decode)
 
 
 class MoECommType(Enum):
@@ -223,8 +224,8 @@ def select_moe_comm_method(num_tokens: int,
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     quant_type = getattr(
-        vllm_config.model_config.hf_config, 'moe_quantize',
-        getattr(vllm_config.model_config.hf_config, 'quantize', None))
+        vllm_config.model_config.hf_text_config, 'moe_quantize',
+        getattr(vllm_config.model_config.hf_text_config, 'quantize', None))
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
     ).world_size == 1:
@@ -242,7 +243,7 @@ def select_moe_comm_method(num_tokens: int,
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop dynamic_eplb guard when dispatch_gmm_combine_decode supports tensor list inputs
-        # TODO: add guard for dispatch_gmm_combine_decode when mtp uses float while moe uses w8a8
+        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and (
             not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
@@ -250,6 +251,9 @@ def select_moe_comm_method(num_tokens: int,
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and get_ep_group(
                 ).world_size <= 16 and (not is_draft_model)
+            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+                fused_decode_enable = fused_mc2_enable and \
+                    speculative_enable_dispatch_gmm_combine_decode(vllm_config)
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable

@@ -174,7 +174,8 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
-        elif model_config and hasattr(model_config.hf_config, "index_topk"):
+        elif model_config and hasattr(model_config.hf_text_config,
+                                      "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
         if model_config is None:
@@ -192,8 +193,6 @@ class NPUPlatform(Platform):
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
-        compilation_config.pass_config.fuse_norm_quant = False
-        compilation_config.pass_config.fuse_act_quant = False
 
         if compilation_config.mode not in [
                 CompilationMode.NONE, CompilationMode.VLLM_COMPILE
@@ -331,7 +330,7 @@ class NPUPlatform(Platform):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
+                "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
         if is_vl_model(vllm_config):
