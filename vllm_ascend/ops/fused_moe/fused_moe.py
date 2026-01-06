@@ -189,7 +189,7 @@ class AscendFusedMoE(FusedMoE):
                 dtype=vllm_config.model_config.dtype)
 
         # init moe
-        self.mix_placement = getattr(ascend_config,"mix_placement",False)
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.n_shared_experts = num_shared_experts
         num_experts += num_shared_experts if self.mix_placement else 0
         self.moe_config.num_experts = num_experts
