@@ -61,7 +61,7 @@ class LlamaXliteModel(XliteModel):
         xlite_model.embed = params_dict.get(model_prefix +
                                             "model.embed_tokens.weight")
         xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
-        if vllm_config.model_config.hf_config.tie_word_embeddings:
+        if vllm_config.model_config.hf_text_config.tie_word_embeddings:
             xlite_model.head = xlite_model.embed
         else:
             xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
@@ -118,7 +118,7 @@ class LlamaXliteModel(XliteModel):
         return (xlite_model, freq_cis, config.hidden_size, dtype)
 
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_text_config
         if hasattr(hf_config, "text_config"):
             hf_config = hf_config.text_config
         config = ModelConfig()

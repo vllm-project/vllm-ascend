@@ -697,7 +697,7 @@ def is_moe_layer(prefix: str) -> bool:
     def get_moe_params():
         from vllm.config import get_current_vllm_config
         vllm_config = get_current_vllm_config()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         n_routed_experts = getattr(config, 'n_routed_experts', 0)
         first_k_dense_replace = getattr(config, 'first_k_dense_replace',
                                         float('inf'))

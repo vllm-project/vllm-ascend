@@ -174,7 +174,8 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
-        elif model_config and hasattr(model_config.hf_config, "index_topk"):
+        elif model_config and hasattr(model_config.hf_text_config,
+                                      "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
         if model_config is None:

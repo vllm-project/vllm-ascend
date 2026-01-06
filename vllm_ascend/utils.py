@@ -468,7 +468,7 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # on special shapes.
     # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
     # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-    if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
+    if vllm_config.model_config and vllm_config.model_config.hf_text_config.model_type == "qwen3_moe" \
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
 
@@ -503,7 +503,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
 
         return
-    hf_config = vllm_config.model_config.hf_config
+    hf_config = vllm_config.model_config.hf_text_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
     else:
@@ -826,7 +826,7 @@ def is_moe_model(vllm_config: VllmConfig):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
+        model_configs = vllm_config.model_config.hf_text_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
 
@@ -842,7 +842,7 @@ def speculative_enable_dispatch_gmm_combine_decode(
     if speculative_method in ["eagle", "eagle3"]:
         return False
     if speculative_method == "mtp":
-        mtp_quant_type = getattr(vllm_config.model_config.hf_config,
+        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config,
                                  "mtp_quantize", None)
         return mtp_quant_type == "w8a8_dynamic"
     return False
@@ -875,7 +875,7 @@ def has_rope(vllm_config: VllmConfig):
     """Checks if the model uses rope."""
     global _HAS_ROPE
     if _HAS_ROPE is None and vllm_config and vllm_config.model_config:
-        hf_config = vllm_config.model_config.hf_config.to_dict()
+        hf_config = vllm_config.model_config.hf_text_config.to_dict()
         _HAS_ROPE = "rope_parameters" in hf_config
     return _HAS_ROPE
 
@@ -1091,7 +1091,7 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+    if not model_config.hf_text_config.model_type == "qwen3_next" and cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info(
                 "Block size is set to 128 if prefix cache or chunked prefill is enabled."

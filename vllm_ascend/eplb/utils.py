@@ -69,7 +69,7 @@ def model_register(model, model_config):
     model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)
     model.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, model)
 
-    config = model_config.hf_config
+    config = model_config.hf_text_config
 
     if config.model_type == "qwen3_moe":
         model.num_moe_layers = config.num_hidden_layers
