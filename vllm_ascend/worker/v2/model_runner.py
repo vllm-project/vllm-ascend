@@ -17,19 +17,31 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from typing import Any
+
 import numpy as np
 import torch
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import async_barrier
+from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import (InputBatch,
                                             combine_sampled_and_draft_tokens,
                                             prepare_pos_seq_lens,
                                             prepare_prefill_inputs)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu.sample.metadata import (SamplingMetadata,
+                                                expand_sampling_metadata)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
+from vllm_ascend.ascend_forward_context import (set_ascend_forward_context,
+                                                set_mc2_mask,
+                                                set_mc2_tokens_capacity)
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
                                               build_attn_state,
@@ -111,6 +123,143 @@ class NPUModelRunner(GPUModelRunner):
                 device="cpu",
                 pin_memory=self.pin_memory,
             )
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, 1)
+        set_mc2_mask(vllm_config, self.device)
+
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        *args,
+        skip_attn: bool = True,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = min(num_tokens, self.max_num_reqs)
+        input_batch = InputBatch.make_dummy(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            input_buffers=self.input_buffers,
+            device=self.device,
+        )
+        if not skip_attn:
+            self.prepare_dummy_attn_metadata(input_batch)
+
+        num_tokens_across_dp = make_num_tokens_across_dp(
+            self.dp_size, num_tokens)
+        num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
+        with (
+                self.maybe_dummy_run_with_lora(
+                    self.lora_config,
+                    input_batch.num_scheduled_tokens,
+                    num_sampled_tokens,
+                ),
+                set_ascend_forward_context(
+                    input_batch.attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                ),
+        ):
+            hidden_states = self.model(
+                input_ids=input_batch.input_ids,
+                positions=input_batch.positions,
+            )
+            sample_hidden_states = hidden_states[input_batch.logits_indices]
+        return hidden_states, sample_hidden_states
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: Any | None = None,
+        dummy_run: bool = False,
+    ) -> ModelRunnerOutput | None:
+        assert intermediate_tensors is None
+        if scheduler_output.total_num_scheduled_tokens == 0 and not dummy_run:
+            # No need to run the model.
+            with async_barrier(self.input_prep_event):
+                self.update_states(scheduler_output)
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+        # NOTE: Call this before the async barrier so CPU all-reduce and
+        # GPU execution can overlap.
+        cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp = (
+            self.get_cudagraph_and_dp_padding(scheduler_output))
+        with async_barrier(self.input_prep_event):
+            self.update_states(scheduler_output)
+            if num_tokens_after_padding == 0:
+                # All DP ranks have zero tokens to run.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            if not dummy_run:
+                # Common case.
+                # Prepare all the inputs and copy to the input buffers.
+                input_batch = self.prepare_inputs(
+                    scheduler_output,
+                    num_tokens_after_padding,
+                )
+
+                # NOTE(woosuk): Sampling metadata should be built under the async
+                # barrier to avoid race conditions.
+                pos = input_batch.positions[input_batch.logits_indices]
+                sampling_metadata = self.req_states.make_sampling_metadata(
+                    input_batch.idx_mapping, input_batch.idx_mapping_np, pos)
+                if input_batch.num_draft_tokens > 0:
+                    sampling_metadata = expand_sampling_metadata(
+                        sampling_metadata,
+                        input_batch.cu_num_logits,
+                        max_expand_len=self.num_speculative_steps + 1,
+                    )
+
+                if self.lora_config:
+                    # Activate LoRA adapters.
+                    lora_inputs = self.req_states.make_lora_inputs(
+                        input_batch.req_ids,
+                        input_batch.idx_mapping_np,
+                        input_batch.num_scheduled_tokens,
+                    )
+                    self._set_active_loras(*lora_inputs)
+            else:
+                # No actual tokens to run. A dummy run for DP.
+                num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
+                input_batch = InputBatch.make_dummy(
+                    num_reqs=num_reqs,
+                    num_tokens=num_tokens_after_padding,
+                    input_buffers=self.input_buffers,
+                    device=self.device,
+                )
+                self.prepare_dummy_attn_metadata(input_batch)
+                sampling_metadata = None
+
+        # Run model.
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            # Run CUDA graph.
+            # NOTE(woosuk): Here, we don't need to pass the input tensors,
+            # because they are already copied to the CUDA graph input buffers.
+            hidden_states = self.cudagraph_manager.run(
+                input_batch.num_tokens_after_padding)
+        else:
+            # Run PyTorch model in eager mode.
+            # TODO(woosuk): Support piecewise CUDA graph.
+            with set_ascend_forward_context(
+                    input_batch.attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch.num_tokens_after_padding,
+                    aclgraph_runtime_mode=cudagraph_mode,
+                    num_tokens_across_dp=num_tokens_across_dp,
+            ):
+                hidden_states = self.model(
+                    input_ids=input_batch.input_ids,
+                    positions=input_batch.positions,
+                )
+                if get_forward_context().sp_enabled:
+                    hidden_states = tensor_model_parallel_all_gather(
+                        hidden_states, 0)
+                    pad_size = get_forward_context().pad_size
+                    if pad_size > 0:
+                        hidden_states = hidden_states[:-pad_size, :]
+        self.execute_model_state = hidden_states, input_batch, sampling_metadata
+        return None
 
     def prepare_inputs(
         self,
