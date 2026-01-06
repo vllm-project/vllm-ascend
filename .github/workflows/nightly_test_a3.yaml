@@ -132,6 +132,9 @@ jobs:
           - name: qwen3-235b-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/models/test_qwen3_235b_w8a8.py
+          - name: qwen3-next-w8a8
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_next_w8a8.py
           # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
           # - name: deepseek3_2-exp-w8a8
           #   os: linux-aarch64-a3-16
