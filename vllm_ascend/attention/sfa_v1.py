@@ -149,7 +149,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_sfa_cp = enable_sp() and \
-            hasattr(self.model_config.hf_config, "index_topk")
+            hasattr(self.model_config.hf_text_config, "index_topk")
 
         assert not (
             self.enable_sfa_cp
@@ -963,7 +963,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose tensor from the original o_proj
         dispose_layer(self.o_proj)
         # Construct the new o_proj using ReplicatedLinear
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         new_o_proj = ReplicatedLinear(config.num_attention_heads *
                                       config.v_head_dim,
                                       config.hidden_size,
