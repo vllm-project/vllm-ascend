@@ -18,7 +18,7 @@
 #
 
 import torch
-from triton.runtime import driver
+from triton.runtime import driver  # type: ignore
 from vllm.triton_utils import tl, triton
 
 
@@ -39,15 +39,13 @@ def _rms_norm_kernel(
     RMS Norm: y = x / sqrt(mean(x^2) + eps) * weight
     Each program handles multiple rows of the input tensor.
     """
-    pid = tl.program_id(0)  # 程序ID
-    n_programs = tl.num_programs(0)  # 网格大小（固定值，例如1024）
+    pid = tl.program_id(0)
+    n_programs = tl.num_programs(0)
 
-    # 计算每个程序处理的行数（向上取整）
     rows_per_program = (n_rows + n_programs - 1) // n_programs
     start_row = pid * rows_per_program
     end_row = tl.minimum(start_row + rows_per_program, n_rows)
 
-    # 循环处理分配给该程序的多行
     for row_idx in range(start_row, end_row):
         row_start_ptr = input_ptr + row_idx * input_row_stride
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
@@ -126,7 +124,7 @@ def rms_norm(
         output,
         input_2d.stride(0),
         output.stride(0),
-        n_rows,  # 传入总行数
+        n_rows,
         n_cols,
         eps,
         BLOCK_SIZE=BLOCK_SIZE,

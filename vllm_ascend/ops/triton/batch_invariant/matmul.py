@@ -18,7 +18,7 @@
 #
 
 import torch
-from triton.runtime import driver
+from triton.runtime import driver  # type: ignore
 from vllm.triton_utils import tl, triton
 
 
