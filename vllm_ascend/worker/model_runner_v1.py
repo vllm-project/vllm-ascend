@@ -1357,6 +1357,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
         is_ubatch = True if ubatch_slices else False
         self.afd_connector.process_group.send_object(is_ubatch,dst)
+        # is_ubatch = True if ubatch_slices else False
+        # dst_list = self.afd_connector.dst_list
+        # if self.afd_connector.ffn_size <= self.afd_connector.rank < self.afd_connector.ffn_size + self.afd_connector.min_size:
+        #     for dst in dst_list:
+        #         self.afd_connector.send_metadata(metadata,dst,self.afd_connector.p2p_pg)
         print(f'send is_ubatch in prepare input is {is_ubatch}')
         
         
@@ -2620,7 +2625,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         dst = (self.afd_connector.process_group.rank_in_group + 1) % self.afd_connector.process_group.world_size
         is_ubatch = True if ubatch_slices else False
         self.afd_connector.process_group.send_object(is_ubatch,dst)
-        print(f'send is_ubatch in dummy_run is {is_ubatch}',flush=True)
+        # is_ubatch = True if ubatch_slices else False
+        # dst_list = self.afd_connector.dst_list
+        # if self.afd_connector.ffn_size <= self.afd_connector.rank < self.afd_connector.ffn_size + self.afd_connector.min_size:
+        #     for dst in dst_list:
+        #         self.afd_connector.send_metadata(is_ubatch,dst,self.afd_connector.p2p_pg)
+        print(f'send is_ubatch in prepare input is {is_ubatch}')
         
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:

@@ -147,13 +147,13 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             if self.use_aclgraph and not is_ubatch:
                 # TODO(yxj):use _acl_graphs_full replay
                 self._ffn_forward(aclgraph_runtime_mode=CUDAGraphMode.NONE,is_ubatch=is_ubatch)
-                self.replay_cnt += 1
-                print(f"ffn replay,replay_cnt is {self.replay_cnt}",flush=True)
+                # self.replay_cnt += 1
+                print(f"_ffn_forward ",flush=True)
                 return
             elif self.use_aclgraph and is_ubatch:
                 # TODO(yxj):ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
                 # replay
-                if self.connector_name == "camconnector":
+                if self.connector_name == "camm2nconnector":
                     max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size) * (self.attn_size // self.ffn_size)
                 else:
                     max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
@@ -557,6 +557,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                    **kwargs):
         
         # recv self.is_ubatch form attn side
+        # if self.connector.rank >= self.connector.attn_size:
+        #     src = self.connector.p2p_rank % self.connector.min_size
+        #     group = self.connector.p2p_pg
+        #     is_ubatch = self.connector.recv_metadata(src,group)
         src = (self.connector.process_group.rank_in_group - 1) % self.connector.process_group.world_size
         is_ubatch = self.connector.process_group.recv_object(src)
         print(f'yxj src in _dummy_run is {src}')
@@ -690,47 +694,47 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     topk_weights = simulateExpertScales
                     print(f'cam recv_attn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
                 elif self.connector_name == "camp2pconnector":
-                cam_afdconnector_data = CAMP2PAFDConnectorMetadata(
-                    moe_expert_num = self.n_routed_experts,
-                    shared_expert_num = 0,
-                    scale = None,
-                    handle = None,
-                    quant_mode = 0,
-                    aiv_num = 48,
-                    batch_size = self.max_num_tokens,
-                    h = self.hidden_size,
-                    k = self.topk
-                )
-                a2eOutput, afdConnectorMetadata, cam_p2p_ep_name = self.connector.recv_attn_output(cam_afdconnector_data)
-                hidden_states, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = a2eOutput[0:5]
-                topk_weights = simulateExpertScales
-                topk_ids = simulateExpertIds
-                x_active_mask = xActiveMaskOut
-            with set_ascend_forward_context(
-                        attn_metadata=None,
-                        vllm_config=self.vllm_config,
-                        reserved_mc2_mask=self.reserved_mc2_mask,
-                        batch_descriptor=batch_descriptor,
-                        aclgraph_runtime_mode=aclgraph_runtime_mode,
-                        prefetch_stream=self.prefetch_stream,
-                        model_instance=self.model):
-                    if self.connector_name == "camp2pconnector":
-                    rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
-                                                layer_idx=layer_idx,
-                                                capture_mode=True,
-                                                topk_ids=topk_ids,
-                                                topk_weights=topk_weights,
-                                                x_active_mask=x_active_mask,
-                                                cam_p2p_ep_name=cam_p2p_ep_name
-                                                )
-                else:
-                    rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
-                                                     layer_idx=layer_idx,
-                                                     capture_mode=True,
-                                                     group_list=group_list,
-                                                    dynamic_scales=dynamic_scales,
-                                                    topk_weights=topk_weights
-                                                 )
+                    cam_afdconnector_data = CAMP2PAFDConnectorMetadata(
+                        moe_expert_num = self.n_routed_experts,
+                        shared_expert_num = 0,
+                        scale = None,
+                        handle = None,
+                        quant_mode = 0,
+                        aiv_num = 48,
+                        batch_size = self.max_num_tokens,
+                        h = self.hidden_size,
+                        k = self.topk
+                    )
+                    a2eOutput, afdConnectorMetadata, cam_p2p_ep_name = self.connector.recv_attn_output(cam_afdconnector_data)
+                    hidden_states, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = a2eOutput[0:5]
+                    topk_weights = simulateExpertScales
+                    topk_ids = simulateExpertIds
+                    x_active_mask = xActiveMaskOut
+                with set_ascend_forward_context(
+                            attn_metadata=None,
+                            vllm_config=self.vllm_config,
+                            reserved_mc2_mask=self.reserved_mc2_mask,
+                            batch_descriptor=batch_descriptor,
+                            aclgraph_runtime_mode=aclgraph_runtime_mode,
+                            prefetch_stream=self.prefetch_stream,
+                            model_instance=self.model):
+                        if self.connector_name == "camp2pconnector":
+                            rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
+                                                        layer_idx=layer_idx,
+                                                        capture_mode=True,
+                                                        topk_ids=topk_ids,
+                                                        topk_weights=topk_weights,
+                                                        x_active_mask=x_active_mask,
+                                                        cam_p2p_ep_name=cam_p2p_ep_name
+                                                        )
+                        else:
+                            rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
+                                                            layer_idx=layer_idx,
+                                                            capture_mode=True,
+                                                            group_list=group_list,
+                                                            dynamic_scales=dynamic_scales,
+                                                            topk_weights=topk_weights
+                                                    )
                 # send
                 if self.connector_name == "m2nconnector":
                     self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)

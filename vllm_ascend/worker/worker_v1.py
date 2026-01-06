@@ -251,6 +251,7 @@ class NPUWorker(WorkerBase):
             try:
                 while not self._ffn_shutdown_event.is_set():
                     # Execute FFN computation
+                    # is_ubatch = self.model_runner.connector.recv_metadata()
                     is_ubatch = self.recv_is_ubatch()
                     self.model_runner.execute_model(scheduler_output=None,is_ubatch=is_ubatch)
             except Exception as e:
