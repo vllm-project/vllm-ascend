@@ -65,10 +65,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
                                       0)
         max_num_seqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        self.batch_seq_mask_buf = torch.empty(max_num_seqs *
-                                              self.decode_threshold,
-                                              dtype=torch.uint8,
-                                              device=device)
 
     @classmethod
     def get_cudagraph_support(
@@ -232,13 +228,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
                                                          self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-        batch_seq_mask = (cp_seq_len == 0)
-        self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
-            batch_seq_mask, non_blocking=True)
-        batch_seq_mask = self.batch_seq_mask_buf[:batch_seq_mask.shape[0]]
-        cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
         decode_metadata.cp_seq_len = cp_seq_len
-        decode_metadata.batch_seq_mask = batch_seq_mask
         return decode_metadata
 
 
@@ -634,8 +624,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 lse=softmax_lse)
 
         # Update out&lse
-        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse,
-                                             decode_meta.batch_seq_mask)
+        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse,)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 

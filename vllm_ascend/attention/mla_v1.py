@@ -128,7 +128,6 @@ class AscendMLADecodeMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
-    batch_seq_mask: torch.Tensor = None
 
 
 @dataclass
@@ -586,7 +585,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             self.block_table = self.block_table[:self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
-        cp_seq_len, batch_seq_mask = None, None
+        cp_seq_len = None
 
         if self.graph_pad_size > num_reqs:
             if self.speculative_config.disable_padded_drafter_batch:
@@ -647,8 +646,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             actual_seq_lengths_q=actual_seq_lengths_q,
             sin=sin[:self.num_decode_tokens, ...],
             cos=cos[:self.num_decode_tokens, ...],
-            cp_seq_len=cp_seq_len,
-            batch_seq_mask=batch_seq_mask)
+            cp_seq_len=cp_seq_len)
         return decode_metadata
 
     def build_for_graph_capture(

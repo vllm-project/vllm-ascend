@@ -59,10 +59,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.batch_seq_mask_buf = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            dtype=torch.uint8,
-            device=device)
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group(
         ).rank_in_group if self.pcp_size > 1 else 0
@@ -226,15 +222,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_computed_tokens_array = np.array(
                 num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
-            batch_seq_mask = (num_computed_tokens_array[:, self.pcp_rank,
-                                                        self.dcp_rank] == 0)
             # TODO: numpy array mode of the shared memory is used to improve performance
-            self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
-                torch.from_numpy(batch_seq_mask), non_blocking=True)
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
-                batch_seq_mask=self.batch_seq_mask_buf[:batch_seq_mask.
-                                                       shape[0]],
                 block_tables=block_table[:num_decodes])
 
         attn_metadata = AscendMetadata(
@@ -548,7 +538,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(
                 query, k_nope, value, **common_kwargs)
         attn_out_lse = _process_attn_out_lse(
-            attn_out, attn_lse, attn_metadata.decode_meta.batch_seq_mask)
+            attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
 
@@ -652,11 +642,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 actual_seq_lengths_kv,
                 actual_seq_lengths=attn_metadata.prefill.chunked_context.
                 actual_chunk_seq_lengths)
-            batch_chunk_seq_mask = attn_metadata.prefill.chunked_context.batch_chunk_seq_mask
-            lse_mask = batch_chunk_seq_mask[:, None,
-                                            None].expand_as(prefix_chunk_lse)
-            prefix_chunk_lse = torch.where(lse_mask, -torch.inf,
-                                           prefix_chunk_lse)
 
         return prefix_chunk_output, prefix_chunk_lse
 

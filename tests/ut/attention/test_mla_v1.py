@@ -121,7 +121,6 @@ class TestAscendMLADecodeMetadata(TestBase):
         seq_lens_list = [2, 3]
         attn_mask = None
         cp_seq_len = torch.tensor([2, 3])
-        batch_seq_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
 
         metadata = AscendMLADecodeMetadata(input_positions=input_positions,
                                            block_table=block_table,
@@ -129,8 +128,7 @@ class TestAscendMLADecodeMetadata(TestBase):
                                            max_seq_lens=max_seq_lens,
                                            seq_lens_list=seq_lens_list,
                                            attn_mask=attn_mask,
-                                           cp_seq_len=cp_seq_len,
-                                           batch_seq_mask=batch_seq_mask)
+                                           cp_seq_len=cp_seq_len)
 
         self.assertIs(metadata.input_positions, input_positions)
         self.assertIs(metadata.block_table, block_table)
@@ -139,7 +137,6 @@ class TestAscendMLADecodeMetadata(TestBase):
         self.assertEqual(metadata.seq_lens_list, seq_lens_list)
         self.assertIsNone(attn_mask)
         self.assertIs(metadata.cp_seq_len, cp_seq_len)
-        self.assertIs(metadata.batch_seq_mask, batch_seq_mask)
 
 
 class TestAscendMLAMetadata(TestBase):
