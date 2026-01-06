@@ -50,10 +50,6 @@ class D2DExpertWeightLoader:
             )
             return
 
-        # If neither send nor receive task is needed for this layer on this rank, return
-        if not (expert_send_info or expert_recv_info):
-            return
-
         self.updated_expert_map = updated_expert_map
 
         self.layer_id = layer_id

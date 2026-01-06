@@ -26,7 +26,7 @@ class TestMoECommMethod(TestBase):
         self.moe_config.tp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
-        self.moe_config.num_global_redundant_experts = 0
+        self.moe_config.global_redundant_expert_num = 0
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
     @patch(
