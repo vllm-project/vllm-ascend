@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-16
+    runs-on: linux-amd64-cpu-8
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     steps:
