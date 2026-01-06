@@ -136,6 +136,7 @@ class EagleProposer(VllmEagleProposer):
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_name = list(draft_attn_layer_names)
+        self.attn_layer_names = self.attn_layer_name
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
@@ -442,14 +443,19 @@ class EagleProposer(VllmEagleProposer):
             # For the requests that exceed the max model length, we set the
             # TODO: sequence length to 1 to minimize their overheads in attention.
 
+            if self.attn_metadata_builder is None:
+                attn_metadata_builder = self._get_attention_metadata_builder()
+            else:
+                attn_metadata_builder = self.attn_metadata_builder
+            block_size = attn_metadata_builder.kv_cache_spec.block_size
+
             # Compute the slot mapping.
-            block_numbers = (clamped_positions // self.block_size)
+            block_numbers = (clamped_positions // block_size)
             block_ids = attn_metadata.block_tables.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            slot_mapping_tmp = (
-                block_ids * self.vllm_config.cache_config.block_size +
-                clamped_positions % self.block_size)
+            slot_mapping_tmp = (block_ids * block_size +
+                                clamped_positions % block_size)
 
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
