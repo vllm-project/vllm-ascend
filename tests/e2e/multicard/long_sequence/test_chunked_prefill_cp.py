@@ -58,62 +58,75 @@ INPUT_PROMPTS = [
     LONG_PROMPT +
     "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
     LONG_PROMPT +
-    "Question: what is the age of Zack Blue? Your answer: The age of Zack Blue is "
+    "Question: what is the age of Alice Johnson? Your answer: The age of Alice Johnson is "
 ]
 
+VLLM_OUTPUT = [INPUT_PROMPTS[0] + "29", INPUT_PROMPTS[1] + "27"]
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
+
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [50])
-def test_models_prefix_cache_with_cp_basic(model: str,
-                                           max_tokens: int) -> None:
+@pytest.mark.parametrize("max_tokens", [2])
+def test_models_chunked_prefill_with_cp_basic(
+        model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(
             model,
+            block_size=128,
             max_model_len=4096,
             enforce_eager=True,
             max_num_batched_tokens=128,
             enable_expert_parallel=True,
             enable_prefix_caching=False,
+            enable_chunked_prefill=True,
             tensor_parallel_size=SETTINGS[model]['TP'],
             quantization=SETTINGS[model]["quantization"],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
-        vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
+        chunked_prefill_outputs = vllm_model.generate_greedy(
+            INPUT_PROMPTS, max_tokens)
+
+    for i in range(len(chunked_prefill_outputs)):
+        assert chunked_prefill_outputs[i][1] == VLLM_OUTPUT[i]
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [50])
-def test_models_prefix_cache_with_cp_piecewise(model: str,
-                                               max_tokens: int) -> None:
+@pytest.mark.parametrize("max_tokens", [2])
+def test_models_chunked_prefill_with_cp_piecewise(
+        model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(
             model,
+            block_size=128,
             max_model_len=4096,
             enforce_eager=False,
             max_num_batched_tokens=128,
             enable_expert_parallel=True,
             enable_prefix_caching=False,
+            enable_chunked_prefill=True,
             tensor_parallel_size=SETTINGS[model]['TP'],
             quantization=SETTINGS[model]["quantization"],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
-        vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
+        chunked_prefill_outputs = vllm_model.generate_greedy(
+            INPUT_PROMPTS, max_tokens)
+
+    for i in range(len(chunked_prefill_outputs)):
+        assert chunked_prefill_outputs[i][1] == VLLM_OUTPUT[i]
 
 
-@pytest.mark.skipif(vllm_version_is('0.12.0'),
-                    reason="0.12.0 is not supported for context sequence.")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [50])
-def test_models_prefix_cache_with_cp_full_graph(model: str,
-                                                max_tokens: int) -> None:
+@pytest.mark.parametrize("max_tokens", [2])
+def test_models_chunked_prefill_with_cp_full_graph(
+        model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(model,
+                    block_size=128,
                     max_model_len=4096,
                     enforce_eager=False,
                     max_num_batched_tokens=128,
                     enable_expert_parallel=True,
                     enable_prefix_caching=False,
+                    enable_chunked_prefill=True,
                     tensor_parallel_size=SETTINGS[model]['TP'],
                     quantization=SETTINGS[model]["quantization"],
                     prefill_context_parallel_size=SETTINGS[model]['PCP'],
@@ -122,4 +135,8 @@ def test_models_prefix_cache_with_cp_full_graph(model: str,
                         "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
                         "cudagraph_mode": "FULL_DECODE_ONLY"
                     }) as vllm_model:
-        vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
+        chunked_prefill_outputs = vllm_model.generate_greedy(
+            INPUT_PROMPTS, max_tokens)
+
+    for i in range(len(chunked_prefill_outputs)):
+        assert chunked_prefill_outputs[i][1] == VLLM_OUTPUT[i]
