@@ -40,6 +40,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           JSON_PATH=".github/workflows/misc/model_list.json"
 
           git fetch origin main
