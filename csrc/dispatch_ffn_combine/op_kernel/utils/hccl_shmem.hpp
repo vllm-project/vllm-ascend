@@ -53,6 +53,24 @@ FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *
 }
 
 
+FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32_t cmp_val) {
+    do {
+        AscendC::LocalTensor<int32_t> ub;
+        ub.address_.logicPos = static_cast<uint8_t>(TPosition::VECIN);
+        ub.address_.bufferAddr = 0;
+        AscendC::GlobalTensor<int32_t> sig;
+        sig.SetGlobalBuffer(sig_addr);
+        AscendC::DataCopy(ub, sig, 8);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        if (ub(0) != cmp_val) {
+            return;
+        }
+    } while (true);
+    return;
+}
+
+
 constexpr int32_t MAX_RANK_SIZE = 32;
 class HcclShmem {
 public:
