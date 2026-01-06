@@ -22,13 +22,6 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
-              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
-              - name: VLLM_ASCEND_REMOTE_URL
-                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
-              - name: RESULT_FILE_PATH
-                value: {{ result_file_path | default("/root/.cache/tests/ret") }}
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
             command:
@@ -81,13 +74,6 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
-              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
-              - name: VLLM_ASCEND_REMOTE_URL
-                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
-              - name: RESULT_FILE_PATH
-                value: {{ result_file_path | default("/root/.cache/tests/ret") }}
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
             command:
