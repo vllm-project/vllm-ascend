@@ -236,13 +236,12 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
                                                          self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-        batch_seq_mask = (cp_seq_len == 0)
-        self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
-            batch_seq_mask, non_blocking=True)
-        batch_seq_mask = self.batch_seq_mask_buf[:batch_seq_mask.shape[0]]
-        cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
-        decode_metadata.cp_seq_len = cp_seq_len
-        decode_metadata.batch_seq_mask = batch_seq_mask
+
+        decode_metadata.cp_seq_len = cp_seq_len.tolist()
+
+        actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
+        decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
+
         return decode_metadata
 
 
@@ -549,9 +548,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
         else:
             num_heads = self.num_heads
         # use pcp & dcp split computed token nums from scheduler to compute actual seq_len and seq_mask
-        seq_len = decode_meta.cp_seq_len
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+
+        actual_seq_lengths = None
+        input_layout = "BNSD"
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
@@ -566,14 +567,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
-            input_layout = "BNSD"
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
-
-        actual_seq_lengths = decode_meta.actual_seq_lengths_q[:attn_metadata.num_decodes]
-        actual_seq_lengths_kv = seq_len.tolist()
 
         common_kwargs = {
             'query_rope': q_pe,
@@ -589,7 +586,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             'block_table': decode_meta.block_table,
             'block_size': block_size,
             'actual_seq_lengths': actual_seq_lengths,
-            'actual_seq_lengths_kv': actual_seq_lengths_kv,
+            'actual_seq_lengths_kv': decode_meta.cp_seq_len,
             'softmax_lse_flag': True,
         }
 
@@ -610,7 +607,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     q_nope, k_nope, k_nope, **common_kwargs)
                 update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
-            if common_kwargs["input_layout"] == "BNSD":
+            if input_layout == "BNSD":
                 softmax_lse = torch.empty((num_tokens, num_heads, 1, 1),
                                            dtype=torch.float,
                                            device=q_nope.device)
@@ -621,10 +618,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             
             graph_params.attn_params[num_tokens].append(
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
-                 weak_ref_tensors(q_pe), weak_ref_tensors(k_pe),
-                 num_heads, self.num_kv_heads, input_layout, spec_attn_mask,
-                 sparse_mode, self.scale, decode_meta.block_table, block_size,
-                 actual_seq_lengths, actual_seq_lengths_kv,
+                 weak_ref_tensors(q_pe), weak_ref_tensors(k_pe), num_heads,
+                 self.num_kv_heads, input_layout, spec_attn_mask, sparse_mode,
+                 self.scale, decode_meta.block_table, block_size,
+                 actual_seq_lengths, decode_meta.cp_seq_len,
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
@@ -648,7 +645,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
 
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
-            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1) #lse shape对不齐？
+            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
         attn_out_lse = self._process_attn_out_lse(attn_output, softmax_lse,
@@ -698,13 +695,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         softmax_lse: torch.Tensor,
         decode_meta: AscendMLADecodeMetadata,
     ) -> torch.Tensor:
-        out_mask = decode_meta.batch_seq_mask[:, None,
-                                              None].expand_as(attn_output)
-        attn_output = torch.where(out_mask, 0, attn_output)
-        lse_mask = decode_meta.batch_seq_mask[:, None,
-                                              None].expand_as(softmax_lse)
-        softmax_lse = torch.where(lse_mask, -torch.inf, softmax_lse)
-
         softmax_lse = softmax_lse.to(torch.float32)
         attn_output = attn_output.to(torch.float32)
         # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]

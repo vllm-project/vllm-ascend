@@ -463,19 +463,14 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
 
             decode_meta = forward_context.attn_metadata[key].decode
             seq_len = decode_meta.cp_seq_len
+            if isinstance(seq_len, torch.Tensor):
+                seq_len = seq_len.tolist()
             actual_seq_lengths_kv = seq_len
 
             pad_length = runtime_shape - len(actual_seq_lengths_kv)
             if pad_length > 0:
-                pad_tensor = np.zeros(pad_length,
-                                      dtype=actual_seq_lengths_kv.dtype)
-                actual_seq_lengths_kv = np.concatenate(
-                    [actual_seq_lengths_kv, pad_tensor])
-
-            if (runtime_shape - len(actual_seq_lengths)):
-                actual_seq_lengths = actual_seq_lengths + [
-                    actual_seq_lengths[-1]
-                ] * (runtime_shape - len(actual_seq_lengths))
+                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (runtime_shape -
+                                        len(actual_seq_lengths_kv))
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 
