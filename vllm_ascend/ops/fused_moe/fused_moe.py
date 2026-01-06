@@ -210,7 +210,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
-        self.moe_config.original_num_experts = num_experts
+        self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
