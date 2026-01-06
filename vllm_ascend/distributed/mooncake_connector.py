@@ -345,7 +345,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
-        self.num_layers = self.model_config.hf_config.num_hidden_layers
+        self.num_layers = self.model_config.hf_text_config.num_hidden_layers
         self.pp_layer_indices = {
             rank:
             get_prefill_pp_indices(self.num_layers, rank,

@@ -253,7 +253,7 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
+        self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config,
                                   "index_topk")
         self.attn_backend = get_attn_backend(
             0,
@@ -2398,7 +2398,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
-        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
+        num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
                       self.kv_caches, num_attn_module)
@@ -2932,7 +2932,7 @@ class NPUModelRunner(GPUModelRunner):
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:
             if (self.vllm_config.speculative_config is not None
-                    and self.vllm_config.model_config.hf_config.model_type
+                    and self.vllm_config.model_config.hf_text_config.model_type
                     not in ["qwen3_next"]):
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
