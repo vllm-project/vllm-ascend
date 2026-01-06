@@ -292,12 +292,20 @@ class KVCacheSendingThread(threading.Thread):
 
 class KVCacheRecvingThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, tp_size: int, _prefill_pp_size: int,
-                 engine: TransferEngine, local_engine_id: str,
-                 local_handshake_port: int, side_channel_port: int,
-                 local_kv_caches_base_addr: list[int], block_len: list[int],
-                 ready_event: threading.Event, vllm_config: VllmConfig,
-                 kv_caches: dict[str, Any]):
+    def __init__(self,
+                 tp_rank: int,
+                 tp_size: int,
+                 _prefill_pp_size: int,
+                 engine: TransferEngine,
+                 local_engine_id: str,
+                 local_handshake_port: int,
+                 side_channel_port: int,
+                 local_kv_caches_base_addr: list[int],
+                 block_len: list[int],
+                 ready_event: threading.Event,
+                 vllm_config: VllmConfig,
+                 kv_caches: dict[str, Any],
+                 prefill_pp_layer_partition: Optional[str] = None):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -337,6 +345,14 @@ class KVCacheRecvingThread(threading.Thread):
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
+        self.num_layers = self.model_config.hf_config.num_hidden_layers
+        self.pp_layer_indices = {
+            rank:
+            get_prefill_pp_indices(self.num_layers, rank,
+                                   self._prefill_pp_size,
+                                   prefill_pp_layer_partition)
+            for rank in range(self._prefill_pp_size)
+        }
         if not is_vl_model(vllm_config):
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
@@ -412,9 +428,16 @@ class KVCacheRecvingThread(threading.Thread):
             logger.debug(
                 f"Finished transferring KV cache for request {request_id}.")
         except Exception as e:
-            logger.error("Failed to transfer KV cache for request "
-                         f"{request_id}: {e}")
+            logger.error(
+                "Failed to transfer KV cache for request "
+                f"{request_id}: {e}",
+                exc_info=True)
         finally:
+            if all_task_done:
+                self.task_tracker.update_done_task_count(request_id)
+                if request_id in self.proc_not_transfer_request:
+                    del self.proc_not_transfer_request[request_id]
+            self.request_queue.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
@@ -423,11 +446,6 @@ class KVCacheRecvingThread(threading.Thread):
                                         remote_port_send_num)
             self._send_done_signal_to_free_remote_port(request_id, remote_host,
                                                        remote_port_send_num)
-            if all_task_done:
-                self.task_tracker.update_done_task_count(request_id)
-                if request_id in self.proc_not_transfer_request:
-                    del self.proc_not_transfer_request[request_id]
-            self.request_queue.task_done()
 
     def _send_done_signal_to_free_remote_port(self, request_id, remote_host,
                                               remote_port_send_num):
@@ -488,9 +506,13 @@ class KVCacheRecvingThread(threading.Thread):
 
         remote_kv_caches_base_addrs = \
             self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-        num_layers = self.model_config.hf_text_config.num_hidden_layers
-        first_layer_index, end_layer_index = get_pp_indices(
-            num_layers, prefill_pp_rank, self._prefill_pp_size)
+        first_layer_index, end_layer_index = self.pp_layer_indices[
+            prefill_pp_rank]
+        # support MTP layer kv transfer
+        if self.vllm_config.speculative_config is not None:
+            # all MTP layer use the same kv cache layer, so only need to transfer once
+            if prefill_pp_rank == self._prefill_pp_size - 1:
+                end_layer_index = end_layer_index + 1
         num_cache_per_layer = len(list(
             self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = \
@@ -539,97 +561,116 @@ class KVCacheRecvingThread(threading.Thread):
             request_id, req_transfer_elapsed, num_transfer_groups, num_blocks,
             get_ip(), self.tp_rank, session_id)
 
-        # Determine if the current position is the offset position at the end of the KV transmission.
+        # Determine if the current position is the offset position at the end of
+        # the KV transmission.
         is_kv_transfer_end = (
             global_offset == tp_num_need_pulls * self._prefill_pp_size - 1)
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
-        # need_nz_cache maybe caused error in non-MLA models
-        if need_cat_cache:
-            self._cat_kv_cache(grouped_local_block_ids, tp_num_need_pulls)
+        need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
+        if need_nz_cache or need_cat_cache:
+            self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls,
+                                   need_cat_cache, need_nz_cache)
 
-    def _cat_kv_cache(self, block_ids: list[list[int]],
-                      tp_num_need_pulls: int):
+    def reformat_kv_cache(self,
+                          block_ids: list[list[int]],
+                          tp_num_need_pulls: int,
+                          need_cat_cache: bool = False,
+                          need_nz_cache: bool = False):
         # Get necessary parameters
         k_cache = list(self.kv_caches.values())[0][0]
         dtype = k_cache.dtype
         device = k_cache.device
-        head_dim = self.model_config.hf_text_config.head_dim
-        block_size = self.vllm_config.cache_config.block_size
-        num_kv_head = max(
-            self.model_config.hf_text_config.num_key_value_heads //
-            self.tp_size, 1)
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32)
+        block_ids_tensor = torch.tensor(flat_block_ids,
+                                        dtype=torch.int32,
+                                        device=device)
         num_blocks = len(flat_block_ids)
-        block_len = num_blocks * block_size
+        num_tokens = num_blocks * self.block_size
 
         # Create device tensors for copy operations
-        block_table = block_ids_tensor.view(1, -1).to(device=device)
-        block_len_tensor = torch.tensor([block_len],
-                                        dtype=torch.int32).to(device=device)
-        seq_start_tensor = torch.tensor([0],
-                                        dtype=torch.int32).to(device=device)
+        block_table = block_ids_tensor.view(1, -1)
+        block_len_tensor = torch.tensor([num_tokens],
+                                        dtype=torch.int32,
+                                        device=device)
+        seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
         # Initialize buffers
-        k_buffer = torch.empty(block_len,
-                               num_kv_head,
-                               head_dim,
-                               dtype=dtype,
-                               device=device)
-        v_buffer = torch.empty(block_len,
-                               num_kv_head,
-                               head_dim,
-                               dtype=dtype,
-                               device=device)
+        k_buffer = torch.empty(
+            (num_tokens, self.num_kv_heads, self.k_head_dim),
+            dtype=dtype,
+            device=device)
+        v_buffer = torch.empty(
+            (num_tokens, self.num_kv_heads, self.v_head_dim),
+            dtype=dtype,
+            device=device)
 
         # Create slot mapping for reshape operations
-        block_offsets = torch.arange(0, block_size, dtype=torch.int32)
+        block_offsets = torch.arange(0,
+                                     self.block_size,
+                                     dtype=torch.int32,
+                                     device=device)
         slot_mapping = (block_offsets.reshape(
-            (1, block_size)) + block_ids_tensor.reshape(
-                (num_blocks, 1)) * block_size)
-        slot_mapping = slot_mapping.flatten().to(device=device)
+            (1, self.block_size)) + block_ids_tensor.reshape(
+                (num_blocks, 1)) * self.block_size).flatten()
+
+        # FIXME: Right now, if we skip synchronization at this point, the system
+        # will crash in GQA scenarios. However, we still haven't identified the
+        # root cause.
+        torch.npu.synchronize()
 
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
             # Load cache data into buffers
-            torch_npu.atb.npu_paged_cache_load(
-                k_cache_layer,
-                v_cache_layer,
-                block_table,
-                block_len_tensor,
-                seq_starts=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
-            )
-
-            # Transpose KV cache
-            k_buffer = self._transpose_kv_cache_between_head(
-                k_buffer, num_blocks, block_size, block_len, num_kv_head,
-                tp_num_need_pulls)
-            v_buffer = self._transpose_kv_cache_between_head(
-                v_buffer, num_blocks, block_size, block_len, num_kv_head,
-                tp_num_need_pulls)
-
-            # Reshape and cache the processed buffers
-            torch_npu._npu_reshape_and_cache(
-                key=k_buffer,
-                value=v_buffer,
-                key_cache=k_cache_layer,
-                value_cache=v_cache_layer,
-                slot_indices=slot_mapping,
-            )
-
+            torch_npu.atb.npu_paged_cache_load(k_cache_layer,
+                                               v_cache_layer,
+                                               block_table,
+                                               block_len_tensor,
+                                               seq_starts=seq_start_tensor,
+                                               key=k_buffer,
+                                               value=v_buffer)
+            if need_cat_cache:
+                self._cat_kv_cache(k_cache_layer, v_cache_layer, k_buffer,
+                                   v_buffer, tp_num_need_pulls, num_blocks,
+                                   num_tokens, slot_mapping)
+            if need_nz_cache:
+                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer,
+                                  v_buffer, slot_mapping)
         # Clean up buffers
         del k_buffer, v_buffer
 
-    def _transpose_kv_cache_between_head(
-            self, buffer: torch.Tensor, num_blocks: int, block_size: int,
-            block_len: int, num_kv_head: int,
-            tp_num_need_pulls: int) -> torch.Tensor:
-        buffer = buffer.view(num_blocks, tp_num_need_pulls, block_size, -1)
-        buffer.transpose_(1, 2)
-        return buffer.contiguous().view(block_len, num_kv_head, -1)
+    def _cat_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
+                      tp_num_need_pulls, num_blocks, num_tokens, slot_mapping):
+
+        def _transpose_kv_cache_between_head(
+                buffer: torch.Tensor) -> torch.Tensor:
+            buffer = buffer.view(num_blocks, tp_num_need_pulls,
+                                 self.block_size, -1)
+            buffer.transpose_(1, 2)
+            return buffer.contiguous().view(num_tokens, self.num_kv_heads, -1)
+
+        # Transpose KV cache
+        k_buffer = _transpose_kv_cache_between_head(k_buffer)
+        v_buffer = _transpose_kv_cache_between_head(v_buffer)
+
+        # Reshape and cache the processed buffers
+        torch_npu._npu_reshape_and_cache(key=k_buffer,
+                                         value=v_buffer,
+                                         key_cache=k_cache_layer,
+                                         value_cache=v_cache_layer,
+                                         slot_indices=slot_mapping)
+
+    def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
+                     slot_mapping):
+        nz_fmt_last_dim = 16
+        k_cache_layer = k_cache_layer.view(
+            -1, self.k_head_dim * self.num_kv_heads // nz_fmt_last_dim,
+            self.block_size, nz_fmt_last_dim)
+        v_cache_layer = v_cache_layer.view(
+            -1, self.v_head_dim * self.num_kv_heads // nz_fmt_last_dim,
+            self.block_size, nz_fmt_last_dim)
+        torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer,
+                                          v_cache_layer, slot_mapping)
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
@@ -677,6 +718,13 @@ class KVCacheRecvingThread(threading.Thread):
                              request_id, remote_host, remote_handshake_port)
                 raise RuntimeError(
                     f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
+        except RuntimeError as e:
+            if isinstance(sock, zmq.Socket):  # type: ignore
+                sock.close()
+                sock = None
+                logger.warning(
+                    f"Unexpected error occurred in socket, {e}, closing the original channel"
+                )
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host,
@@ -1133,6 +1181,8 @@ class MooncakeConnectorWorker:
         # get prefill pp size from extra config
         self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
         assert self._decode_pp_size == 1, "decode pp size must be 1"
+        self._prefill_pp_layer_partition = prefill_parallel_config.get(
+            "pp_layer_partition", None)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -1242,7 +1292,8 @@ class MooncakeConnectorWorker:
                 self.tp_rank, self.tp_size, self._prefill_pp_size, self.engine,
                 self.engine_id, self.handshake_port, self.side_channel_port,
                 kv_caches_base_addr, self.block_len, ready_event,
-                self.vllm_config, self.kv_caches)
+                self.vllm_config, self.kv_caches,
+                self._prefill_pp_layer_partition)
             self.kv_recv_thread.start()
 
         start_wait_time = time.time()
@@ -1733,3 +1784,31 @@ def ensure_zmq_recv(
                 raise RuntimeError(
                     f"Failed to receive data after {max_retries} "
                     f"retries: {e}")
+
+
+# decode node should know pp_partition_layer in prefill node,
+# it is configured in kv_transfer_config by partition_list_str,
+# default using vllm layer split algorithm.
+def get_prefill_pp_indices(
+        num_hidden_layers: int,
+        pp_rank: int,
+        pp_size: int,
+        partition_list_str: Optional[str] = None) -> tuple[int, int]:
+    if partition_list_str is None:
+        return get_pp_indices(num_hidden_layers, pp_rank, pp_size)
+    else:
+        try:
+            partitions = [
+                int(layer) for layer in partition_list_str.split(",")
+            ]
+        except ValueError as err:
+            raise ValueError("Invalid partition string: {}".format(
+                partition_list_str)) from err
+        if len(partitions) != pp_size:
+            raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
+        if sum(partitions) != num_hidden_layers:
+            raise ValueError(
+                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+        start_layer = sum(partitions[:pp_rank])
+        end_layer = start_layer + partitions[pp_rank]
+        return (start_layer, end_layer)
