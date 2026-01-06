@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
+from typing import Optional
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -14,6 +15,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
+from vllm_ascend.ops.triton.rmsnormbias.add_rmsnorm_bias_kernel import add_rmsnorm_bias
+
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
@@ -284,6 +287,27 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
     return output
 
 
+def add_rmsnorm_bias_impl(input: torch.Tensor, residual: torch.Tensor,
+                     norm_weight: torch.Tensor,
+                     norm_bias: Optional[torch.Tensor],
+                     eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    x, residual=add_rmsnorm_bias(input, residual,
+                     norm_weight,
+                     norm_bias,
+                     eps)
+    return x, residual
+
+
+def add_rmsnorm_bias_impl_fake(
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_bias: torch.Tensor,
+        eps: float = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input)
+    output2 = torch.empty_like(input)
+    return output, output2
+
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
 # is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
 # aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
@@ -367,5 +391,11 @@ direct_register_custom_op(op_name="matmul_and_reduce",
 direct_register_custom_op(op_name="quantize",
                           op_func=_quantize_impl,
                           fake_impl=_quantize_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="add_rmsnorm_bias",
+                          op_func=add_rmsnorm_bias_impl,
+                          fake_impl=add_rmsnorm_bias_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
