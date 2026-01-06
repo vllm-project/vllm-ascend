@@ -34,7 +34,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
 
 
-# TODO: add full decode only (when ready)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_qwen3_next_mtp_acceptance_tp4(model_name):
     golden = [0.85, 0.46, 0.19]
@@ -55,6 +54,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
                     distributed_executor_backend="mp",
                     disable_log_stats=False,
                     speculative_config={
+                        "cudagraph_mode": "FULL_DECODE_ONLY",
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 3,
                     },
@@ -88,6 +88,8 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
     cleanup_dist_env_and_memory()
 
 
+# FIXME: When applying `FULL_DECODE_ONLY` in this e2e, ci will fail.
+# The failure can not be reproduced locally.
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
