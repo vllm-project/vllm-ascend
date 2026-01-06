@@ -27,7 +27,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
@@ -88,6 +88,11 @@ class NPUWorker(WorkerBase):
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
+        # Import _inductor for graph mode execution with triton
+        # This lazy import avoids torch_npu re-initialization in patch
+        from vllm.triton_utils import HAS_TRITON
+        if HAS_TRITON:
+            import torch_npu._inductor  # noqa: F401
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
@@ -168,25 +173,27 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_config.hidden_size
+        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        for name, param in model.named_parameters():
-            if 'w2_weight' in name and param.shape[2] == hidden_size:
-                parts = name.split('.')
-                param_name = parts[-1]
-                parent_module = model.get_submodule(".".join(parts[:-1]))
+        if tags is None or "weights" in tags:
+            for name, param in model.named_parameters():
+                if 'w2_weight' in name and param.shape[2] == hidden_size:
+                    parts = name.split('.')
+                    param_name = parts[-1]
+                    parent_module = model.get_submodule(".".join(parts[:-1]))
 
-                w2_data = param.transpose(1, 2)
-                w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-                setattr(parent_module, param_name, w2_data)
-            elif 'w13_weight' in name and param.shape[1] == hidden_size:
-                parts = name.split('.')
-                param_name = parts[-1]
-                parent_module = model.get_submodule(".".join(parts[:-1]))
+                    w2_data = param.transpose(1, 2)
+                    w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
+                    setattr(parent_module, param_name, w2_data)
+                elif 'w13_weight' in name and param.shape[1] == hidden_size:
+                    parts = name.split('.')
+                    param_name = parts[-1]
+                    parent_module = model.get_submodule(".".join(parts[:-1]))
 
-                w13_data = param.transpose(1, 2)
-                w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-                setattr(parent_module, param_name, w13_data)
+                    w13_data = param.transpose(1, 2)
+                    w13_data = torch.nn.Parameter(w13_data,
+                                                  requires_grad=False)
+                    setattr(parent_module, param_name, w13_data)
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -292,7 +299,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -311,7 +318,8 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, NoneType)):
+        if isinstance(output,
+                      (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)
@@ -364,11 +372,25 @@ class NPUWorker(WorkerBase):
         self.model_runner.eplb_warmup()
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
                         or []).copy()
-        if not self.model_config.enforce_eager:
+        cg_capture_sizes: list[int] = []
+        if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+            cg_capture_sizes = [] if cg_sizes is None else cg_sizes
             warmup_sizes = [
-                x for x in warmup_sizes if x not in
-                self.vllm_config.compilation_config.cudagraph_capture_sizes
+                x for x in warmup_sizes if x not in cg_capture_sizes
             ]
+
+        compile_ranges = self.vllm_config.compilation_config.get_compile_ranges(
+        )
+        # For each compile_range, if none of the batch sizes
+        # in warmup_sizes or cudagraph_capture_sizes are in the range,
+        # add the end of the range to ensure compilation/warmup.
+        all_sizes = set(cg_capture_sizes)
+        all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
+        for compile_range in compile_ranges:
+            if not any(x in compile_range for x in all_sizes):
+                warmup_sizes.append(compile_range.end)
+
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)

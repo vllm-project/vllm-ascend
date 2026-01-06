@@ -8,8 +8,9 @@ from vllm.v1.sample.rejection_sampler import (GREEDY_TEMPERATURE,
                                               generate_uniform_probs)
 
 from vllm_ascend.ops.triton.reject_sample import (
-    expand_triton, rejection_greedy_sample_with_triton,
-    rejection_random_sample_kernel, sample_recovered_tokens_kernel)
+    cal_grid_and_block_size, expand_triton,
+    rejection_greedy_sample_with_triton, rejection_random_sample_kernel,
+    sample_recovered_tokens_kernel)
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 
 PLACEHOLDER_TOKEN_ID = -1
@@ -119,20 +120,18 @@ def rejection_sample(
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    if HAS_TRITON:
+        grid, block_size = cal_grid_and_block_size(batch_size)
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
         if HAS_TRITON:
-            rejection_greedy_sample_with_triton(
-                output_token_ids,
-                num_draft_tokens,
-                cu_num_draft_tokens,
-                draft_token_ids,
-                target_argmax,
-                bonus_token_ids,
-                is_greedy,
-                max_spec_len,
-            )
+            rejection_greedy_sample_with_triton(output_token_ids,
+                                                num_draft_tokens,
+                                                cu_num_draft_tokens,
+                                                draft_token_ids, target_argmax,
+                                                bonus_token_ids, is_greedy,
+                                                max_spec_len, grid, block_size)
         else:
             if min(num_draft_tokens) == 1 and max(
                     num_draft_tokens) == 1 and sampling_metadata.all_greedy:
@@ -180,7 +179,7 @@ def rejection_sample(
 
     # Rejection sampling for random sampling requests.
     if HAS_TRITON:
-        rejection_random_sample_kernel[(batch_size, )](
+        rejection_random_sample_kernel[(grid, )](
             output_token_ids,
             cu_num_draft_tokens,
             draft_token_ids,
@@ -192,7 +191,9 @@ def rejection_sample(
             is_greedy,
             max_spec_len,
             vocab_size,
+            batch_size,
             NO_DRAFT_PROBS=draft_probs is None,
+            BLOCK_SIZE=block_size,
         )
     else:
         rejection_random_sample_pytorch(
