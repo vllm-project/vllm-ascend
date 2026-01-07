@@ -28,6 +28,7 @@ from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
 def compile_fx(graph: GraphModule, example_inputs: list,
@@ -51,7 +52,7 @@ def fusion_pass_compile(
 ) -> tuple[Optional[Callable], Optional[Any]]:
 
     def compile_inner(graph, example_inputs):
-        current_pass_manager = compiler_config["graph_fusion_manager"]
+        current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph, runtime_shape)
         return graph
 
