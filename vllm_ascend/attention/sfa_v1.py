@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
@@ -156,6 +157,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             and self.vllm_config.compilation_config.cudagraph_mode
             == CUDAGraphMode.FULL_DECODE_ONLY
         ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     @classmethod
     def get_cudagraph_support(
@@ -280,7 +282,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
-            attn_mask=common_attn_metadata.attn_mask,
+            attn_mask=self.attn_mask_builder.get_attention_mask(
+                self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_tables=block_table,
             sin=sin[:num_input_tokens],
