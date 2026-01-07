@@ -23,8 +23,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import dispose_tensor, is_310p
-import umdk_cam_op_lib
-from umdk_cam_operator import dispatch_gmm_combine_decode
+
+
 
 
 def cumsum_group_list(group_list: torch.Tensor,
@@ -273,6 +273,8 @@ def fused_experts(
         ep_rank_id: int,
         moe_expert_num:int,
     ):
+    import umdk_cam_op_lib
+    from umdk_cam_operator import dispatch_gmm_combine_decode
     output, _ = torch.ops.umdk_cam_op_lib.dispatch_gmm_combine_decode(
         x=hidden_states,
         expert_ids=topk_ids,

@@ -63,14 +63,14 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         self._counter = 0
 
         # Initialize ACL graph support
-        self.cudagraph_batch_sizes = list(
+        self.aclgraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
-        # self.aclgraph_batch_sizes = list(
-        #     reversed(self.compilation_config.cudagraph_capture_sizes))
         
         # Storage for captured graphs
         self._acl_graphs_full: dict[int, torch.npu.NPUGraph] = {
+        }  # {num_tokens: ACLGraph}
+        self._acl_graphs_ubatch_full: dict[int, torch.npu.NPUGraph] = {
         }  # {num_tokens: ACLGraph}
         self.graph_pool = None
 
@@ -95,6 +95,11 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         self.n_routed_experts = self.model_config.hf_config.n_routed_experts
         self.hidden_size = self.model_config.hf_config.hidden_size
         print(f'self.topk is {self.topk}')
+
+        # TODO(jcz): 对于ffn eager模式下_current_num_ubatches逻辑和layer_idx的计算逻辑需要优化
+        #            这里的2是hardcode，需要根据实际情况调整，初始化的时候目前暂时需要初始化成dummy run跑的batch_size
+        self._current_num_ubatches = self.afd_config.num_afd_stages
+        self.is_ubatch = False
         
         # self.profiler
         # import os
@@ -108,10 +113,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         #         torch_npu.profiler.ProfilerActivity.CPU,
         #         torch_npu.profiler.ProfilerActivity.NPU
         #     ],
-        #     schedule=torch_npu.profiler.schedule(wait=5, warmup=2, active=20, repeat=1, skip_first=20),
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=5, repeat=1, skip_first=120),
         #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
         #     experimental_config=experimental_config,
-        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/dl/y00889327/profile/prof_ffn")
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof_ffn")
         # )
         # self.prof.start()
 
@@ -122,47 +127,41 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         self.connector.init_afd_connector()
 
     def _get_current_layer_idx(self) -> int:
-        return (self._counter //
-                self.afd_config.num_afd_stages) % self.num_layers
+        return (self._counter // self._current_num_ubatches) % self.num_layers
     
     def profile_run(self):
         self._dummy_run(self.max_num_tokens)
 
         
     @torch.inference_mode()
-    def execute_model(self, scheduler_output=None, intermediate_tensors=None):
+    def execute_model(self, scheduler_output=None, intermediate_tensors=None, is_ubatch:bool=False):
         """Execute FFN computation for a single request"""
-        # scheduler_output and intermediate_tensors are unused in FFN server
-        # mode
         # self.prof.step()
         current_layer_idx = self._get_current_layer_idx()
         try:
-            # skip dense layer
-            if current_layer_idx < self.first_k_dense_replace:
+            # TODO(yxj)；support eager mode
+            # if current_layer_idx < self.first_k_dense_replace:
+            #     return
+            
+            if self.use_aclgraph and not is_ubatch:
+                # TODO(yxj):use _acl_graphs_full replay
+                self._ffn_forward(aclgraph_runtime_mode=CUDAGraphMode.NONE,is_ubatch=is_ubatch)
+                print(f"is_ubatch is false eager",flush=True)
                 return
-            if current_layer_idx >= self.num_hidden_layers:
-                return
-            torch.npu.synchronize()
-            if self.use_aclgraph:
+            elif self.use_aclgraph and is_ubatch:
+                # TODO(yxj):ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
                 # replay
                 if self.connector_name == "camm2nconnector":
-                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size)
-                    print(f'[CAM FFN Replay] Calculated max_num_tokens={max_num_tokens}')
-                elif self.connector_name == "camp2pconnector":
-                    max_num_tokens = self.max_num_tokens
+                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size) * (self.attn_size // self.ffn_size)
                 else:
                     max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
-                acl_graph_info = self._acl_graphs_full.get(max_num_tokens)
-                if acl_graph_info is None:
-                    raise ValueError(
-                        f"ACL graph not found for max_num_tokens={max_num_tokens}. "
-                        f"Available keys: {list(self._acl_graphs_full.keys())}, "
-                        f"connector={self.connector_name}, attn_size={self.attn_size}, ffn_size={self.ffn_size}")
+                acl_graph_info = self._acl_graphs_ubatch_full.get(max_num_tokens)
                 graph = acl_graph_info['graph']
                 graph.replay()
                 self.replay_cnt += 1
-                print(f"ffn replay,replay_cnt is {self.replay_cnt}")
+                print(f"ffn replay,replay_cnt is {self.replay_cnt}",flush=True)
                 return
+                
             if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
@@ -191,7 +190,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     h = self.hidden_size,
                     k = self.topk
                 )
-                output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data)
+                output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data, self._counter % self._current_num_ubatches)
+                self._current_num_ubatches = afdConnectorMetadata.num_ubatches
                 hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
                 group_list = expertTokenNums.to(torch.int64)
                 topk_weights = simulateExpertScales
@@ -212,6 +212,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 topk_weights = simulateExpertScales
                 topk_ids = simulateExpertIds
                 x_active_mask = xActiveMaskOut
+                print(f'recv_attn_output success ,layer id is {current_layer_idx}')
+                print(f'hidden_states shape is {hidden_states.shape},dtype is {hidden_states.dtype}')
             elif self.connector_name == "p2pconnector":
                 hidden_states,router_logits,topk_weights, topk_ids, row_idx, afdConnectorMetadata = self.connector.recv_attn_output()
                 if afdConnectorMetadata is not None and afdConnectorMetadata.recv_handle_list is not None:
@@ -231,102 +233,47 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 max_num_tokens = self.max_num_tokens * self.attn_size * (cam_afdconnector_data.moe_expert_num // self.ffn_size) * (self.attn_size // self.ffn_size)
             else:
                 max_num_tokens = self.max_num_tokens * self.topk * self.attn_size # 64
-            self.cudagraph_batch_sizes.append(max_num_tokens)
+            self.aclgraph_batch_sizes.append(max_num_tokens)
             num_tokens = hidden_states.shape[0]
-            acl_graph_info = self._find_cuda_graph(current_layer_idx,
-                                                    num_tokens)
-
+            print(f'num_tokens  is {num_tokens}')
             
-            print(f'acl_graph_info is {acl_graph_info}')
-            print(f'current_layer_idx is {current_layer_idx},num_tokens is {max_num_tokens}')
-            print(f'self._forword_cnt is {self._forword_cnt},num_tokens is {max_num_tokens}')
-           
-            if acl_graph_info is not None:
-                # Use captured ACL graph for computation
-                with set_ascend_forward_context(
-                        attn_metadata=None,
-                        vllm_config=self.vllm_config,
-                        reserved_mc2_mask=self.reserved_mc2_mask,
-                        # batch_descriptor=batch_descriptor,
-                        # aclgraph_runtime_mode=aclgraph_runtime_mode,
-                        prefetch_stream=self.prefetch_stream,
-                        model_instance=self.model):
-                    if self.connector_name == "m2nconnector":
-                        # 未combine hidden
-                        # TODO(yxj)：图模式
-                        rank_ffn_output = self._execute_with_acl_graph(
-                            acl_graph_info = acl_graph_info,
-                            hidden_states=hidden_states,
-                            group_list=group_list,
-                            dynamic_scales=dynamic_scales,
-                            topk_weights=topk_weights,
-                            current_layer_idx=current_layer_idx)
-                    elif self.connector_name == "camm2nconnector":
-                        # 未combine hidden
-                        rank_ffn_output = self._execute_with_acl_graph(
-                            acl_graph_info = acl_graph_info,
-                            hidden_states=hidden_states,
-                            group_list=group_list,
-                            dynamic_scales=dynamic_scales,
-                            topk_weights=topk_weights,
-                            current_layer_idx=current_layer_idx)
-                    elif self.connector_name == "camp2pconnector":
-                        # 未combine hidden
-                        rank_ffn_output = self._execute_with_acl_graph(
-                            acl_graph_info = acl_graph_info,
-                            hidden_states=hidden_states,
-                            topk_ids=topk_ids,
-                            x_active_mask=x_active_mask,
-                            topk_weights=topk_weights,
-                            current_layer_idx=current_layer_idx,
-                            cam_p2p_ep_name=cam_p2p_ep_name)
-                    else:
-                        rank_ffn_output = self._execute_with_acl_graph(
-                            acl_graph_info = acl_graph_info,
-                            hidden_states = hidden_states,
-                            router_logits = router_logits,
-                            current_layer_idx = current_layer_idx,
-                            topk_weights = topk_weights, 
-                            topk_ids = topk_ids,
-                            row_idx = row_idx,
-                            )
-            else:
-                # Fallback to eager mode
-                if afdConnectorMetadata is not None:
-                    ffn_need_forward_data = afdConnectorMetadata.ffn_need_forward_data
-                    with_prefill = ffn_need_forward_data.with_prefill
-                    moe_comm_type = ffn_need_forward_data.moe_comm_type
-                    num_input_tokens = ffn_need_forward_data.num_input_tokens
-                    total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
-                    current_layer_idx = afdConnectorMetadata.layer_idx
-                # test
-                with set_ascend_forward_context(
-                        attn_metadata=None,
-                        vllm_config=self.vllm_config,
-                        num_tokens=num_input_tokens,
-                        with_prefill=with_prefill,
-                        reserved_mc2_mask=self.reserved_mc2_mask,
-                        moe_comm_type=moe_comm_type,
-                        prefetch_stream=self.prefetch_stream,
-                        num_actual_tokens=total_num_scheduled_tokens,
-                        model_instance=self.model):
-                    if self.connector_name == "m2nconnector":
-                        # 未combine hidden
-                        rank_ffn_output = self._execute_eager_mode(
-                            hidden_states=hidden_states,
-                            group_list=group_list,
-                            dynamic_scales=dynamic_scales,
-                            topk_weights=topk_weights,
-                            current_layer_idx=current_layer_idx)
-                    elif self.connector_name == "camm2nconnector":
-                        # 未combine hidden
-                        rank_ffn_output = self._execute_eager_mode(
-                            hidden_states=hidden_states,
-                            group_list=group_list,
-                            dynamic_scales=dynamic_scales,
-                            topk_weights=topk_weights,
-                            current_layer_idx=current_layer_idx)
-                    elif self.connector_name == "camp2pconnector":
+            
+            # Fallback to eager mode
+            if afdConnectorMetadata is not None:
+                ffn_need_forward_data = afdConnectorMetadata.ffn_need_forward_data
+                with_prefill = ffn_need_forward_data.with_prefill
+                moe_comm_type = ffn_need_forward_data.moe_comm_type
+                num_input_tokens = ffn_need_forward_data.num_input_tokens
+                total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
+                current_layer_idx = afdConnectorMetadata.layer_idx
+            # test
+            with set_ascend_forward_context(
+                    attn_metadata=None,
+                    vllm_config=self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    with_prefill=with_prefill,
+                    reserved_mc2_mask=self.reserved_mc2_mask,
+                    moe_comm_type=moe_comm_type,
+                    prefetch_stream=self.prefetch_stream,
+                    num_actual_tokens=total_num_scheduled_tokens,
+                    model_instance=self.model):
+                if self.connector_name == "m2nconnector":
+                    # 未combine hidden
+                    rank_ffn_output = self._execute_eager_mode(
+                        hidden_states=hidden_states,
+                        group_list=group_list,
+                        dynamic_scales=dynamic_scales,
+                        topk_weights=topk_weights,
+                        current_layer_idx=current_layer_idx)
+                elif self.connector_name == "camm2nconnector":
+                    # 未combine hidden
+                    rank_ffn_output = self._execute_eager_mode(
+                        hidden_states=hidden_states,
+                        group_list=group_list,
+                        dynamic_scales=dynamic_scales,
+                        topk_weights=topk_weights,
+                        current_layer_idx=current_layer_idx)
+                elif self.connector_name == "camp2pconnector":
                         # 未combine hidden
                         rank_ffn_output = self._execute_eager_mode(
                             hidden_states=hidden_states,
@@ -335,27 +282,27 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                             topk_weights=topk_weights,
                             current_layer_idx=current_layer_idx,
                             cam_p2p_ep_name=cam_p2p_ep_name)
-                    else:
-                        rank_ffn_output = self._execute_eager_mode(
-                            hidden_states = hidden_states,
-                            router_logits = router_logits,
-                            current_layer_idx = current_layer_idx,
-                            topk_weights = topk_weights, 
-                            topk_ids = topk_ids,
-                            row_idx = row_idx,
-                            )
+                else:
+                    rank_ffn_output = self._execute_eager_mode(
+                        hidden_states = hidden_states,
+                        router_logits = router_logits,
+                        current_layer_idx = current_layer_idx,
+                        topk_weights = topk_weights, 
+                        topk_ids = topk_ids,
+                        row_idx = row_idx,
+                        )
 
             if self.connector_name == "camm2nconnector":
                 handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
                 cam_afdconnector_data.handle = handle
-                self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
+                self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data, self._counter % self._current_num_ubatches)
             elif self.connector_name == "camp2pconnector":
                 handle = [attenBatchSize]
                 cam_afdconnector_data.handle = handle
                 self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
             elif self.connector_name == "m2nconnector":
                 self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
-                print(f'send_ffn_output success ,layer id is {current_layer_idx}')
+                print(f'send_ffn_output success ,layer id is {current_layer_idx}',flush=True)
             else :
                 afdConnectorMetadata.recv_handle_list = None
                 self.connector.send_ffn_output(rank_ffn_output, afdConnectorMetadata)
@@ -367,7 +314,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         finally:
             self._counter += 1
             if (self._counter == self.num_layers *
-                    self.afd_config.num_afd_stages):
+                    self._current_num_ubatches):
                 self._counter = 0
                 self._forword_cnt += 1
         return None  # FFN server doesn't return ModelRunnerOutput
@@ -557,13 +504,15 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             self._capture_aclgraphs(
                     compilation_cases=compilation_cases_decode,
                     aclgraph_runtime_mode=CUDAGraphMode.FULL,
-                    uniform_decode=True)
+                    uniform_decode=True,
+                    )
            
         set_cudagraph_capturing_enabled(False)
         
     def _capture_aclgraphs(self, compilation_cases: list[int],
                            aclgraph_runtime_mode: CUDAGraphMode,
-                           uniform_decode: bool):
+                           uniform_decode: bool,
+                           ):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
             aclgraph_runtime_mode in [CUDAGraphMode.FULL,
                                       CUDAGraphMode.PIECEWISE]
@@ -587,17 +536,24 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 self._dummy_run(num_tokens,
                                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
-                                uniform_decode=uniform_decode)
+                                uniform_decode=uniform_decode,
+                                )
             self._dummy_run(num_tokens,
                             aclgraph_runtime_mode=CUDAGraphMode.FULL,
                             force_attention=force_attention,
-                            uniform_decode=uniform_decode)
+                            uniform_decode=uniform_decode
+                            )
     
     def _dummy_run(self, 
                    num_tokens: int = 1, 
                    aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
                    force_attention: bool = False,
-                   uniform_decode: bool = False,**kwargs):
+                   uniform_decode: bool = False,
+                   **kwargs):
+        src = (self.connector.process_group.rank_in_group - 1) % self.connector.process_group.world_size
+        is_ubatch = self.connector.process_group.recv_object(src)
+        print(f'yxj src in _dummy_run is {src}')
+        print(f'yxj is_ubatch in _dummy_run is {is_ubatch}')
         
         # only support eager mode and piecewise graph now
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
@@ -624,19 +580,29 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             with torch.npu.graph(aclgraph, pool=self.graph_pool):
                 # compute_ffn_output
                 output = self._ffn_forward(batch_descriptor=batch_descriptor,
-                                  aclgraph_runtime_mode=aclgraph_runtime_mode)
+                                  aclgraph_runtime_mode=aclgraph_runtime_mode,
+                                  is_ubatch=is_ubatch)
             print(f'output shape is {output.shape}')
             # Store the captured graph with token count as key
-            self._acl_graphs_full[output.shape[0]] = {
-                'graph': aclgraph,
-                'input_hidden_states': output,
-                'output': output
-            }
-            print(f'self._acl_graphs_full is {self._acl_graphs_full}')
+            if is_ubatch:
+                self._acl_graphs_ubatch_full[output.shape[0]] = {
+                    'graph': aclgraph,
+                    'input_hidden_states': output,
+                    'output': output
+                }
+                print(f'self._acl_graphs_ubatch_full is {self._acl_graphs_ubatch_full}',flush=True)
+            else:
+                self._acl_graphs_full[output.shape[0]] = {
+                    'graph': aclgraph,
+                    'input_hidden_states': output,
+                    'output': output
+                }
+                print(f'self._acl_graphs_full is {self._acl_graphs_full}',flush=True)
         else:
             self._ffn_forward(batch_descriptor=batch_descriptor,
-                                  aclgraph_runtime_mode=aclgraph_runtime_mode) 
-            print("finsh capture warm_up")
+                                  aclgraph_runtime_mode=aclgraph_runtime_mode,
+                                  is_ubatch=is_ubatch) 
+            print("finsh capture warm_up or prefile run",flush=True)
         print(f'self.dummy_run_call_cnt is {self.dummy_run_call_cnt}')
         self.dummy_run_call_cnt += 1
 
@@ -669,98 +635,107 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
 
 
     def _ffn_forward(self,
-                     batch_descriptor,
-                     aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,):
-        # mock self.model
+                     batch_descriptor=None,
+                     aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+                     is_ubatch:bool=False):
+        afd_num_stage = 2 if is_ubatch else 1
+        cur_num_stages = 0
         for layer_idx in range(self.first_k_dense_replace,self.num_layers):
-            # recv
-            if self.connector_name == "m2nconnector":
-                # TODO metadata
-                m2n_afdconnector_data = M2NAFDConnectorMetadata()
-                hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
-                self._build_and_recv_m2n_afdconnector(
-                    m2n_afdconnector_data=m2n_afdconnector_data,
-                    quant_mode= 0,
-                    expand_x_type = torch.bfloat16,
-                    n_routed_experts=self.n_routed_experts,
-                    hidden_size=self.hidden_size,
-                    topk=self.topk,
-                    expert_token_nums_type=0,
-                    attn_size=self.attn_size,
-                    max_num_tokens=self.max_num_tokens,
+            for ubatch_idx in range(afd_num_stage):
+                # recv
+                if self.connector_name == "m2nconnector":
+                    hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
+                        self._build_and_recv_m2n_afdconnector(
+                        m2n_afdconnector_data=m2n_afdconnector_data,
+                        quant_mode= 0,
+                        expand_x_type = torch.bfloat16,
+                        n_routed_experts=self.n_routed_experts,
+                        hidden_size=self.hidden_size,
+                        topk=self.topk,
+                        expert_token_nums_type=0,
+                        attn_size=self.attn_size,
+                        max_num_tokens=self.max_num_tokens,
+                        )
+                    # [64,2048]
+                    hidden_states, dynamic_scales, group_list, handle, topk_weights, afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
+                    print(f'recv_attn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
+                    m2n_afdconnector_data.handle = handle
+                    m2n_afdconnector_data.topk_weights = topk_weights
+                elif self.connector_name == "camm2nconnector":
+                    cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
+                        moe_expert_num = self.n_routed_experts,
+                        shared_expert_num = 0,
+                        scale = None,
+                        handle = None,
+                        quant_mode = 0,
+                        aiv_num = 48,
+                        batch_size = self.max_num_tokens,
+                        h = self.hidden_size,
+                        k = self.topk
                     )
-
-            elif self.connector_name == "camm2nconnector":
-                cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
-                    moe_expert_num = self.n_routed_experts,
-                    shared_expert_num = 0,
-                    scale = None,
-                    handle = None,
-                    quant_mode = 0,
-                    aiv_num = 48,
-                    batch_size = self.max_num_tokens,
-                    h = self.hidden_size,
-                    k = self.topk
-                )
-                output1,afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data)
-                hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
-                group_list = expertTokenNums.to(torch.int64)
-                topk_weights = simulateExpertScales
-                # compute
-            elif self.connector_name == "camp2pconnector":
-                cam_afdconnector_data = CAMP2PAFDConnectorMetadata(
-                    moe_expert_num = self.n_routed_experts,
-                    shared_expert_num = 0,
-                    scale = None,
-                    handle = None,
-                    quant_mode = 0,
-                    aiv_num = 48,
-                    batch_size = self.max_num_tokens,
-                    h = self.hidden_size,
-                    k = self.topk
-                )
-                a2eOutput, afdConnectorMetadata, cam_p2p_ep_name = self.connector.recv_attn_output(cam_afdconnector_data)
-                hidden_states, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = a2eOutput[0:5]
-                topk_weights = simulateExpertScales
-                topk_ids = simulateExpertIds
-                x_active_mask = xActiveMaskOut
-            with set_ascend_forward_context(
-                    attn_metadata=None,
-                    vllm_config=self.vllm_config,
-                    reserved_mc2_mask=self.reserved_mc2_mask,
-                    batch_descriptor=batch_descriptor,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    prefetch_stream=self.prefetch_stream,
-                    model_instance=self.model):
-                if self.connector_name == "camp2pconnector":
-                    rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
-                                                layer_idx=layer_idx,
-                                                capture_mode=True,
-                                                topk_ids=topk_ids,
-                                                topk_weights=topk_weights,
-                                                x_active_mask=x_active_mask,
-                                                cam_p2p_ep_name=cam_p2p_ep_name
-                                                )
-                else:
-                    rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
-                                                layer_idx=layer_idx,
-                                                capture_mode=True,
-                                                group_list=group_list,
-                                                dynamic_scales=dynamic_scales,
-                                                topk_weights=topk_weights
-                                                )
+                    output1, afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data, cur_num_stages)
+                    hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
+                    group_list = expertTokenNums.to(torch.int64)
+                    topk_weights = simulateExpertScales
+                    print(f'cam recv_attn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
+                elif self.connector_name == "camp2pconnector":
+                    cam_afdconnector_data = CAMP2PAFDConnectorMetadata(
+                        moe_expert_num = self.n_routed_experts,
+                        shared_expert_num = 0,
+                        scale = None,
+                        handle = None,
+                        quant_mode = 0,
+                        aiv_num = 48,
+                        batch_size = self.max_num_tokens,
+                        h = self.hidden_size,
+                        k = self.topk
+                    )
+                    a2eOutput, afdConnectorMetadata, cam_p2p_ep_name = self.connector.recv_attn_output(cam_afdconnector_data)
+                    hidden_states, simulateExpertIds, simulateExpertScales, attenBatchSize, xActiveMaskOut = a2eOutput[0:5]
+                    topk_weights = simulateExpertScales
+                    topk_ids = simulateExpertIds
+                    x_active_mask = xActiveMaskOut
+                with set_ascend_forward_context(
+                            attn_metadata=None,
+                            vllm_config=self.vllm_config,
+                            reserved_mc2_mask=self.reserved_mc2_mask,
+                            batch_descriptor=batch_descriptor,
+                            aclgraph_runtime_mode=aclgraph_runtime_mode,
+                            prefetch_stream=self.prefetch_stream,
+                            model_instance=self.model):
+                        if self.connector_name == "camp2pconnector":
+                            rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
+                                                        layer_idx=layer_idx,
+                                                        capture_mode=True,
+                                                        topk_ids=topk_ids,
+                                                        topk_weights=topk_weights,
+                                                        x_active_mask=x_active_mask,
+                                                        cam_p2p_ep_name=cam_p2p_ep_name
+                                                        )
+                        else:
+                            rank_ffn_output = self._run_ffn_computation(hidden_states = hidden_states,
+                                                            layer_idx=layer_idx,
+                                                            capture_mode=True,
+                                                            group_list=group_list,
+                                                            dynamic_scales=dynamic_scales,
+                                                            topk_weights=topk_weights
+                                                    )
                 # send
                 if self.connector_name == "m2nconnector":
                     self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
+                    print(f'send_ffn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
                 elif self.connector_name == "camm2nconnector":
                     handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
                     cam_afdconnector_data.handle = handle
-                    self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
+                    self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data, cur_num_stages)
                 elif self.connector_name == "camp2pconnector":
                     handle = [attenBatchSize]
                     cam_afdconnector_data.handle = handle
                     self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
-                # print(f'send_ffn_output success ,layer id is {layer_idx}')
+                    print(f'cam send_ffn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
+                # 如果切分，则更新cur_num_stages
+                if is_ubatch:
+                    cur_num_stages ^= 1
         return rank_ffn_output
   
         
@@ -1059,7 +1034,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
 
         # Find the minimum capture size that can handle num_tokens for this
         # layer
-        for capture_size in self.cudagraph_batch_sizes:
+        for capture_size in self.aclgraph_batch_sizes:
             if num_tokens <= capture_size:
                 return self._acl_graphs.get((layer_idx, capture_size))
         return None

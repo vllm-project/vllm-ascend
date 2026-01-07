@@ -15,7 +15,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id)
 from vllm.forward_context import (create_forward_context, get_forward_context,
-                                  override_forward_context)
+                                  override_forward_context, DPMetadata)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -168,10 +168,6 @@ class UBatchWrapper:
         def _capture_ubatch_thread(results, ubatch_metadata):
             torch.npu.set_device(self.device)
             ubatch_context = ubatch_metadata.context
-            with torch.npu.stream(ubatch_context.compute_stream):
-                _ = torch.npu.current_blas_handle()
-            with torch.npu.stream(ubatch_context.comm_stream):
-                _ = torch.npu.current_blas_handle()
             with ubatch_context:
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
@@ -181,6 +177,9 @@ class UBatchWrapper:
                 )
 
             results.append((ubatch_metadata.context.id, model_output))
+            # TODO(jcz):这里需要同步吗？如果不同步，会导致crash
+            import time
+            time.sleep(2)
 
         results: list[tuple[int, torch.Tensor]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
@@ -235,6 +234,7 @@ class UBatchWrapper:
                     inputs_embeds=ubatch_metadata.inputs_embeds,
                 )
             results.append((ubatch_metadata.context.id, model_output))
+            torch.npu.synchronize()
 
         results: list[tuple[int, torch.Tensor]] = []
 
@@ -244,6 +244,7 @@ class UBatchWrapper:
         # TODO HXY 这里强行override了才导致这边的里面要Get的时候拿不到正确的东西了
         with override_forward_context(None):
             ubatch_threads = []
+            i = 0
             for metadata in ubatch_metadata:
                 thread = threading.Thread(target=_ubatch_thread,
                                             args=(
@@ -257,6 +258,7 @@ class UBatchWrapper:
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
+                i += 1
 
             sorted_results = [value for position, value in sorted(results)]
             result = torch.cat(sorted_results, dim=0)
@@ -271,12 +273,25 @@ class UBatchWrapper:
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
             forward_context = copy.copy(get_forward_context())
+
+            dp_size = self.vllm_config.parallel_config.data_parallel_size
+            ubatch_num_tokens_across_dp = torch.tensor(
+                [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+            )
+            ubatch_dp_metadata = DPMetadata.make(
+                self.vllm_config.parallel_config,
+                attn_metadata[i] if attn_metadata is not None else None,
+                ubatch_slice.num_tokens,
+                ubatch_num_tokens_across_dp,
+            )
+            forward_context.dp_metadata = ubatch_dp_metadata
+            forward_context.ubatch_idx = i
             forward_context.attn_metadata = attn_metadata[i] if attn_metadata is not None else None
             forward_context.no_compile_layers = self.vllm_config.compilation_config.static_forward_context
-            forward_context.dp_metadata = dp_metadata
             forward_context.cudagraph_runtime_mode = aclgraph_runtime_mode
             forward_context.batch_descriptor = batch_descriptor
             forward_context.afd_metadata = afd_metadata
+            forward_context.num_ubatches = len(ubatch_slices)
             forward_contexts.append(forward_context)
 
         ubatch_ctxs = make_ubatch_contexts(
@@ -329,7 +344,6 @@ class UBatchWrapper:
         ubatch_slices = forward_context.ubatch_slices
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
         afd_metadata = forward_context.afd_metadata
-
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
 
@@ -379,12 +393,12 @@ class UBatchWrapper:
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                 afd_metadata=afd_metadata)
-            with self.sm_control:
-                return self._capture_ubatches(ubatch_metadata, self.model)
+            return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.aclgraphs \
             and aclgraph_runtime_mode is CUDAGraphMode.FULL:
             aclgraph_metadata = self.aclgraphs[num_tokens]
             aclgraph_metadata.aclgraph.replay()
+            print("UBatchWrapper replay")
             return aclgraph_metadata.outputs
         else:
             ubatch_metadata = self._make_ubatch_metadata(
