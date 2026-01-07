@@ -799,6 +799,7 @@ def enable_sp_by_custom_op(vllm_config: VllmConfig = None):
         vllm_config = get_current_vllm_config()
     return enable_sp(vllm_config) and not is_vl_model(vllm_config)
 
+
 def enable_sp_by_pass(vllm_config: VllmConfig):
     return enable_sp(vllm_config) and is_vl_model(vllm_config)
 

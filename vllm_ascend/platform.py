@@ -313,7 +313,9 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config) and (is_moe_model(vllm_config) or vllm_config.model_config.enforce_eager):
+        if is_vl_model(vllm_config) and (
+                is_moe_model(vllm_config)
+                or vllm_config.model_config.enforce_eager):
             if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
                bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
                 raise ValueError(

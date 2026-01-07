@@ -1,13 +1,13 @@
 import torch
-from torch._inductor.pattern_matcher import PatternMatcherPass
-from vllm.config import VllmConfig
-from vllm.logger import logger
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 import torch._inductor.pattern_matcher as pm
-from vllm.distributed import tensor_model_parallel_all_reduce
 from torch._inductor.pattern_matcher import (PatternMatcherPass,
                                              PatternPrettyPrinter)
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.config import VllmConfig
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              get_tp_group, tensor_model_parallel_all_reduce)
+from vllm.logger import logger
+
 
 class _SequenceParallelPatternHelper:
     """Helper for sequence parallelism patterns."""
@@ -30,22 +30,28 @@ class _SequenceParallelPatternHelper:
 
     def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.reduce_scatter.default(
-            x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
-        )
+            x,
+            dim=0,
+            world_size=self.tp_size,
+            group_name=self.tp_group.unique_name)
 
     def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.all_gather.default(
-            x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
-        )
+            x,
+            dim=0,
+            world_size=self.tp_size,
+            group_name=self.tp_group.unique_name)
+
 
 class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
+        super().__init__(eps, vllm_config.model_config.dtype,
+                         torch.npu.current_device())
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
         self.eps = eps
-    
+
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
@@ -66,7 +72,8 @@ class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(x, residual, weight, self.eps)
+            result, _, residual = torch.ops.npu.npu_add_rms_norm(
+                x, residual, weight, self.eps)
 
             return result, residual
 
@@ -78,24 +85,28 @@ class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            
+
             reduce_scatter = self._reduce_scatter(input)
-            residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(reduce_scatter, residual, weight, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(
+                reduce_scatter, residual)
+            result, _, residual = torch.ops.npu.npu_add_rms_norm(
+                reduce_scatter, residual, weight, self.eps)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)
 
+
 class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
+        super().__init__(eps, vllm_config.model_config.dtype,
+                         torch.npu.current_device())
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
         self.eps = eps
-    
+
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
@@ -116,7 +127,8 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
-            result, _, _ = torch.ops.npu.npu_add_rms_norm(x, residual, weight, self.eps)
+            result, _, _ = torch.ops.npu.npu_add_rms_norm(
+                x, residual, weight, self.eps)
 
             return result
 
@@ -128,10 +140,12 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            
+
             reduce_scatter = self._reduce_scatter(input)
-            residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, _ = torch.ops.npu.npu_add_rms_norm(reduce_scatter, residual, weight, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(
+                reduce_scatter, residual)
+            result, _, _ = torch.ops.npu.npu_add_rms_norm(
+                reduce_scatter, residual, weight, self.eps)
             all_gather = self._all_gather(result)
             return all_gather
 
@@ -139,14 +153,16 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
                                 pm.fwd_only, pm_pass)
 
 
-class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
+class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper
+                                                 ):
 
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(eps, vllm_config.model_config.dtype, torch.npu.current_device())
+        super().__init__(eps, vllm_config.model_config.dtype,
+                         torch.npu.current_device())
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
         self.eps = eps
-    
+
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
@@ -170,7 +186,8 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper)
         ) -> tuple[torch.Tensor, torch.Tensor]:
             x = self._all_reduce(input)
             add_ = x + deepstack_input_embeds
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(add_, residual, weight, self.eps)
+            result, _, residual = torch.ops.npu.npu_add_rms_norm(
+                add_, residual, weight, self.eps)
 
             return result, residual
 
@@ -183,12 +200,14 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper)
             """
             Replacement for the AddRMSNormQuant fusion.
             """
-            
+
             reduce_scatter = self._reduce_scatter(input)
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = reduce_scatter + chunk
-            residual = torch.ops.vllm.maybe_chunk_residual(reduce_scatter, residual)
-            result, _, residual = torch.ops.npu.npu_add_rms_norm(add_, residual, weight, self.eps)
+            residual = torch.ops.vllm.maybe_chunk_residual(
+                reduce_scatter, residual)
+            result, _, residual = torch.ops.npu.npu_add_rms_norm(
+                add_, residual, weight, self.eps)
             all_gather = self._all_gather(result)
             return all_gather, residual
 
@@ -196,38 +215,33 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper)
                                 pm.fwd_only, pm_pass)
 
 
-
 class AscendSequenceParallelismPass(VllmInductorPass):
+
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="npu_sequence_parallelism_pass"
-        )
+            pass_name="npu_sequence_parallelism_pass")
 
         for epsilon in [1e-5, 1e-6]:
             # TODO: add first allreduce and quant
-            
-            AscendMiddleAllReduceRMSNormPattern(
-                config, epsilon
-            ).register(self.patterns)
-            
-            AscendLastAllReduceRMSNormPattern(
-                config, epsilon
-            ).register(self.patterns)
-            
-            AscendQwen3VLMiddleAllReduceRMSNormPattern(
-                config, epsilon
-            ).register(self.patterns)
 
-    
+            AscendMiddleAllReduceRMSNormPattern(config, epsilon).register(
+                self.patterns)
+
+            AscendLastAllReduceRMSNormPattern(config,
+                                              epsilon).register(self.patterns)
+
+            AscendQwen3VLMiddleAllReduceRMSNormPattern(
+                config, epsilon).register(self.patterns)
+
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         # logger.info(f"before apply patterns {graph.graph}")
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         # logger.info(f"after apply patterns {graph.graph}")
-        
+
         pattern_idx = 0
         for pattern_entry in self.patterns.patterns.values():
             for p in pattern_entry:
@@ -235,7 +249,7 @@ class AscendSequenceParallelismPass(VllmInductorPass):
                 logger.debug("Pattern %d: %s", pattern_idx, p_str)
                 pattern_idx += 1
         self.end_and_log()
-    
+
     def is_applicable(self, runtime_shape: int | None = None) -> bool:
         """
         Check if the pass is applicable for the current configuration.
