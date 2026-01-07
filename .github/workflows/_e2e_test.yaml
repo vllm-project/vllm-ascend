@@ -83,12 +83,8 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
-          # pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
-          # pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py::test_qwen_pooling_classify_correctness
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_models_output
+          pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
 
       - name: Run e2e test
         env:
@@ -98,32 +94,40 @@ jobs:
         run: |
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
-
-          pytest -sv --durations=0 tests/e2e/nightly/single_node/ops/singlecard_ops/triton/
-          pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+          # basic 
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
           # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
           # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
           #pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
-          pytest -sv --durations=0 tests/e2e/singlecard/pooling/
-          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
 
-          # ------------------------------------ v1 spec decode test ------------------------------------ #
+          # compile
+          pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
+  
+          # model_runner_v2
+          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
+
+          # pooling
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_classification.py
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_embedding.py
+          pytest -sv --durations=0 tests/e2e/singlecard/pooling/test_scoring.py
+
+          # spec_decode
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
-
-          pytest -sv --durations=0 tests/e2e/singlecard/model_runner_v2/test_basic.py
-          pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
 
   e2e-2-cards:
     name: multicard-2
@@ -184,7 +188,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/test_aclgraph_capture_replay.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
       - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
@@ -200,36 +204,39 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'full' }}
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/test_quantization.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_full_graph_mode.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_expert_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_external_launcher.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_single_request_aclgraph.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
           # torch 2.8 doesn't work with lora, fix me
-          #pytest -sv --durations=0 tests/e2e/multicard/test_ilama_lora_tp2.py
+          #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
+          
 
           # To avoid oom, we need to run the test in a single process.
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_fc1_tp2
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
 
-          pytest -sv --durations=0 tests/e2e/multicard/test_prefix_caching.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_pipeline_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_moe.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_weight_load.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_offline_weight_load.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_pipeline_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_prefix_caching.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_quantization.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py
+          # This test is broken, fix me
+          #pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_shared_expert_dp.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
 
   e2e-4-cards:
     name: multicard-4
@@ -300,11 +307,15 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/spec_decode/test_mtp_qwen3_next.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
-          pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_kimi_k2_thinking_w4a16_tp4
-          pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
-          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_mtp.py
-          pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_next.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_data_parallel_tp2.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_kimi_k2.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py
+
+          # long_sequence
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_basic.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_mtp.py
+
+          # spec_decode
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
