@@ -114,7 +114,7 @@ def _run_worker_process(
 
         # Expose model config to the main test process
         counters["hidden_layers"].value = (
-            llm.llm_engine.model_config.hf_config.num_hidden_layers)
+            llm.llm_engine.model_config.hf_text_config.num_hidden_layers)
 
         llm.generate(local_prompts,
                      SamplingParams(max_tokens=max_tokens, temperature=0.0))

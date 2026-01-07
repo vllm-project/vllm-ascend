@@ -20,7 +20,6 @@ import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
-from vllm.config.compilation import Range
 from vllm.logger import logger
 
 
@@ -309,7 +308,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         logger.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
-    def is_applicable_for_range(self, compile_range: Range) -> bool:
+    def is_applicable(self, runtime_shape: int | None = None) -> bool:
         """
         Check if the pass is applicable for the current configuration.
         """

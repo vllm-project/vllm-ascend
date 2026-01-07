@@ -879,7 +879,6 @@ class TestAscendMLAImpl(TestBase):
         B, H, D = 4, self.impl.num_heads, self.impl.v_head_dim  # total: [4, 4, 8]
         test_cases = [(1, 1), (1, 2), (2, 1), (2, 2), (4, 4)]
         for test_case in test_cases:
-            print(test_case)
             self.impl.dcp_size = test_case[0]
             self.impl.pcp_size = test_case[1]
             mock_dcp.world_size = test_case[0]

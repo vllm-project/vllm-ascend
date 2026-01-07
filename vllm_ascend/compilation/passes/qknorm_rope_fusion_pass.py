@@ -22,7 +22,6 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass,
 from vllm.attention.layer import Attention
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.compilation import Range
 from vllm.logger import logger
 
 
@@ -284,7 +283,7 @@ class QKNormRopeFusionPass(VllmInductorPass):
                 pattern_idx += 1
         self.end_and_log()
 
-    def is_applicable_for_range(self, compile_range: Range) -> bool:
+    def is_applicable(self, runtime_shape):
         """
         Check if the pass is applicable for the current configuration.
         """

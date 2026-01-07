@@ -143,7 +143,7 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         self.dispatcher.need_extra_args = True
         self.dispatcher.enable_dispatch_v2 = True
-
+        self.dispatcher.moe_expert_num = len(expert_map)
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states,
                                                        context_metadata)
         self.assertIn("tp_send_counts", kwargs)
