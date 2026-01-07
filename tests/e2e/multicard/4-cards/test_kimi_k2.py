@@ -16,33 +16,29 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-"""Compare the short outputs of HF and vLLM when using greedy sampling.
-
-Run `pytest tests/e2e/multicard/test_quantization.py`.
-"""
-from modelscope import snapshot_download  # type: ignore
+import os
 
 from tests.e2e.conftest import VllmRunner
 
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-def test_qwen2_5_w8a8_external_quantized_tp2():
+
+def test_kimi_k2_thinking_w4a16_tp4():
     example_prompts = [
-        "The president of the United States is",
+        "Hello, my name is",
     ]
     max_tokens = 5
+
     with VllmRunner(
-            snapshot_download("neuralmagic/Qwen2.5-3B-quantized.w8a8"),
-            tensor_parallel_size=2,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
-            max_model_len=4096,
-            gpu_memory_utilization=0.8,
+            "vllm-ascend/Kimi-K2-Thinking-Pruning",
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1],
+            },
     ) as vllm_model:
-        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
-
-    golden_results = [
-        'The president of the United States is the head of state and',
-    ]
-
-    for i in range(len(vllm_output)):
-        assert golden_results[i] == vllm_output[i][1]
-        print(f"Generated text: {vllm_output[i][1]!r}")
+        vllm_model.generate_greedy(example_prompts, max_tokens)
