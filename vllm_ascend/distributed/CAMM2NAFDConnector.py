@@ -26,7 +26,7 @@ from vllm.distributed.afd_transfer.afd_connector.p2p_connector import DefaultPro
 
 from vllm.utils import direct_register_custom_op
 from vllm.forward_context import ForwardContext, get_forward_context
-
+from vllm_ascend.utils import npu_stream_switch_within_graph
 logger = init_logger(__name__)
 
 # # TODO(yxj):move to ascend ,use kwargs 
@@ -155,6 +155,13 @@ class CAMM2NAFDConnector(AFDConnectorBase):
 
         logger.info("m2n connector initialized")
 
+        self.comm_stream = None
+        if self.config.afd_config.is_multistream:
+            self.comm_stream = torch.npu.Stream()
+            aic_num = int(self.config.afd_config.multistream_info["core_num"])
+            aiv_num = 2 * aic_num
+            torch.npu.set_stream_limit(self.comm_stream, aic_num, aiv_num)
+
         self._initialized = True
     
     def is_initialized(self) -> bool:
@@ -182,22 +189,27 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
             print(f'send_attn_output dst is {dst}')
             self.process_group.send_object(metadata,dst)
-            
-        return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
-                                                self.hccl_comm_name,
-                                                self.hccl_comm_name2,
-                                                self.rank,
-                                                self.ffn_size,
-                                                self.attn_size)
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            output = torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
+                                                    self.hccl_comm_name,
+                                                    self.hccl_comm_name2,
+                                                    self.rank,
+                                                    self.ffn_size,
+                                                    self.attn_size)
+        return output
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata, ubatch_idx: int = 0) -> torch.Tensor:
-        return torch.ops.vllm.cam_recv_ffn_output(hidden_states,
-                                                self.hccl_comm_name,
-                                                self.hccl_comm_name2,
-                                                self.rank,
-                                                self.ffn_size,
-                                                self.attn_size)
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            output = torch.ops.vllm.cam_recv_ffn_output(hidden_states,
+                                                    self.hccl_comm_name,
+                                                    self.hccl_comm_name2,
+                                                    self.rank,
+                                                    self.ffn_size,
+                                                    self.attn_size)
+        return output
     
     # MOE发给ATTN(MOE发送) 
     def send_ffn_output(self, ffn_output: torch.Tensor, metadata: CAMM2NAFDConnectorMetadata, ubatch_idx: int = 0):
@@ -208,21 +220,22 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         shared_expert_num = metadata.shared_expert_num
         aiv_num = metadata.aiv_num
         handle = metadata.handle
-        
-        torch_npu.cam_e2a(expandXOut = ffn_output, simulateExpertIds = handle[0],
-                            simulateExpertScales = handle[1],
-                            expandIdx = handle[2],
-                            epRecvCounts = handle[3],
-                            commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
-                            attenBatchSize = handle[4],
-                            commId = 0,
-                            batchSize = batch_size, hiddenSize = h, topk = k,
-                            expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
-                            sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
-                            rank = self.rank,
-                            loadBalancingRankNum=1, loadBalancingThreshold=0,
-                            groupEp = self.hccl_comm_name2 if ubatch_idx == 1 else self.hccl_comm_name,
-                            aivNum = aiv_num)
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            torch_npu.cam_e2a(expandXOut = ffn_output, simulateExpertIds = handle[0],
+                                simulateExpertScales = handle[1],
+                                expandIdx = handle[2],
+                                epRecvCounts = handle[3],
+                                commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
+                                attenBatchSize = handle[4],
+                                commId = 0,
+                                batchSize = batch_size, hiddenSize = h, topk = k,
+                                expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
+                                sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num,
+                                rank = self.rank,
+                                loadBalancingRankNum=1, loadBalancingThreshold=0,
+                                groupEp = self.hccl_comm_name2 if ubatch_idx == 1 else self.hccl_comm_name,
+                                aivNum = aiv_num)
 
         return
     
@@ -245,16 +258,17 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         quant_mode = metadata.quant_mode
         aiv_num = metadata.aiv_num
         expandXOutDType = torch.tensor([], dtype=torch.bfloat16 if not quant_mode else torch.int8, device='npu')
-
-        output1 = torch_npu.cam_a2e(expandX = torch.tensor([], dtype=torch.bfloat16, device='npu'), expertIds = torch.tensor([], dtype=torch.int32, device='npu'),
-                            scales = torch.tensor([], dtype=torch.float, device='npu'), commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
-                            expandXOutDType = expandXOutDType,
-                            commId = 0, batchSize = batch_size, hiddenSize = h, topk = k,
-                            expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
-                            sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num, rank = self.rank,
-                            loadBalancingRankNum=1, loadBalancingThreshold=0, dynamicQuant = quant_mode,
-                            groupEp = self.hccl_comm_name2 if ubatch_idx == 1 else self.hccl_comm_name,
-                            aivNum = aiv_num)
+        curr_stream = torch.npu.current_stream()
+        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
+            output1 = torch_npu.cam_a2e(expandX = torch.tensor([], dtype=torch.bfloat16, device='npu'), expertIds = torch.tensor([], dtype=torch.int32, device='npu'),
+                                scales = torch.tensor([], dtype=torch.float, device='npu'), commArgs = torch.tensor([], dtype=torch.float16, device='npu'),
+                                expandXOutDType = expandXOutDType,
+                                commId = 0, batchSize = batch_size, hiddenSize = h, topk = k,
+                                expertRankSize = self.ffn_size, attentionRankSize = self.attn_size,
+                                sharedExpertNum = shared_expert_num, totalExpertNum = moe_expert_num + shared_expert_num, rank = self.rank,
+                                loadBalancingRankNum=1, loadBalancingThreshold=0, dynamicQuant = quant_mode,
+                                groupEp = self.hccl_comm_name2 if ubatch_idx == 1 else self.hccl_comm_name,
+                                aivNum = aiv_num)
         
         return output1, afdmetadata
     
