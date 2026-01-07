@@ -6,8 +6,7 @@ import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               vllm_version_is)
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type                              
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -24,28 +23,21 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
         refresh_all_lora_classes()
-        if vllm_version_is('0.13.0'):
+        self.lora_config = kwargs.get("lora_config")
+        if get_ascend_device_type() == AscendDeviceType._310P or (
+            self.lora_config is not None and self.lora_config.max_lora_rank >= 128):
             from vllm.lora.ops.torch_ops import (bgmv_expand,
-                                                 bgmv_expand_slice,
-                                                 bgmv_shrink, sgmv_expand,
-                                                 sgmv_expand_slice,
-                                                 sgmv_shrink)
+                                                    bgmv_expand_slice,
+                                                    bgmv_shrink, sgmv_expand,
+                                                    sgmv_expand_slice,
+                                                    sgmv_shrink)
         else:
-            max_lora_rank = kwargs["lora_config"].max_lora_rank
-            if get_ascend_device_type(
-            ) == AscendDeviceType._310P or max_lora_rank >= 128:
-                from vllm.lora.ops.torch_ops import (bgmv_expand,
-                                                     bgmv_expand_slice,
-                                                     bgmv_shrink, sgmv_expand,
-                                                     sgmv_expand_slice,
-                                                     sgmv_shrink)
-            else:
-                from vllm_ascend.lora.lora_ops import (bgmv_expand,
-                                                       bgmv_expand_slice,
-                                                       bgmv_shrink,
-                                                       sgmv_expand,
-                                                       sgmv_expand_slice,
-                                                       sgmv_shrink)
+            from vllm_ascend.lora.lora_ops import (bgmv_expand,
+                                                    bgmv_expand_slice,
+                                                    bgmv_shrink,
+                                                    sgmv_expand,
+                                                    sgmv_expand_slice,
+                                                    sgmv_shrink)
         self.bgmv_expand = bgmv_expand
         self.bgmv_expand_slice = bgmv_expand_slice
         self.bgmv_shrink = bgmv_shrink
