@@ -34,7 +34,8 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
     COMPILATION_PASS_KEY, AscendDeviceType, enable_sp, get_ascend_device_type,
     is_vl_model, update_aclgraph_sizes, update_cudagraph_capture_sizes,
-    update_default_aclgraph_sizes, check_kv_extra_config)
+    update_default_aclgraph_sizes, check_kv_extra_config,
+    is_moe_model)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -312,11 +313,11 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        if is_vl_model(vllm_config):
+        if is_vl_model(vllm_config) and (is_moe_model(vllm_config) or vllm_config.model_config.enforce_eager):
             if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
                bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
                 raise ValueError(
-                    "Currently, VL models doesn't support "
+                    "For VL mdoels, only dense models with graph mode support "
                     "FLASHCOMM in vllm-ascend. We will fix this in the future. "
                     "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
