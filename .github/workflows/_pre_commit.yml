@@ -34,6 +34,7 @@ jobs:
         VLLM_TARGET_DEVICE=empty pip install .
     - name: Install vllm-ascend dev
       run: |
+        export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       env:
