@@ -131,7 +131,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=16, non-mtp, non-dynamic-eplb.
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
-    # with W8A8, non-dynamic-eplb. And MTP layer must be W8A8.
+    # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
     # Whether to anbale balance scheduling
