@@ -18,17 +18,12 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/multicard/long_sequence/test_chunked_prefill.py`.
+Run `pytest tests/e2e/multicard/long_sequence/test_prefix_caching.py`
 """
 
-import os
-import random
-import string
 from typing import Any, Dict
-from unittest.mock import patch
 
 import pytest
-from vllm import SamplingParams
 
 from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
 
@@ -59,84 +54,72 @@ INPUT_PROMPTS = [
     LONG_PROMPT +
     "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
     LONG_PROMPT +
-    "Question: what is the age of Alice Johnson? Your answer: The age of Alice Johnson is "
+    "Question: what is the age of Umar Black? Your answer: The age of Umar Black is "
 ]
 
-VLLM_OUTPUT = [INPUT_PROMPTS[0] + "29", INPUT_PROMPTS[1] + "27"]
-
-
-def generate_prompts(input_len, batchsize):
-    prompts = [
-        " ".join([
-            f"{random.choice(string.ascii_letters)}" for _ in range(input_len)
-        ]) for _ in range(batchsize)
-    ]
-    return prompts
+VLLM_OUTPUT = [INPUT_PROMPTS[0] + "29", INPUT_PROMPTS[1] + "39"]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [2])
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "768"})
-def test_models_chunked_prefill_with_cp_basic(model: str,
-                                              max_tokens: int) -> None:
+def test_models_prefix_cache_with_cp_basic(
+        model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(
             model,
             block_size=128,
-            max_model_len=4096,
             enforce_eager=True,
-            max_num_batched_tokens=128,
+            max_model_len=4096,
+            enable_prefix_caching=True,
             enable_expert_parallel=True,
-            enable_prefix_caching=False,
-            enable_chunked_prefill=True,
+            max_num_batched_tokens=4096,
             tensor_parallel_size=SETTINGS[model]['TP'],
             quantization=SETTINGS[model]["quantization"],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
-        chunked_prefill_outputs = vllm_model.generate_greedy(
+        prefix_cache_outputs = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
 
-    for i in range(len(chunked_prefill_outputs)):
-        assert chunked_prefill_outputs[i][1] == VLLM_OUTPUT[i]
+    for i in range(len(prefix_cache_outputs)):
+        assert prefix_cache_outputs[i][1] == VLLM_OUTPUT[i]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [2])
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "768"})
-def test_models_chunked_prefill_with_cp_piecewise(model: str,
-                                                  max_tokens: int) -> None:
+def test_models_prefix_cache_with_cp_piecewise(
+        model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(
             model,
             block_size=128,
             max_model_len=4096,
             enforce_eager=False,
-            max_num_batched_tokens=128,
+            enable_prefix_caching=True,
             enable_expert_parallel=True,
-            enable_prefix_caching=False,
-            enable_chunked_prefill=True,
+            max_num_batched_tokens=4096,
             tensor_parallel_size=SETTINGS[model]['TP'],
             quantization=SETTINGS[model]["quantization"],
             prefill_context_parallel_size=SETTINGS[model]['PCP'],
             decode_context_parallel_size=SETTINGS[model]['DCP']) as vllm_model:
-        chunked_prefill_outputs = vllm_model.generate_greedy(
+        prefix_cache_outputs = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
 
-    for i in range(len(chunked_prefill_outputs)):
-        assert chunked_prefill_outputs[i][1] == VLLM_OUTPUT[i]
+    for i in range(len(prefix_cache_outputs)):
+        assert prefix_cache_outputs[i][1] == VLLM_OUTPUT[i]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [2])
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "768"})
-def test_models_chunked_prefill_with_cp_full_graph(model: str,
-                                                   max_tokens: int) -> None:
+def test_models_prefix_cache_with_cp_full_graph(
+        model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(model,
                     block_size=128,
                     max_model_len=4096,
                     enforce_eager=False,
-                    max_num_batched_tokens=128,
+                    enable_prefix_caching=True,
                     enable_expert_parallel=True,
-                    enable_prefix_caching=False,
-                    enable_chunked_prefill=True,
+                    max_num_batched_tokens=4096,
                     tensor_parallel_size=SETTINGS[model]['TP'],
                     quantization=SETTINGS[model]["quantization"],
                     prefill_context_parallel_size=SETTINGS[model]['PCP'],
@@ -145,46 +128,8 @@ def test_models_chunked_prefill_with_cp_full_graph(model: str,
                         "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
                         "cudagraph_mode": "FULL_DECODE_ONLY"
                     }) as vllm_model:
-        chunked_prefill_outputs = vllm_model.generate_greedy(
+        prefix_cache_outputs = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
 
-    for i in range(len(chunked_prefill_outputs)):
-        assert chunked_prefill_outputs[i][1] == VLLM_OUTPUT[i]
-
-
-@patch.dict(
-    os.environ, {
-        "HCCL_BUFFSIZE": "768",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-        "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"
-    })
-def test_models_chunked_prefill_mixed_length_prompts_including_1_token():
-    TEST_ROPE_PARAMETERS = {
-        "rope_theta": 1000000,
-        "rope_type": "yarn",
-        "factor": 4,
-        "original_max_position_embeddings": 32768
-    }
-    prompts = [
-        generate_prompts(128 * 1024, 1)[0],
-        generate_prompts(1, 1)[0],
-        generate_prompts(9104, 1)[0],
-    ]
-    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
-
-    model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
-    with VllmRunner(
-            model,
-            enforce_eager=True,
-            max_num_seqs=2,
-            max_num_batched_tokens=131000,
-            max_model_len=132000,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=1,
-            enable_expert_parallel=True,
-            block_size=128,
-            quantization="ascend",
-            hf_overrides={"rope_parameters": TEST_ROPE_PARAMETERS},
-    ) as runner:
-        runner.model.generate(prompts, sampling_params)
+    for i in range(len(prefix_cache_outputs)):
+        assert prefix_cache_outputs[i][1] == VLLM_OUTPUT[i]

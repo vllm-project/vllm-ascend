@@ -305,6 +305,8 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/test_offline_inference_distributed.py::test_kimi_k2_thinking_w4a16_tp4
           pytest -sv --durations=0 tests/e2e/multicard/test_data_parallel_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_basic.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_chunked_prefill.py
+          pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_prefix_caching.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_accuracy.py
           pytest -sv --durations=0 tests/e2e/multicard/long_sequence/test_mtp.py
           pytest -sv --durations=0 tests/e2e/multicard/test_qwen3_next.py
