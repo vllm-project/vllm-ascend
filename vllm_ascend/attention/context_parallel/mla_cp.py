@@ -626,8 +626,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params.attn_params[num_tokens].append(
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
                  weak_ref_tensors(q_pe), weak_ref_tensors(k_pe), num_heads,
-                 self.num_kv_heads, input_layout, spec_attn_mask, sparse_mode,
-                 self.scale, decode_meta.block_table, block_size,
+                 self.num_kv_heads, input_layout, weak_ref_tensors(spec_attn_mask) if spec_attn_mask is not None else None, sparse_mode,
+                 self.scale, weak_ref_tensors(decode_meta.block_table), block_size,
                  actual_seq_lengths, decode_meta.cp_seq_len,
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
             torch.npu.graph_task_group_begin(stream)
