@@ -630,7 +630,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 softmax_lse = torch.empty((num_tokens, num_heads, 1),
                                           dtype=torch.float,
                                           device=q_nope.device)
-            
+
             graph_params.attn_params[num_tokens].append(
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
                  weak_ref_tensors(q_pe), weak_ref_tensors(k_pe), num_heads,
