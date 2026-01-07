@@ -46,10 +46,15 @@ else:
 
 _CUSTOM_OP_REGISTERED = False
 
-def config_deprecate_logging():
+
+def config_deprecated_logging():
+    """Configure deprecated logging format, when used deprecated codes
+    in vllm-ascend.
+    """
     import logging
     import warnings
 
+    # Customize warning format to be one line
     def one_line_formatwarning(message, category, filename, lineno, line=None):
         return f"{filename}:{lineno}: {category.__name__}: {message}"
 
@@ -61,6 +66,8 @@ def config_deprecate_logging():
     vllm_logger = logging.getLogger("vllm")
     warnings_logger = logging.getLogger("py.warnings")
 
+    # Propagate vllm logger handlers to warnings logger, to keep the same
+    # format with vllm
     if vllm_logger.handlers:
         warnings_logger.handlers = []
 
@@ -135,7 +142,7 @@ class NPUPlatform(Platform):
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
-        config_deprecate_logging()
+        config_deprecated_logging()
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
