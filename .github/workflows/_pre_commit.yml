@@ -29,8 +29,7 @@ jobs:
     - name: Install vllm
       working-directory: vllm-empty
       run: |
-        pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-        VLLM_TARGET_DEVICE=empty pip install .
+        VLLM_TARGET_DEVICE=empty python3 -m pip install .
     - name: Install vllm-ascend dev
       run: |
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
