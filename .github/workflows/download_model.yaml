@@ -19,26 +19,28 @@ jobs:
   download-models:
     if: contains(github.event.pull_request.labels.*.name, 'model-download')
     name: Download models from ModelScope
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a2-0
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
 
     steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -y && apt-get install git jq -y
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          pip install modelscope
+
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Install dependencies
-        run: |
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-          pip install modelscope jq
 
       - name: Extract new models from PR
         id: diff
         run: |
           set -euo pipefail
 
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           JSON_PATH=".github/workflows/misc/model_list.json"
 
           git fetch origin main
@@ -59,9 +61,12 @@ jobs:
           cat /tmp/new_models.txt || true
 
       - name: Download new models (CLI)
-        if: hashFiles('/tmp/new_models.txt') != ''
         run: |
           set -euo pipefail
+          if [ ! -s /tmp/new_models.txt ]; then
+            echo "No new models to download."
+            exit 0
+          fi
 
           while read -r model; do
             [ -z "$model" ] && continue
