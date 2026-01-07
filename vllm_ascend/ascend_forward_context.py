@@ -14,7 +14,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
-                               is_moe_model,
+                               is_moe_model, set_flashcomm_pad_size,
                                speculative_enable_dispatch_gmm_combine_decode)
 
 
@@ -127,6 +127,8 @@ def set_ascend_forward_context(
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
                 forward_context.pad_size = pad_size
+                set_flashcomm_pad_size(pad_size)
+
         else:
             max_tokens_across_dp = num_tokens
 

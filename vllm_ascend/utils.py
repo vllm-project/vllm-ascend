@@ -67,6 +67,16 @@ _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
+_FLASHCOMM_PAD_SIZE = 0
+
+
+def get_flashcomm_pad_size():
+    return _FLASHCOMM_PAD_SIZE
+
+
+def set_flashcomm_pad_size(flashcomm_pad_size: int):
+    global _FLASHCOMM_PAD_SIZE
+    _FLASHCOMM_PAD_SIZE = flashcomm_pad_size
 
 
 def _print_callback_on_stream(*args):

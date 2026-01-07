@@ -24,7 +24,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import tensor_model_parallel_all_gather
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
@@ -42,6 +41,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm_ascend.ascend_forward_context import (set_ascend_forward_context,
                                                 set_mc2_mask,
                                                 set_mc2_tokens_capacity)
+from vllm_ascend.utils import enable_sp, get_flashcomm_pad_size, is_moe_model
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
                                               build_attn_state,
@@ -252,12 +252,21 @@ class NPUModelRunner(GPUModelRunner):
                     input_ids=input_batch.input_ids,
                     positions=input_batch.positions,
                 )
-                if get_forward_context().sp_enabled:
-                    hidden_states = tensor_model_parallel_all_gather(
-                        hidden_states, 0)
-                    pad_size = get_forward_context().pad_size
-                    if pad_size > 0:
-                        hidden_states = hidden_states[:-pad_size, :]
+        self.execute_model_state = hidden_states, input_batch, sampling_metadata
+
+        hidden_states, input_batch, sampling_metadata = self.execute_model_state
+        if is_moe_model(self.vllm_config):
+            sp_enabled = enable_sp(
+                self.vllm_config
+            ) and input_batch.num_tokens_after_padding is not None
+        else:
+            sp_enabled = enable_sp(self.vllm_config) and \
+                input_batch.num_tokens_after_padding is not None and input_batch.num_tokens_after_padding > 1000
+        if sp_enabled:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            pad_size = get_flashcomm_pad_size()
+            if pad_size > 0:
+                hidden_states = hidden_states[:-pad_size, :]
         self.execute_model_state = hidden_states, input_batch, sampling_metadata
         return None
 
