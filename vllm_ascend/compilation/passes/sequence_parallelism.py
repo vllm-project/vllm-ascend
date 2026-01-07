@@ -6,6 +6,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_reduce)
 from vllm.logger import logger
+from vllm.config.utils import Range
 
 
 class _SequenceParallelPatternHelper:
@@ -213,6 +214,8 @@ class AscendSequenceParallelismPass(VllmInductorPass):
 
             AscendQwen3VLMiddleAllReduceRMSNormPattern(
                 config, epsilon).register(self.patterns)
+        
+        self.min_tokens = 1000
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
@@ -220,8 +223,11 @@ class AscendSequenceParallelismPass(VllmInductorPass):
         logger.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
-    def is_applicable(self, runtime_shape: int | None = None) -> bool:
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+
         """
         Check if the pass is applicable for the current configuration.
         """
-        return True
+        
+        applicable = compile_range.start >= self.min_tokens
+        return applicable
