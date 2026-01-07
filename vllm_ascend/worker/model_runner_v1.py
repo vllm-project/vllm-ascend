@@ -3058,5 +3058,7 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         target_module = sys.modules[target_module_name]
         setattr(target_module, "graph_capture", graph_capture)
         yield
+    except Exception as e:
+        raise RuntimeError(f"NPUModelRunner failed, error is {e}")
     finally:
         setattr(target_module, "graph_capture", graph_capture)
