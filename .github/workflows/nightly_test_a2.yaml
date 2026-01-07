@@ -49,6 +49,9 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
+          - name: qwen3-8b
+            os: linux-aarch64-a2-1
+            tests: tests/e2e/nightly/single_node/models/test_qwen3_8b.py
           - name: qwen3-32b
             os: linux-aarch64-a2-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py

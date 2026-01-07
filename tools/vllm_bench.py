@@ -47,6 +47,8 @@ class VllmbenchRunner:
                  model_name: str,
                  port: int,
                  config: dict,
+                 baseline: float,
+                 threshold: float = 0.97,
                  model_path: str = "",
                  host_ip: str = "localhost"):
         self.model_name = model_name
@@ -60,10 +62,12 @@ class VllmbenchRunner:
         curr_time = datetime.now().strftime('%Y%m%d%H%M%S')
         self.result_filename = f"result_vllm_bench_{curr_time}.json"
         self.config = config
+        self.baseline = baseline
+        self.threshold = threshold
 
         self._run_vllm_bench_task()
         self._wait_for_task()
-        self._get_result()
+        self._performance_verify()
 
     def _concat_config_args(self, vllm_bench_cmd):
         if "ignore_eos" in self.config:
@@ -87,16 +91,30 @@ class VllmbenchRunner:
             self.proc.kill()
 
     def _wait_for_task(self):
-        result_msg = "========================="
-        while True:
-            line = self.proc.stdout.readline().strip()
-            if line:
-                print(line)
-            if result_msg in line:
-                return
-            if "ERROR" in line:
-                error_msg = f"Some errors happened to vllm_bench runtime, the first error is {line}"
-                raise RuntimeError(error_msg) from None
+        """Wait for the vllm bench command to complete and check the execution result"""
+
+        stdout, stderr = self.proc.communicate()
+
+        if self.proc.returncode != 0:
+            logging.error(
+                f"vllm bench command failed, return code: {self.proc.returncode}"
+            )
+            logging.error(f"Standard output: {stdout}")
+            logging.error(f"Standard error: {stderr}")
+            raise RuntimeError(
+                f"vllm bench command execution failed: {stderr}")
+
+        logging.info(
+            f"vllm bench command completed, return code: {self.proc.returncode}"
+        )
+        if stdout:
+            lines = stdout.split('\n')
+            last_lines = lines[-100:] if len(lines) > 100 else lines
+            logging.info(f"Last {len(last_lines)} lines of standard output:")
+            for line in last_lines:
+                logging.info(line)
+        else:
+            logging.info("Standard output is empty")
 
     def _get_result(self):
         result_file = os.path.join(os.getcwd(), self.result_filename)
@@ -104,16 +122,27 @@ class VllmbenchRunner:
         with open(result_file, 'r', encoding='utf-8') as f:
             self.result = json.load(f)
 
+    def _performance_verify(self):
+        self._get_result()
+        output_throughput = self.result["output_throughput"]
+        assert float(
+            output_throughput
+        ) >= self.baseline * self.threshold, f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+
 
 def run_vllm_bench_case(model_name,
                         port,
                         config,
+                        baseline,
+                        threshold=0.97,
                         model_path="",
                         host_ip="localhost"):
     try:
         with VllmbenchRunner(model_name,
                              port,
                              config,
+                             baseline,
+                             threshold,
                              model_path=model_path,
                              host_ip=host_ip) as vllm_bench:
             vllm_bench_result = vllm_bench.result
