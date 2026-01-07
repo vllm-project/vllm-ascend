@@ -50,35 +50,19 @@ class AttentionMaskBuilder:
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(self.device, non_blocking=True)
 
-    def get_splitfuse_attn_mask(
-        self,
-        seq_lens: torch.Tensor = None,
-        position: torch.Tensor = None,
-        dtype: torch.dtype = None,
-        device: torch.device = None,
-    ) -> torch.Tensor:
-
+    def get_splitfuse_attn_mask(self) -> torch.Tensor:
         from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
-
-        target_device = device or getattr(self, "device", None) or torch.device("npu")
-
         if get_ascend_device_type() == AscendDeviceType._310P:
-            target_dtype = dtype or torch.float16
-
-            cache = getattr(self, "_splitfuse_attn_mask_cache", None)
-            if cache is None:
-                self._splitfuse_attn_mask_cache = {}
-                cache = self._splitfuse_attn_mask_cache
-
-            key = str(target_dtype)
-            if key not in cache:
-                max_seq_len = int(seq_lens.max().item()) if seq_lens is not None else 2048
-                max_seq_len = min(max_seq_len, 2048)
-                cache[key] = self.get_attn_mask(max_seq_len, target_dtype)
-            return cache[key]
-
-        if (self.chunked_prefill_attn_mask is None
-                or self.chunked_prefill_attn_mask.device != target_device):
+            target_dtype = torch.float16
+            target_device = getattr(self, "device", None) or torch.device("npu")
+            mask = getattr(self, "_splitfuse_attn_mask_310p", None)
+            if mask is None or mask.device != target_device or mask.dtype != target_dtype:
+                mask = self.get_attn_mask(2048, target_dtype)
+                if mask.device != target_device:
+                    mask = mask.to(target_device)
+                self._splitfuse_attn_mask_310p = mask
+            return mask
+        if self.chunked_prefill_attn_mask is None:
             self.chunked_prefill_attn_mask = torch.triu(
                 torch.ones(2048,
                            2048), diagonal=1).to(torch.int8).to(self.device)
