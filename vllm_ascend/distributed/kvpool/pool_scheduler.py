@@ -24,10 +24,11 @@ class KVPoolScheduler:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_put", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
-        self.client = LookupKeyClient(
-            vllm_config) if self.kv_role != "kv_consumer" else None
+        self.client = LookupKeyClient(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config,
@@ -75,8 +76,8 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
-        num_external_hit_tokens = self.client.lookup(  # type: ignore[union-attr]
-            token_len, request.block_hashes)
+        num_external_hit_tokens = self.client.lookup(token_len,
+                                                     request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -150,7 +151,8 @@ class KVPoolScheduler:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer"
+        force_skip_save = (self.kv_role == "kv_consumer"
+                           and not self.consumer_is_to_put)
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -198,6 +200,7 @@ class KVPoolScheduler:
                     num_current_tokens = request_tracker.token_len
                     new_token_ids = request.all_token_ids[
                         num_current_tokens:num_current_tokens + num_new_tokens]
+                    request_tracker.token_len += len(new_token_ids)
                 else:
                     raise ValueError(
                         f"Request {req_id} is not in _unfinished_requests, "
@@ -205,10 +208,7 @@ class KVPoolScheduler:
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
                     continue
-                request_tracker.update(new_token_ids, new_block_ids)
-                # decode not save
-                if request_tracker.token_len > len(request.prompt_token_ids):
-                    continue
+                request_tracker.update(new_block_ids)
 
                 last_chunk_tokens_num = ((len(request.prompt_token_ids) //
                                           self._block_size * self._block_size)
@@ -271,7 +271,7 @@ class KVPoolScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-        if self.kv_role == "kv_consumer":
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
@@ -310,8 +310,8 @@ class LookupKeyClient:
         self.socket.close(linger=0)
 
 
-def get_zmq_rpc_path_lookup(
-    vllm_config: Optional["VllmConfig"] = None, ) -> str:
+def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
     base_url = envs.VLLM_RPC_BASE_PATH
     # Default to 0 if not configured
     rpc_port = 0
@@ -325,4 +325,4 @@ def get_zmq_rpc_path_lookup(
                 "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
             )
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}"
+    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"

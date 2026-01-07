@@ -99,7 +99,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
 
     @patch('torch.ops._C_ascend')
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
@@ -115,7 +115,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(self.positions, self.query,
@@ -141,7 +141,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(self.positions,
@@ -164,7 +164,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
             model_config = ModelConfig(MODEL,
                                        tokenizer=MODEL,
                                        max_model_len=MAX_NUM_BATCHED_TOKEND)
-            model_config.hf_config = PretrainedConfig()
+            model_config.hf_text_config = PretrainedConfig()
             vllm_config.model_config = model_config
             with set_ascend_forward_context(None, vllm_config):
                 self.layer.forward(self.positions, self.query, self.key,
@@ -184,7 +184,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(
@@ -213,7 +213,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
             result_q, result_k = self.layer.forward(self.positions, self.query,
@@ -404,7 +404,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         model_config = ModelConfig(MODEL_VL,
                                    tokenizer=MODEL_VL,
                                    max_model_len=MAX_NUM_BATCHED_TOKEND)
-        model_config.hf_config = PretrainedConfig()
+        model_config.hf_text_config = PretrainedConfig()
         vllm_config.model_config = model_config
         return vllm_config
 

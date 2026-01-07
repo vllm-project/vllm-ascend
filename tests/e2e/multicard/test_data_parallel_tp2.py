@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
-MODELS = ["Qwen/Qwen3-0.6B"]
+MODELS = ["Qwen/Qwen3-30B-A3B"]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"})
-def test_qwen_inference_dp2_tp2(model, max_tokens):
+def test_qwen3_inference_dp2_tp2(model, max_tokens):
     script = "examples/offline_data_parallel.py"
 
     env = os.environ.copy()

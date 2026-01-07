@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -103,13 +104,23 @@ class AscendQuantConfig(QuantizationConfig):
                 return ASCEND_QUANTIZATION_METHOD
         return None
 
+    def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
+        # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
+        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
+        if prefix_mapping:
+            hf_to_vllm_mapper = WeightsMapper(
+                orig_to_new_prefix=prefix_mapping)
+            return hf_to_vllm_mapper._map_name(prefix)
+        return prefix
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        model_type = vllm_config.model_config.hf_text_config.model_type
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
+        prefix = self.quant_prefix_mapper(model_type, prefix)
         from vllm.attention.layer import Attention
         if prefix.startswith("language_model"):
             prefix = prefix.split('.', 1)[-1]
@@ -122,9 +133,6 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, Attention) and self.quant_description.get(
-                'kv_quant_type') == 'C8':
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
@@ -174,6 +182,16 @@ class AscendQuantConfig(QuantizationConfig):
         return []
 
 
+# key: model_type
+# value: orig_to_new_prefix
+QUANT_MODEL_PREFIX_MAPPINGS = {
+    "qwen3_vl_moe": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
+}
+
 packed_modules_model_mapping = {
     "qwen3_moe": {
         "qkv_proj": [
@@ -200,6 +218,12 @@ packed_modules_model_mapping = {
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
+    "pangu_ultra_moe": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    },
     "kimi_k2": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
@@ -219,6 +243,12 @@ packed_modules_model_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    },
+    "pangu_ultra_moe_mtp": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "qwen3_next": {
         "qkv_proj": [
@@ -242,6 +272,19 @@ packed_modules_model_mapping = {
             "up_proj",
         ],
     },
+    "qwen3_vl_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "glm4_moe": {
         "qkv_proj": [
             "q_proj",
@@ -254,6 +297,12 @@ packed_modules_model_mapping = {
         ],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    },
+    "longcat_flash": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
 }
 
@@ -471,6 +520,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -481,9 +531,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         return self.quant_method.apply(
             layer, x, router_logits, top_k, renormalize, use_grouped_topk,
             global_num_experts, expert_map, topk_group, num_expert_group,
-            custom_routing_function, scoring_func, e_score_correction_bias,
-            is_prefill, enable_force_load_balance, log2phy,
-            global_redundant_expert_num, **kwargs)
+            custom_routing_function, scoring_func, routed_scaling_factor,
+            e_score_correction_bias, is_prefill, enable_force_load_balance,
+            log2phy, global_redundant_expert_num, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
@@ -492,6 +542,11 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         # TODO: implement this function
         pass
+
+    @property
+    def supports_eplb(self):
+        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
+        return supports_eplb
 
 
 class AscendEmbeddingMethod(AscendLinearMethod):

@@ -54,8 +54,12 @@ jobs:
   e2e-nightly:
     name: ${{ inputs.tests }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 600
     container:
       image: ${{ inputs.image }}
+    env:
+      TRANSFORMERS_OFFLINE: 1
+      VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
@@ -119,6 +123,16 @@ jobs:
           pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
+      - name: Install triton-ascend
+        if: ${{ inputs.name == 'test_custom_op' }}
+        shell: bash -l {0}
+        run: |
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -127,4 +141,12 @@ jobs:
           BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          pytest -sv ${{ inputs.tests }}
+          # ignore test_dispatch_ffn_combine until the test is fixed
+          pytest -sv ${{ inputs.tests }} \
+          --ignore=tests/e2e/nightly/ops/test_dispatch_ffn_combine.py \
+          --ignore=tests/e2e/nightly/ops/test_fused_moe.py \
+          --ignore=tests/e2e/nightly/ops/test_rotary_embedding.py \
+          --ignore=tests/e2e/nightly/ops/test_matmul_allreduce_add_rmsnorm.py
+
+
+

@@ -27,9 +27,9 @@ from vllm_ascend.attention.attention_v1 import (AscendMetadata,
 from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
-    ACLGraphEntry, ACLGraphWrapper, get_graph_params, get_mtp_graph_params,
-    set_graph_params, set_mtp_graph_params, update_attn_dcp_pcp_params,
-    update_mla_attn_dcp_pcp_params, update_mtp_graph_params_workspaces)
+    ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
+    set_draft_graph_params, set_graph_params, update_attn_dcp_pcp_params,
+    update_draft_graph_params_workspaces, update_mla_attn_dcp_pcp_params)
 
 
 class TestACLGraphEntry(TestBase):
@@ -713,25 +713,26 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(unwrapped, self.mock_runnable)
 
 
-class TestMTPGraphParams(TestBase):
+class TestDraftGraphParams(TestBase):
 
-    def test_set_mtp_graph_params(self):
-        with patch('vllm_ascend.compilation.acl_graph._mtp_graph_params',
+    def test_set_draft_graph_params(self):
+        with patch('vllm_ascend.compilation.acl_graph._draft_graph_params',
                    new=None):
-            set_mtp_graph_params([4])
-            from vllm_ascend.compilation.acl_graph import _mtp_graph_params
-            self.assertIsNotNone(_mtp_graph_params)
+            set_draft_graph_params([4])
+            from vllm_ascend.compilation.acl_graph import _draft_graph_params
+            self.assertIsNotNone(_draft_graph_params)
 
-    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
-    def test_update_mtp_graph_params_workspaces(self, mtp_graph_params_mock):
-        mtp_graph_params_mock.workspaces = {4: 5}
-        update_mtp_graph_params_workspaces(4, 6)
-        self.assertEqual(mtp_graph_params_mock.workspaces[4], 6)
+    @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
+    def test_update_draft_graph_params_workspaces(self,
+                                                  draft_graph_params_mock):
+        draft_graph_params_mock.workspaces = {4: 5}
+        update_draft_graph_params_workspaces(4, 6)
+        self.assertEqual(draft_graph_params_mock.workspaces[4], 6)
 
-    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
-    def test_get_mtp_graph_params(self, mtp_graph_params_mock):
-        graph_params = get_mtp_graph_params()
-        self.assertIs(mtp_graph_params_mock, graph_params)
+    @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
+    def test_get_draft_graph_params(self, draft_graph_params_mock):
+        graph_params = get_draft_graph_params()
+        self.assertIs(draft_graph_params_mock, graph_params)
 
 
 class TestPCPDCPGraphParams(TestBase):
@@ -783,7 +784,7 @@ class TestPCPDCPGraphParams(TestBase):
                                      decode=decode)
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_mtp_model = False
+        forward_context.is_draft_model = False
 
         num_heads = 256
         scale = 0.1
@@ -803,7 +804,9 @@ class TestPCPDCPGraphParams(TestBase):
             (q_nope, q_pe, k_nope, k_pe, block_table, seq_lens, num_heads,
              scale, num_kv_heads, out, lse))
 
-        update_mla_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
+        with patch("torch_npu._C._npu_setStream", return_value=None):
+            update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
+                                           4)
 
         _mock_graph_task_end.assert_called_once()
 
@@ -834,7 +837,7 @@ class TestPCPDCPGraphParams(TestBase):
                                   decode_meta=decode)
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_mtp_model = False
+        forward_context.is_draft_model = False
 
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
@@ -842,6 +845,7 @@ class TestPCPDCPGraphParams(TestBase):
              block_table, 128, actual_seq_lengths_kv, actual_seq_lengths_q,
              out, lse, 2, 0, 0))
 
-        update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
+        with patch("torch_npu._C._npu_setStream", return_value=None):
+            update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
 
         _mock_graph_task_end.assert_called_once()

@@ -25,35 +25,106 @@ for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
 for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
 # View gateway configuration
 for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
-# View NPU network configuration
+```
+
+2. Check NPU network configuration:
+
+Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+
+```bash
 cat /etc/hccn.conf
 ```
 
-2. Get NPU IP Addresses
+3. Get NPU IP Addresses
 
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g;done
 ```
 
-## Generate Ranktable
+## Run with Docker
+Start a Docker container.
 
-The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. For more details, please refer to the [vllm-ascend examples](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/README.md). Execute the following commands for reference.
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export NAME=vllm-ascend
 
-```shell
-cd vllm-ascend/examples/disaggregate_prefill_v1/
-bash gen_ranktable.sh --ips 192.0.0.1 \
-  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 1 --decode-device-cnt 1
+# Run the container using the defined variables
+docker run --rm \
+--name $NAME \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /etc/hccn.conf:/etc/hccn.conf \
+-v /mnt/sfs_turbo/.cache:/root/.cache \
+-it $IMAGE bash
 ```
 
-If you want to run "2P1D", please set npus-per-node to 3 and prefill-device-cnt to 2. The rank table will be generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+## Install Mooncake
 
-|Parameter  | Meaning |
-| --- | --- |
-| --ips | Each node's local IP address (prefiller nodes should be in front of decoder nodes) |
-| --npus-per-node | Each node's NPU clips |
-| --network-card-name | The physical machines' NIC |
-|--prefill-device-cnt  | NPU clips used for prefill |
-|--decode-device-cnt |NPU clips used for decode |
+Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+First, we need to obtain the Mooncake project. Refer to the following command:
+
+```shell
+git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+```
+
+(Optional) Replace go install url if the network is poor
+
+```shell
+cd Mooncake
+sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
+```
+
+Install mpi
+
+```shell
+apt-get install mpich libmpich-dev -y
+```
+
+Install the relevant dependencies. The installation of Go is not required.
+
+```shell
+bash dependencies.sh -y
+```
+
+Compile and install
+
+```shell
+mkdir build
+cd build
+cmake .. -DUSE_ASCEND_DIRECT=ON
+make -j
+make install
+```
+
+Set environment variables
+
+**Note:**
+
+- Adjust the Python path according to your specific Python installation
+- Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
+
+```shell
+export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+```
 
 ## Prefiller/Decoder Deployment
 
@@ -65,7 +136,7 @@ We can run the following scripts to launch a server on the prefiller/decoder NPU
 
 ```shell
 export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_IF_IP=192.0.0.1 # node ip
+export HCCL_IF_IP=192.0.0.1  # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
@@ -75,8 +146,8 @@ export OMP_NUM_THREADS=10
 vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --host 0.0.0.0 \
   --port 13700 \
-  --tensor-parallel-size 1 \
   --no-enable-prefix-caching \
+  --tensor-parallel-size 1 \
   --seed 1024 \
   --served-model-name qwen25vl \
   --max-model-len 40000  \
@@ -84,7 +155,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30000",
   "engine_id": "0",
@@ -127,7 +198,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnector",
+  '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30100",
   "engine_id": "1",

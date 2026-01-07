@@ -19,6 +19,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend.attention.utils import using_paged_attention
+
 from ..utils import weak_ref_tensors
 
 
@@ -160,6 +162,13 @@ class ACLGraphWrapper:
                         # any other acl graph.
                         output = weak_ref_tensors(output)
 
+            # here we always use weak ref for the workspaces
+            # to save memory
+            global _graph_params
+            global _draft_graph_params
+            weak_ref_workspaces(_graph_params)
+            weak_ref_workspaces(_draft_graph_params)
+
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)
@@ -193,8 +202,79 @@ class ACLGraphWrapper:
         return entry.output
 
 
-def update_attn_params(update_stream, forward_context, runtime_shape):
+def weak_ref_workspaces(params):
+    if params is None:
+        return
+    for num_tokens in params.workspaces:
+        if params.workspaces[num_tokens] is None:
+            continue
+        params.workspaces[num_tokens] = weak_ref_tensors(
+            params.workspaces[num_tokens])
+
+
+def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
     graph_params = get_graph_params()
+    # FIXME: Behold! We are using a temporary hack here to update the args
+    # for each layer's attention op in the graph.
+    with torch.npu.stream(update_stream):
+        for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[runtime_shape],
+                graph_params.handles[runtime_shape],
+                graph_params.events[runtime_shape],
+        ):
+            (
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                num_heads,
+                scale,
+                block_table,
+                seq_lens,
+                output,
+            ) = param
+            seq_lens = forward_context.attn_metadata[key].seq_lens
+
+            # When using FULL_DECODE_ONLY, there are some rare bugs for FULL_DECODE_ONLY
+            # mode with GQA. This is triggered by getting workspace for _npu_paged_attention
+            # in torch_npu. On some rare cases, _npu_paged_attention with smaller seq_lens
+            # might encounter a bigger workspace, while currently we use max_model_len to
+            # calculate max workspace in capturing. So additional get_workspace is added
+            # here to avoid such bugs.
+            # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
+            # replaced by npu_fused_infer_attention_score which does not contain such bugs.
+            workspace = torch_npu._npu_paged_attention_get_workspace(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                num_kv_heads=num_kv_heads,
+                num_heads=num_heads,
+                scale_value=scale,
+                block_table=block_table,
+                context_lens=seq_lens,
+                out=output)
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch_npu._npu_paged_attention(query=query,
+                                           key_cache=key_cache,
+                                           value_cache=value_cache,
+                                           num_kv_heads=num_kv_heads,
+                                           num_heads=num_heads,
+                                           scale_value=scale,
+                                           block_table=block_table,
+                                           context_lens=seq_lens,
+                                           out=output,
+                                           workspace=workspace)
+            torch.npu.graph_task_update_end(update_stream)
+
+            event.record(update_stream)
+
+
+def _update_attn_fia_params(update_stream, forward_context, runtime_shape):
+    if forward_context.is_draft_model:
+        graph_params = get_draft_graph_params()
+    else:
+        graph_params = get_graph_params()
     # For Qwen3-next, since the kv_cache_config has already categorized
     # linear_attn and self_attn, the attn_metadata is first arranged with
     # self_attn followed by linear_attn. Therefore, using zip directly
@@ -211,8 +291,8 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
              attn_output, softmax_lse) = param
 
             seq_lens = forward_context.attn_metadata[key].seq_lens_list
-            query_start_loc = forward_context.attn_metadata[
-                key].query_start_loc_list
+            actual_seq_lengths_q = forward_context.attn_metadata[
+                key].actual_seq_lengths_q
             torch.npu.graph_task_update_begin(update_stream, handle)
             torch_npu.npu_fused_infer_attention_score.out(
                 query=query,
@@ -222,7 +302,7 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                 atten_mask=attn_mask,
                 input_layout="TND",
                 block_size=block_size,
-                actual_seq_lengths=query_start_loc,
+                actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=seq_lens,
                 num_key_value_heads=num_kv_heads,
                 num_heads=num_heads,
@@ -236,10 +316,18 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
             event.record(update_stream)
 
 
+def update_attn_params(update_stream, forward_context, runtime_shape,
+                       vllm_config):
+    if using_paged_attention(runtime_shape, vllm_config):
+        _update_attn_pa_params(update_stream, forward_context, runtime_shape)
+    else:
+        _update_attn_fia_params(update_stream, forward_context, runtime_shape)
+
+
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                            speculative_config):
-    if forward_context.is_mtp_model:
-        graph_params = get_mtp_graph_params()
+    if forward_context.is_draft_model:
+        graph_params = get_draft_graph_params()
     else:
         graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
@@ -258,7 +346,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
             seq_lens_list = forward_context.attn_metadata[
                 key].decode.seq_lens_list
             if speculative_config and speculative_config.method == "mtp" \
-                    and not forward_context.is_mtp_model:
+                    and not forward_context.is_draft_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
                 spec_multiple = speculative_config.num_speculative_tokens + 1
@@ -268,7 +356,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                     spec_multiple * (i + 1)
                     for i in range(runtime_shape // spec_multiple)
                 ]
-            elif forward_context.is_mtp_model:
+            elif forward_context.is_draft_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
                 block_table = forward_context.attn_metadata[
@@ -372,7 +460,10 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
 
 def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                                    runtime_shape):
-    graph_params = get_graph_params()
+    if forward_context.is_draft_model:
+        graph_params = get_draft_graph_params()
+    else:
+        graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
     with torch.npu.stream(update_stream):
@@ -446,24 +537,24 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     )
 
 
-def update_graph_params_workspaces(num_tokens: int, workspace: int):
+def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
     global _graph_params
     if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
+        _graph_params.workspaces[num_tokens] = workspace
 
 
 def get_graph_params():
     return _graph_params
 
 
-_mtp_graph_params: Optional[GraphParams] = None
+_draft_graph_params: Optional[GraphParams] = None
 
 
-def set_mtp_graph_params(aclgraph_capture_sizes: list[int]):
-    global _mtp_graph_params
-    if _mtp_graph_params is not None:
-        raise ValueError("MTPGraph parameters have already been set!")
-    _mtp_graph_params = GraphParams(
+def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
+    global _draft_graph_params
+    if _draft_graph_params is not None:
+        raise ValueError("DraftGraph parameters have already been set!")
+    _draft_graph_params = GraphParams(
         {size: []
          for size in aclgraph_capture_sizes},
         {size: None
@@ -475,11 +566,11 @@ def set_mtp_graph_params(aclgraph_capture_sizes: list[int]):
     )
 
 
-def update_mtp_graph_params_workspaces(num_tokens: int, workspace: Any):
-    global _mtp_graph_params
-    if _mtp_graph_params is not None:
-        _mtp_graph_params.workspaces[num_tokens] = workspace
+def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
+    global _draft_graph_params
+    if _draft_graph_params is not None:
+        _draft_graph_params.workspaces[num_tokens] = workspace
 
 
-def get_mtp_graph_params():
-    return _mtp_graph_params
+def get_draft_graph_params():
+    return _draft_graph_params

@@ -13,41 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
-from uuid import uuid4
+from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import logger
+from vllm.triton_utils import HAS_TRITON
 
-
-def check_kv_extra_config(vllm_config):
-
-    def _check(name: str, config: dict):
-        tp_key = "tp_size"
-        dp_key = "dp_size"
-        if tp_key in config:
-            config_tp = config[tp_key]
-            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
-            if config_tp != vllm_tp:
-                raise ValueError(
-                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
-                    f"Expected {vllm_tp}, but got {config_tp}.")
-        if dp_key in config:
-            config_dp = config[dp_key]
-            vllm_dp = vllm_config.parallel_config.data_parallel_size
-            if config_dp != vllm_dp:
-                raise ValueError(
-                    f"KV transfer '{name}' config has a conflicting data parallel size. "
-                    f"Expected {vllm_dp}, but got {config_dp}.")
-
-    if vllm_config.kv_transfer_config.is_kv_producer:
-        _check(
-            "prefill",
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "prefill", {}))
-    if vllm_config.kv_transfer_config.is_kv_consumer:
-        _check(
-            "decode",
-            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class AscendConfig:
@@ -55,7 +27,7 @@ class AscendConfig:
     Configuration Object for additional_config from vllm.configs.
     """
 
-    def __init__(self, vllm_config):
+    def __init__(self, vllm_config: "VllmConfig"):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -73,8 +45,7 @@ class AscendConfig:
             finegrained_tp_config, vllm_config)
 
         # Dump / PrecisionDebugger configuration
-        dump_config_path = additional_config.get("dump_config", None)
-        self.dump_config = DumpConfig(dump_config_path)
+        self.dump_config_path = additional_config.get("dump_config_path", None)
 
         weight_prefetch_config = additional_config.get(
             "weight_prefetch_config", {})
@@ -95,8 +66,6 @@ class AscendConfig:
         self.gate_eplb = additional_config.get("gate_eplb", False)
         self.num_wait_worker_iterations = additional_config.get(
             "num_wait_worker_iterations", 30)
-        self.chunked_prefill_for_mla = additional_config.get(
-            "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp",
             False) and vllm_config.parallel_config.enable_expert_parallel
@@ -106,13 +75,12 @@ class AscendConfig:
                              enable_shared_expert_dp=True)
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
+        self.multistream_overlap_gate = additional_config.get(
+            "multistream_overlap_gate", False)
         self.recompute_scheduler_enable = additional_config.get(
             "recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
-
-        if vllm_config.kv_transfer_config is not None:
-            check_kv_extra_config(vllm_config)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -128,7 +96,7 @@ class AscendConfig:
                 try:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_config.num_key_value_heads
+                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
                     self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
@@ -147,15 +115,27 @@ class AscendConfig:
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
-        if self.enable_npugraph_ex:
-            raise NotImplementedError(
-                "This feature is still in the experiment and will be supported soon."
-            )
-        kv_cfg = vllm_config.kv_transfer_config
-        if kv_cfg is not None and not getattr(kv_cfg, "_engine_id_patched",
-                                              False):
-            kv_cfg.engine_id = f"{kv_cfg.engine_id}-{uuid4().hex}"
-            kv_cfg._engine_id_patched = True
+        # We find that _npu_paged_attention still performs better than
+        # npu_fused_infer_attention_score in some cases. We allow to execute
+        # _npu_paged_attention in this cases. This should be removed once
+        # npu_fused_infer_attention_score performs better on all scenarios.
+        self.pa_shape_list = additional_config.get("pa_shape_list", [])
+
+        self.enable_async_exponential = bool(
+            additional_config.get("enable_async_exponential", False))
+
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
+        if self.enable_kv_nz:
+            use_sparse = hasattr(vllm_config.model_config.hf_text_config,
+                                 "index_topk")
+            if not vllm_config.model_config.is_deepseek_mla or use_sparse:
+                raise RuntimeError(
+                    "enable_kv_nz is only supported for mla currently.")
+            if vllm_config.kv_transfer_config is None \
+                or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise NotImplementedError(
+                    "enable_kv_nz is only supported in pd scenario and can "
+                    "only be used in D node.")
 
 
 class FinegrainedTPConfig:
@@ -222,7 +202,10 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self, fuse_norm_quant: bool = True, **kwargs):
+    def __init__(self,
+                 fuse_norm_quant: bool = True,
+                 fuse_qknorm_rope: bool = False,
+                 **kwargs):
         """
         Initialize the configuration.
         
@@ -230,11 +213,12 @@ class AscendCompilationConfig:
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
-                
+            fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
-        # Add more compilation related configs here as needed
+        self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
 
 
 class XliteGraphConfig:
@@ -258,18 +242,6 @@ class XliteGraphConfig:
                 raise RuntimeError(
                     "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
                 )
-
-
-class DumpConfig:
-    """
-    Configuration object for dump/PrecisionDebugger settings.
-    """
-
-    def __init__(self, dump_config_path: Optional[str] = None):
-        # enable_dump is True when dump_cfg exists and config_path is not empty
-        self.enable_dump: bool = bool(dump_config_path)
-        # Path to msprobe config json; may be None.
-        self.config_path: Optional[str] = dump_config_path
 
 
 class WeightPrefetchConfig:

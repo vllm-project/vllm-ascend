@@ -18,7 +18,8 @@ from typing import Callable, Optional
 
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
+
+from vllm_ascend.utils import get_weight_prefetch_method
 
 
 def select_experts(hidden_states: torch.Tensor,
@@ -56,7 +57,7 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
     # prefetch w1_w3_proj.weight preprocess
-    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
@@ -224,7 +225,7 @@ def _select_experts_with_fusion_ops(
         norm_type=norm_type,  # 0: softmax; 1: sigmoid
         # out_flag=False, # todo new api; should the third output be output
         # y2_flag=False, # old api; should the third output be output
-        routed_scaling_factor=1,
+        routed_scaling_factor=routed_scaling_factor,
         eps=float(1e-20))
     if scoring_func == "softmax":
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
@@ -303,3 +304,28 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
+
+def zero_experts_compute(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    zero_expert_type: str,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if zero_expert_type == "identity":
+        zero_expert_mask = expert_indices < num_experts
+        zero_expert_scales = expert_scales.clone()
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0,
+                                         zero_expert_scales)
+
+        hidden_states = hidden_states.unsqueeze(1)
+        zero_expert_scales = zero_expert_scales.unsqueeze(2)
+        result = hidden_states * zero_expert_scales
+        result = result.sum(dim=1)
+
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
+    expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
+
+    return expert_indices, expert_scales, result

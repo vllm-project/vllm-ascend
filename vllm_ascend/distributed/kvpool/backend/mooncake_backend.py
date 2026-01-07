@@ -76,7 +76,6 @@ class MooncakeBackend(Backend):
 
 @dataclass
 class MooncakeStoreConfig:
-    local_hostname: str
     metadata_server: str
     global_segment_size: Union[int, str]
     local_buffer_size: int
@@ -89,14 +88,13 @@ class MooncakeStoreConfig:
         with open(file_path) as file:
             config = json.load(file)
         return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size",
                            DEFAULT_GLOBAL_SEGMENT_SIZE)),
             local_buffer_size=_parse_global_segment_size(
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
-            protocol=config.get("protocol", "tcp"),
+            protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"))
 

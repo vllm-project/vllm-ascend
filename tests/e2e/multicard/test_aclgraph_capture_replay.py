@@ -28,7 +28,8 @@ from vllm.utils.network_utils import get_open_port
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MODELS = [
-    "Qwen/Qwen3-0.6B",
+    # Offline data parallel mode will be not supported/useful for dense models
+    # "Qwen/Qwen3-0.6B",
     "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 
@@ -107,11 +108,13 @@ def _run_worker_process(
             quantization="ascend" if "W8A8" in model_path else None,
             enable_expert_parallel=True if "DeepSeek" in model_path else False,
             trust_remote_code=True,
+            # vllm enables async scheduling by default, remove below when vllm >= 0.14.0
+            async_scheduling=False,
         )
 
         # Expose model config to the main test process
         counters["hidden_layers"].value = (
-            llm.llm_engine.model_config.hf_config.num_hidden_layers)
+            llm.llm_engine.model_config.hf_text_config.num_hidden_layers)
 
         llm.generate(local_prompts,
                      SamplingParams(max_tokens=max_tokens, temperature=0.0))
@@ -134,7 +137,7 @@ def _run_worker_process(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
-def test_aclgraph_capture_replay_metrics_dp2(
+def test_models_aclgraph_capture_replay_metrics_dp2(
     model: str,
     max_tokens: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -215,7 +218,7 @@ def test_aclgraph_capture_replay_metrics_dp2(
     # Part A: Warmup runs (Profile run + 2 runs per captured graph)
     warmup_runs = 1 + (2 * max_batch_sizes)
     soc_version = get_ascend_device_type()
-    if soc_version in {AscendDeviceType._910_93} and "DeepSeek" in model:
+    if soc_version in {AscendDeviceType.A3} and "DeepSeek" in model:
         # An extra warmup run is needed for MC2 warmup here
         warmup_runs += 1
 

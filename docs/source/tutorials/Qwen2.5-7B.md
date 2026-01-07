@@ -98,7 +98,8 @@ Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 pla
 
 ```shell
 #!/bin/sh
-export ASCEBD_RT_VISIBLE_DEVICES=0
+export ASCEND_RT_VISIBLE_DEVICES=0
+export MODEL_PATH="Qwen/Qwen2.5-7B-Instruct"
 
 vllm serve ${MODEL_PATH} \
           --host 0.0.0.0 \
