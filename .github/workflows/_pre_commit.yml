@@ -17,7 +17,6 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     env:
       GOPROXY: https://goproxy.io,direct
-      PRE_COMMIT_HOME: /tmp/pre-commit
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
@@ -37,8 +36,8 @@ jobs:
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+    - name: Run pre-commit
       env:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
-      with:
-        extra_args: --all-files --hook-stage manual
+      run: |
+        pre-commit run --all-files --hook-stage manual
