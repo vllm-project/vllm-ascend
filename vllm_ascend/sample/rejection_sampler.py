@@ -4,7 +4,8 @@ from typing import Optional
 import torch
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import (GREEDY_TEMPERATURE,
+from vllm.v1.sample.rejection_sampler import (GREEDY_TEMPERATURE, MAX_SPEC_LEN,
+                                              PLACEHOLDER_TOKEN_ID,
                                               generate_uniform_probs)
 
 from vllm_ascend.ops.triton.reject_sample import (
@@ -12,11 +13,6 @@ from vllm_ascend.ops.triton.reject_sample import (
     rejection_greedy_sample_with_triton, rejection_random_sample_kernel,
     sample_recovered_tokens_kernel)
 from vllm_ascend.sample.sampler import apply_top_k_top_p
-
-PLACEHOLDER_TOKEN_ID = -1
-# Maximum number of speculative draft tokens allowed per request in a single
-# step. This value is chosen to be large enough to handle typical use cases.
-MAX_SPEC_LEN = 32
 
 
 def apply_sampling_constraints(
