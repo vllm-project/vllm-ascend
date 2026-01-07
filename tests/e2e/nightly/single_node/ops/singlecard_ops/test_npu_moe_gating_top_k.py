@@ -9,8 +9,8 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 # Fix random seed to ensure test reproducibility
-RTOL_TOLERANCE = 1e-3
-ATOL_TOLERANCE = 1e-5
+RTOL_TOLERANCE = 1e-5
+ATOL_TOLERANCE = 1e-8
 seed = 45
 random.seed(seed)
 numpy.random.seed(seed)

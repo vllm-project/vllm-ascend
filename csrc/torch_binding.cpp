@@ -1253,19 +1253,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
     at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(aclnnMoeGatingTopK,
-                    x,                   // input_x
+                    x,                 
                     bias,
-                    k,                   // k
-                    k_group,              // k_group
-                    group_count,          // group_count
-                    group_select_mode,   // group_select_mode
-                    renorm,              // renorm
-                    norm_type,            // norm_type
-                    out_flag,             // out_flag
-                    routed_scaling_factor, // routed_scaling_factor
-                    eps,                 // eps
-                    y,                // input_y (注意：这里应该是 yOut) 
-                    expert_idx,        // output
+                    k,                  
+                    k_group,             
+                    group_count,         
+                    group_select_mode,   
+                    renorm,              
+                    norm_type,            
+                    out_flag,            
+                    routed_scaling_factor, 
+                    eps,                
+                    y,                
+                    expert_idx,        
                     out
                 ); 
 
