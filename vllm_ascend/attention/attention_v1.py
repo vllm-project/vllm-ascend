@@ -22,10 +22,6 @@ from typing import ClassVar, List, Optional, Tuple, Type
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
@@ -45,7 +41,21 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, AttentionImpl, AttentionLayer, AttentionType)
+    from vllm.attention.backends.registry import (  # type: ignore
+        AttentionBackendEnum, register_backend)
+else:
+    from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+    from vllm.v1.attention.backend import (AttentionImpl, AttentionLayer,
+                                           AttentionType)
+    from vllm.v1.attention.backends.registry import (  # type: ignore
+        AttentionBackendEnum, register_backend)
+# isort: on
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647

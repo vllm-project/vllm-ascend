@@ -3,9 +3,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.attention.selector import AttentionSelectorConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform

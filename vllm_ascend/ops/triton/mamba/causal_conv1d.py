@@ -13,7 +13,15 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from vllm.attention.backends.utils import PAD_SLOT_ID
+
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+else:
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+# isort: on
 
 
 def causal_conv1d_ref(

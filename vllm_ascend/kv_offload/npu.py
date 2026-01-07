@@ -2,7 +2,6 @@ from collections.abc import Iterator
 from typing import Optional
 
 import torch
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
@@ -12,6 +11,14 @@ from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
+from vllm_ascend.utils import vllm_version_is
+
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import AttentionBackend  # type: ignore
+else:
+    from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+# isort: on
 
 
 class NPUOffloadingSpec(OffloadingSpec):

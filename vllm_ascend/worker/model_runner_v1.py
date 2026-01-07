@@ -30,9 +30,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention, MLAAttention
-from vllm.attention.selector import get_attn_backend
 from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed import (get_tensor_model_parallel_world_size,
@@ -119,6 +117,15 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
+# isort: off
+if vllm_version_is('0.13.0'):
+    from vllm.attention.backends.abstract import (  # type: ignore
+        AttentionBackend, AttentionType)
+    from vllm.attention.selector import get_attn_backend  # type: ignore
+else:
+    from vllm.v1.attention.selector import get_attn_backend  # type: ignore
+    from vllm.v1.attention.backend import AttentionBackend, AttentionType  # type: ignore
+# isort: on
 import torch_npu
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -1666,6 +1673,8 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata,
                 aux_hidden_states,
             )
+            if not vllm_version_is('0.13.0'):
+                self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         (
             logprobs_lists,
@@ -1979,7 +1988,7 @@ class NPUModelRunner(GPUModelRunner):
                     query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
                                                                  1],
                     _seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    seq_lens=self.seq_lens.cpu[:num_reqs],
+                    seq_lens=self.seq_lens.gpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     block_table_tensor=block_table_tensor[:num_reqs],
