@@ -69,7 +69,7 @@ class MtpProposer(EagleProposer):
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                     block_table_tensor=self.runner.input_batch.block_table[0].
-                    get_device_tensor(),
+                    get_device_tensor(num_reqs),
                     slot_mapping=self.runner.input_batch.block_table[0].
                     slot_mapping.gpu,
                     positions=self.runner.positions.gpu,
