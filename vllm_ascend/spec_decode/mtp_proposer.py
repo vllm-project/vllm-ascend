@@ -1,4 +1,4 @@
-from typing import Optional, Union
+﻿from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -73,8 +73,6 @@ class MtpProposer(EagleProposer):
                     slot_mapping=self.runner.input_batch.block_table[0].
                     slot_mapping.gpu,
                     positions=self.runner.positions.gpu,
-                    attn_mask=self.runner.attn_mask,
-                    spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
                     max_seq_len=0)
