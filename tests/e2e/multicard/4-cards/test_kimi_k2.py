@@ -20,9 +20,6 @@ import os
 
 from tests.e2e.conftest import VllmRunner
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 
 def test_kimi_k2_thinking_w4a16_tp4():
     example_prompts = [
@@ -32,8 +29,7 @@ def test_kimi_k2_thinking_w4a16_tp4():
 
     with VllmRunner(
             "vllm-ascend/Kimi-K2-Thinking-Pruning",
-            max_model_len=8192,
-            dtype="auto",
+            max_model_len=4096,
             tensor_parallel_size=4,
             compilation_config={
                 "cudagraph_mode": "FULL_DECODE_ONLY",
