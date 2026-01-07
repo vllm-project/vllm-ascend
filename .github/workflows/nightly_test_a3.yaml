@@ -68,6 +68,9 @@ jobs:
           - name: multi-node-qwenw8a8-2node-eplb
             config_file_path: Qwen3-235B-W8A8-EPLB.yaml
             size: 2
+          - name: multi-node-dpsk3.2-2node
+            config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
+            size: 2
           - name: multi-node-deepseek-r1-w8a8-longseq
             config_file_path: DeepSeek-R1-W8A8-longseq.yaml
             size: 2
