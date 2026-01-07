@@ -16,8 +16,6 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-import os
-
 from tests.e2e.conftest import VllmRunner
 
 
