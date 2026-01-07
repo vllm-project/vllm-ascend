@@ -23,6 +23,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+
 @triton.jit
 def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
                             norm_bias_ptr, output_ptr, output2_ptr, batch_size,
@@ -60,6 +61,7 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
         tl.store(output_ptr + input_offsets, buffered_values, mask=valid_mask)
 
         input_offsets += row_step * hidden_size
+
 
 def add_rmsnorm_bias(input: torch.Tensor, residual: torch.Tensor,
                      norm_weight: torch.Tensor,
