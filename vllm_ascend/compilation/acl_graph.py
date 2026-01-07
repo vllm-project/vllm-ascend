@@ -474,9 +474,10 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                 graph_params.events[runtime_shape],
         ):
 
-            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads,
-             input_layout, spec_attn_mask, sparse_mode, scale, block_table, block_size,
-             actual_seq_lengths, actual_seq_lengths_kv, attn_output, softmax_lse) = param
+            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+             spec_attn_mask, sparse_mode, scale, block_table, block_size,
+             actual_seq_lengths, actual_seq_lengths_kv, attn_output,
+             softmax_lse) = param
 
             decode_meta = forward_context.attn_metadata[key].decode
             seq_len = decode_meta.cp_seq_len
@@ -486,8 +487,8 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
 
             pad_length = runtime_shape - len(actual_seq_lengths_kv)
             if pad_length > 0:
-                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (runtime_shape -
-                                        len(actual_seq_lengths_kv))
+                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
+                    runtime_shape - len(actual_seq_lengths_kv))
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 

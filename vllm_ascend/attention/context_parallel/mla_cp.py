@@ -233,8 +233,13 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank,
                                                          self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-
+        batch_seq_mask = (cp_seq_len == 0)
+        self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
+            batch_seq_mask, non_blocking=True)
+        batch_seq_mask = self.batch_seq_mask_buf[:batch_seq_mask.shape[0]]
+        cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
+        decode_metadata.batch_seq_mask = batch_seq_mask
 
         actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
@@ -555,8 +560,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         else:
             num_heads = self.num_heads
         # use pcp & dcp split computed token nums from scheduler to compute actual seq_len and seq_mask
-        k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
-        k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
+                             self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
+                         self.qk_rope_head_dim)
 
         actual_seq_lengths = None
         input_layout = "BNSD"
@@ -616,12 +623,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BNSD":
                 softmax_lse = torch.empty((num_tokens, num_heads, 1, 1),
-                                           dtype=torch.float,
-                                           device=q_nope.device)
+                                          dtype=torch.float,
+                                          device=q_nope.device)
             else:
                 softmax_lse = torch.empty((num_tokens, num_heads, 1),
-                                           dtype=torch.float,
-                                           device=q_nope.device)
+                                          dtype=torch.float,
+                                          device=q_nope.device)
             
             graph_params.attn_params[num_tokens].append(
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
