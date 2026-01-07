@@ -46,7 +46,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - OS: Linux
 - Software:
     - Python >= 3.10, < 3.12
-    - CANN == 8.3.rc2 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
+    - CANN == 8.5.0 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850/index/index.html))
     - PyTorch == 2.8.0, torch-npu == 2.8.0
     - vLLM (the same version as vllm-ascend)
 

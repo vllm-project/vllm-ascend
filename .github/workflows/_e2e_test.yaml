@@ -100,7 +100,7 @@ jobs:
         run: |
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
-          # basic 
+          # basic
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
@@ -140,7 +140,7 @@ jobs:
     name: multicard-2
     runs-on: linux-aarch64-a3-2
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -222,10 +222,10 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'full' }}
         run: |
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
 
@@ -255,7 +255,7 @@ jobs:
     if: ${{ needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
