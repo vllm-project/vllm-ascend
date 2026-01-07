@@ -1150,3 +1150,14 @@ def check_kv_extra_config(vllm_config):
         _check(
             "decode",
             vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+
+
+def singleton(cls):
+    instances = {}
+
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+
+    return get_instance
