@@ -196,11 +196,11 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
 
 at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& x,
-    const at::Tensor& weight1,
-    const at::Tensor& weight2,
+    const at::TensorList& weight1,
+    const at::TensorList& weight2,
     const at::Tensor& expert_idx,
-    const at::Tensor& scale1,
-    const at::Tensor& scale2,
+    const at::TensorList& scale1,
+    const at::TensorList& scale2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
