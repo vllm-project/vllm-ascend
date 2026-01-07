@@ -33,17 +33,17 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
     cols = tl.arange(0, BLOCK_SIZE)
     valid_mask = cols < hidden_size
     norm_weight_values = tl.load(norm_weight_ptr + cols,
-                                 mask = valid_mask,
-                                 other = 0.0)
+                                 mask=valid_mask,
+                                 other=0.0)
     input_offsets = row_start * hidden_size + cols
     for _ in tl.range(row_start, batch_size, row_step):
         # add
         buffered_values = tl.load(input_ptr + input_offsets,
-                                  mask = valid_mask,
-                                  other = 0.0)
+                                  mask=valid_mask,
+                                  other=0.0)
         buffered_values += tl.load(residual_ptr + input_offsets,
                                    mask=valid_mask,
-                                   other = 0.0)
+                                   other=0.0)
         tl.store(output2_ptr + input_offsets, buffered_values, mask=valid_mask)
         buffered_values = buffered_values.to(tl.float32)
         # rmsnorm
@@ -54,8 +54,8 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
         buffered_values = buffered_values * norm_weight_values
         # add bias
         norm_bias_values = tl.load(norm_bias_ptr + cols,
-                                   mask = valid_mask,
-                                   other = 0.0)
+                                   mask=valid_mask,
+                                   other=0.0)
         buffered_values = buffered_values + norm_bias_values
         tl.store(output_ptr + input_offsets, buffered_values, mask=valid_mask)
 
@@ -77,12 +77,12 @@ def add_rmsnorm_bias(input: torch.Tensor, residual: torch.Tensor,
     n_rows = min(batch_size, num_vectorcore)
     output = torch.empty(batch_size,
                          hidden_size,
-                         device = input.device,
-                         dtype = input.dtype)
+                         device=input.device,
+                         dtype=input.dtype)
     output2 = torch.empty(batch_size,
                           hidden_size,
-                          device = input.device,
-                          dtype = input.dtype)
+                          device=input.device,
+                          dtype=input.dtype)
     add_rmsnorm_bias_kernel[(n_rows, 1, 1)](input, residual, norm_weight,
                                             norm_bias, output, output2,
                                             batch_size, hidden_size, eps,
