@@ -573,7 +573,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             return tensor_model_parallel_all_reduce(output_parallel)
 
         pad_size = forward_context.pad_size
-        if pad_size > 0:
+        if pad_size > 0 and not (enable_dsa_cp()
+                                 and "o_proj" in self.layer.prefix):
             x = F.pad(x, (0, 0, 0, pad_size))
 
         world_size = self.layer.tp_size
