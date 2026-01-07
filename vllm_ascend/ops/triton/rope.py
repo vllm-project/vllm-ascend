@@ -29,6 +29,10 @@ def _triton_rope(
     q_row_stride,
     k_ptr,
     k_row_stride,
+    cos_ptr,
+    cos_row_stride,
+    sin_ptr,
+    sin_row_stride,
     cos_sin_ptr,
     cos_sin_row_stride,
     pos_ptr,
@@ -42,6 +46,7 @@ def _triton_rope(
     pad_rope_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
+    USE_COS_SIN: tl.constexpr
 ):
     """
     This triton kernel applies rotary embedding on q and k.
@@ -82,16 +87,26 @@ def _triton_rope(
         # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
         # m of this program instance
         # ####################################################################
-        pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
-        cos_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
+        if USE_COS_SIN:
+            pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
+            cos_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
 
-        cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
-        cos_mask = cos_offsets < (rope_dim // 2)
-        cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask,
-                          other=0).to(tl.float32)
-        sin_row = tl.load(cos_start_ptr + sin_offsets, mask=cos_mask,
-                          other=0).to(tl.float32)
+            cos_offsets = tl.arange(0, pad_rope_dim // 2)
+            sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+            cos_mask = cos_offsets < (rope_dim // 2)
+            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask,
+                            other=0).to(tl.float32)
+            sin_row = tl.load(cos_start_ptr + sin_offsets, mask=cos_mask,
+                            other=0).to(tl.float32)
+        else:
+            cos_start_ptr = cos_ptr + row_idx * cos_row_stride
+            sin_start_ptr = sin_ptr + row_idx * sin_row_stride
+            cos_offsets = tl.arange(0, pad_rope_dim // 2)
+            sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+            cos_mask = cos_offsets < (rope_dim // 2)
+            cos_row = tl.load(cos_start_ptr + cos_offsets, mask=cos_mask,
+                            other=0).to(tl.float32)
+            sin_row = tl.load(sin_start_ptr + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
 
         # ####################################################################
         # Load the left and right half of q and k for the current
@@ -190,9 +205,13 @@ def rope_forward_triton(q,
         q.stride(0),
         k,
         k.stride(0),
-        cos_sin_cache,
-        cos_sin_cache.stride(0),
-        positions,
+        cos,
+        cos.stride(0),
+        sin,
+        sin.stride(0),
+        None,
+        None,
+        None,
         num_tokens,
         n_q_head,
         n_kv_head,
@@ -203,6 +222,7 @@ def rope_forward_triton(q,
         pad_rope_dim,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_NEOX_STYLE=is_neox_style,
+        USE_COS_SIN=False,
     )
     return q, k
 
@@ -238,6 +258,10 @@ def rope_cos_sin(q: torch.Tensor,
         q.stride(0),
         k,
         k.stride(0),
+        None,
+        None,
+        None,
+        None,
         cos_sin_cache,
         cos_sin_cache.stride(0),
         positions,
@@ -251,5 +275,6 @@ def rope_cos_sin(q: torch.Tensor,
         pad_rope_dim,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_NEOX_STYLE=is_neox_style,
+        USE_COS_SIN=True,
     )
     return q.view(q_shape), k.view(k_shape)
