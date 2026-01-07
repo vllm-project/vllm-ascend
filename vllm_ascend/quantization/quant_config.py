@@ -48,7 +48,6 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
 from .utils import get_quant_method
 
 
-
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend
