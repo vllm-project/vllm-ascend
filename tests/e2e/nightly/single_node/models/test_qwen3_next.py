@@ -61,7 +61,8 @@ aisbench_cases = [{
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("max_num_batched_tokens", MAX_NUM_BATCHED_TOKENS)
-async def test_models(model: str, mode: str, tp_size: int, max_num_batched_tokens: int) -> None:
+async def test_models(model: str, mode: str, tp_size: int,
+                      max_num_batched_tokens: int) -> None:
     port = get_open_port()
     env_dict = {
         "OMP_NUM_THREADS": "10",
@@ -80,8 +81,10 @@ async def test_models(model: str, mode: str, tp_size: int, max_num_batched_token
         "--max-num-batched-tokens",
         str(max_num_batched_tokens),
         "--trust-remote-code",
-        "--gpu-memory-utilization", "0.8",
-        "--max-num-seqs", "64",
+        "--gpu-memory-utilization",
+        "0.8",
+        "--max-num-seqs",
+        "64",
     ]
     if mode == "aclgraph":
         server_args.extend(
