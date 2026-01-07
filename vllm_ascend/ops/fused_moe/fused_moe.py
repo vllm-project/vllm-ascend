@@ -32,7 +32,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.eplb.utils import moe_load_async_stream
 from vllm_ascend.flash_common3_context import (get_flash_common3_context,
                                                set_flash_common3_context)
 from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
@@ -371,13 +370,8 @@ class AscendFusedMoE(FusedMoE):
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, \
                 "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            moe_load_stream = moe_load_async_stream()
-            cur_stream = torch.npu.current_stream()
-            moe_load_stream.wait_stream(cur_stream)
-            with npu_stream_switch(moe_load_stream):
-                self.moe_load += expert_tokens if group_list_type == 1 else \
-                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            cur_stream.wait_stream(moe_load_stream)
+            self.moe_load += expert_tokens if group_list_type == 1 else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
