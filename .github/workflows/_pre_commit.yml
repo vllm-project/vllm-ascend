@@ -12,20 +12,27 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-16
+    runs-on: linux-amd64-cpu-16-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     env:
       GOPROXY: https://goproxy.io,direct
+      GITHUB_WORKSPACE: /__w/vllm-ascend/vllm-ascend
     steps:
-    - name: Install sys dependencies
-      run: |
-        apt-get update
-        apt-get install -y git
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
+
+    # With problem matchers in a container, the output of $GITHUB_WORKSPACE and ${{ github.workspace }} are different.
+    # So we will just copy it into the path ${{ github.workspace }}. see https://github.com/actions/runner/issues/2058
+    - name: Cp problem matchers
+      run: |
+        mkdir -p ${{ github.workspace }}/.github/workflows/matchers/
+        cp .github/workflows/matchers/* ${{ github.workspace }}/.github/workflows/matchers/
+        echo ${{ github.workspace }}
+        sleep 10000
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v6
       with:
@@ -40,8 +47,11 @@ jobs:
       run: |
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+    - name: Run pre-commit
       env:
+        PRE_COMMIT_COLOR: always
+        FORCE_COLOR: "1"
+        TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
-      with:
-        extra_args: --all-files --hook-stage manual
+      run: |
+        pre-commit run --all-files --hook-stage manual
