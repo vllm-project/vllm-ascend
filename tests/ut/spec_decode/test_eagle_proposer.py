@@ -275,6 +275,8 @@ class TestEagleProposerDummyRun(TestBase):
         num_tokens = 32
         with_prefill = False
 
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=num_tokens,
                                 with_prefill=with_prefill)
 
@@ -284,6 +286,8 @@ class TestEagleProposerDummyRun(TestBase):
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
         mock_context.return_value.__enter__.return_value = None
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
         self.assertTrue(self.proposer.model.call_count == 4)
 
@@ -298,6 +302,8 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context.capturing = True
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64,
                                 in_graph_capturing=True,
                                 aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -316,6 +322,8 @@ class TestEagleProposerDummyRun(TestBase):
         mock_return_context.capturing = False
         mock_get_context.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
+        self.proposer.enable_shared_expert_dp = False
         self.proposer.dummy_run(num_tokens=64,
                                 in_graph_capturing=False,
                                 aclgraph_runtime_mode=CUDAGraphMode.FULL)
