@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
