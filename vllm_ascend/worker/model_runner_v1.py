@@ -1355,8 +1355,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
         # send is_ubatch to ffn side
         is_ubatch = True if ubatch_slices else False
-        self.afd_connector.send_is_ubatch(is_ubatch)
-        logger.debug(f'send is_ubatch in prepare input is {is_ubatch}')
+        # to support inequal AF,[ffn_size,ffn_size + min_size) send
+        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
+            logger.debug(f'yxj self.afd_connector.rank in prepare input is {self.afd_connector.rank}')
+            self.afd_connector.send_is_ubatch(is_ubatch)
+        logger.debug(f'yxj send is_ubatch in prepare input is {is_ubatch}')
 
         self.seq_lens_np[:num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -2562,8 +2565,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         logger.info(f"dummy_run, ubatch_slices: {ubatch_slices}")
         # send is_ubatch to ffn side
         is_ubatch = True if ubatch_slices else False
-        self.afd_connector.send_is_ubatch(is_ubatch)
-        logger.debug(f'send is_ubatch in prepare input is {is_ubatch}')
+        # to support inequal AF,[ffn_size,ffn_size + min_size) send
+        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
+            logger.debug(f'yxj self.afd_connector.rank in dummy_run is {self.afd_connector.rank}')
+            self.afd_connector.send_is_ubatch(is_ubatch)
+        logger.debug(f'send is_ubatch in dummy_run  is {is_ubatch}')
         
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:

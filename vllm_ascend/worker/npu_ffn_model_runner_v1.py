@@ -152,7 +152,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 # TODO(yxj):ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
                 # replay
                 if self.connector_name == "camm2nconnector":
-                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size) * (self.attn_size // self.ffn_size)
+                    #TODO(yxj):self.max_num_tokens * self.attn_size * (self.topk // self.ffn_size)
+                    max_num_tokens = self.max_num_tokens * self.attn_size * (self.n_routed_experts // self.ffn_size)
                 else:
                     max_num_tokens = self.max_num_tokens * self.topk * self.attn_size
                 acl_graph_info = self._acl_graphs_ubatch_full.get(max_num_tokens)
@@ -550,9 +551,8 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                    force_attention: bool = False,
                    uniform_decode: bool = False,
                    **kwargs):
-        src = (self.connector.process_group.rank_in_group - 1) % self.connector.process_group.world_size
-        is_ubatch = self.connector.process_group.recv_object(src)
-        print(f'yxj src in _dummy_run is {src}')
+        
+        is_ubatch = self.connector.recv_is_ubatch()
         print(f'yxj is_ubatch in _dummy_run is {is_ubatch}')
         
         # only support eager mode and piecewise graph now
