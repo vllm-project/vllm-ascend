@@ -380,24 +380,25 @@ class NPUWorker(WorkerBase):
         self.model_runner.eplb_warmup()
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
                         or []).copy()
-        cg_capture_sizes: list[int] = []
-        if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            cg_capture_sizes = [] if cg_sizes is None else cg_sizes
-            warmup_sizes = [
-                x for x in warmup_sizes if x not in cg_capture_sizes
-            ]
+        if not self.model_config.enforce_eager:
+            cg_capture_sizes: list[int] = []
+            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
+                warmup_sizes = [
+                    x for x in warmup_sizes if x not in cg_capture_sizes
+                ]
 
-        compile_ranges = self.vllm_config.compilation_config.get_compile_ranges(
-        )
-        # For each compile_range, if none of the batch sizes
-        # in warmup_sizes or cudagraph_capture_sizes are in the range,
-        # add the end of the range to ensure compilation/warmup.
-        all_sizes = set(cg_capture_sizes)
-        all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
-        for compile_range in compile_ranges:
-            if not any(x in compile_range for x in all_sizes):
-                warmup_sizes.append(compile_range.end)
+            compile_ranges = self.vllm_config.compilation_config.get_compile_ranges(
+            )
+            # For each compile_range, if none of the batch sizes
+            # in warmup_sizes or cudagraph_capture_sizes are in the range,
+            # add the end of the range to ensure compilation/warmup.
+            all_sizes = set(cg_capture_sizes)
+            all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
+            for compile_range in compile_ranges:
+                if not any(x in compile_range for x in all_sizes):
+                    warmup_sizes.append(compile_range.end)
 
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
