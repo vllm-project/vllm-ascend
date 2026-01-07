@@ -109,6 +109,7 @@ direct_register_custom_op(op_name="add_rmsnorm_bias",
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
+
 class AscendRMSNorm(RMSNorm):
 
     def __init__(
