@@ -107,7 +107,8 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method, vllm_version_is)
+                               set_weight_prefetch_method, vllm_version_is,
+                               ACL_FORMAT_FRACTAL_NZ, is_310p)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -125,8 +126,9 @@ import torch_npu
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
-if get_ascend_device_type() == AscendDeviceType._310P:
+if is_310p():
     torch_npu.npu.set_compile_mode(jit_compile=False)
+    ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
 
 
 @dataclass

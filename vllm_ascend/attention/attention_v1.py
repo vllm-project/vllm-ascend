@@ -606,8 +606,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
-        context_lens = attn_metadata.seq_lens
         if is_310p():
+            context_lens = attn_metadata.seq_lens
             if context_lens.device != query.device:
                 context_lens = context_lens.to(device=query.device, non_blocking=True)
             attn_metadata.seq_lens = decode_context_lens
