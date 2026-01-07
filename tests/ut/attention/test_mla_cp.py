@@ -882,7 +882,6 @@ class TestAscendMLAImpl(TestBase):
             # Inputs
             attn_output = torch.randn(B, H, D)
             softmax_lse = torch.randn(B, H, 1)
-            decode_meta = MagicMock()
 
             result = _process_attn_out_lse(attn_output, softmax_lse)
             # [PCP * S, DCP * H, D + 1]

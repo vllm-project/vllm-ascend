@@ -61,10 +61,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         ) if self.dcp_size > 1 else 0
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
-        scheduler_config = vllm_config.scheduler_config
-        decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
-                                      0)
-        max_num_seqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
 
     @classmethod
     def get_cudagraph_support(
@@ -624,7 +620,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 lse=softmax_lse)
 
         # Update out&lse
-        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse,)
+        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 
