@@ -310,19 +310,8 @@ class AscendW4A16FusedMoEMethod:
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(
                 1, 2).contiguous()
 
-            if self.symmetric:
-                layer.w13_weight_offset.data = layer.w13_weight_offset.data.expand_as(
-                    layer.w13_weight_scale.data)
-                layer.w2_weight_offset.data = layer.w2_weight_offset.data.expand_as(
-                    layer.w2_weight_scale.data)
-            else:
+            if not self.symmetric:
                 layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(
                     1, 2).contiguous()
                 layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(
                     1, 2).contiguous()
-
-        if self.symmetric:
-            layer.w13_weight_offset.data = layer.w13_weight_offset.data.expand_as(
-                layer.w13_weight_scale.data)
-            layer.w2_weight_offset.data = layer.w2_weight_offset.data.expand_as(
-                layer.w2_weight_scale.data)
