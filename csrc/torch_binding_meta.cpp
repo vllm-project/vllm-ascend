@@ -157,10 +157,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
 std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
     const at::Tensor &x,
     const at::Tensor &expert_ids,
-    const at::Tensor &gmm1_permuted_weight,
-    const at::Tensor &gmm1_permuted_weight_scale,
-    const at::Tensor &gmm2_weight,
-    const at::Tensor &gmm2_weight_scale,
+    const at::TensorList &gmm1_permuted_weight,
+    const at::TensorList &gmm1_permuted_weight_scale,
+    const at::TensorList &gmm2_weight,
+    const at::TensorList &gmm2_weight_scale,
     const at::Tensor &expert_scales,
     const c10::optional<at::Tensor> &expert_smooth_scales,
     const c10::optional<at::Tensor> &x_active_mask,
@@ -181,9 +181,10 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
 
     bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
     int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    at::Tensor ep_recv_count = at::empty({num_local_experts * ep_rank_size}, expert_ids.options().device(at::kMeta));
-
-    return {output, ep_recv_count};
+    auto opts = expert_ids.options().dtype(at::kLong); 
+    at::Tensor expert_token_nums = at::empty({num_local_experts}, opts.device(at::kMeta)); 
+    
+    return {output, expert_token_nums};
 }
 
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
