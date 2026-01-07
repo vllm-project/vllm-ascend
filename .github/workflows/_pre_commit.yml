@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-16
+    runs-on: linux-amd64-cpu-8
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     env:
@@ -38,6 +38,9 @@ jobs:
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - name: Run pre-commit
       env:
+        PRE_COMMIT_COLOR: always
+        FORCE_COLOR: "1"
+        TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
         pre-commit run --all-files --hook-stage manual
