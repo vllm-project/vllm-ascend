@@ -1,7 +1,6 @@
 import torch
 import torch._inductor.pattern_matcher as pm
-from torch._inductor.pattern_matcher import (PatternMatcherPass,
-                                             PatternPrettyPrinter)
+from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
@@ -57,7 +56,7 @@ class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def get_inputs(self):
         """
-        Generate example inputs for the AddRMSNormQuant fusion pattern.
+        Generate example inputs.
         """
         input = self.empty(8, 16)
         weight = self.empty(16)
@@ -82,10 +81,6 @@ class AscendMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            """
-            Replacement for the AddRMSNormQuant fusion.
-            """
-
             reduce_scatter = self._reduce_scatter(input)
             residual = torch.ops.vllm.maybe_chunk_residual(
                 reduce_scatter, residual)
@@ -111,9 +106,6 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
     def get_inputs(self):
-        """
-        Generate example inputs for the AddRMSNormQuant fusion pattern.
-        """
         input = self.empty(8, 16)
         weight = self.empty(16)
         residual = self.empty(8, 16)
@@ -137,10 +129,6 @@ class AscendLastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            """
-            Replacement for the AddRMSNormQuant fusion.
-            """
-
             reduce_scatter = self._reduce_scatter(input)
             residual = torch.ops.vllm.maybe_chunk_residual(
                 reduce_scatter, residual)
@@ -167,9 +155,6 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper
         return torch.empty(*args, dtype=self.dtype, device="npu", **kws)
 
     def get_inputs(self):
-        """
-        Generate example inputs for the AddRMSNormQuant fusion pattern.
-        """
         input = self.empty(8, 16)
         weight = self.empty(16)
         residual = self.empty(8, 16)
@@ -197,10 +182,6 @@ class AscendQwen3VLMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper
             residual: torch.Tensor,
             deepstack_input_embeds: torch.tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            """
-            Replacement for the AddRMSNormQuant fusion.
-            """
-
             reduce_scatter = self._reduce_scatter(input)
             chunk = deepstack_input_embeds.chunk(self.tp_size)[self.tp_rank]
             add_ = reduce_scatter + chunk
@@ -224,8 +205,6 @@ class AscendSequenceParallelismPass(VllmInductorPass):
             pass_name="npu_sequence_parallelism_pass")
 
         for epsilon in [1e-5, 1e-6]:
-            # TODO: add first allreduce and quant
-
             AscendMiddleAllReduceRMSNormPattern(config, epsilon).register(
                 self.patterns)
 
@@ -237,17 +216,8 @@ class AscendSequenceParallelismPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        # logger.info(f"before apply patterns {graph.graph}")
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
-        # logger.info(f"after apply patterns {graph.graph}")
-
-        pattern_idx = 0
-        for pattern_entry in self.patterns.patterns.values():
-            for p in pattern_entry:
-                p_str = PatternPrettyPrinter.run(p.pattern)
-                logger.debug("Pattern %d: %s", pattern_idx, p_str)
-                pattern_idx += 1
         self.end_and_log()
 
     def is_applicable(self, runtime_shape: int | None = None) -> bool:

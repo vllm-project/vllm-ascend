@@ -62,6 +62,6 @@ class GraphFusionPassManager:
             self.passes.append(QKNormRopeFusionPass(config))
 
         if enable_sp_by_pass(config):
-            from .passes.sequnce_parallelism import \
+            from .passes.sequence_parallelism import \
                 AscendSequenceParallelismPass
             self.passes.append(AscendSequenceParallelismPass(config))
