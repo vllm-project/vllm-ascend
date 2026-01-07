@@ -80,10 +80,10 @@ jobs:
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
-    runs-on: linux-amd64-cpu-16
+    runs-on: linux-amd64-cpu-16-hk
     container:
       # fixme: vllm-ascend install failed with 8.3.rc2 on github action
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:8.2.rc2-910b-ubuntu22.04-py3.11
+      image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -96,9 +96,11 @@ jobs:
     steps:
       - name: Install packages
         run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -110,7 +112,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty python3 -m pip install .
+          VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
