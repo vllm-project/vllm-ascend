@@ -1,7 +1,3 @@
-"""
-Run `pytest tests/e2e/multicard/test_data_parallel_tp2.py`.
-"""
-
 import os
 import subprocess
 import sys

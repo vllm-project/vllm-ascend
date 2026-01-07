@@ -40,7 +40,7 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 def test_qwen3_external_launcher(model):
     script = Path(
         __file__
-    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    ).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
@@ -81,7 +81,7 @@ def test_qwen3_external_launcher(model):
 def test_qwen3_moe_external_launcher_ep_tp2(model):
     script = Path(
         __file__
-    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    ).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
@@ -112,7 +112,7 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
 def test_qwen3_external_launcher_with_sleepmode():
     script = Path(
         __file__
-    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    ).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
@@ -157,7 +157,7 @@ def test_qwen3_external_launcher_with_sleepmode():
 def test_qwen3_external_launcher_with_sleepmode_level2():
     script = Path(
         __file__
-    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    ).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     model_path = snapshot_download("Qwen/Qwen3-8B")
     # TODO: Add moe model test
@@ -213,7 +213,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
 def test_qwen3_external_launcher_with_matmul_allreduce(model):
     script = Path(
         __file__
-    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    ).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     cmd = [
         sys.executable,

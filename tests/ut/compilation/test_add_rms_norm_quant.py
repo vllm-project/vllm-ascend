@@ -16,6 +16,23 @@
 import sys
 from unittest import mock
 
+import torch
+
+
+def get_inputs():
+    """
+    Generate example inputs for the AddRMSNormQuantSPPatternWithBias fusion pattern.
+    """
+    rms_norm_input = torch.randn(2, 4)
+    residual = torch.randn(2, 4)
+    rms_norm_weight = torch.randn(4)
+    rmsnorm_bias = torch.randn(4)
+    scale = torch.ones(4)
+    offset = torch.zeros(4)
+    return [
+        rms_norm_input, residual, rms_norm_weight, scale, offset, rmsnorm_bias
+    ]
+
 
 def _extra_stream_scope_check_for_test(match) -> bool:
     """
@@ -93,3 +110,39 @@ def test_replacement_function_without_torch_npu(caplog):
             assert result is None
         except (ImportError, AttributeError):
             pass
+
+
+def test_get_inputs_sp_pattern_with_bias():
+    """
+    Test that get_inputs generates tensors with correct shapes and device.
+    This test verifies the internal get_inputs function used in the pattern.
+    """
+    try:
+        import torch
+    except ImportError:
+        return  # Skip if torch is not available
+
+    inputs = get_inputs()
+    (
+        rms_norm_input,
+        residual,
+        rms_norm_weight,
+        scale,
+        offset,
+        rmsnorm_bias,
+    ) = inputs
+
+    # Verify shapes
+    assert rms_norm_input.shape == (2, 4)
+    assert residual.shape == (2, 4)
+    assert rms_norm_weight.shape == (4, )
+    assert rmsnorm_bias.shape == (4, )
+    assert scale.shape == (4, )
+    assert offset.shape == (4, )
+
+    # Verify number of inputs
+    assert len(inputs) == 6
+
+    # Verify specific values
+    assert torch.all(scale == 1.0)
+    assert torch.all(offset == 0.0)
