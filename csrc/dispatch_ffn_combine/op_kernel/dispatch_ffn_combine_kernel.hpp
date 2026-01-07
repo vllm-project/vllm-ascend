@@ -80,16 +80,12 @@ public:
         __gm__ ElementA *ptrA;
         LayoutA layoutA;
         LayoutA layoutA2;
-        // __gm__ ElementB *ptrB1;
         GM_ADDR ptrB1;
         LayoutB layoutB1;
-        // __gm__ ElementB *ptrB2;
         GM_ADDR ptrB2;
         LayoutB layoutB2;
-        // __gm__ ElementScale *ptrScale1;
         GM_ADDR ptrScale1;
         LayoutScale layoutScale1;
-        // __gm__ ElementScale *ptrScale2;
         GM_ADDR ptrScale2;
         LayoutScale layoutScale2;
         __gm__ ElementD2 *ptrOutput;
@@ -218,11 +214,9 @@ private:
         cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM));
 
         gmA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA *>(workspaceInfo.ptrA));
-        // gmS.SetGlobalBuffer(params.ptrScale1);
         gmC.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC));
 
         gmPermutedToken.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD1 *>(workspaceInfo.ptrPermutedToken));
-        // gmS2.SetGlobalBuffer(params.ptrScale2);
         gmC2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC2));
 
         gmPerTokenScale1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale *>(workspaceInfo.ptrPerTokenScale));
@@ -388,7 +382,6 @@ private:
                 int64_t gmOffsetA = layoutA.GetOffset(offsetA);
                 int64_t gmOffsetB = layoutB1.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                // int64_t gmOffsetS = groupIdx * params.problemShape.n() + blockCoord.n() * L1TileShape::N;   // One scale group per expert
                 int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
                 if (currentM > 0) {
                     blockMmad(
@@ -466,7 +459,6 @@ private:
                 currentM = params.maxOutputSize - preCurrentmSum;
             } 
             AscendC::GlobalTensor<ElementB> gmB2;
-            //gmB2.SetGlobalBuffer(params.ptrB2);
             AscendC::GlobalTensor<ElementScale> gmS2;
             AscendC::PipeBarrier<PIPE_ALL>();
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
@@ -509,7 +501,6 @@ private:
                 int64_t gmOffsetA = layoutA.GetOffset(offsetA);
                 int64_t gmOffsetB = layoutB2.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                // int64_t gmOffsetS = groupIdx * n2 + blockCoord.n() * L1TileShape::N;   // One scale group per expert
                 int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);   // One scale group per expert
                 if (currentM > 0) {
                     blockMmad(
@@ -875,10 +866,8 @@ private:
 
     AscendC::GlobalTensor<ElementA> gmA;
     AscendC::GlobalTensor<ElementC> gmC;
-    // AscendC::GlobalTensor<ElementScale> gmS;
 
     AscendC::GlobalTensor<ElementD1> gmPermutedToken;
-    // AscendC::GlobalTensor<ElementScale> gmS2;
     AscendC::GlobalTensor<ElementC> gmC2;
 
     AscendC::GlobalTensor<ElementPerTokenScale> gmPerTokenScale1;
