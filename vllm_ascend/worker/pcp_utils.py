@@ -319,6 +319,7 @@ class PCPManager:
                                                                pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[:num_tokens *
                                                        self.pcp_world_size]
+        pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
         return pcp_padded_slot_mapping
 
