@@ -47,7 +47,7 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -83,11 +83,16 @@ jobs:
           - name: multi-node-qwen3-dp-mooncake-layerwise
             config_file_path: Qwen3-235B-A22B-Mooncake-Layerwise.yaml
             size: 2
+<<<<<<< HEAD
           - name: multi-node-qwen-disagg-pd
             config_file_path: Qwen3-235B-disagg-pd.yaml
             size: 2
           - name: multi-node-qwen-vl-disagg-pd
             config_file_path: Qwen3-VL-235B-disagg-pd.yaml
+=======
+          - name: multi-node-kimi-k2-instruct-w8a8
+            config_file_path: Kimi-K2-Instruct-W8A8.yaml
+>>>>>>> 4fd695f3 (fix)
             size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -103,7 +108,7 @@ jobs:
   single-node-tests:
     name: single-node
     # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    # needs: multi-node-tests
+    needs: multi-node-tests
     strategy:
       fail-fast: false
       matrix:

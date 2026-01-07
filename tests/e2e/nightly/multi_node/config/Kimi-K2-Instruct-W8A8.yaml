@@ -1,31 +1,14 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
 test_name: "test Kimi-K2-Instruct-W8A8 2-nodes-dp4-tp8-torchair"
 model: "vllm-ascend/Kimi-K2-Instruct-W8A8"
 
 num_nodes: 2
 npu_per_node: 16
-
 env_common:
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 96
+  OMP_NUM_THREADS: 100
   NUMEXPR_MAX_THREADS: 128
 
 deployment:
@@ -41,7 +24,7 @@ deployment:
       --tensor-parallel-size 8
       --seed 1024
       --enable-expert-parallel
-      --max-num-seqs 16
+      --max-num-seqs 32
       --max-model-len 8192
       --max-num-batched-tokens 8192
       --quantization ascend
@@ -62,7 +45,7 @@ deployment:
       --tensor-parallel-size 8
       --seed 1024
       --enable-expert-parallel
-      --max-num-seqs 16
+      --max-num-seqs 32
       --max-model-len 8192
       --max-num-batched-tokens 8192
       --quantization ascend
@@ -77,9 +60,9 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 512
-    max_out_len: 3000
-    batch_size: 512
+    num_prompts: 2800
+    max_out_len: 1500
+    batch_size: 700
     request_rate: 11.2
     baseline: 1
     threshold: 0.97
@@ -88,7 +71,7 @@ benchmarks:
     dataset_path: vllm-ascend/gsm8k-lite
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
+    max_out_len: 7680
     batch_size: 64
-    baseline: 95
-    threshold: 5
+    baseline: 97
+    threshold: 3
