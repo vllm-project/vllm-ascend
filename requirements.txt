@@ -33,3 +33,6 @@ torch-npu==2.8.0
 arctic-inference==0.1.1
 transformers>=4.57.3
 fastapi<0.124.0
+
+# Install triton-ascend
+triton-ascend @https://test-files.pythonhosted.org/packages/b0/01/d1355823a69f87331d70142c44922d734acfae64067c7182ab200ea9808b/triton_ascend-3.2.0.dev20260105-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'
