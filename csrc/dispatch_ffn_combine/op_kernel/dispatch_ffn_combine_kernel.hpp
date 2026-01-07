@@ -530,7 +530,7 @@ private:
     }
 
     CATLASS_DEVICE
-    void ResetTokenPerExpert(int32_t num)
+    void ResetTokenPerExpert(AscendC::GlobalTensor<int32_t> & tokenPerExpert, int32_t num)
     {
         if (coreIdx != coreNum - 1) {
             return;
@@ -776,6 +776,7 @@ private:
         }
         blockEpilogue.Finalize();
         AscendC::SyncAll<true>();
+        ResetTokenPerExpert(tokenPerExpert, params.EP * params.EP * params.expertPerRank);
         shmem.CrossRankSync();
         MoeTokenUnpermuteTilingData tilingData;
         MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
