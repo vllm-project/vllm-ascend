@@ -43,7 +43,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               weak_ref_tensors)
+                               weak_ref_tensors, is_310p, is_A5)
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -83,6 +83,8 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
+        if is_310p():
+            return (2, num_blocks, (num_kv_heads * head_size) // 16, block_size, 16)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -604,6 +606,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         forward_context: ForwardContext = get_forward_context()
         if forward_context.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
+        context_lens = attn_metadata.seq_lens
+        if is_310p():
+            if context_lens.device != query.device:
+                context_lens = context_lens.to(device=query.device, non_blocking=True)
+            attn_metadata.seq_lens = decode_context_lens
         torch_npu._npu_paged_attention(query=query,
                                        key_cache=self.key_cache,
                                        value_cache=self.value_cache,
@@ -648,6 +655,49 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
             )[0]
 
+    def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
+        from vllm_ascend.utils import aligned_16, ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d
+
+        real_tokens = int(attn_metadata.seq_lens.sum().item())
+        query, key, value, output = (aligned_16(t) for t in (query, key, value, output))
+
+        seq_len = attn_metadata.seq_lens
+        if seq_len.dtype != torch.int32:
+            seq_len = seq_len.to(torch.int32)
+
+        aligned_tokens = int(query.shape[0])
+        delta = aligned_tokens - real_tokens
+        if delta:
+            seq_len = seq_len.clone()
+            seq_len[-1] += delta
+
+        mask = attn_metadata.attn_mask
+        if mask is not None and mask.dim() == 2:
+                max_len = int(seq_len.max().item())
+                aligned_len = ((max_len + 15) // 16) * 16
+                
+                mask2d = mask[:aligned_len, :aligned_len].contiguous()
+                mask_nz = nd_to_nz_2d(mask2d).contiguous()
+                
+                bsz = int(seq_len.numel())
+                if bsz > 1:
+                    mask_nz = mask_nz.repeat(bsz, 1, 1, 1).contiguous()
+
+                mask = torch_npu.npu_format_cast(mask_nz, ACL_FORMAT_FRACTAL_NZ)
+
+        torch_npu._npu_flash_attention(
+            query=query,
+            key=key,
+            value=value,
+            mask=mask,
+            seq_len=seq_len,
+            scale_value=self.scale,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            out=output,
+        )
+        return output[:real_tokens, :, :]
+
     def reshape_and_cache(
         self,
         key: torch.Tensor,
@@ -662,7 +712,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if is_A5():
                 # TODO: Once eagle running to here, it may has error because of the 0 dim of slot_mapping.
                 # Should check if the 0 dim of slot_mapping must equal to the 0 dim of key.
                 # If it's necessary, the slots should be sliced.
@@ -693,6 +743,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
+
+        if is_310p():
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                return self.forward_paged_attention(query, attn_metadata, output)
+
+            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+                num_tokens = query.shape[0]
+                q = query[:num_tokens]
+                k = key[:num_tokens]
+                v = value[:num_tokens]
+                out = self._forward_prefill_310p_fallback(q, k, v, attn_metadata, output)
+                output[:num_tokens] = out
+                return output
+
         if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and using_paged_attention(num_tokens, self.vllm_config)
                 and self.sliding_window is None):
@@ -702,6 +766,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, attn_metadata, output)
 
         return output
+
 
     def forward(
         self,

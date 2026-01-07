@@ -27,8 +27,9 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type, has_rope, is_vl_model)
+from vllm_ascend.utils import (AscendDeviceType, enable_custom_op, 
+                                get_ascend_device_type, has_rope, is_vl_model,
+                                is_310p, is_A5)
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -533,8 +534,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if self.mrope_section != [16, 24, 24] or \
-            get_ascend_device_type() == AscendDeviceType.A5:
+        if is_310p() or is_A5 or self.mrope_section != [16, 24, 24]:
             return super().forward_oot(positions, query, key)
 
         import torch_npu

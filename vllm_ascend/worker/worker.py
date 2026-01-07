@@ -405,10 +405,16 @@ class NPUWorker(WorkerBase):
         NPUPlatform.seed_everything(self.model_config.seed)
 
     def _warm_up_atb(self):
-        x = torch.rand((2, 4), dtype=torch.float16).npu()
-        weight = torch.rand((2, 4), dtype=torch.float16).npu()
-        c = torch.rand((4, 4), dtype=torch.float32).npu()
-        torch_npu._npu_matmul_add_fp32(x, weight, c)
+        if is_310p():
+            logger.info("Warm-up for 310P device, skip fp32 format")
+            x = torch.rand((2, 4), dtype=torch.float16).npu()
+            weight = torch.rand((2, 4), dtype=torch.float16).npu()
+            result = torch.matmul(x, weight.T)
+        else:
+            x = torch.rand((2, 4), dtype=torch.float16).npu()
+            weight = torch.rand((2, 4), dtype=torch.float16).npu()
+            c = torch.rand((4, 4), dtype=torch.float32).npu()
+            torch_npu._npu_matmul_add_fp32(x, weight, c)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()

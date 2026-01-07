@@ -16,6 +16,7 @@
 #
 
 import torch
+import torch.nn.functional as F
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
 
@@ -37,7 +38,8 @@ class AscendSiluAndMul(SiluAndMul):
 
         torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
         if get_ascend_device_type() == AscendDeviceType._310P:
-            out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
+            h = x.shape[-1] // 2
+            out = (F.silu(x[..., :h].to(torch.float32)) * x[..., h:].to(torch.float32)).to(torch.float16)
         else:
             out = torch_npu.npu_swiglu(x)
         torch.ops.vllm.maybe_wait_prefetch_done(out)

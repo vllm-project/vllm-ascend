@@ -2373,6 +2373,134 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset):]
 
+    def _bind_kv_cache(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        from vllm.v1.worker.utils import bind_kv_cache
+        bind_kv_cache(
+            kv_caches,
+            self.compilation_config.static_forward_context,
+            self.kv_caches,
+        )
+
+    # ---------------------------------------
+    # Default path
+    # ---------------------------------------
+    def _initialize_kv_cache_tensors_default(
+        self, kv_cache_config: "KVCacheConfig"
+    ) -> dict[str, torch.Tensor]:
+        # Initialize the memory buffer for KV cache
+        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+        # Change the memory buffer to the desired shape
+        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
+                                                   kv_cache_raw_tensors)
+
+        # Set up cross-layer KV cache sharing
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+            logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
+            kv_caches[layer_name] = kv_caches[target_layer_name]
+
+        return kv_caches
+
+    def _build_kv_cache_sizes_310p(self, kv_cache_config: "KVCacheConfig") -> dict[str, int]:
+        kv_cache_sizes: dict[str, int] = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1, (
+                "KV cache tensor shared by multiple layers is not supported in "
+                "310p NPU."
+            )
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+        return kv_cache_sizes
+
+    def _get_num_blocks_310p(
+        self,
+        tensor_size: int,
+        kv_cache_spec: "FullAttentionSpec",
+        kv_cache_config: "KVCacheConfig",
+    ) -> int:
+        assert tensor_size % kv_cache_spec.page_size_bytes == 0
+        num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+        assert num_blocks >= kv_cache_config.num_blocks
+        return num_blocks
+
+    def _get_kv_cache_shape_310p(
+        self,
+        num_blocks: int,
+        kv_cache_spec: "FullAttentionSpec",
+        attn_backend: object,
+    ):
+        if self.vllm_config.additional_config.get("kv_cache_dtype", None) == "int8":
+            return attn_backend.get_bsh_kv_cache_shape(
+                num_blocks,
+                kv_cache_spec.block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+            )
+
+        if hasattr(attn_backend, "get_supported_block_size") and self.use_hybrid_blocks:
+            block_size = attn_backend.get_supported_block_size()[0]
+            block_size_chunk = kv_cache_spec.block_size // block_size
+            return attn_backend.get_kv_cache_shape(
+                num_blocks * block_size_chunk,
+                block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+            )
+
+        return self.attn_backend.get_kv_cache_shape(
+            num_blocks,
+            kv_cache_spec.block_size,
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size,
+        )
+
+    def _allocate_kv_pair_310p(
+        self,
+        kv_cache_shape,
+        dtype: torch.dtype,
+    ):
+        # allocate [1:] and then format_cast
+        k_tensor = torch.zeros(kv_cache_shape[1:], dtype=dtype, device=self.device)
+        v_tensor = torch.zeros(kv_cache_shape[1:], dtype=dtype, device=self.device)
+        k_cache = torch_npu.npu_format_cast(k_tensor, ACL_FORMAT)
+        v_cache = torch_npu.npu_format_cast(v_tensor, ACL_FORMAT)
+        return k_cache, v_cache
+
+    # -------------------------
+    # 310p path
+    # -------------------------
+    def _initialize_kv_cache_tensors_310p(
+        self, kv_cache_config: "KVCacheConfig"
+    ) -> dict[str, torch.Tensor]:
+        kv_cache_sizes = self._build_kv_cache_sizes_310p(kv_cache_config)
+
+        kv_caches: Dict[str, torch.Tensor] = {}
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+
+                if not isinstance(kv_cache_spec, FullAttentionSpec):
+                    raise ValueError("Unknown KV cache spec type.")
+
+                tensor_size = kv_cache_sizes[layer_name]
+                num_blocks = self._get_num_blocks_310p(tensor_size, kv_cache_spec, kv_cache_config)
+                kv_cache_shape = self._get_kv_cache_shape_310p(num_blocks, kv_cache_spec, attn_backend)
+                dtype = kv_cache_spec.dtype
+
+                if "attn" in layer_name:
+                    if self.vllm_config.kv_transfer_config is None:
+                        k_cache, v_cache = self._allocate_kv_pair_310p(kv_cache_shape, dtype)
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                    else:
+                        raise ValueError("KV cache transfer is not supported for 310p.")
+
+        return kv_caches
+
+    # -------------------------
+    # Public entry
+    # -------------------------
     def initialize_kv_cache_tensors(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
@@ -2384,24 +2512,12 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
-                                                   kv_cache_raw_tensors)
+        if is_310p():
+            kv_caches = self._initialize_kv_cache_tensors_310p(kv_cache_config)
+        else:
+            kv_caches = self._initialize_kv_cache_tensors_default(kv_cache_config)
 
-        # Set up cross-layer KV cache sharing
-        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
-        ):
-            logger.debug("%s reuses KV cache of %s", layer_name,
-                         target_layer_name)
-            kv_caches[layer_name] = kv_caches[target_layer_name]
-
-        from vllm.v1.worker.utils import bind_kv_cache
-        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
-        bind_kv_cache(kv_caches,
-                      self.compilation_config.static_forward_context,
-                      self.kv_caches, num_attn_module)
+        self._bind_kv_cache(kv_caches)
         return kv_caches
 
     def _allocate_kv_cache_tensors(

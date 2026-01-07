@@ -69,6 +69,12 @@ _GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
 
 
+def is_310p():
+    return get_ascend_device_type() == AscendDeviceType._310P
+
+def is_A5():
+    return get_ascend_device_type() == AscendDeviceType.A5
+
 def _print_callback_on_stream(*args):
     """Callback function to print arguments on the dedicated print stream."""
     global _GRAPH_PRINT_STREAM
