@@ -32,8 +32,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
-                                              build_attn_state,
-                                              make_attention_mask)
+                                              build_attn_state)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
@@ -154,12 +153,6 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs,
             num_scheduled_tokens,
             num_valid_tokens,
-        )
-        attn_mask = make_attention_mask(
-            self.vllm_config,
-            attn_state,
-            self.dtype,
-            self.device,
         )
 
         idx_mapping_list = [
@@ -284,7 +277,6 @@ class NPUModelRunner(GPUModelRunner):
             slot_mappings=slot_mappings.to(torch.int32),
             kv_cache_config=self.kv_cache_config,
             decode_token_per_req=self.decode_token_per_req,
-            attn_mask=attn_mask,
             attn_state=attn_state,
         )
 
