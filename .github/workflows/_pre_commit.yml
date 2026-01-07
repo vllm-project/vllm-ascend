@@ -12,13 +12,15 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-16
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+    env:
+      GOPROXY: https://goproxy.io,direct
+      PRE_COMMIT_HOME: /tmp/pre-commit
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-      with:
-        python-version: "3.11"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - name: Checkout vllm-project/vllm repo
@@ -30,10 +32,10 @@ jobs:
     - name: Install vllm
       working-directory: vllm-empty
       run: |
-        pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-        VLLM_TARGET_DEVICE=empty pip install .
+        VLLM_TARGET_DEVICE=empty python3 -m pip install .
     - name: Install vllm-ascend dev
       run: |
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       env:
