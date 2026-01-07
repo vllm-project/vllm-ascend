@@ -211,6 +211,7 @@ def test_accuracy_pcp_only(max_tokens: int, ) -> None:
         name_1="vllm_pcp_only_outputs",
     )
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [10])
 def test_cp_kv_cache_interleave_size_between_tp_and_cp(

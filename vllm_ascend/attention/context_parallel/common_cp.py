@@ -75,10 +75,8 @@ class AscendMetadataForDecode:
     block_tables: torch.Tensor = None
 
 
-def _process_attn_out_lse(
-        attn_output: torch.Tensor, 
-        softmax_lse: torch.Tensor
-) -> torch.Tensor:
+def _process_attn_out_lse(attn_output: torch.Tensor,
+                          softmax_lse: torch.Tensor) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
     dcp_size = get_decode_context_model_parallel_world_size()
     dcp_group = get_dcp_group().device_group if dcp_size > 1 else None
