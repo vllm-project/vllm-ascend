@@ -98,13 +98,21 @@ static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingCont
     uint32_t K = aStorageShape->GetStorageShape().GetDim(1);
 
     auto wTensor = context->GetDynamicInputTensor(WEIGHT_INDEX, 0);
-    uint32_t N = wTensor->GetStorageShape().GetDim(1);
+    uint32_t wTensorDims = wTensor->GetOriginShape().GetDimNum();
+    uint32_t N = wTensor->GetStorageShape().GetDim(wTensorDims - 1);
 
     uint32_t topK = expertIdxTensor->GetStorageShape().GetDim(1);
-    uint32_t expertPerRank = 0;
+    uint32_t listLen = 0;
     while (true) {
-        auto wTensorT = context->GetDynamicInputTensor(WEIGHT_INDEX, ++expertPerRank);
+        auto wTensorT = context->GetDynamicInputTensor(WEIGHT_INDEX, ++listLen);
         if (wTensorT == nullptr) {break;}
+    }
+
+    uint32_t expertPerRank;
+    if (listLen == 1) {
+        expertPerRank = wTensor->GetStorageShape().GetDim(0);
+    } else {
+        expertPerRank = listLen;
     }
 
     info.M = M;
@@ -112,11 +120,13 @@ static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingCont
     info.K = K;
     info.expertPerRank = expertPerRank;
     info.topK = topK;
+    info.listLen = listLen;
     OP_LOGD(K_INNER_DEBUG, "M=%d ", info.M);
     OP_LOGD(K_INNER_DEBUG, "K=%d ", info.K);
     OP_LOGD(K_INNER_DEBUG, "N=%d ", info.N);
     OP_LOGD(K_INNER_DEBUG, "expertPerRank=%d ", info.expertPerRank);
     OP_LOGD(K_INNER_DEBUG, "topK=%d ", info.topK);
+    OP_LOGD(K_INNER_DEBUG, "listLen=%d ", info.listLen);
 
     return ge::GRAPH_SUCCESS;
 }

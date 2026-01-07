@@ -97,6 +97,7 @@ public:
         LayoutD2 layoutD2;
         GM_ADDR ptrWorkspace;
         int32_t EP;
+        int32_t listLen;
         int32_t expertPerRank;
         uint32_t maxOutputSize;
         uint32_t rank;
@@ -126,7 +127,7 @@ public:
         CATLASS_HOST_DEVICE
         Params(
             GemmCoord problemShape_,
-            uint32_t EP_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
+            uint32_t EP_, uint32_t listLen_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
             uint32_t rank_, uint32_t rankSize_, int64_t topK_,
             uint64_t initRoutingQuantTilingKey_, uint32_t epilogueCoreNum_, uint32_t epilogueGranularity_,
             GM_ADDR ptrA_, LayoutA layoutA_, LayoutA layoutA2_,
@@ -141,7 +142,7 @@ public:
             GM_ADDR ptrWorkspace_, int32_t ubMoveNum_,
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
         ) : problemShape(problemShape_),
-            EP(EP_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
+            EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
             rank(rank_), rankSize(rankSize_), topK(topK_),
             initRoutingQuantTilingKey(initRoutingQuantTilingKey_),
             epilogueCoreNum(epilogueCoreNum_), epilogueGranularity(epilogueGranularity_),
@@ -325,7 +326,7 @@ private:
         BlockMmad blockMmad(resource);
 
         int64_t gmGroupOffsetA = 0;
-        // int64_t gmGroupOffsetB = 0;
+        int64_t gmGroupOffsetB = 0;
         int64_t gmGroupOffsetC = 0;
         uint32_t startCoreIdx = 0;
         uint32_t syncGroupIdx = 0;
@@ -336,9 +337,11 @@ private:
         constexpr uint32_t MAX_EXPERTS_PER_RANK = 32;
         __gm__ ElementB* weight1Array[MAX_EXPERTS_PER_RANK];
         __gm__ ElementScale * scale1Array[MAX_EXPERTS_PER_RANK];
-        for (uint32_t groupIdx = 0; groupIdx < MAX_EXPERTS_PER_RANK; ++groupIdx) {
-            weight1Array[groupIdx] = reinterpret_cast<__gm__ ElementB*>(GetTensorAddr<int8_t>(groupIdx, params.ptrB1));
-            scale1Array[groupIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(groupIdx, params.ptrScale1));
+
+        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
+        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
+            weight1Array[loopIdx] = reinterpret_cast<__gm__ ElementB*>(GetTensorAddr<int8_t>(loopIdx, params.ptrB1));
+            scale1Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale1));
         }
         AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -350,10 +353,11 @@ private:
                 currentM = params.maxOutputSize - preCurrentmSum;
             } 
             AscendC::GlobalTensor<ElementB> gmB1;
-            //gmB1.SetGlobalBuffer(params.ptrB1);
             AscendC::GlobalTensor<ElementScale> gmS;
-            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight1Array[groupIdx]));
-            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale1Array[groupIdx]));
+            int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
+            gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight1Array[arrayGroupIdx]));
+            gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale1Array[arrayGroupIdx]));
+
             AscendC::PipeBarrier<PIPE_ALL>();
 
             if (currentM <= L1TileShape::M) {
@@ -385,12 +389,11 @@ private:
                 int64_t gmOffsetB = layoutB1.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 // int64_t gmOffsetS = groupIdx * params.problemShape.n() + blockCoord.n() * L1TileShape::N;   // One scale group per expert
-                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
+                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
                 if (currentM > 0) {
                     blockMmad(
                         gmA[gmGroupOffsetA + gmOffsetA], layoutA,
-                        // gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
-                        gmB1[gmOffsetB], layoutB1,
+                        gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
                         gmC[gmGroupOffsetC + gmOffsetC], layoutC,
                         gmS[gmOffsetS], layoutScale,
                         actualBlockShape
@@ -408,7 +411,9 @@ private:
 
             preCurrentmSum += currentM;
             gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
-            // gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            if (params.listLen == 1) {
+                gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            }
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
             startCoreIdx = (startCoreIdx  + coreLoops) % coreNum;
         }
@@ -428,7 +433,7 @@ private:
         uint32_t k2 = params.problemShape.n() / 2;
 
         int64_t gmGroupOffsetA = 0;
-        // int64_t gmGroupOffsetB = 0;
+        int64_t gmGroupOffsetB = 0;
         int64_t gmGroupOffsetC = 0;
 
         uint32_t startCoreIdx = 0;
@@ -446,9 +451,10 @@ private:
         constexpr uint32_t MAX_EXPERTS_PER_RANK = 8;
         __gm__ ElementB* weight2Array[MAX_EXPERTS_PER_RANK];
         __gm__ ElementScale * scale2Array[MAX_EXPERTS_PER_RANK];
-        for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
-            weight2Array[groupIdx] = reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(groupIdx, params.ptrB2));
-            scale2Array[groupIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(groupIdx, params.ptrScale2));
+        int32_t loopCount = params.listLen == 1 ? 1 : params.expertPerRank;
+        for (uint32_t loopIdx = 0; loopIdx < loopCount; ++loopIdx) {
+            weight2Array[loopIdx] = reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(loopIdx, params.ptrB2));
+            scale2Array[loopIdx] = reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(loopIdx, params.ptrScale2));
         }
         AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -462,9 +468,10 @@ private:
             AscendC::GlobalTensor<ElementB> gmB2;
             //gmB2.SetGlobalBuffer(params.ptrB2);
             AscendC::GlobalTensor<ElementScale> gmS2;
-            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight2Array[groupIdx]));
-            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale2Array[groupIdx]));
             AscendC::PipeBarrier<PIPE_ALL>();
+            int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
+            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(weight2Array[arrayGroupIdx]));
+            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(scale2Array[arrayGroupIdx]));
 
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
@@ -503,12 +510,11 @@ private:
                 int64_t gmOffsetB = layoutB2.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 // int64_t gmOffsetS = groupIdx * n2 + blockCoord.n() * L1TileShape::N;   // One scale group per expert
-                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;   // One scale group per expert
+                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);   // One scale group per expert
                 if (currentM > 0) {
                     blockMmad(
                         gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA,
-                        // gmB2[gmGroupOffsetB + gmOffsetB], layoutB2,
-                        gmB2[gmOffsetB], layoutB2,
+                        gmB2[gmGroupOffsetB + gmOffsetB], layoutB2,
                         gmC2[gmGroupOffsetC + gmOffsetC], layoutC,
                         gmS2[gmOffsetS], layoutScale,
                         actualBlockShape, syncLoopIdx, 3
@@ -517,7 +523,9 @@ private:
             }
             preCurrentmSum += currentM;
             gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
-            // gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            if (params.listLen == 1) {
+                gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+            }
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
 
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
