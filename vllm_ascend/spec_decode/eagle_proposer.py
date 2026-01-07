@@ -73,7 +73,8 @@ class EagleProposer(VllmEagleProposer):
 
         self.pcp_size = self.runner.pcp_size
         self.decode_threshold = 1 + self.num_speculative_tokens
-
+        self.query_start_loc = self.runner._make_buffer(
+            self.runner.max_num_reqs + 1, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0],
                                        device="cpu",
                                        dtype=torch.int32)
@@ -200,10 +201,14 @@ class EagleProposer(VllmEagleProposer):
             num_computed_tokens_cpu = (
                 self.runner.input_batch.
                 num_computed_tokens_cpu_tensor[:num_reqs])
+            self.query_start_loc.cpu[:num_reqs + 1] = torch.tensor(
+                [0] + self.runner.actual_seq_lengths_q[:num_reqs],
+                device="cpu",
+                dtype=torch.int32)
+            self.query_start_loc.copy_to_gpu()
             common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.runner.query_start_loc.gpu[:num_reqs + 1],
-                query_start_loc_cpu=self.runner.query_start_loc.cpu[:num_reqs +
-                                                                    1],
+                query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs + 1],
                 seq_lens_cpu=self.runner.seq_lens.cpu,
                 seq_lens=self.runner.seq_lens.gpu[:num_reqs],
                 num_reqs=num_reqs,
