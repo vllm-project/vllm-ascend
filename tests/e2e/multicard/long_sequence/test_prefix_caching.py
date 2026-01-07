@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/multicard/long_sequence/test_prefix_caching_cp.py`
+Run `pytest tests/e2e/multicard/long_sequence/test_prefix_caching.py`
 """
 
 from typing import Any, Dict
