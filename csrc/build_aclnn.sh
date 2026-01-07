@@ -40,6 +40,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     fi
     # depdendency: cann-toolkit file moe_distribute_base.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
+    echo "ASCEND_TOOLKIT_HOME= " $ASCEND_TOOLKIT_HOME
+    echo "HCCL_STRUCT_FILE_PATH= " $HCCL_STRUCT_FILE_PATH
     if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
         echo "cannot find moe_distribute_base.h file in CANN env"
         exit 1

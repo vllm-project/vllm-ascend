@@ -4,7 +4,7 @@
 
 * Software:
     * Python >= 3.10, < 3.12
-    * CANN == 8.3.rc2
+    * CANN == 8.5.0
     * PyTorch == 2.8.0, torch-npu == 2.8.0
     * vLLM (same version as vllm-ascend)
     * mooncake-transfer-engine reference documentation: <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
