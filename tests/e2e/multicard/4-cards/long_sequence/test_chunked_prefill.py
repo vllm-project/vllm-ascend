@@ -16,11 +16,6 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-"""Compare the short outputs of HF and vLLM when using greedy sampling.
-
-Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
-"""
-
 import os
 import random
 import string
