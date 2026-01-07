@@ -142,9 +142,9 @@ jobs:
           #      which follow the rule from vLLM with prefix v
           # TODO(yikun): the post release might be considered as latest release
           tags: |
-            type=ref,event=branch,suffix=${{ env.SUFFIX }}
-            type=ref,event=pr,suffix=${{ env.SUFFIX }}
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
+            type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
+            type=ref,event=workflow_dispatch,suffix=${{ env.SUFFIX }}
           flavor:
             latest=false
 
