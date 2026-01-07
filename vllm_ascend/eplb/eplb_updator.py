@@ -118,6 +118,7 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
+        self.eplb_loader.eplb_adaptor.wait_for_copy_stream_complete()
         if self.update_expert_weight_flag():
             (expert_send_info, expert_recv_info, updated_expert_map,
              log2phy_map, layer_id) = self.update_info_all.pop(0)

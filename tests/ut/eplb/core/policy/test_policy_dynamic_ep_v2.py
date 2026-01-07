@@ -3,7 +3,7 @@ from typing import Dict, Set
 import numpy as np
 import pytest
 
-from vllm_ascend.eplb.core.policy.policy_dynamic_ep_v2 import (DynamicConfig,
+from vllm_ascend.eplb.core.policy.policy_swift_balancer import (DynamicConfig,
                                                                DynamicEplbV2)
 
 
