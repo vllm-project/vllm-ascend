@@ -638,10 +638,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                      batch_descriptor=None,
                      aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
                      is_ubatch:bool=False):
-        afd_num_stage = 2 if is_ubatch else 1
-        cur_num_stages = 0
+        ubatch_size = self.parallel_config.ubatch_size if is_ubatch else 1
+        rank_ffn_output = None
         for layer_idx in range(self.first_k_dense_replace,self.num_layers):
-            for ubatch_idx in range(afd_num_stage):
+            for ubatch_idx in range(ubatch_size):
                 # recv
                 if self.connector_name == "m2nconnector":
                     hidden_states, dynamic_scales, group_list, topk_weights, afdConnectorMetadata = \
@@ -673,7 +673,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                         h = self.hidden_size,
                         k = self.topk
                     )
-                    output1, afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data, cur_num_stages)
+                    output1, afdConnectorMetadata = self.connector.recv_attn_output(cam_afdconnector_data, ubatch_idx)
                     hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
                     group_list = expertTokenNums.to(torch.int64)
                     topk_weights = simulateExpertScales
@@ -727,15 +727,12 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 elif self.connector_name == "camm2nconnector":
                     handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
                     cam_afdconnector_data.handle = handle
-                    self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data, cur_num_stages)
+                    self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data, ubatch_idx)
                 elif self.connector_name == "camp2pconnector":
                     handle = [attenBatchSize]
                     cam_afdconnector_data.handle = handle
                     self.connector.send_ffn_output(rank_ffn_output, cam_afdconnector_data)
                     print(f'cam send_ffn_output success ,layer id is {layer_idx},ubatch_idx is {ubatch_idx}',flush=True)
-                # 如果切分，则更新cur_num_stages
-                if is_ubatch:
-                    cur_num_stages ^= 1
         return rank_ffn_output
   
         
