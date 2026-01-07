@@ -54,7 +54,7 @@ def fusion_pass_compile(
 
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
-        graph = current_pass_manager(graph, compile_range)
+        graph = current_pass_manager(graph)
         return graph
 
     decompositions = select_decomp_table()

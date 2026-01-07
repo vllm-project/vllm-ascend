@@ -33,7 +33,7 @@ class GraphFusionPassManager:
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
 
-    def __call__(self, graph: fx.Graph, compile_range) -> fx.Graph:
+    def __call__(self, graph: fx.Graph) -> fx.Graph:
         compile_range = get_pass_context().compile_range
 
         for pass_ in self.passes:
