@@ -2377,15 +2377,14 @@ class NPUModelRunner(GPUModelRunner):
 
     def _bind_kv_cache(self, kv_caches: dict[str, torch.Tensor]) -> None:
         from vllm.v1.worker.utils import bind_kv_cache
+        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(
             kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_caches,
+            num_attn_module,
         )
 
-    # ---------------------------------------
-    # Default path
-    # ---------------------------------------
     def _initialize_kv_cache_tensors_default(
         self, kv_cache_config: "KVCacheConfig"
     ) -> dict[str, torch.Tensor]:
