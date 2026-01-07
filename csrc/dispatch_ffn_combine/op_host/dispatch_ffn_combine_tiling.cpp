@@ -91,16 +91,21 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
 static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo &info)
 {
     const char *nodeName = context->GetNodeName();
-    // OPS_LOG_I(nodeName, "DispatchFFnCombine DispatchFFNCombineCheckShapeAndSetTiling.");
 
     const gert::StorageShape *aStorageShape = context->GetInputShape(X_INDEX);
-    const gert::StorageShape *bStorageShape = context->GetInputShape(WEIGHT_INDEX);
-    const gert::StorageShape *expertIdxShape = context->GetInputShape(EXPERTID_INDEX);
+    auto expertIdxTensor = context->GetDynamicInputTensor(EXPERTID_INDEX, 0);
     uint32_t M = aStorageShape->GetStorageShape().GetDim(0);
     uint32_t K = aStorageShape->GetStorageShape().GetDim(1);
-    uint32_t expertPerRank = bStorageShape->GetStorageShape().GetDim(0);
-    uint32_t N = bStorageShape->GetStorageShape().GetDim(2);
-    uint32_t topK = expertIdxShape->GetStorageShape().GetDim(1);
+
+    auto wTensor = context->GetDynamicInputTensor(WEIGHT_INDEX, 0);
+    uint32_t N = wTensor->GetStorageShape().GetDim(1);
+
+    uint32_t topK = expertIdxTensor->GetStorageShape().GetDim(1);
+    uint32_t expertPerRank = 0;
+    while (true) {
+        auto wTensorT = context->GetDynamicInputTensor(WEIGHT_INDEX, ++expertPerRank);
+        if (wTensorT == nullptr) {break;}
+    }
 
     info.M = M;
     info.N = N;
