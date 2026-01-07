@@ -11,52 +11,15 @@
 #   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
 name: Image Build and Push
 on:
-  pull_request:
-    branches:
-      - 'main'
-      - '*-dev'
-    paths:
-      - '.github/workflows/pr_tag_image_build_and_push.yaml'
-      - 'Dockerfile*'
-      - '.github/workflows/_pr_image_build.yml'
-      - 'vllm_ascend/**'
-      - 'setup.py'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'cmake/**'
-      - 'CMakeLists.txt'
-      - 'csrc/**'
-      # We should also trigger image build when nightly test related files are changed to ensure the image is valid for nightly tests
-      - 'tests/e2e/nightly/'
-    types: [ labeled ]
+  schedule:
+    - cron: '0 */2 * * *'
   push:
-    # Publish image when tagging, the Dockerfile in tag will be build as tag image
-    branches:
-      - 'main'
-      - '*-dev'
     tags:
       - 'v*'
-    paths:
-      - '.github/workflows/pr_tag_image_build_and_push.yaml'
-      - 'Dockerfile*'
-      - '.github/workflows/_pr_image_build.yml'
-      - 'vllm_ascend/**'
-      - 'setup.py'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'cmake/**'
-      - 'CMakeLists.txt'
-      - 'csrc/**'
-
-  workflow_dispatch: 
-# only cancel in-progress runs of the same workflow
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
   image_build:
-    if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     name: Image Build and Push
     strategy:
       matrix:
@@ -77,11 +40,11 @@ jobs:
           #   dockerfile: Dockerfile.310p
           # - name: 310P openEuler
           #   dockerfile: Dockerfile.310p.openEuler
-    uses: ./.github/workflows/_pr_image_build.yaml
+    uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
-      should_push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
+      should_push: ${{ github.repository_owner == 'vllm-project' }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
