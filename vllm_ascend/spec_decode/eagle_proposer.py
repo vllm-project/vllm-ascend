@@ -21,6 +21,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -39,8 +40,6 @@ from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import shared_expert_dp_enabled
-
-PADDING_SLOT_ID = -1
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -73,7 +72,8 @@ class EagleProposer(VllmEagleProposer):
 
         self.pcp_size = self.runner.pcp_size
         self.decode_threshold = 1 + self.num_speculative_tokens
-
+        self.query_start_loc = self.runner._make_buffer(
+            self.runner.max_num_reqs + 1, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0],
                                        device="cpu",
                                        dtype=torch.int32)
@@ -200,10 +200,14 @@ class EagleProposer(VllmEagleProposer):
             num_computed_tokens_cpu = (
                 self.runner.input_batch.
                 num_computed_tokens_cpu_tensor[:num_reqs])
+            self.query_start_loc.cpu[:num_reqs + 1] = torch.tensor(
+                [0] + self.runner.actual_seq_lengths_q[:num_reqs],
+                device="cpu",
+                dtype=torch.int32)
+            self.query_start_loc.copy_to_gpu()
             common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.runner.query_start_loc.gpu[:num_reqs + 1],
-                query_start_loc_cpu=self.runner.query_start_loc.cpu[:num_reqs +
-                                                                    1],
+                query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs + 1],
                 seq_lens_cpu=self.runner.seq_lens.cpu,
                 seq_lens=self.runner.seq_lens.gpu[:num_reqs],
                 num_reqs=num_reqs,
@@ -217,8 +221,6 @@ class EagleProposer(VllmEagleProposer):
                 slot_mapping=self.runner.input_batch.block_table[0].
                 slot_mapping.gpu,
                 positions=self.runner.positions.gpu,
-                attn_mask=self.runner.attn_mask,
-                spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -667,8 +669,6 @@ class EagleProposer(VllmEagleProposer):
             slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
-            attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0)
@@ -757,8 +757,6 @@ class EagleProposer(VllmEagleProposer):
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             positions=common_attn_metadata.positions,
-            attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.

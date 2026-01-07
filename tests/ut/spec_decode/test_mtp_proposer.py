@@ -291,8 +291,6 @@ class TestMtpProposer:
 
         mock_runner = MagicMock()
         mock_runner.actual_seq_lengths_q = MagicMock()
-        mock_runner.attn_mask = MagicMock()
-        mock_runner.spec_attn_mask = MagicMock()
         mock_runner.attn_state = MagicMock()
         mock_runner.graph_pad_size = 0
         mock_runner.decode_token_per_req = MagicMock()
@@ -334,5 +332,3 @@ class TestMtpProposer:
         assert spec_common_attn_metadata.num_actual_tokens == total_num_tokens
         assert spec_common_attn_metadata.max_query_len == 8
         assert spec_common_attn_metadata.actual_seq_lengths_q == proposer.runner.actual_seq_lengths_q
-        assert spec_common_attn_metadata.attn_mask == proposer.runner.attn_mask
-        assert spec_common_attn_metadata.spec_attn_mask == proposer.runner.spec_attn_mask
