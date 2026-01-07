@@ -244,7 +244,6 @@ class UBatchWrapper:
         # TODO HXY 这里强行override了才导致这边的里面要Get的时候拿不到正确的东西了
         with override_forward_context(None):
             ubatch_threads = []
-            i = 0
             for metadata in ubatch_metadata:
                 thread = threading.Thread(target=_ubatch_thread,
                                             args=(
@@ -258,7 +257,6 @@ class UBatchWrapper:
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
-                i += 1
 
             sorted_results = [value for position, value in sorted(results)]
             result = torch.cat(sorted_results, dim=0)
