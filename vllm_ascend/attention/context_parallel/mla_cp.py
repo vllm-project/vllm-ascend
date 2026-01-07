@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata,
@@ -633,8 +634,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params.attn_params[num_tokens].append(
                 (weak_ref_tensors(q_nope), weak_ref_tensors(k_nope),
                  weak_ref_tensors(q_pe), weak_ref_tensors(k_pe), num_heads,
-                 self.num_kv_heads, input_layout, weak_ref_tensors(spec_attn_mask) if spec_attn_mask is not None else None, sparse_mode,
-                 self.scale, weak_ref_tensors(decode_meta.block_table), block_size,
+                 self.num_kv_heads, input_layout,
+                 weak_ref_tensors(spec_attn_mask) if spec_attn_mask is not None
+                 else None, sparse_mode, self.scale,
+                 weak_ref_tensors(decode_meta.block_table), block_size,
                  actual_seq_lengths, decode_meta.cp_seq_len,
                  weak_ref_tensors(attn_output), weak_ref_tensors(softmax_lse)))
             torch.npu.graph_task_group_begin(stream)
@@ -654,12 +657,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
-        if input_layout == "BNSD": 
+        if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
 
-            attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
-            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
+            attn_output = attn_output.permute(0, 2, 1, 3).reshape(
+                B_attn * S, N_attn, D)
+            softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(
+                B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse,
