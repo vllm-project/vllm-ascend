@@ -1,8 +1,8 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this factory.
 from .policy_abstract import DynamicConfig, EplbPolicy
-from .policy_default_eplb import DynamicEplb
-from .policy_swift_balancer import DynamicEplbV2
+from .policy_default_eplb import DefaultEplb
+from .policy_swift_balancer import SwiftBalanceEplb
 from .policy_flashlb import FlashLB, warm_up
 from .policy_random import RandomLoadBalance
 
