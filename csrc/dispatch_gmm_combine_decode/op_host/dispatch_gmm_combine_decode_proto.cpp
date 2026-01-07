@@ -18,7 +18,7 @@ namespace ge {
 constexpr uint32_t EXPAND_X_INDEX = 0;
 constexpr uint32_t EXPERT_IDS_INDEX = 1;
 constexpr uint32_t OUTPUT_X_INDEX = 0;
-constexpr uint32_t OUTPUT_REC_COUNT_INDEX = 1;
+constexpr uint32_t OUTPUT_EXPERT_TOKEN_NUMS = 1;
 
 constexpr uint32_t ATTR_GROUP_EP_INDEX = 0;
 constexpr uint32_t ATTR_EP_RANK_SIZE_INDEX = 1;
@@ -36,9 +36,9 @@ static ge::graphStatus InferShape(gert::InferShapeContext *context)
     const gert::Shape *expandXShape = context->GetInputShape(EXPAND_X_INDEX);
     const gert::Shape *expertIdsShape = context->GetInputShape(EXPERT_IDS_INDEX);
     gert::Shape *expandXOutShape = context->GetOutputShape(OUTPUT_X_INDEX);
-    gert::Shape *recvCountOutShape = context->GetOutputShape(OUTPUT_REC_COUNT_INDEX);
+    gert::Shape *expertTokenNumsShape = context->GetOutputShape(OUTPUT_EXPERT_TOKEN_NUMS);
     if (expandXShape == nullptr || expertIdsShape == nullptr || expandXOutShape == nullptr ||
-        recvCountOutShape == nullptr) {
+        expertTokenNumsShape == nullptr) {
         return GRAPH_FAILED;
     }
     if (expandXShape->GetDimNum() < 2 || expertIdsShape->GetDimNum() < 1) {
@@ -72,12 +72,12 @@ static ge::graphStatus InferShape(gert::InferShapeContext *context)
     uint32_t epRankId = static_cast<uint32_t>(*epRankIdPtr);
     uint32_t sharedExpertRankNum = static_cast<uint32_t>(*sharedExpertRankNumPtr);
 
-    recvCountOutShape->SetDimNum(1);
+    expertTokenNumsShape->SetDimNum(1);
     bool isShareExpert = (epRankId < sharedExpertRankNum);
     if (isShareExpert) {
-        recvCountOutShape->SetDim(0, epRankSize);
+        expertTokenNumsShape->SetDim(0, 1);
     } else {
-        recvCountOutShape->SetDim(0, epRankSize * (moeExpertNum / (epRankSize - sharedExpertRankNum)));
+        expertTokenNumsShape->SetDim(0, moeExpertNum / (epRankSize - sharedExpertRankNum));
     }
 
     return GRAPH_SUCCESS;
@@ -87,7 +87,7 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto expandXDataType = context->GetInputDataType(EXPAND_X_INDEX);
     context->SetOutputDataType(OUTPUT_X_INDEX, expandXDataType);
-    context->SetOutputDataType(OUTPUT_REC_COUNT_INDEX, ge::DT_INT32);
+    context->SetOutputDataType(OUTPUT_EXPERT_TOKEN_NUMS, ge::DT_INT64);
     return ge::GRAPH_SUCCESS;
 }
 

@@ -26,22 +26,22 @@ public:
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("gmm1_permuted_weight")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_INT8, ge::DT_INT8})
             .Format({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ})
             .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ});
         this->Input("gmm1_permuted_weight_scale")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("gmm2_weight")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_INT8, ge::DT_INT8})
             .Format({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ})
             .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ});
         this->Input("gmm2_weight_scale")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
@@ -65,9 +65,9 @@ public:
             .DataType({ge::DT_BF16, ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Output("ep_recv_count")
+        this->Output("expert_token_nums")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .DataType({ge::DT_INT64, ge::DT_INT64})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("group_ep").String();
