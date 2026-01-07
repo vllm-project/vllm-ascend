@@ -99,7 +99,7 @@ def test_models_long_sequence_output_between_tp_and_cp(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [10])
-def test_models_long_sequence_output_between_tp_and_cp(
+def test_models_long_sequence_cp_kv_cache_interleave_size_output_between_tp_and_cp(
     model: str,
     max_tokens: int,
 ) -> None:
