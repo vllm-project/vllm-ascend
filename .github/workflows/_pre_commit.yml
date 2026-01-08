@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-16
+    runs-on: linux-amd64-cpu-16-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     env:
@@ -29,8 +29,13 @@ jobs:
     #     mkdir -p ${{ github.workspace }}/.github/workflows/matchers/
     #     cp .github/workflows/matchers/* ${{ github.workspace }}/.github/workflows/matchers/
     #     echo ${{ github.workspace }}
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+    - name: Cp problem matchers
+      run: |
+        cp .github/workflows/matchers/* "$HOME"/.cache/pre-commit/matchers/
+        ls "$HOME"/.cache/pre-commit/matchers/
+
+    - run: echo "::add-matcher::$HOME/.cache/matchers/actionlint.json"
+    - run: echo "::add-matcher::.$HOME/.cache/matchers/mypy.json"
 
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v6
