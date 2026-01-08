@@ -1,4 +1,5 @@
 from typing import Optional
+
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -306,6 +307,7 @@ def add_rmsnorm_bias_impl_fake(
     output = torch.empty_like(input)
     output2 = torch.empty_like(input)
     return output, output2
+
 
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
 # is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
