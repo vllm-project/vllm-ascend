@@ -19,6 +19,7 @@
 
 namespace MoeInitRoutingV2 {
 using namespace AscendC;
+using namespace optiling;
 
 template <typename T, typename TilingData>
 class MoeV2SrcToDstWithCapacity {

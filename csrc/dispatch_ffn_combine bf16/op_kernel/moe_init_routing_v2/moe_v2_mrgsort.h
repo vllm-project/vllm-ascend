@@ -20,6 +20,7 @@
 
 namespace MoeInitRoutingV2 {
 using namespace AscendC;
+using namespace optiling;
 
 struct MoeV2MrgsortParam {
     int64_t perListElements;

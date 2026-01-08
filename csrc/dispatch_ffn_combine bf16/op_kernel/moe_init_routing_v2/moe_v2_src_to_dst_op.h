@@ -19,6 +19,7 @@
 
 namespace MoeInitRoutingV2 {
 using namespace AscendC;
+using namespace optiling;
 
 class MoeV2SrcToDstOp {
 public:

@@ -20,6 +20,7 @@
 
 namespace MoeInitRoutingV2 {
 using namespace AscendC;
+using namespace optiling;
 
 class MoeV2SortOneCore : public MoeV2SortBase {
 public:
