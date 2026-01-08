@@ -1,8 +1,10 @@
 from typing import Optional
+
 import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 
 @triton.heuristics(
     {"HAS_BIAS": lambda args: args["norm_bias_ptr"] is not None})
