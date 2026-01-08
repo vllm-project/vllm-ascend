@@ -206,12 +206,13 @@ class KVCacheSendingLayerThread(threading.Thread):
         if self.pd_head_ratio == 1:
             if self.use_sparse:
                 layer_local_kv_base_addr = [
-                    local_kv_base_addr[i]
-                    for i in [3 * layer_idx, 3 * layer_idx + 2]
+                    local_kv_base_addr[i] for i in
+                    [3 * layer_idx, 3 * layer_idx + 1, 3 * layer_idx + 2]
                 ]
                 layer_remote_kv_base_addr = [
                     remote_kv_base_addrs[i]  # type:ignore
-                    for i in [3 * layer_idx, 3 * layer_idx + 2]
+                    for i in
+                    [3 * layer_idx, 3 * layer_idx + 1, 3 * layer_idx + 2]
                 ]
             else:
                 layer_local_kv_base_addr = [
@@ -1001,8 +1002,9 @@ class MooncakeLayerwiseConnectorWorker:
                     ptrs.append(base_addr)
                     lengths.append(region_len)
             else:
-                cache_list = [cache_or_caches
-                              ] if self.use_mla or self.use_sparse  else cache_or_caches
+                cache_list = [
+                    cache_or_caches
+                ] if self.use_mla or self.use_sparse else cache_or_caches
                 for cache in cache_list:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
@@ -1079,7 +1081,10 @@ class MooncakeLayerwiseConnectorWorker:
             num_replica_groups = self.tp_size // num_kv_head if self.tp_size >= num_kv_head else 1
             replica_group_idx = self.tp_rank % num_replica_groups
             req_ids = sorted(list(connector_metadata.requests.keys()))
-            selected_req_ids = [req_id for i, req_id in enumerate(req_ids) if i % num_replica_groups == replica_group_idx]
+            selected_req_ids = [
+                req_id for i, req_id in enumerate(req_ids)
+                if i % num_replica_groups == replica_group_idx
+            ]
             if selected_req_ids:
                 if self.use_mla:
                     reshape_cache_event = attn_metadata[
@@ -1094,18 +1099,20 @@ class MooncakeLayerwiseConnectorWorker:
                         rearrange_block_ids = sorted({
                             block_id
                             for req_id in selected_req_ids
-                            for block_id in connector_metadata.requests[req_id].local_block_ids
+                            for block_id in
+                            connector_metadata.requests[req_id].local_block_ids
                         })
 
                         keys = kv_layer[0][rearrange_block_ids].clone()
                         values = kv_layer[1][rearrange_block_ids].clone()
                         # sort kv caches for each block
                         keys = keys.view(keys.size(0), self.pd_head_ratio, -1,
-                                        *keys.shape[2:]).transpose(
-                                            0, 1).reshape_as(keys)
-                        values = values.view(values.size(0), self.pd_head_ratio,
-                                            -1, *values.shape[2:]).transpose(
-                                                0, 1).reshape_as(values)
+                                         *keys.shape[2:]).transpose(
+                                             0, 1).reshape_as(keys)
+                        values = values.view(values.size(0),
+                                             self.pd_head_ratio, -1,
+                                             *values.shape[2:]).transpose(
+                                                 0, 1).reshape_as(values)
                         # reshard kv cache
                         keys = keys.reshape(-1, *kv_layer[0].shape[2:])
                         values = values.reshape(-1, *kv_layer[1].shape[2:])
@@ -1119,13 +1126,14 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_send_layer_thread is not None
                 assert reshape_cache_event is not None
                 send_task = SendTask(wait_event=reshape_cache_event,
-                                    k_cache=keys,
-                                    v_cache=values,
-                                    layer_idx=self.current_layer,
-                                    rearrange_block_ids=rearrange_block_ids)
+                                     k_cache=keys,
+                                     v_cache=values,
+                                     layer_idx=self.current_layer,
+                                     rearrange_block_ids=rearrange_block_ids)
                 for req_id, req_meta in connector_metadata.requests.items():
                     if req_id in selected_req_ids:
-                        req_meta_update = self.update_decoder_info(req_id, req_meta)
+                        req_meta_update = self.update_decoder_info(
+                            req_id, req_meta)
                         logger.debug(
                             f"Add request {req_id} to kv send layer thread. {req_meta_update=}"
                         )
