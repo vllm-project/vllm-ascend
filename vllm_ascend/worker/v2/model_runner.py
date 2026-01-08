@@ -126,6 +126,7 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, 1)
         set_mc2_mask(vllm_config, self.device)
 
+    # _dummy_run will be removed after we refactor ascend_forward_context
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -253,7 +254,7 @@ class NPUModelRunner(GPUModelRunner):
                     positions=input_batch.positions,
                 )
         self.execute_model_state = hidden_states, input_batch, sampling_metadata
-
+        # previous code in execute_model will be removed after we refactor ascend_forward_context
         hidden_states, input_batch, sampling_metadata = self.execute_model_state
         if is_moe_model(self.vllm_config):
             sp_enabled = enable_sp(
