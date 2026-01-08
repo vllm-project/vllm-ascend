@@ -145,6 +145,7 @@ install_triton_ascend() {
     rm -f "${BISHENG_NAME}"
 
     export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+    which bishengir-compile
     python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
     echo "====> Triton ascend installation completed"
 }
