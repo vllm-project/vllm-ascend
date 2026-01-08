@@ -1,0 +1,268 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:1
+msgid "ACL Graph"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:3
+msgid "Why we need ACL Graph?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:5
+msgid ""
+"When in LLM inference, each token requires nearly thousand operator "
+"executions, and when host launching operators are slower than device, it "
+"will cause host bound. In severe cases, the device will be idle for more "
+"than half of the time. To solve this problem, we use graph in LLM "
+"inference."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:26
+msgid "How to use ACL Graph?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:28
+msgid ""
+"ACL Graph is enabled by default in V1 Engine, just need to check that "
+"`enforce_eager` is not set to `True`. More details see: [Graph Mode "
+"Guide](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:30
+msgid "How it works?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:32
+msgid ""
+"In short, graph mode works in two steps: **capture and replay**. When "
+"engine starts, we will capture all of the ops in model forward and save "
+"it as a graph, and when req come in, we just replay the graph on devices,"
+" and waiting for result."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:34
+msgid "But in reality, graph mode is not that simple."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:36
+msgid "Padding and Bucketing"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:38
+msgid ""
+"Due to graph can only replay the ops captured before, without doing "
+"tiling and checking graph input, we need to ensure the consistency of the"
+" graph input, but we know that model input's shape depends on the request"
+" scheduled by Scheduler, we can't ensure the consistency."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:40
+msgid ""
+"Obviously, we can solve this problem by capturing the biggest shape and "
+"padding all of the model input to it. But it will bring a lot of "
+"redundant computing and make performance worse. So we can capture "
+"multiple graphs with different shape, and pad the model input to the "
+"nearest graph, which will greatly reduce redundant computing. But when "
+"`max_num_batched_tokens` is very large, the number of graphs that need to"
+" be captured will also become very large. But we know that when "
+"intensor's shape is large, the computing time will be very long, and "
+"graph mode is not necessary in this case. So all of things we need to do "
+"is:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:41
+msgid "Set a threshold;"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:42
+msgid ""
+"When `num_scheduled_tokens` is bigger than the threshold, use "
+"`eager_mode`;"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:43
+msgid "Capture multiple graphs within a range below the threshold;"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:58
+msgid "Piecewise and Full graph"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:60
+msgid ""
+"Due to the increasing complexity of the attention layer in current LLM, "
+"we can't ensure all types of attention can run in graph. In MLA, "
+"prefill_tokens and decode_tokens have different calculation method, so "
+"when a batch has both prefills and decodes in MLA, graph mode is "
+"difficult to handle this situation."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:62
+msgid ""
+"vLLM solves this problem with piecewise graph mode. We use eager mode to "
+"launch attention's ops, and use graph to deal with others. But it also "
+"bring some problems: The cost of launching ops has become large again, "
+"although much smaller than eager mode, but it will also lead to host "
+"bound when cpu is poor or `num_tokens` is small."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:64
+msgid "Altogether, we need to support both piecewise and full graph mode."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:66
+msgid ""
+"When attention can run in graph, we tend to choose full graph mode to "
+"achieve optimal performance;"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:67
+msgid "When full graph is not work, use piecewise graph as a substitute;"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:68
+msgid ""
+"When piecewise graph's performance is not good and full graph mode is "
+"blocked, separate prefills and decodes, and use full graph mode in "
+"**decode_only** situation. Because when a batch include prefill req, "
+"usually `num_tokens` will be quite big and not cause host bound."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:70
+msgid ""
+"Currently, due to stream resource constraint, we can only support a few "
+"buckets in piecewise graph mode now, which will cause redundant computing"
+" and may lead to performance degradation compared with eager mode."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:72
+msgid "How it be implemented?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:74
+msgid ""
+"vLLM has already implemented most of the modules in graph mode. You can "
+"see more details at: [CUDA "
+"Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:76
+msgid ""
+"When in graph mode, vLLM will call "
+"`current_platform.get_static_graph_wrapper_cls` to get current device's "
+"graph model wrapper, so what we need to do is to implement the graph mode"
+" wrapper on Ascend: `ACLGraphWrapper`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:78
+msgid ""
+"vLLM has added `support_torch_compile` decorator to all models, this "
+"decorator will replace the `__init__` and `forward` interface of the "
+"model class, and when `forward` called, the code inside the "
+"`ACLGraphWrapper` will be executed, and it will do capture or replay as "
+"mentioned above."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:80
+msgid ""
+"When use piecewise graph, we just need to follow the above-mentioned "
+"process, but when in full graph, due to the complexity of the attention, "
+"sometimes we need to update attention op's param before execution. So we "
+"implement `update_attn_params` and `update_mla_attn_params` funcs for "
+"full graph mode. And when forward, memory will be reused between "
+"different ops, so we can't update attention op's param before forward. In"
+" ACL Graph, we use `torch.npu.graph_task_update_begin` and "
+"`torch.npu.graph_task_update_end` to do it, and use "
+"`torch.npu.ExternalEvent` to ensure order between params update and ops "
+"execution."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:82
+msgid "DFX"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:84
+msgid "Stream resource constraint"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:86
+msgid ""
+"Currently, we can only capture 1800 graphs at most, due to the limitation"
+" of ACL graph that a graph requires a separate stream at least. This "
+"number is bounded by the number of streams, which is 2048, we save 248 "
+"streams as a buffer. Besides, there are many variables that can affect "
+"the number of buckets:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:88
+msgid ""
+"Piecewise graph will divides the model into `num_hidden_layers + 1` sub "
+"modules, based on attention layer. Every sub module is a single graph "
+"which need to cost stream, so the number of buckets in piecewise graph "
+"mode is very tight compared with full graph mode."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:90
+msgid ""
+"The number of streams required for a graph is related to the number of "
+"comm domains. Each comm domain will increase one stream consumed by a "
+"graph."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:92
+msgid ""
+"When multi-stream is explicitly called in sub module, it will consumes an"
+" additional stream."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:94
+msgid ""
+"There are some other rules about ACL Graph and stream. Currently, we use "
+"func `update_aclgraph_sizes` to calculate the maximum number of buckets "
+"and update `graph_batch_sizes` to ensure stream resource is sufficient."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:96
+msgid "We will expand the stream resource limitation in the future."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:98
+msgid "Limitation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:100
+msgid "`FULL` and `FULL_AND_PIECEWISE` are not supported now;"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:101
+msgid ""
+"When use ACL Graph and MTP and `num_speculative_tokens > 1`, as vLLM "
+"don't support this case in v0.11.0, we need to set "
+"`cudagraph_capture_sizes` explicitly."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ACL_Graph.md:102
+msgid "`use_inductor` is not supported now;"
+msgstr ""
+

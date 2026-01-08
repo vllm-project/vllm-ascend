@@ -1,0 +1,260 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:1
+msgid "Expert Load Balance (EPLB)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:3
+msgid "Overview"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:5
+msgid ""
+"Expert balancing for MoE models in LLM serving is essential for optimal "
+"performance. Dynamically changing experts during inference can negatively"
+" impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due "
+"to stop-the-world operations. SwiftBalancer enables asynchronous expert "
+"load balancing with zero-overhead expert movement, ensuring seamless "
+"service continuity."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:7
+msgid "EPLB Effects"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:9
+msgid ""
+"Reduced Latency: Dynamically balances expert loads to minimize TTFT and "
+"TPOT by distributing workloads evenly across experts."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:10
+msgid ""
+"Enhanced Throughput: Optimizes GPU utilization, increasing token "
+"generation speed under high-concurrency scenarios."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:11
+msgid ""
+"Zero-Overhead Movement: Expert redistribution occurs asynchronously "
+"without interrupting ongoing inference requests."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:12
+msgid ""
+"Adaptive Scaling: Automatically adjusts to workload fluctuations while "
+"maintaining stable performance."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:13
+msgid ""
+"Fault Tolerance: Redundant expert placement ensures system resilience "
+"during hardware failures."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:15
+msgid "Support Scenarios"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:17
+msgid "Models:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:18
+msgid "DeepseekV3/V3.1/R1、Qwen3-MOE"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:19
+msgid "MOE QuantType:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:20
+msgid "W8A8-dynamic"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:22
+msgid "How to Use EPLB"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:24
+msgid "Dynamic EPLB"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:26
+msgid ""
+"We need to add environment variable `export DYNAMIC_EPLB=\"true\"` to "
+"enable vllm eplb. Enable dynamic balancing with auto-tuned parameters. "
+"Adjust num_iterations_eplb_update and num_wait_worker_iterations based on"
+" workload patterns."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:39
+msgid "Static EPLB"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:40
+msgid "Initial Setup (Record Expert Map)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:42
+msgid ""
+"We need to add environment variable `export EXPERT_MAP_RECORD=\"true\"` "
+"to record expert map.Generate the initial expert distribution map using "
+"expert_map_record_path. This creates a baseline configuration for future "
+"deployments."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:56
+msgid "Subsequent Deployments (Use Recorded Map)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:57
+msgid ""
+"Load the pre-recorded expert map for consistent performance. This avoids "
+"recalculating distributions at runtime."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:68
+msgid "Critical Considerations"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:69
+msgid "Parameter Tuning:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:70
+msgid ""
+"num_iterations_eplb_update: Higher values (e.g., 400+) for stable "
+"workloads; lower values (e.g., 100-200) for fluctuating traffic."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:71
+msgid ""
+"num_wait_worker_iterations: Should be ≥ 30 to avoid premature balancing "
+"during startup."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:72
+msgid ""
+"init_redundancy_expert: Must match tensor-parallel size (e.g., 16 for 16 "
+"GPUs) to ensure sufficient redundancy."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:74
+msgid "Hardware Requirements:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:75
+msgid ""
+"Ensure that all GPUs have identical memory capacity and compute "
+"capabilities."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:76
+msgid ""
+"Network bandwidth must support expert redistribution traffic (≥ 10 Gbps "
+"recommended)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:78
+msgid "Model Compatibility:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:79
+msgid ""
+"Only MoE models with explicit expert parallelism support (e.g., Qwen3 MoE"
+" models) are compatible."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:80
+msgid ""
+"Verify model architecture supports dynamic expert routing through "
+"--enable-expert-parallel."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:82
+msgid "Gating Configuration:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:83
+msgid ""
+"When gate_eplb=true, validate that the gating mechanism can handle expert"
+" movement without routing errors."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:84
+msgid "Test with synthetic workloads before production deployment."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:86
+msgid "Monitoring & Validation:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:87
+msgid ""
+"Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and "
+"gpu_utilization."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:88
+msgid "Use vllm monitor to detect imbalances during runtime."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:89
+msgid ""
+"Always verify expert map JSON structure before loading (validate with jq "
+"or similar tools)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:91
+msgid "Startup Behavior:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:92
+msgid ""
+"Initial requests may experience higher latency during the first balancing"
+" cycle (typically 1-2 minutes)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:93
+msgid "Avoid sudden traffic spikes during the warm-up phase."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:95
+msgid "Common Pitfalls:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:96
+msgid ""
+"Incorrect tensor-parallel-size vs. actual GPU count → causes resource "
+"underutilization."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:97
+msgid "Using expert_map_path without generating the map first → runtime errors."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:98
+msgid "Setting init_redundancy_expert > available GPUs → system failure."
+msgstr ""
+

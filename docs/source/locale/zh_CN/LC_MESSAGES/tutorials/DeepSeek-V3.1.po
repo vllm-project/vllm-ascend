@@ -1,0 +1,476 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:1
+msgid "DeepSeek-V3/3.1"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:5
+msgid ""
+"DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-"
+"thinking mode. Compared to the previous version, this upgrade brings "
+"improvements in multiple aspects:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:7
+msgid ""
+"Hybrid thinking mode: One model supports both thinking mode and non-"
+"thinking mode by changing the chat template."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:9
+msgid ""
+"Smarter tool calling: Through post-training optimization, the model's "
+"performance in tool usage and agent tasks has significantly improved."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:11
+msgid ""
+"Higher thinking efficiency: DeepSeek-V3.1-Think achieves comparable "
+"answer quality to DeepSeek-R1-0528, while responding more quickly."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:13
+msgid "The `DeepSeek-V3.1` model is first supported in `vllm-ascend:v0.9.1rc3`"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:15
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:17
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:19
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:21
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:23
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:25
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:26
+msgid ""
+"`DeepSeek-V3.1`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:27
+msgid ""
+"`DeepSeek-V3.1-w8a8`(Quantized version without mtp): [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-w8a8)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:28
+msgid ""
+"`DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download "
+"model weight](https://www.modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to "
+"`bfloat16` in `config.json`."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:29
+msgid ""
+"`DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp):"
+" [Download model weight](https://www.modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:30
+#, python-format
+msgid ""
+"`Method of Quantify`: "
+"[msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96)."
+" You can use these methods to quantify the model."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:32
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:34
+msgid "Verify Multi-node Communication(Optional)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:36
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../installation.md#verify-multi-node-communication)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:38
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:40
+msgid "You can using our official docker image to run `DeepSeek-V3.1` directly."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:42
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:80
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:82
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:84
+msgid "Single-node Deployment"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:86
+msgid ""
+"Quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 "
+"Atlas 800 A3 (64G × 16)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:88
+msgid "Run the following script to execute online inference."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:132
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:134
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a "
+"fusion operator that can significantly improve performance, though it "
+"requires more NPU memory. It is therefore recommended to enable this "
+"option when sufficient NPU memory is available."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:135
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` "
+"enables balance scheduling. This may help increase output throughput and "
+"reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios."
+" Furthermore, enabling this feature is not recommended in scenarios where"
+" PD is separated."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:136
+msgid ""
+"For single-node deployment, we recommend using `dp4tp4` instead of "
+"`dp2tp8`."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:137
+msgid ""
+"`--max-model-len` specifies the maximum context length - that is, the sum"
+" of input and output tokens for a single request. For performance testing"
+" with an input length of 3.5K and output length of 1.5K, a value of "
+"`16384` is sufficient, however, for precision testing, please set it at "
+"least `35000`."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:138
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:139
+msgid ""
+"If you use the w4a8 weight, more memory will be allocated to kvcache, and"
+" you can try to increase system throughput to achieve greater throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:141
+msgid "Multi-node Deployment"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:143
+msgid ""
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64G × "
+"8)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:145
+msgid "Run the following scripts on two nodes respectively."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:147
+msgid "**Node 0**"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:200
+msgid "**Node 1**"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:255
+msgid "Prefill-Decode Disaggregation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:257
+msgid ""
+"We recommend using Mooncake for deployment: "
+"[Mooncake](./pd_disaggregation_mooncake_multi_node.md)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:259
+msgid ""
+"Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 "
+"nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory "
+"to serve high concurrency in 1P1D case."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:260
+msgid ""
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 "
+"(64G × 16)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:262
+msgid ""
+"To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need "
+"to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` "
+"script on each node and deploy a `proxy.sh` script on prefill master node"
+" to forward requests."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:264
+msgid ""
+"`launch_online_dp.py` to launch external dp vllm servers. "
+"[launch\\_online\\_dp.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:267
+msgid "Prefill Node 0 `run_dp_template.sh` script"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:343
+msgid "Prefill Node 1 `run_dp_template.sh` script"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:419
+msgid "Decode Node 0 `run_dp_template.sh` script"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:497
+msgid "Decode Node 1 `run_dp_template.sh` script"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:575
+msgid "run server for each node"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:588
+msgid "Run proxy `proxy.sh` scripts on the prefill master node"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:590
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. "
+"You can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:646
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:648
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:661
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:663
+msgid "Here are two accuracy evaluation methods."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:665
+#: ../../source/tutorials/DeepSeek-V3.1.md:680
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:666
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:668
+msgid ""
+"After execution, you can get the result, here is the result of "
+"`DeepSeek-V3.1-w8a8-mtp-QuaRot` in `vllm-ascend:0.11.0rc1` for reference "
+"only."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "note"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "ceval"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "90.94"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "1 Atlas 800 A3 (64G × 16)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "gsm8k"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:44
+msgid "96.28"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:675
+msgid "Using Language Model Evaluation Harness"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:676
+msgid "Not test yet."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:678
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:682
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:684
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:686
+msgid ""
+"Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an "
+"example."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:688
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:690
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:691
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:692
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:693
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:695
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.1.md:701
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+

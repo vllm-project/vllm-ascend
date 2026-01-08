@@ -1,0 +1,427 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:1
+msgid "Qwen3-VL-235B-A22B-Instruct"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:5
+msgid ""
+"The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family "
+"of powerful Large Vision-Language Models (LVLMs) designed for "
+"comprehensive multimodal understanding. They accept images, text, and "
+"bounding boxes as input, and output text and detection boxes, enabling "
+"advanced functions like image detection, multi-modal dialogue, and multi-"
+"image reasoning."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, NPU deployment, accuracy and performance evaluation."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:9
+msgid ""
+"This tutorial uses the vLLM-Ascend `v0.11.0rc2` version for "
+"demonstration, showcasing the `Qwen3-VL-235B-A22B-Instruct` model as an "
+"example for multi-NPU deployment."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:11
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:13
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:15
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:17
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:19
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:21
+msgid ""
+"`Qwen3-VL-235B-A22B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G "
+"× 16) node，2 Atlas 800 A2（64G * 8）nodes. [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:23
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:25
+msgid "Verify Multi-node Communication(Optional)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:27
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../installation.md#verify-multi-node-communication)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:29
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md
+msgid "Use docker image"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:35
+msgid ""
+"For example, using images `quay.io/ascend/vllm-ascend:v0.11.0rc2`(for "
+"Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc2-a3`(for Atlas "
+"800 A3)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:37
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md
+msgid "Build from source"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:78
+msgid "You can build all from source."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:80
+msgid ""
+"Install `vllm-ascend`, refer to [set up using python](../installation.md"
+"#set-up-using-python)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:84
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:86
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:88
+msgid "Multi-node Deployment with MP (Recommended)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:89
+msgid ""
+"Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to "
+"deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:91
+msgid "Node 0"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:134
+msgid "Node1"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:181
+msgid "The parameters are explained as follows:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:182
+msgid ""
+"`--max-model-len` represents the context length, which is the maximum "
+"value of the input plus output for a single request."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:183
+msgid ""
+"`--max-num-seqs` indicates the maximum number of requests that each DP "
+"group is allowed to process. If the number of requests sent to the "
+"service exceeds this limit, the excess requests will remain in a waiting "
+"state and will not be scheduled. Note that the time spent in the waiting "
+"state is also counted in metrics such as TTFT and TPOT. Therefore, when "
+"testing performance, it is generally recommended that `--max-num-seqs` * "
+"`--data-parallel-size` >= the actual total concurrency."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:184
+msgid ""
+"`--max-num-batched-tokens` represents the maximum number of tokens that "
+"the model can process in a single step. Currently, vLLM v1 scheduling "
+"enables ChunkPrefill/SplitFuse by default, which means:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:185
+msgid ""
+"(1) If the input length of a request is greater than `--max-num-batched-"
+"tokens`, it will be divided into multiple rounds of computation according"
+" to `--max-num-batched-tokens`;"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:186
+msgid ""
+"(2) Decode requests are prioritized for scheduling, and prefill requests "
+"are scheduled only if there is available capacity."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:187
+msgid ""
+"Generally, if `--max-num-batched-tokens` is set to a larger value, the "
+"overall latency will be lower, but the pressure on GPU memory (activation"
+" value usage) will be greater."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:188
+msgid ""
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
+"will use for actual inference. Its essential function is to calculate the"
+" available kv_cache size. During the warm-up phase (referred to as "
+"profile run in vLLM), vLLM records the peak GPU memory usage during an "
+"inference process with an input size of `--max-num-batched-tokens`. The "
+"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
+" * HBM size - peak GPU memory usage. Therefore, the larger the value of "
+"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
+" the GPU memory usage during the warm-up phase may differ from that "
+"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
+"memory-utilization` too high may lead to OOM (Out of Memory) issues "
+"during actual inference. The default value is `0.9`."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:189
+msgid ""
+"`--enable-expert-parallel` indicates that EP is enabled. Note that vLLM "
+"does not support a mixed approach of ETP and EP; that is, MoE can either "
+"use pure EP or pure TP."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:190
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:191
+msgid ""
+"`--quantization` \"ascend\" indicates that quantization is used. To "
+"disable quantization, remove this option."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:192
+msgid ""
+"`--compilation-config` contains configurations related to the aclgraph "
+"graph mode. The most significant configurations are \"cudagraph_mode\" "
+"and \"cudagraph_capture_sizes\", which have the following meanings: "
+"\"cudagraph_mode\": represents the specific graph mode. Currently, "
+"\"PIECEWISE\" and \"FULL_DECODE_ONLY\" are supported. The graph mode is "
+"mainly used to reduce the cost of operator dispatch. Currently, "
+"\"FULL_DECODE_ONLY\" is recommended."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:194
+msgid ""
+"\"cudagraph_capture_sizes\": represents different levels of graph modes. "
+"The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. "
+"In the graph mode, the input for graphs at different levels is fixed, and"
+" inputs between levels are automatically padded to the next level. "
+"Currently, the default setting is recommended. Only in some scenarios is "
+"it necessary to set this separately to achieve optimal performance."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:195
+msgid ""
+"`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 "
+"optimization is enabled. Currently, this optimization is only supported "
+"for MoE in scenarios where tp_size > 1."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:197
+msgid ""
+"If the service starts successfully, the following information will be "
+"displayed on node 0:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:208
+msgid "Multi-node Deployment with Ray"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:210
+msgid "refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](./ray.md)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:212
+msgid "Prefill-Decode Disaggregation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:214
+msgid ""
+"refer to [Prefill-Decode Disaggregation Mooncake "
+"Verification](./pd_disaggregation_mooncake_multi_node.md)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:216
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:218
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:235
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:237
+msgid "Here are two accuracy evaluation methods."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:239
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:251
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:241
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:243
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3-VL-"
+"235B-A22B-Instruct` in `vllm-ascend:0.11.0rc2` for reference only."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "aime2024"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:76
+msgid "93"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:249
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:253
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:255
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:257
+msgid "Run performance evaluation of `Qwen3-VL-235B-A22B-Instruct` as an example."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:259
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:261
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:262
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:263
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:264
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:266
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-VL-235B-A22B-Instruct.md:273
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+

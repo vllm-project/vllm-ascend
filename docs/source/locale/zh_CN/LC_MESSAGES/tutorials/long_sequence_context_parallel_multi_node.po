@@ -1,0 +1,448 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:1
+msgid "Long-Sequence Context Parallel (Deepseek)"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:3
+msgid "Getting Start"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:6
+msgid ""
+"Context parallel feature currently is only supported on Atlas A3 device, "
+"and will be supported on Atlas A2 in the future."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:9
+msgid ""
+"vLLM-Ascend now supports long sequence with context parallel options. "
+"This guide takes one-by-one steps to verify these features with "
+"constrained resources."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:11
+msgid ""
+"Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 "
+"servers to deploy the “1P1D” architecture. Node p is deployed across "
+"multiple machines, while node d is deployed on a single machine. Assume "
+"the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 "
+"(prefill 2), and the decoder servers are 192.0.0.3 (decoder 1). On each "
+"server, use 8 NPUs 16 chips to deploy one service instance.In the current"
+" example, we will enable the context parallel feature on node p to "
+"improve TTFT. Although enabling the DCP feature on node d can reduce "
+"memory usage, it would introduce additional communication and small "
+"operator overhead. Therefore, we will not enable the DCP feature on node "
+"d."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:13
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:15
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:17
+msgid ""
+"`DeepSeek-V3.1_w8a8mix_mtp`(Quantized version with mix mtp): [Download "
+"model weight](https://www.modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V3.1-w8a8). Please modify `torch_dtype` from `float16` to "
+"`bfloat16` in `config.json`."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:19
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:21
+msgid "Verify Multi-node Communication"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:23
+msgid ""
+"Refer to [verify multi-node communication environment](../installation.md"
+"#verify-multi-node-communication) to verify multi-node communication."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:25
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:27
+msgid "You can using our official docker image to run `DeepSeek-V3.1` directly."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:29
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:64
+msgid "You need to set up environment on each node."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:66
+msgid "Prefiller/Decoder Deployment"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:68
+msgid ""
+"We can run the following scripts to launch a server on the "
+"prefiller/decoder node, respectively. Please note that each P/D node will"
+" occupy ports ranging from kv_port to kv_port + num_chips to initialize "
+"socket listeners. To avoid any issues, port conflicts should be "
+"prevented. Additionally, ensure that each node's engine_id is uniquely "
+"assigned to avoid conflicts."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:70
+msgid ""
+"Run the following script to execute online 128k inference on three nodes "
+"respectively."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md
+msgid "Prefiller node 1"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md
+msgid "Prefiller node 2"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md
+msgid "Decoder node 1"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:280
+msgid "Prefill master node `proxy.sh` scripts"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:296
+msgid "run proxy"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:298
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. "
+"You can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:305
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:307
+msgid ""
+"`--tensor-parallel-size` 16 are common settings for tensor parallelism "
+"(TP) sizes."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:308
+msgid ""
+"`--prefill-context-parallel-size` 2 are common settings for prefill "
+"context parallelism (PCP) sizes."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:309
+msgid ""
+"`--decode-context-parallel-size` 8 are common settings for decode context"
+" parallelism (DCP) sizes."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:310
+msgid ""
+"`--max-model-len` represents the context length, which is the maximum "
+"value of the input plus output for a single request."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:311
+msgid ""
+"`--max-num-seqs` indicates the maximum number of requests that each DP "
+"group is allowed to process. If the number of requests sent to the "
+"service exceeds this limit, the excess requests will remain in a waiting "
+"state and will not be scheduled. Note that the time spent in the waiting "
+"state is also counted in metrics such as TTFT and TPOT. Therefore, when "
+"testing performance, it is generally recommended that `--max-num-seqs` * "
+"`--data-parallel-size` >= the actual total concurrency."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:312
+msgid ""
+"`--max-num-batched-tokens` represents the maximum number of tokens that "
+"the model can process in a single step. Currently, vLLM v1 scheduling "
+"enables ChunkPrefill/SplitFuse by default, which means:"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:313
+msgid ""
+"(1) If the input length of a request is greater than `--max-num-batched-"
+"tokens`, it will be divided into multiple rounds of computation according"
+" to `--max-num-batched-tokens`;"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:314
+msgid ""
+"(2) Decode requests are prioritized for scheduling, and prefill requests "
+"are scheduled only if there is available capacity."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:315
+msgid ""
+"Generally, if `--max-num-batched-tokens` is set to a larger value, the "
+"overall latency will be lower, but the pressure on GPU memory (activation"
+" value usage) will be greater."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:316
+msgid ""
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
+"will use for actual inference. Its essential function is to calculate the"
+" available kv_cache size. During the warm-up phase (referred to as "
+"profile run in vLLM), vLLM records the peak GPU memory usage during an "
+"inference process with an input size of `--max-num-batched-tokens`. The "
+"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
+" * HBM size - peak GPU memory usage. Therefore, the larger the value of "
+"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
+" the GPU memory usage during the warm-up phase may differ from that "
+"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
+"memory-utilization` too high may lead to OOM (Out of Memory) issues "
+"during actual inference. The default value is `0.9`."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:317
+msgid ""
+"`--enable-expert-parallel` indicates that EP is enabled. Note that vLLM "
+"does not support a mixed approach of ETP and EP; that is, MoE can either "
+"use pure EP or pure TP."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:318
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:319
+msgid ""
+"`--quantization` \"ascend\" indicates that quantization is used. To "
+"disable quantization, remove this option."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:320
+msgid ""
+"`--compilation-config` contains configurations related to the aclgraph "
+"graph mode. The most significant configurations are \"cudagraph_mode\" "
+"and \"cudagraph_capture_sizes\", which have the following meanings: "
+"\"cudagraph_mode\": represents the specific graph mode. Currently, "
+"\"PIECEWISE\" and \"FULL_DECODE_ONLY\" are supported. The graph mode is "
+"mainly used to reduce the cost of operator dispatch. Currently, "
+"\"FULL_DECODE_ONLY\" is recommended."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:322
+msgid ""
+"\"cudagraph_capture_sizes\": represents different levels of graph modes. "
+"The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. "
+"In the graph mode, the input for graphs at different levels is fixed, and"
+" inputs between levels are automatically padded to the next level. "
+"Currently, the default setting is recommended. Only in some scenarios is "
+"it necessary to set this separately to achieve optimal performance."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:323
+msgid ""
+"`export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` indicates that Flashcomm1 "
+"optimization is enabled. Currently, this optimization is only supported "
+"for MoE in scenarios where tensor-parallel-size > 1."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:324
+msgid ""
+"`export VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL=1` indicates that context "
+"parallel is enabled. This environment variable is required in the PD "
+"architecture but not needed in the pd co-locate deployment scenario. It "
+"will be removed in the future."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:326
+msgid "**Notice:**"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:327
+msgid ""
+"tensor-parallel-size needs to be divisible by decode-context-parallel-"
+"size."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:328
+msgid ""
+"decode-context-parallel-size must less than or equal to tensor-parallel-"
+"size."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:330
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:332
+msgid "Here are two accuracy evaluation methods."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:334
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:346
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:336
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:338
+msgid ""
+"After execution, you can get the result, here is the result of "
+"`DeepSeek-V3.1-w8a8` for reference only."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "aime2024"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "86.67"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:344
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:348
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:350
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:352
+msgid "Run performance evaluation of `DeepSeek-V3.1-w8a8` as an example."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:354
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:356
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:357
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:358
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:359
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:361
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:368
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "ttft"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "random"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "performance"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "perf"
+msgstr ""
+
+#: ../../source/tutorials/long_sequence_context_parallel_multi_node.md:213
+msgid "20.7s"
+msgstr ""
+

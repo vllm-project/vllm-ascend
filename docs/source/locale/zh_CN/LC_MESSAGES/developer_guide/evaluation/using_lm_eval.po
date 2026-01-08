@@ -7,59 +7,122 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:1
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:1
 msgid "Using lm-eval"
 msgstr "使用 lm-eval"
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:2
-msgid ""
-"This document will guide you have a accuracy testing using [lm-"
-"eval](https://github.com/EleutherAI/lm-evaluation-harness)."
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:2
+#, fuzzy
+msgid "This document guides you to conduct accuracy testing using [lm-eval][1]."
 msgstr ""
-"本文将指导你如何使用 [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) "
-"进行准确率测试。"
+"本文将指导你如何使用 [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness)"
+" 进行准确率测试。"
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:4
-msgid "1. Run docker container"
-msgstr "1. 运行 docker 容器"
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:4
+msgid "Online Server"
+msgstr ""
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:6
-msgid "You can run docker container on a single NPU:"
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:5
+msgid "1. Start the vLLM server"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:6
+#, fuzzy
+msgid "You can run docker container to start the vLLM server on a single NPU:"
 msgstr "你可以在单个NPU上运行docker容器："
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:33
-msgid "2. Run ceval accuracy test using lm-eval"
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:35
+msgid "The vLLM server is started successfully, if you see logs as below:"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:43
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:163
+#, fuzzy
+msgid "2. Run GSM8K using lm-eval for accuracy testing"
 msgstr "2. 使用 lm-eval 运行 ceval 准确性测试"
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:34
-msgid "Install lm-eval in the container."
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:45
+msgid "You can query the result with input prompts:"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:72
+msgid "The output format matches the following:"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:102
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:164
+#, fuzzy
+msgid "Install lm-eval in the container:"
 msgstr "在容器中安装 lm-eval。"
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:39
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:109
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:171
 msgid "Run the following command:"
 msgstr "运行以下命令："
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:50
-msgid "After 1-2 mins, the output is as shown below:"
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:120
+#, fuzzy
+msgid "After 30 minutes, the output is as shown below:"
 msgstr "1-2 分钟后，输出如下所示："
 
-#: ../../developer_guide/evaluation/using_lm_eval.md:62
-msgid ""
-"You can see more usage on [Lm-eval Docs](https://github.com/EleutherAI/lm-"
-"evaluation-harness/blob/main/docs/README.md)."
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:132
+msgid "Offline Server"
 msgstr ""
-"你可以在 [Lm-eval 文档](https://github.com/EleutherAI/lm-evaluation-"
-"harness/blob/main/docs/README.md) 上查看更多用法。"
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:133
+msgid "1. Run docker container"
+msgstr "1. 运行 docker 容器"
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:135
+msgid "You can run docker container on a single NPU:"
+msgstr "你可以在单个NPU上运行docker容器："
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:182
+#, fuzzy
+msgid "After 1 to 2 minutes, the output is shown below:"
+msgstr "1-2 分钟后，输出如下所示："
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:194
+msgid "Use Offline Datasets"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:196
+msgid ""
+"Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples,"
+" and you can see more from [here][2]."
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:210
+msgid "Set [gsm8k.yaml][3] as follows:"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:273
+msgid "Set [_default_template_yaml][4] as follows:"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:296
+msgid "You can see more usage on [Lm-eval Docs][5]."
+msgstr ""
+
+#~ msgid ""
+#~ "You can see more usage on [Lm-"
+#~ "eval Docs](https://github.com/EleutherAI/lm-evaluation-"
+#~ "harness/blob/main/docs/README.md)."
+#~ msgstr ""
+#~ "你可以在 [Lm-eval 文档](https://github.com/EleutherAI"
+#~ "/lm-evaluation-harness/blob/main/docs/README.md) "
+#~ "上查看更多用法。"
+

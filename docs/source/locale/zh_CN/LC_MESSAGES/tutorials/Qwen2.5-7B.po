@@ -1,0 +1,280 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen2.5-7B.md:1
+msgid "Qwen2.5-7B"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:5
+msgid ""
+"Qwen2.5-7B-Instruct is the flagship instruction-tuned variant of Alibaba "
+"Cloud’s Qwen 2.5 LLM series. It supports a maximum context window of "
+"128K, enables generation of up to 8K tokens, and delivers enhanced "
+"capabilities in multilingual processing, instruction following, "
+"programming, mathematical computation, and structured data handling."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:7
+msgid ""
+"This document details the complete deployment and verification workflow "
+"for the model, including supported features, environment preparation, "
+"single-node deployment, functional verification, accuracy and performance"
+" evaluation, and troubleshooting of common issues. It is designed to help"
+" users quickly complete model deployment and validation."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:9
+msgid "The `Qwen2.5-7B-Instruct` model was supported since `vllm-ascend:v0.9.0`."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:11
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:13
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:15
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:17
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:19
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:21
+msgid ""
+"`Qwen2.5-7B-Instruct`(BF16 version): require 1 910B4 cards(32G × 1). "
+"[Qwen2.5-7B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-7B-"
+"Instruct)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:23
+msgid ""
+"It is recommended to download the model weights to a local directory "
+"(e.g., `./Qwen2.5-7B-Instruct/`) for quick access during deployment."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:25
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:27
+msgid ""
+"You can using our official docker image and install extra operator for "
+"supporting `Qwen2.5-7B-Instruct`."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md
+msgid "A3 series"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:36
+#: ../../source/tutorials/Qwen2.5-7B.md:64
+msgid "Start the docker image on your each node."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md
+msgid "A2 series"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:90
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:92
+msgid "Single-node Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:94
+msgid ""
+"Qwen2.5-7B-Instruct supports single-node single-card deployment on the "
+"910B4 platform. Follow these steps to start the inference service:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:96
+msgid ""
+"Prepare model weights: Ensure the downloaded model weights are stored in "
+"the `./Qwen2.5-7B-Instruct/` directory."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:97
+msgid "Create and execute the deployment script (save as `deploy.sh`):"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:112
+msgid "Multi-node Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:114
+msgid "Single-node deployment is recommended."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:116
+msgid "Prefill-Decode Disaggregation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:118
+msgid "Not supported yet."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:120
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:122
+msgid "After starting the service, verify functionality using a `curl` request:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:135
+msgid ""
+"A valid response (e.g., `\"Beijing is a vibrant and historic capital "
+"city\"`) indicates successful deployment."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:137
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:139
+#: ../../source/tutorials/Qwen2.5-7B.md:151
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:141
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:143
+msgid ""
+"Results and logs are saved to `benchmark/outputs/default/`. A sample "
+"accuracy report is shown below:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "gsm8k"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:66
+msgid "75.00"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:149
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:153
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:155
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:156
+msgid "Run performance evaluation of `Qwen2.5-7B-Instruct` as an example."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:158
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:160
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:161
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:162
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:163
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:165
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-7B.md:178
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+

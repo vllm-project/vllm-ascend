@@ -1,0 +1,207 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:1
+msgid "Prefill-Decode Disaggregation (Qwen2.5-VL)"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:3
+msgid "Getting Start"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:5
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide "
+"takes one-by-one steps to verify these features with constrained "
+"resources."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:7
+msgid ""
+"Using the Qwen2.5-VL-7B-Instruct model as an example, use vllm-ascend "
+"v0.11.0rc1 (with vLLM v0.11.0) on 1 Atlas 800T A2 server to deploy the "
+"\"1P1D\" architecture. Assume the IP address is 192.0.0.1."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:9
+msgid "Verify Communication Environment"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:11
+msgid "Verification Process"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:13
+msgid "Single Node Verification:"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:15
+msgid ""
+"Execute the following commands in sequence. The results must all be "
+"`success` and the status must be `UP`:"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:30
+msgid "Check NPU network configuration:"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:32
+msgid ""
+"Ensure that the hccn.conf file exists in the environment. If using "
+"Docker, mount it into the container."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:38
+msgid "Get NPU IP Addresses"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:44
+msgid "Run with Docker"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:45
+msgid "Start a Docker container."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:80
+msgid "Install Mooncake"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:82
+msgid ""
+"Mooncake is the serving platform for Kimi, a leading LLM service provided"
+" by Moonshot AI.Installation and Compilation Guide: https://github.com"
+"/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries. First, we"
+" need to obtain the Mooncake project. Refer to the following command:"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:89
+msgid "(Optional) Replace go install url if the network is poor"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:96
+msgid "Install mpi"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:102
+msgid "Install the relevant dependencies. The installation of Go is not required."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:108
+msgid "Compile and install"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:118
+msgid "Set environment variables"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:120
+msgid "**Note:**"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:122
+msgid "Adjust the Python path according to your specific Python installation"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:123
+msgid ""
+"Ensure `/usr/local/lib` and `/usr/local/lib64` are in your "
+"`LD_LIBRARY_PATH`"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:129
+msgid "Prefiller/Decoder Deployment"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:131
+msgid ""
+"We can run the following scripts to launch a server on the "
+"prefiller/decoder NPU, respectively."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md
+msgid "Prefiller"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md
+msgid "Decoder"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:223
+msgid ""
+"If you want to run \"2P1D\", please set ASCEND_RT_VISIBLE_DEVICES and "
+"port to different values for each P process."
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:225
+msgid "Example Proxy for Deployment"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:227
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. "
+"You can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "Parameter"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "Meaning"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "--port"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "Port of proxy"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "--prefiller-port"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "All ports of prefill"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "--decoder-ports"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:179
+msgid "All ports of decoder"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:245
+msgid "Verification"
+msgstr ""
+
+#: ../../source/tutorials/pd_disaggregation_mooncake_single_node.md:247
+msgid "Check service health using the proxy server endpoint."
+msgstr ""
+

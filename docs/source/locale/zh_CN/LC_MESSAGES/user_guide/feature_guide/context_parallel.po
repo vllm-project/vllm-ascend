@@ -1,0 +1,298 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:1
+msgid "Context Parallel Guide"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:3
+msgid "Overview"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:5
+msgid ""
+"This guide shows how to use Context Parallel, a long sequence inference "
+"optimization technique. Context Parallel includes `PCP` (Prefill Context "
+"Parallel) and `DCP` (Decode Context Parallel), which reduces NPU memory "
+"usage and improves inference speed in long sequence LLM inference."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:7
+msgid "Benefits of Context Parallel"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:8
+msgid ""
+"Context parallel mainly solves the problem of serving long context "
+"requests. As prefill and decode present quite different characteristics "
+"and have quite different SLO (service level objectives), we need to "
+"implement context parallel separately for them. The major considerations "
+"are:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:10
+msgid ""
+"For long context prefill, we can use context parallel to reduce TTFT "
+"(time to first token) by amortizing the computation time of the prefill "
+"across query tokens."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:11
+msgid ""
+"For long context decode, we can use context parallel to reduce KV cache "
+"duplication and offer more space for KV cache to increase the batchsize "
+"(and hence the throughput)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:13
+msgid ""
+"To learn more about the theory and implementation details of context "
+"parallel, please refer to the [context parallel developer "
+"guide](../../developer_guide/feature_guide/context_parallel.md)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:15
+msgid "Supported Scenarios"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:16
+msgid ""
+"Currently context parallel can be used together with most other features,"
+" supported features are as follows:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Eager"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Graph"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Prefix <br> Cache"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Chunked <br> Prefill"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "SpecDecode <br> (MTP)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "PD <br> disaggregation"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "MLAPO"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "**PCP**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "✅"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "❌"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "**DCP**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:22
+msgid "How to use Context Parallel"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:23
+msgid ""
+"You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and "
+"`decode_context_parallel_size`, refer to the following example:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:25
+msgid "Offline example:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:44
+msgid "Online example:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:53
+msgid ""
+"The total world_size is `tensor_parallel_size` * "
+"`prefill_context_parallel_size`, so the examples above need 4 NPUs for "
+"each."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:55
+msgid "Constraints"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:56
+msgid "While using DCP, the following constraints must be met:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:57
+msgid "For MLA based model, such as Deepseek-R1:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:58
+msgid "`tensor_parallel_size >= decode_context_parallel_size`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:59
+#, python-format
+msgid "`tensor_parallel_size % decode_context_parallel_size == 0`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:60
+msgid "For GQA based model, such as Qwen3-235B:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:61
+msgid ""
+"`(tensor_parallel_size // num_key_value_heads) >= "
+"decode_context_parallel_size`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:62
+#, python-format
+msgid ""
+"`(tensor_parallel_size // num_key_value_heads) % "
+"decode_context_parallel_size == 0`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:64
+msgid ""
+"While using Context Parallel in KV cache transfer needed scenario (e.g. "
+"KV pooling, PD-disaggregation), to simplify KV cache transmission, "
+"`cp_kv_cache_interleave_size` must be set to the same value of KV cache "
+"`block_size`(default: 128), which specify cp to split KV cache in a "
+"block-interleave style. For example:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:75
+msgid "Experimental Results"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:76
+msgid ""
+"To evaluate the effectiveness of Context Parallel in in long sequence LLM"
+" inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, "
+"deploy PD-disaggregate instances in the environment of 64 cards Ascend "
+"910C*64G (A3), the configuration and performance data are as follows."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:78
+msgid "DeepSeek-R1-W8A8:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Input length <br> 32k"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Input length <br> 64k"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Input length <br> 128k"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32) *1"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 9.3s <br> TPOT: 72ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 22.8s <br> TPOT: 74ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 73.2s <br> TPOT: 82ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "P node: (PCP2 TP8 DCP8 EP16) *2 <br> D node: (DP32 EP32) *1"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 7.9s <br> TPOT: 74ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 15.9s <br> TPOT: 78ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 46.0s <br> TPOT: 83ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md:84
+msgid "Qwen3-235B:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "Input length <br> 120k"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 5.1s <br> TPOT: 65ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 13.1s <br> TPOT: 85ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 33.9s <br> TPOT: 120ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "P node: (PCP2 TP8 DCP2 EP16) *2 <br> D node: (DP32 EP32) *1"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 3.0s <br> TPOT: 66ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 8.9s <br> TPOT: 86ms"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/context_parallel.md
+msgid "TTFT: 22.7s <br> TPOT: 121ms"
+msgstr ""
+

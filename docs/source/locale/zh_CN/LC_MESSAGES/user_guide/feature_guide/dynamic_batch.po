@@ -1,0 +1,92 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:1
+msgid "Dynamic Batch"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:3
+msgid ""
+"Dynamic batch is a technique that dynamically adjusts the chunksize "
+"during each inference iteration within the chunked prefilling strategy "
+"according to the resources and SLO targets, thereby improving the "
+"effective throughput and decreasing the TBT."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:5
+msgid ""
+"Dynamic batch is controlled by the value of the "
+"`--SLO_limits_for_dynamic_batch`. Notably, only 910 B3 is supported with "
+"decode token numbers scales below 2048 so far. Especially, the "
+"improvements are quite obvious on Qwen, Llama models. We are working on "
+"further improvements and this feature will support more XPUs in the "
+"future."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:10
+msgid "Getting started"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:12
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:14
+msgid ""
+"Dynamic batch now depends on an offline cost model saved in a lookup "
+"table to refine the token budget. The lookup table is saved in '.csv' "
+"file, which should be first downloaded from [here](https://vllm-"
+"ascend.obs.cn-north-4.myhuaweicloud.com/vllm-"
+"ascend/dynamic_batch_scheduler/A2-B3-BLK128.csv), renamed, and saved to "
+"the path `vllm_ascend/core/profile_table.csv`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:16
+msgid ""
+"`Pandas` is needed to load the lookup table, in case `pandas` is not "
+"installed."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:31
+msgid "Supported Models"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:32
+msgid ""
+"So far, dynamic batch performs better on several dense models including "
+"Qwen and Llama (from 8B to 32B) with `tensor_parallel_size=8`. For "
+"different models, a proper `SLO_limits_for_dynamic_batch` parameter is "
+"needed. The empirical value of this parameter is generally `35, 50, or "
+"75`. Therefore, some additional tests are needed to select the best "
+"parameter."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:34
+msgid "Usage"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:35
+msgid ""
+"Dynamic batch is used in the online inference. A fully executable example"
+" is as follows:"
+msgstr ""
+

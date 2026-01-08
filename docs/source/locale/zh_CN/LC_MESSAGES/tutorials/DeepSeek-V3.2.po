@@ -1,0 +1,368 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:1
+msgid "DeepSeek-V3.2"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:5
+msgid ""
+"DeepSeek-V3.2 is a sparse attention model. The main architecture is "
+"similar to DeepSeek-V3.1, but with a sparse attention mechanism, which is"
+" designed to explore and validate optimizations for training and "
+"inference efficiency in long-context scenarios."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:9
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:11
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:13
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:15
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:17
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:19
+msgid ""
+"`DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) "
+"nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:20
+msgid ""
+"`DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G "
+"× 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:21
+msgid ""
+"`DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or"
+" 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:22
+msgid ""
+"`DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × "
+"16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:24
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:26
+msgid "Verify Multi-node Communication(Optional)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:28
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../installation.md#verify-multi-node-communication)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:30
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:32
+msgid "You can using our official docker image to run `DeepSeek-V3.2` directly.."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:35
+msgid ""
+"We strongly recommend you to install triton ascend package to speed up "
+"the inference."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:37
+msgid ""
+"The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better"
+" performance, please follow the instructions below to install it and its "
+"dependency."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:39
+msgid "Install the Ascend BiSheng toolkit, execute the command:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:48
+msgid "Install Triton Ascend:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md
+msgid "A3 series"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:63
+#: ../../source/tutorials/DeepSeek-V3.2.md:106
+msgid "Start the docker image on your each node."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md
+msgid "A2 series"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:139
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:141
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../installation.md)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:143
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:145
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:148
+msgid ""
+"In this tutorial, we suppose you downloaded the model weight to "
+"`/root/.cache/`. Feel free to change it to your own path."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:151
+msgid "Prefill-Decode Disaggregation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:153
+msgid ""
+"We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node "
+"environment with 1P1D for better performance."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:155
+msgid "Before you start, please"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:156
+msgid "prepare the script `launch_online_dp.py` on each node."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:259
+msgid "prepare the script `run_dp_template.sh` on each node."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:261
+#: ../../source/tutorials/DeepSeek-V3.2.md:569
+msgid "Prefill node 0"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:335
+#: ../../source/tutorials/DeepSeek-V3.2.md:576
+msgid "Prefill node 1"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:409
+#: ../../source/tutorials/DeepSeek-V3.2.md:583
+msgid "Decode node 0"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:488
+#: ../../source/tutorials/DeepSeek-V3.2.md:590
+msgid "Decode node 1"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:567
+msgid ""
+"Once the preparation is done, you can start the server with the following"
+" command on each node:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:597
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:599
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:612
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:614
+msgid "Here are two accuracy evaluation methods."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:616
+#: ../../source/tutorials/DeepSeek-V3.2.md:642
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:618
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:620
+#: ../../source/tutorials/DeepSeek-V3.2.md:638
+msgid "After execution, you can get the result."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:622
+msgid "Using Language Model Evaluation Harness"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:624
+msgid ""
+"As an example, take the `gsm8k` dataset as a test dataset, and run "
+"accuracy evaluation of `DeepSeek-V3.2-W8A8` in online mode."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:626
+msgid ""
+"Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) "
+"for `lm_eval` installation."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:628
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:640
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:644
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:646
+msgid "The performance result is:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:648
+msgid "**Hardware**: A3-752T, 4 node"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:650
+msgid "**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:652
+msgid "**Input/Output**: 64k/3k"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:654
+msgid "**Performance**: 533tps, TPOT 32ms"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:656
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:658
+msgid "Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:660
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:662
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:663
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:664
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:665
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:667
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:674
+msgid "Function Call"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:676
+msgid ""
+"The function call feature is supported from v0.13.0rc1 on. Please use the"
+" latest version."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-V3.2.md:678
+msgid ""
+"Refer to [DeepSeek-V3.2 Usage "
+"Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html"
+"#tool-calling-example) for details."
+msgstr ""
+

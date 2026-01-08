@@ -1,0 +1,211 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:1
+msgid "Qwen3-Coder-30B-A3B"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:5
+msgid ""
+"The newly released Qwen3-Coder-30B-A3B employs a sparse MoE architecture "
+"for efficient training and inference, delivering significant "
+"optimizations in agentic coding, extended context support of up to 1M "
+"tokens, and versatile function calling."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node deployment, accuracy and performance evaluation."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:9
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:11
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:13
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:15
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:17
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:19
+msgid ""
+"`Qwen3-Coder-30B-A3B-Instruct`(BF16 version): requires 1 Atlas 800 A3 "
+"node (with 16x 64G NPUs) or 1 Atlas 800 A2 node (with 8x 64G/32G NPUs). "
+"[Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3"
+"-Coder-30B-A3B-Instruct)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:21
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:23
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:25
+msgid ""
+"`Qwen3-Coder` is first supported in `vllm-ascend:v0.10.0rc1`, please run "
+"this model using a later version."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:27
+msgid ""
+"You can using our official docker image to run `Qwen3-Coder-30B-A3B-"
+"Instruct` directly."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:53
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:55
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../installation.md)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:57
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:59
+msgid "Single-node Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:61
+msgid "Run the following script to execute online inference."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:63
+msgid ""
+"For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size "
+"should be at least 2, and for 32 GB of memory, tensor-parallel-size "
+"should be at least 4."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:72
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:74
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:89
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:91
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:103
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:93
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:95
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3"
+"-Coder-30B-A3B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "openai_humaneval"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "f4a973"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "humaneval_pass@1"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:29
+msgid "94.51"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:101
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Coder-30B-A3B.md:105
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+

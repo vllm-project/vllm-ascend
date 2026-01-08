@@ -1,0 +1,65 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:1
+msgid "Kimi-K2-Thinking"
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:3
+msgid "Run with Docker"
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:46
+msgid "Verify the Quantized Model"
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:47
+msgid ""
+"Please be advised to edit the value of "
+"`\"quantization_config.config_groups.group_0.targets\"` from "
+"`[\"Linear\"]` into `[\"MoE\"]` in `config.json` of original model "
+"downloaded from [Hugging "
+"Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking)."
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:63
+msgid "Your model files look like:"
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:82
+msgid "Online Inference on Multi-NPU"
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:84
+msgid "Run the following script to start the vLLM server on Multi-NPU:"
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:86
+msgid ""
+"For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at "
+"least 16."
+msgstr ""
+
+#: ../../source/tutorials/Kimi-K2-Thinking.md:97
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr ""
+
