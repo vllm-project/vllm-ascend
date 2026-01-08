@@ -17,6 +17,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker tag for build results'
+        type: string
+        default: manual
+        required: true
 
 jobs:
   image_build:
@@ -46,5 +52,6 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
       should_push: ${{ github.repository_owner == 'vllm-project' }}
+      workflow_dispatch_tag: ${{ inputs.tag }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
