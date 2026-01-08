@@ -123,8 +123,7 @@ jobs:
           pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-      - name: Install triton-ascend
-        if: ${{ inputs.name == 'test_custom_op' }}
+      - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
           BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
