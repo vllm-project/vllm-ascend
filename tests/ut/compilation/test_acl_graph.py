@@ -805,8 +805,8 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
             (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
-             None, 0, scale, block_table, 128,
-             None, actual_seq_lengths_kv, out, lse))
+             None, 0, scale, block_table, 128, None, actual_seq_lengths_kv,
+             out, lse))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
             update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
