@@ -22,11 +22,11 @@ from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
 
-class GraphFusionPassManager:
+class NpuGraphEXPassManager:
     """
-    A pass manager for graph fusion passes.
+    A pass manager for npu_graph ex fusion passes.
     It handles the configuration and execution of passes.
-    The counterpart in vllm is PostGradPassManager. Since torch_npu
+    The counterpart in vllm is PostGradPassManager. Since torch_npu 
     does not support triton for now, we define our own pass manager.
     """
 
@@ -39,7 +39,7 @@ class GraphFusionPassManager:
         for pass_ in self.passes:
             if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
-        graph.recompile()
+        graph.recompiler()
         return graph
 
     def add(self, pass_: VllmInductorPass):
@@ -48,19 +48,14 @@ class GraphFusionPassManager:
 
     def configure(self, config: VllmConfig):
         # By default, we enable the graph fusion and quantization fusion pass.
-        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
+        self.ascend_compilation_config: dict = config.additional_config.get(
+            "ascend_compilation_config", {})
         if self.ascend_compilation_config.get("fuse_norm_quant", True):
-            from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
+            from .npugraph_ex_passes.graphex_norm_quant_fusion_pass import \
+                GraphEXAddRMSNormFusionPass
+            self.passes.append(GraphEXAddRMSNormFusionPass(config))
 
-            self.passes.append(AddRMSNormQuantFusionPass(config))
-
-<<<<<<< HEAD
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
-            from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
-
-            self.passes.append(QKNormRopeFusionPass(config))
-=======
-        # if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
-        #     from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
-        #     self.passes.append(QKNormRopeFusionPass(config))
->>>>>>> b163df1a (qkv norm)
+            from .npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import \
+                GraphEXQKNormRopeFusionPass
+            self.passes.append(GraphEXQKNormRopeFusionPass(config))
