@@ -383,6 +383,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 torch.ones((2048, 2048), device='npu', dtype=torch.bool))
 
         # For sink attention
+        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self.sparse_mode_with_sinks = 4 if (self.sinks is not None and self.sliding_window is not None) else 3
         self.sinks = sinks
 
     @staticmethod
@@ -792,8 +795,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             if self.sliding_window is not None:
+                atten_mask = self.attn_mask_builder.get_swa_mask(torch.bool, self.sliding_window)
                 sparse_mode = 4
             else:
+                atten_mask = self.attn_mask_builder.get_attn_mask(2048, torch.bool)
                 sparse_mode = 3
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
@@ -806,10 +811,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
                 pre_tokens=self.sliding_window
-                if self.sliding_window is not None else 2147483647,
+                if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                atten_mask=self.share_mask_tril_spase,
-                sparse_mode=sparse_mode,
+                atten_mask=atten_mask,
+                sparse_mode=self.sparse_mode_with_sinks,
                 softmax_scale=self.scale,
                 block_table=attn_metadata.block_tables,
                 block_size=block_size,
