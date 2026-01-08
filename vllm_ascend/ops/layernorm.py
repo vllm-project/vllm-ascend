@@ -75,8 +75,8 @@ def add_rmsnorm_bias(input: torch.Tensor, residual: torch.Tensor,
     input = input.contiguous()
     residual = residual.contiguous()
     norm_weight = norm_weight.contiguous()
-    norm_bias = norm_bias.contiguous(
-    ) if norm_bias is not None else torch.zeros_like(norm_weight).contiguous()
+    if norm_bias is not None:
+        norm_bias = norm_bias.contiguous()
     num_vectorcore = get_vectorcore_num()
     batch_size = input.shape[0]
     hidden_size = input.shape[1]
