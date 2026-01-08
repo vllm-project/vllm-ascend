@@ -3,14 +3,16 @@ model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 2
 npu_per_node: 16
 env_common:
+  HCCL_OP_EXPANSION_MODE: AIV
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 10
+  OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
+  VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0"
 
 disaggregated_prefill:
