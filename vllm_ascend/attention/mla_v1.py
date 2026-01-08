@@ -438,7 +438,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(
                 common_prefix_len, common_attn_metadata)
-
         return self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=self.num_actual_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1330,7 +1329,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UK_T,
             decode_k_nope,
             decode_k_pe,
-            attn_metadata.slot_mapping[:bsz].flatten(),
+            attn_metadata.slot_mapping[:bsz],
             quant_scale0=self.quant_scale0,
             quant_offset0=self.quant_offset0,
             bias0=self.quant_bias_qkv,
