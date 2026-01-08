@@ -22,21 +22,13 @@ from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
-from vllm.config import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor, DPMetadata
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
-
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.ascend_forward_context import (get_mc2_mask,
-                                                select_moe_comm_method)
-from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
 # isort: off
 from vllm_ascend.utils import (
@@ -444,14 +436,47 @@ class NPUPlatform(Platform):
         cls,
         attn_metadata: dict[str, Any],
         vllm_config: VllmConfig,
-        dp_metadata: DPMetadata,
+        dp_metadata,
         virtual_engine: int = 0,
         num_tokens: int | None = None,
         num_tokens_across_dp: torch.Tensor | None = None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: BatchDescriptor | None = None,
-        ubatch_slices: UBatchSlices | None = None,
+        cudagraph_runtime_mode=None,
+        batch_descriptor=None,
+        ubatch_slices=None,
     ) -> dict[str, Any]:
+        """set additional forward context for ascend npus.
+
+        Args:
+            attn_metadata (dict[str, Any]): attention metadata for all layers.
+            vllm_config (VllmConfig): configuration of vllm.
+            dp_metadata (DpMetada): metadata for data parallelism. 
+                lack of typehint because of circular import.
+            virtual_engine (int, optional): index of virtual engine. Defaults to 0.
+            num_tokens (int | None, optional): number of tokens. Defaults to None.
+            num_tokens_across_dp (torch.Tensor | None, optional): number of tokens 
+                across data parallelism.Defaults to None.
+            cudagraph_runtime_mode (CUDAGraphMode, optional): mode of cudagraph runtime.
+                Defaults to None.lack of typehint because of circular import.
+            batch_descriptor (BatchDescriptor, optional): descriptor of batch.
+                Defaults to None.
+            ubatch_slices (UBatchSlices, optional): slice info for dual batch. 
+                Defaults to None. lack of typehint because of circular import
+
+        Returns:
+            dict[str, Any]: _description_
+        """
+        # NOTE(Ronald1995): avoid circular import.
+        from vllm_ascend.ascend_forward_context import (get_mc2_mask,
+                                                        select_moe_comm_method)
+        from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+        from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+        # NOTE(Ronald1995): avoid circular import, cudagraph_runtime_mode is
+        # CUDAGraphMode.NONE in vllm, but we can't set CUDAGraphMode.NONE in
+        # argument default value, so we set it to None first, then set it to
+        # CUDAGraphMode.NONE here.
+        from vllm.config import CUDAGraphMode
+        if cudagraph_runtime_mode is None:
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
         # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
