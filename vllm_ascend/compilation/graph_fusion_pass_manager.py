@@ -17,6 +17,7 @@
 #
 
 from torch import fx as fx
+from vllm.compilation.inductor_pass import get_pass_context
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
@@ -32,10 +33,13 @@ class GraphFusionPassManager:
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
 
-    def __call__(self, graph: fx.Graph, runtime_shape) -> fx.Graph:
+    def __call__(self, graph: fx.Graph) -> fx.Graph:
+        compile_range = get_pass_context().compile_range
+
         for pass_ in self.passes:
-            if pass_.is_applicable(runtime_shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
+        graph.recompile()
         return graph
 
     def add(self, pass_: VllmInductorPass):
@@ -46,8 +50,11 @@ class GraphFusionPassManager:
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get(
             "ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("enable_quantization_fusion",
-                                              True):
-            from .passes.quant_fusion_pass import AddRMSNormQuantFusionPass
+        if self.ascend_compilation_config.get("fuse_norm_quant", True):
+            from .passes.norm_quant_fusion_pass import \
+                AddRMSNormQuantFusionPass
             self.passes.append(AddRMSNormQuantFusionPass(config))
-        # Add more passes here as needed
+
+        if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
+            from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
+            self.passes.append(QKNormRopeFusionPass(config))

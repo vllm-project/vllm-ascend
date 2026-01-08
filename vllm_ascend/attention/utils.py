@@ -1,12 +1,38 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, List, Optional
 
 import torch
 import torch.nn.functional as F
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_config,
+                               get_ascend_device_type)
+
+
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
+    if vllm_config.speculative_config is not None:
+        return False
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return False
+    from vllm.config.compilation import CUDAGraphMode
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
+        return False
+
+    return runtime_shape in get_ascend_config().pa_shape_list
+
+
+@lru_cache(maxsize=1)
+def enable_cp():
+    prefill_config = get_current_vllm_config().parallel_config
+    return prefill_config.prefill_context_parallel_size > 1 \
+                or prefill_config.decode_context_parallel_size > 1
 
 
 @dataclass
@@ -16,7 +42,7 @@ class AscendPrefillContextParallelMetadata:
 
     cp_kv_recover_idx_for_chunk: torch.Tensor = None
 
-    num_actual_tokens_pcp_padded: Optional[int] = None
+    num_actual_tokens_pcp_padded: int = 0
 
     num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
 
@@ -40,61 +66,32 @@ class AscendPrefillContextParallelMetadata:
 
     q_full_idx: torch.Tensor = None
 
-    pcp_prefill_mask: torch.Tensor = None
+    # original query_lens before pcp split
+    query_lens_pcp_full_cpu: torch.Tensor = None
+
+    # original max_query_len before pcp split
+    max_query_len_pcp_full: int = 0
 
 
 @dataclass
-class AscendCommonAttentionMetadata:
+class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
-    For many of the tensors we keep both GPU and CPU versions.
+    For many of the tensors we keep both NPU and CPU versions.
     """
+    seq_lens_cpu: torch.Tensor = None
+    num_computed_tokens_cpu: torch.Tensor = None
 
-    query_start_loc: torch.Tensor
-    query_start_loc_cpu: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
-
-    seq_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
-
-    seq_lens: torch.Tensor
-    """same to seq_lens_cpu, for compatibility with some new attn metadata
-    (such as GDN)."""
-
-    num_computed_tokens_cpu: torch.Tensor
-    """(batch_size,), the number of computed tokens for each request"""
-
-    num_reqs: int
-    """Number of requests"""
-    num_actual_tokens: int
-    """Total number of tokens in batch"""
-
-    max_query_len: int
-    """Max token number of request in batch"""
-
-    decode_token_per_req: int
+    decode_token_per_req: int = 1
     """decode token number per request"""
 
-    block_table_tensor: torch.Tensor
-
-    slot_mapping: torch.Tensor
-
-    actual_seq_lengths_q: list[int]
+    actual_seq_lengths_q: list[int] = field(default_factory=list)
 
     positions: torch.Tensor = None
 
-    attn_mask: torch.Tensor = None
-
-    fia_attn_mask: torch.Tensor = None
-
-    spec_attn_mask: torch.Tensor = None
-
     attn_state: Any = None
-
-    is_only_prefill: bool = False
 
     graph_pad_size: int = -1
 
@@ -102,12 +99,35 @@ class AscendCommonAttentionMetadata:
     # padding tokens. It is used to handle some padding operations.
     num_input_tokens: int = 0
 
-    # NOTE: This is a temporary solution for rotary embedding in MLA
-    cos: torch.Tensor = None
-    sin: torch.Tensor = None
-
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
+
+    # TODO: Remove it when vLLM no longer uses this function.
+    def unpadded(self, num_actual_tokens: int,
+                 num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
+        # This only use to eagle now. It will be use to enforce_eager in future.
+        return AscendCommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
+            num_computed_tokens_cpu=self.
+            num_computed_tokens_cpu[:num_actual_reqs],
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            decode_token_per_req=self.decode_token_per_req,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            causal=self.causal,
+            actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
+            positions=self.positions[:num_actual_tokens],
+            attn_state=self.attn_state,
+            graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
+            num_input_tokens=num_actual_tokens,
+            prefill_context_parallel_metadata=self.
+            prefill_context_parallel_metadata,
+            max_seq_len=self.max_seq_len)
 
 
 def filter_chunked_req_indices(
@@ -141,6 +161,8 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
+    While pcp > 1, query_lens is split across pcp ranks, so we pass in the
+    original query_lens and max_query_len to distinguish prefills and decodes.
 
     Args:
         common_attn_metadata: AscendCommonAttentionMetadata object containing the
@@ -153,7 +175,13 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    max_query_len = common_attn_metadata.max_query_len
+    long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
+    query_lens_pcp_full = long_seq_metadata.query_lens_pcp_full_cpu \
+        if long_seq_metadata else None
+    max_query_len_pcp_full = long_seq_metadata.max_query_len_pcp_full \
+        if long_seq_metadata else 0
+    max_query_len = common_attn_metadata.max_query_len \
+        if max_query_len_pcp_full == 0 else max_query_len_pcp_full
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
@@ -161,7 +189,8 @@ def split_decodes_and_prefills(
     if max_query_len <= decode_threshold:
         return num_reqs, 0, num_tokens, 0
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    query_lens = (query_start_loc[1:] - query_start_loc[:-1]) \
+        if query_lens_pcp_full is None else query_lens_pcp_full
     is_prefill = query_lens > decode_threshold
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0

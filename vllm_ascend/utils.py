@@ -23,6 +23,7 @@ import math
 import os
 from contextlib import contextmanager, nullcontext
 from enum import Enum
+from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
@@ -31,15 +32,17 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
 
+COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
@@ -49,10 +52,12 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_WEIGHT_PREFETCH_METHOD = None
+_GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -63,6 +68,7 @@ _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
+_HAS_ROPE = None
 
 
 def _print_callback_on_stream(*args):
@@ -121,16 +127,22 @@ def _unregister_print_streams_on_exit():
 atexit.register(_unregister_print_streams_on_exit)
 
 
-def is_enable_nz():
-    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
-
-
-def sleep_mode_enabled():
-    global _SLEEP_MODE_ENABLED
-    if _SLEEP_MODE_ENABLED is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
-    return _SLEEP_MODE_ENABLED
+def maybe_trans_nz(weight: torch.Tensor):
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        # NZ is not enabled
+        return weight
+    if weight.dtype == torch.float:
+        # fp32 can not support NZ
+        return weight
+    elif weight.dtype in {torch.bfloat16, torch.float16}:
+        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
+            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+        else:
+            return weight
+    else:
+        # quant weight will trans nz by default
+        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
@@ -228,19 +240,6 @@ def aligned_16(tensor: torch.Tensor):
     return new_tensor
 
 
-def try_register_lib(lib_name: str, lib_info: str = ""):
-    import importlib
-    import importlib.util
-    try:
-        module_spec = importlib.util.find_spec(lib_name)
-        if module_spec is not None:
-            importlib.import_module(lib_name)
-            if lib_info:
-                logger.info(lib_info)
-    except Exception:
-        pass
-
-
 def enable_custom_op():
     """
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
@@ -314,6 +313,27 @@ def prefetch_stream() -> torch.npu.Stream:
     return _PREFETCH_STREAM
 
 
+def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
+    global _WEIGHT_PREFETCH_METHOD
+    if _WEIGHT_PREFETCH_METHOD is None:
+        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
+    return _WEIGHT_PREFETCH_METHOD
+
+
+def get_weight_prefetch_method():
+    return _WEIGHT_PREFETCH_METHOD
+
+
+def global_stream() -> torch.npu.Stream:
+    global _GLOBAL_STREAM
+    if _GLOBAL_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _GLOBAL_STREAM = torch_npu.npu.Stream()
+    return _GLOBAL_STREAM
+
+
 def shared_experts_calculation_stream() -> torch.npu.Stream:
     global _SHARED_EXPERTS_CALCULATION_STREAM
     if _SHARED_EXPERTS_CALCULATION_STREAM is None:
@@ -321,6 +341,13 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
         # we return the default stream.
         _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
+def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
+    global _CP_CHUNKEDPREFILL_COMM_STREAM
+    if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
+        _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -443,7 +470,7 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # on special shapes.
     # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
     # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-    if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
+    if vllm_config.model_config and vllm_config.model_config.hf_text_config.model_type == "qwen3_moe" \
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
 
@@ -465,6 +492,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # TODO: Find out whether we need to solve allreduce function
     MAX_CAPTURE_SIZE = 1800
 
+    # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
+    CP_ADDITIONAL_STREAM_NUM = 100
+
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = \
@@ -478,7 +508,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
 
         return
-    hf_config = vllm_config.model_config.hf_config
+    hf_config = vllm_config.model_config.hf_text_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
     else:
@@ -487,9 +517,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # Calculate maximum supported batch sizes considering model architecture
     resources_per_graph = num_hidden_layers + 1
-    if vllm_config.speculative_config is not None:
-        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
-        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+    # For suffix decoding, use the suffix path when no draft_model_config is provided.
+    if (spec := vllm_config.speculative_config) and \
+    (draft := spec.draft_model_config):
+        resources_per_graph += draft.hf_config.num_hidden_layers + 1
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
@@ -520,6 +551,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
     else:
+        # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
+        if parallel_config.prefill_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
+        if parallel_config.decode_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
+
         # The above describes an empirical formula applicable to the A2 hardware.
         # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
         # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
@@ -646,9 +683,11 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
-        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
+        AscendApplyRotaryEmb, AscendDeepseekScalingRotaryEmbedding,
+        AscendMRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -674,6 +713,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
+        "MMEncoderAttention": AscendMMEncoderAttention,
+        "ApplyRotaryEmb": AscendApplyRotaryEmb,
     }
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -684,10 +725,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
 
 class AscendDeviceType(Enum):
-    _910B = 0  # A2
-    _910_93 = 1  # A3
+    A2 = 0
+    A3 = 1
     _310P = 2
-    _910_95 = 3  # A5
+    A5 = 3
 
 
 _ascend_device_type = None
@@ -706,13 +747,13 @@ def check_ascend_device_type():
 
     soc_version = torch_npu.npu.get_soc_version()
     if 220 <= soc_version <= 225:
-        cur_device_type = AscendDeviceType._910B
+        cur_device_type = AscendDeviceType.A2
     elif 250 <= soc_version <= 255:
-        cur_device_type = AscendDeviceType._910_93
+        cur_device_type = AscendDeviceType.A3
     elif 200 <= soc_version <= 205:
         cur_device_type = AscendDeviceType._310P
     elif soc_version == 260:
-        cur_device_type = AscendDeviceType._910_95
+        cur_device_type = AscendDeviceType.A5
     else:
         raise RuntimeError(f"Can not support soc_version: {soc_version}.")
 
@@ -727,23 +768,27 @@ def get_ascend_device_type():
 
 
 def lmhead_tp_enable() -> bool:
-    return get_ascend_config().lmhead_tensor_parallel_size is not None
+    return get_ascend_config(
+    ).finegrained_tp_config.lmhead_tensor_parallel_size > 0
+
+
+def embedding_tp_enable() -> bool:
+    return get_ascend_config(
+    ).finegrained_tp_config.embedding_tensor_parallel_size > 0
 
 
 def oproj_tp_enable() -> bool:
-    return get_ascend_config().oproj_tensor_parallel_size is not None
+    return get_ascend_config(
+    ).finegrained_tp_config.oproj_tensor_parallel_size > 0
 
 
 def mlp_tp_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+    return get_ascend_config(
+    ).finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
 def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
-
-
-def dense_optim_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
@@ -792,9 +837,26 @@ def is_moe_model(vllm_config: VllmConfig):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
+        model_configs = vllm_config.model_config.hf_text_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def speculative_enable_dispatch_gmm_combine_decode(
+        vllm_config: VllmConfig) -> bool:
+    if vllm_config.speculative_config is None:
+        return True
+    speculative_method = getattr(vllm_config.speculative_config, "method",
+                                 None)
+    if speculative_method in [None, "ngram", "suffix"]:
+        return True
+    if speculative_method in ["eagle", "eagle3"]:
+        return False
+    if speculative_method == "mtp":
+        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config,
+                                 "mtp_quantize", None)
+        return mtp_quant_type == "w8a8_dynamic"
+    return False
 
 
 def _is_contain_expert(config: Any):
@@ -811,9 +873,22 @@ def is_vl_model(vllm_config: VllmConfig):
     """Checks if the model is a VL model by config"""
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
-        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        if "thinker_config" in hf_config:
+            # Qwen-Omni-thinker models
+            _IS_VL_MODEL = True
+        else:
+            _IS_VL_MODEL = "vision_config" in hf_config
     return _IS_VL_MODEL
+
+
+def has_rope(vllm_config: VllmConfig):
+    """Checks if the model uses rope."""
+    global _HAS_ROPE
+    if _HAS_ROPE is None and vllm_config and vllm_config.model_config:
+        hf_config = vllm_config.model_config.hf_text_config.to_dict()
+        _HAS_ROPE = "rope_parameters" in hf_config
+    return _HAS_ROPE
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -848,6 +923,13 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+    # For IntermediateTensors used in pipeline parallelism
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -891,9 +973,6 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
         },
-        "ep": {
-            "hccl_buffer_size": calculate_ep_buffer_size()
-        },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 
@@ -913,30 +992,6 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
-
-
-def calculate_ep_buffer_size() -> int:
-    """
-    formula of ep buffer size:
-    batch_size * hidden_size * topk * 4
-    """
-    ep_buffer_size = _DEFAULT_BUFFER_SIZE
-    try:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        hf_config = vllm_config.model_config.hf_config
-
-        hidden_size = hf_config.hidden_size
-        topk = getattr(hf_config, "num_experts_per_token", 1)
-        batch_size = vllm_config.scheduler_config.max_num_batched_tokens
-        int8_size = torch.iinfo(torch.int8).bits // 8
-        bf16_size = torch.finfo(torch.bfloat16).bits // 8
-        ep_buffer_size = math.ceil(
-            (batch_size * hidden_size * topk *
-             (int8_size * 2 + bf16_size)) / (1024 * 1024))
-    except Exception:
-        pass
-    return max(ep_buffer_size, _DEFAULT_BUFFER_SIZE)
 
 
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
@@ -962,23 +1017,32 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
-                                                     vllm_config):
+def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     if not flashcomm2_enable():
-        logger.debug("FLASHCOMM2 not enable.")
-        return flashcomm2_oproj_tp_size
+        return 0
 
     logger.info(
-        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size={flashcomm2_oproj_tp_size} and global_tp_size={global_tp_size}"
+        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}"
     )
+
+    layer_sharding = ascend_config.layer_sharding or []
+    if layer_sharding:
+        if layer_sharding == ["o_proj"]:
+            logger.info_once(
+                "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
+            )
+        else:
+            raise ValueError(
+                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
+                f"Found invalid layer_sharding: {layer_sharding}")
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
-    if ascend_config.oproj_tensor_parallel_size is not None:
+    if ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
         raise AssertionError(
             "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
         )
@@ -996,9 +1060,8 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
         )
     if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, "
-            "with additional support for hybrid deployment scenarios. "
-            "It is not applicable in D-scenario environments.")
+            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support for hybrid deployment scenarios. It is not applicable in D-scenario environments."
+        )
 
     return flashcomm2_oproj_tp_size
 
@@ -1041,7 +1104,7 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+    if not model_config.hf_text_config.model_type == "qwen3_next" and cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info(
                 "Block size is set to 128 if prefix cache or chunked prefill is enabled."
@@ -1059,3 +1122,61 @@ def dispose_layer(layer: Any):
 def replace_layer(original_layer: Any, new_layer: Any):
     original_layer.__class__ = new_layer.__class__
     original_layer.__dict__ = new_layer.__dict__
+
+
+def check_kv_extra_config(vllm_config):
+
+    def _check(name: str, config: dict):
+        tp_key = "tp_size"
+        dp_key = "dp_size"
+        if tp_key in config:
+            config_tp = config[tp_key]
+            vllm_tp = vllm_config.parallel_config.tensor_parallel_size
+            if config_tp != vllm_tp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting tensor parallel size. "
+                    f"Expected {vllm_tp}, but got {config_tp}.")
+        if dp_key in config:
+            config_dp = config[dp_key]
+            vllm_dp = vllm_config.parallel_config.data_parallel_size
+            if config_dp != vllm_dp:
+                raise ValueError(
+                    f"KV transfer '{name}' config has a conflicting data parallel size. "
+                    f"Expected {vllm_dp}, but got {config_dp}.")
+
+    if vllm_config.kv_transfer_config.is_kv_producer:
+        _check(
+            "prefill",
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {}))
+    if vllm_config.kv_transfer_config.is_kv_consumer:
+        _check(
+            "decode",
+            vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+
+
+def singleton(cls):
+    instances = {}
+
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+
+    return get_instance
+
+
+@lru_cache(maxsize=1)
+def get_current_model_config():
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    return vllm_config.model_config
+
+
+#TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
+@lru_cache(maxsize=1)
+def enable_dsa_cp() -> bool:
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    is_ds_v32 = hasattr(vllm_config.model_config.hf_config, "index_topk")
+    return is_ds_v32 and enable_sp()

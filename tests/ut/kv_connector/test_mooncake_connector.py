@@ -12,12 +12,30 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 import zmq
-from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.utils.network_utils import make_zmq_path
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
+
+_mock_ascend_config = MagicMock(enable_kv_nz=False)
+_mock_pp_group = MagicMock(rank_in_group=0, world_size=1)
+_mock_tp_group = MagicMock(rank_in_group=0, world_size=4)
+_mock_pcp_group = MagicMock(rank_in_group=0, world_size=1)
+_mock_dcp_group = MagicMock(rank_in_group=0, world_size=1)
+patch('vllm_ascend.distributed.mooncake_connector.get_pp_group',
+      return_value=_mock_pp_group).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_tp_group',
+      return_value=_mock_tp_group).start()
+patch(
+    'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_world_size',
+    return_value=4).start()
+patch(
+    'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank',
+    return_value=0).start()
+patch('vllm_ascend.distributed.mooncake_connector.get_pcp_group',
+      return_value=_mock_pcp_group).start()
+patch('vllm.distributed.parallel_state._DCP', _mock_dcp_group).start()
 
 from vllm_ascend.distributed.mooncake_connector import (  # noqa: E402
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
@@ -88,6 +106,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
             'side_channel_host': 'localhost',
             'side_channel_port': 5555,
             'metadata': MagicMock(),
+            'vllm_config': MockVllmConfig(),
             'ready_event': threading.Event(),
             'kv_caches': kv_caches,
             'pcp_rank': 0
@@ -130,6 +149,7 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
             'prefill_tp_size': 4,
             'local_engine_id': 'engine_1',
             'side_channel_host': 'localhost',
+            'vllm_config': MockVllmConfig(),
             'side_channel_port': 5555,
             'metadata': {
                 "test": "metadata"
@@ -159,27 +179,32 @@ class TestKVCacheSendingThread(unittest.TestCase):
             kv_caches_base_addr=[12345678],
             num_blocks=2,
         )
+        vllm_config = MockVllmConfig()
         host = "127.0.0.1"
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
-            free_port = s.getsockname()[1]
+            base_port = s.getsockname()[1]
 
         thread = KVCacheSendingThread(tp_rank=0,
                                       prefill_tp_size=1,
                                       local_engine_id="engine1",
                                       side_channel_host=host,
-                                      side_channel_port=free_port,
+                                      side_channel_port=base_port,
                                       metadata=metadata,
+                                      vllm_config=vllm_config,
                                       ready_event=ready_event,
                                       kv_caches={},
                                       pcp_rank=0)
         thread.start()
+        actual_port = base_port + (thread.pp_rank * thread.tp_size +
+                                   thread.tp_rank +
+                                   thread.pcp_rank * thread.prefill_tp_size)
         self.assertTrue(ready_event.wait(timeout=3),
                         "Server thread startup timeout")
 
         context = zmq.Context()  # type: ignore
         sock = context.socket(zmq.DEALER)  # type: ignore
-        sock.connect(f"tcp://{host}:{free_port}")
+        sock.connect(f"tcp://{host}:{actual_port}")
         encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(type=MooncakeAgentMetadata)
 
@@ -213,14 +238,17 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
+            side_channel_port=30000,
             local_kv_caches_base_addr=[0x1000, 0x2000],
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
 
     def test_add_request(self):
         test_req = {
@@ -231,7 +259,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             "remote_host": "localhost",
             "remote_handshake_port": 6666,
             "offset": 0,
-            "num_need_pulls": 2,
+            "tp_num_need_pulls": 2,
             "all_task_done": False
         }
         self.thread.add_request(
@@ -242,7 +270,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             remote_host=test_req["remote_host"],
             remote_handshake_port=test_req["remote_handshake_port"],
             offset=test_req["offset"],
-            num_need_pulls=test_req["num_need_pulls"],
+            tp_num_need_pulls=test_req["tp_num_need_pulls"],
             all_task_done=test_req["all_task_done"])
         queued = self.thread.request_queue.get_nowait()
         self.assertEqual(queued["request_id"], "req1")
@@ -265,14 +293,17 @@ class TestSocketManagement(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
+            side_channel_port=30000,
             local_kv_caches_base_addr=[0x1000, 0x2000],
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.thread.remote_sockets = defaultdict(deque)
         self.thread.remote_poller = MagicMock()
 
@@ -315,18 +346,23 @@ class TestCoreFunctionality(unittest.TestCase):
         self.ready_event = threading.Event()
         self.mock_queue = MagicMock()
         self.vllm_config = MockVllmConfig()
-        self.kv_caches: Dict[str, Any] = {}
+        self.kv_caches: Dict[str, Any] = {
+            "layer_0": (MagicMock(), MagicMock())
+        }
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
+            side_channel_port=30000,
             local_kv_caches_base_addr=[0x1000, 0x2000],
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.thread.request_queue = self.mock_queue
         self.test_req = {
             "request_id": "req1",
@@ -337,7 +373,10 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_transfer_port": 7777,
             "offset": 0,
-            "num_need_pulls": 2,
+            "tp_num_need_pulls": 2,
+            "remote_port_send_num": {
+                6666: 1
+            },
             "all_task_done": False
         }
         self.thread.task_tracker = MagicMock()
@@ -353,7 +392,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.thread._handle_request(self.test_req)
 
         mock_transfer.assert_called_once_with(self.test_req)
-        mock_send.assert_called_once_with("req1", "localhost", 6666)
+        mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
         if not self.thread.task_tracker.update_done_task_count.called:
             self.thread.task_tracker.update_done_task_count("req1")
         self.thread.task_tracker.update_done_task_count.assert_called_once_with(
@@ -362,12 +401,14 @@ class TestCoreFunctionality(unittest.TestCase):
 
     @patch.object(KVCacheRecvingThread, '_get_remote_metadata')
     def test_transfer_kv_cache(self, mock_get_meta):
-        self.thread.kv_caches_base_addr["remote_engine"] = {
-            6666: [0x3000, 0x4000]
-        }
-
-        self.thread._transfer_kv_cache(self.test_req)
-
+        with patch(
+                'vllm_ascend.distributed.mooncake_connector.get_ascend_config'
+        ) as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.kv_caches_base_addr["remote_engine"] = {
+                6666: [0x3000, 0x4000]
+            }
+            self.thread._transfer_kv_cache(self.test_req)
         self.engine.batch_transfer_sync_read.assert_called_once()
         call_args, call_kwargs = self.engine.batch_transfer_sync_read.call_args
         self.assertEqual(call_args[0], "localhost:7777")
@@ -398,14 +439,17 @@ class TestMetadataHandling(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
+            side_channel_port=30000,
             local_kv_caches_base_addr=[0x1000, 0x2000],
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.test_metadata = MooncakeAgentMetadata(
             engine_id="remote_engine",
             te_rpc_port=9090,
@@ -461,14 +505,17 @@ class TestMainThreadLoop(unittest.TestCase):
         self.thread = KVCacheRecvingThread(
             tp_rank=0,
             tp_size=4,
+            _prefill_pp_size=1,
             engine=self.engine,
             local_engine_id="local_engine",
             local_handshake_port=5555,
+            side_channel_port=30000,
             local_kv_caches_base_addr=[0x1000, 0x2000],
             block_len=[1024, 2048],
             ready_event=self.ready_event,
             vllm_config=self.vllm_config,
-            kv_caches=self.kv_caches)
+            kv_caches=self.kv_caches,
+            prefill_pp_layer_partition=None)
         self.thread.request_queue = queue.Queue()
 
     @patch.object(KVCacheRecvingThread, '_handle_request')
@@ -482,7 +529,7 @@ class TestMainThreadLoop(unittest.TestCase):
             "remote_handshake_port": 6666,
             "remote_transfer_port": 7777,
             "offset": 0,
-            "num_need_pulls": 2,
+            "tp_num_need_pulls": 2,
             "all_task_done": False
         }
 
@@ -505,10 +552,15 @@ class MockVllmConfig:
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
+        self.speculative_config = MagicMock()
         self.model_config.use_mla = True
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
         self.parallel_config.data_parallel_size_local = 1
+        self.parallel_config.pipeline_parallel_size = 1
+        self.parallel_config.data_parallel_rank_local = 0
+        self.model_config.get_num_layers_by_block_type = MagicMock(
+            return_value=32)
         self.cache_config.block_size = 16
         self.kv_transfer_config.kv_port = 5000
         self.kv_transfer_config.kv_role = 'kv_producer'
@@ -516,11 +568,13 @@ class MockVllmConfig:
         self.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
             "prefill": {
                 "tp_size": 2,
-                "dp_size": 1
+                "dp_size": 1,
+                "pp_size": 1
             },
             "decode": {
                 "tp_size": 2,
-                "dp_size": 1
+                "dp_size": 1,
+                "pp_size": 1
             }
         }.get(k, d)
         self.additional_config = {}
@@ -615,6 +669,7 @@ class TestMooncakeConnectorMetadata(unittest.TestCase):
 
         meta.add_new_req(request_id="req1",
                          local_block_ids=[1, 2, 3],
+                         num_external_tokens=48,
                          kv_transfer_params={
                              "remote_block_ids": [4, 5, 6],
                              "remote_engine_id": "remote_engine",
@@ -667,7 +722,7 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         request = MockRequest("req1")
         blocks_mock = MagicMock()
         blocks_mock.get_unhashed_block_ids.return_value = [4, 5, 6]
-        self.scheduler._reqs_need_recv["req1"] = (request, [4, 5, 6])
+        self.scheduler._reqs_need_recv["req1"] = (request, [4, 5, 6], 48)
         request.kv_transfer_params = {
             "remote_block_ids": [1, 2, 3],
             "remote_engine_id": "remote",
@@ -1019,7 +1074,6 @@ class MockTransferEngine:
 
 class MockEnvsAscend:
     MOONCAKE_CONNECTOR_PROTOCOL = "mock_protocol"
-    PHYSICAL_DEVICES = "10,11"
 
 
 def mock_get_tensor_model_parallel_rank():
@@ -1045,29 +1099,19 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.mock_transfer_engine.get_rpc_port.return_value = 9090
         self.mock_transfer_engine.initialize.return_value = 0
         self.mock_transfer_engine.register_memory.return_value = 0
-        self.mock_dcp_group = MagicMock(spec=GroupCoordinator)
-        self.mock_dcp_group.rank_in_group = 0
-        self.mock_dcp_group.world_size = 1
-        self.mock_dcp_group.device_group = MagicMock()
-        self.mock_dcp = MagicMock()
-        self.mock_dcp.world_size = 1
-
-        self.mock_pcp_group = MagicMock(spec=GroupCoordinator)
-        self.mock_pcp_group.rank_in_group = 0
-        self.mock_pcp_group.world_size = 1
-        self.mock_pcp_group.device_group = MagicMock()
 
         self.patches = [
             patch('torch.Tensor.size', return_value=(10, 16, 8, 16)),
             patch('torch.Tensor.element_size', return_value=4),
             patch('torch.Tensor.data_ptr', return_value=0x1000),
             patch('math.prod', return_value=128),
-            patch('random.Random'),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank',
                 mock_get_tensor_model_parallel_rank),
             patch('vllm_ascend.distributed.mooncake_connector.get_tp_group',
                   mock_get_tp_group),
+            patch('vllm_ascend.distributed.mooncake_connector.get_pp_group',
+                  return_value=_mock_pp_group),
             patch('vllm_ascend.distributed.mooncake_connector.get_ip',
                   mock_get_ip),
             patch(
@@ -1089,15 +1133,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                   MagicMock()),
             patch('vllm_ascend.distributed.mooncake_connector.threading.Event',
                   MagicMock()),
-            patch('vllm.distributed.parallel_state.get_dcp_group',
-                  return_value=self.mock_dcp_group),
-            patch('vllm.distributed.parallel_state._DCP',
-                  return_value=self.mock_dcp),
-            patch(
-                'vllm_ascend.distributed.mooncake_connector.get_decode_context_model_parallel_world_size',
-                return_value=1),
-            patch('vllm_ascend.distributed.mooncake_connector.get_pcp_group',
-                  return_value=self.mock_pcp_group),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.get_ascend_config',
                 return_value=MagicMock()),
@@ -1145,6 +1180,164 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         # Default tp_rank is 0, so device_id should be 10
         self.assertIsNotNone(worker.engine)
+
+    def test_get_remote_tp_rank(self):
+
+        def get_tp_rank(prefill_tp_size: int, prefill_pp_size: int,
+                        decode_tp_size: int, num_kv_heads: int,
+                        tp_num_need_pulls: int, is_deepseek_mla: bool):
+            with patch('vllm_ascend.distributed.mooncake_connector.get_ascend_config',
+                    return_value=MagicMock()), \
+                patch.object(self.vllm_config.kv_transfer_config, 'get_from_extra_config',
+                            side_effect=lambda k, d=None: {
+                                "prefill": {"tp_size": prefill_tp_size, "dp_size": 1, "pp_size": prefill_pp_size},
+                                "decode": {"tp_size": decode_tp_size, "dp_size": 1, "pp_size": 1}
+                            }.get(k, d)):
+                self.vllm_config.model_config.hf_text_config.num_key_value_heads = num_kv_heads
+                self.vllm_config.model_config.is_deepseek_mla = is_deepseek_mla
+                worker = MooncakeConnectorWorker(self.vllm_config,
+                                                 self.engine_id)
+                worker.tp_num_need_pulls = tp_num_need_pulls
+                worker.use_sparse = 0
+                return worker._get_remote_ranks_for_req('test')
+
+        self.assertIn(
+            get_tp_rank(16, 1, 1, 4, 4, False)[0],
+            [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]])
+        self.assertIn(
+            get_tp_rank(8, 1, 1, 4, 4, False)[0], [[0, 2, 4, 6], [1, 3, 5, 7]])
+        self.assertIn(get_tp_rank(4, 1, 1, 4, 4, False)[0], [[0, 1, 2, 3]])
+        self.assertIn(get_tp_rank(16, 1, 4, 4, 1, False),
+                      [[[0], [4], [8], [12]], [[1], [5], [9], [13]],
+                       [[2], [6], [10], [14]], [[3], [7], [11], [15]]])
+        self.assertIn(get_tp_rank(8, 1, 4, 4, 1, False),
+                      [[[0], [2], [4], [6]], [[1], [3], [5], [7]]])
+        self.assertIn(get_tp_rank(4, 2, 2, 4, 2, False),
+                      [[[0, 1, 4, 5], [2, 3, 6, 7]]])
+        self.assertIn(get_tp_rank(4, 1, 4, 4, 1, False),
+                      [[[0], [1], [2], [3]]])
+        self.assertIn(
+            get_tp_rank(8, 2, 1, 4, 4, False)[0],
+            [[0, 2, 4, 6, 8, 10, 12, 14], [1, 3, 5, 7, 9, 11, 13, 15]])
+        self.assertIn(get_tp_rank(4, 2, 2, 4, 2, False),
+                      [[[0, 1, 4, 5], [2, 3, 6, 7]]])
+        self.assertIn(get_tp_rank(2, 2, 1, 4, 2, False), [[[0, 1, 2, 3]]])
+        self.assertIn(
+            get_tp_rank(4, 4, 2, 8, 2, False),
+            [[[0, 1, 4, 5, 8, 9, 12, 13], [2, 3, 6, 7, 10, 11, 14, 15]]])
+        self.assertIn(
+            get_tp_rank(4, 2, 1, 4, 4, False)[0], [[0, 1, 2, 3, 4, 5, 6, 7]])
+        self.assertIn(
+            get_tp_rank(4, 4, 1, 4, 4, False)[0],
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]])
+        self.assertIn(get_tp_rank(8, 2, 4, 4, 1, False),
+                      [[[0, 8], [2, 10], [4, 12], [6, 14]],
+                       [[1, 9], [3, 11], [5, 13], [7, 15]]])
+        self.assertIn(get_tp_rank(4, 2, 4, 4, 4, False),
+                      [[[0, 4], [1, 5], [2, 6], [3, 7]]])
+        self.assertIn(
+            get_tp_rank(4, 4, 4, 4, 1, False),
+            [[[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]]])
+        self.assertIn(
+            get_tp_rank(16, 1, 1, 1, 1,
+                        True)[0], [[0], [1], [2], [3], [4], [5], [6], [7], [8],
+                                   [9], [10], [11], [12], [13], [14], [15]])
+        self.assertIn(get_tp_rank(4, 1, 4, 1, 1, True), [[[0], [1], [2], [3]]])
+        self.assertIn(
+            get_tp_rank(8, 2, 1, 1, 1, True)[0],
+            [[0, 8], [2, 10], [4, 12], [6, 14], [1, 9], [3, 11], [5, 13],
+             [7, 15]])
+        self.assertIn(
+            get_tp_rank(4, 4, 1, 1, 1, True)[0],
+            [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]])
+        self.assertIn(
+            get_tp_rank(8, 2, 4, 1, 1, True)[0],
+            [[0, 8], [2, 10], [4, 12], [6, 14], [1, 9], [3, 11], [5, 13],
+             [7, 15]])
+        self.assertIn(
+            get_tp_rank(4, 4, 4, 1, 1, True),
+            [[[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]]])
+
+    def test_get_kv_split_metadata(self):
+
+        def get_kv_split_metadata(use_mla, pcp_size, dcp_size, tp_size,
+                                  tp_rank, pcp_rank, _prefill_tp_size,
+                                  remote_pcp_size, remote_dcp_size,
+                                  remote_port, remote_block_ids,
+                                  local_block_ids):
+
+            worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
+
+            worker.use_mla = use_mla
+            worker.pcp_size = pcp_size
+            worker.dcp_size = dcp_size
+            worker.tp_size = tp_size
+            worker.tp_rank = tp_rank
+            worker.pcp_rank = pcp_rank
+            worker._prefill_tp_size = _prefill_tp_size
+            worker.local_remote_block_port_mapping = None
+            worker.block_size = 16
+            worker.num_key_value_heads = 1
+
+            meta = types.SimpleNamespace()
+
+            meta.remote_pcp_size = remote_pcp_size
+            meta.remote_dcp_size = remote_dcp_size
+            meta.remote_port = remote_port
+            meta.remote_block_ids = remote_block_ids
+            meta.local_block_ids = local_block_ids
+            meta.num_external_tokens = pcp_size * dcp_size * len(
+                local_block_ids) * worker.block_size
+            meta.num_prompt_blocks = pcp_size * dcp_size * len(local_block_ids)
+
+            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
+                '0', meta)
+
+            return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+
+        self.assertEqual(
+            get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 1, 8, 30000, [1],
+                                  [1]),
+            ([[30001], [30002], [30003], [30004], [30005], [30006], [30007],
+              [30000]], [[], [], [], [], [], [], [], [1]], [[], [], [], [], [],
+                                                            [], [], [1]]))
+
+        self.assertEqual(
+            get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 8, 30000, [1],
+                                  [1]),
+            ([[30001], [30002], [30003], [30004], [30005], [30006], [30007],
+              [30008], [30009], [30010], [30011], [30012], [30013], [30014],
+              [30015], [30000]
+              ], [[], [], [], [], [], [], [], [], [], [], [], [], [], [], [],
+                  [1]], [[], [], [], [], [], [], [], [], [], [], [], [], [],
+                         [], [], [1]]))
+
+        self.assertEqual(
+            get_kv_split_metadata(True, 1, 1, 8, 1, 0, 8, 2, 2, 30000, [1],
+                                  [1]),
+            ([[30001], [30008], [30009], [30000]], [[], [], [], [1]
+                                                    ], [[], [], [], [1]]))
+
+        self.assertEqual(
+            get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 2, 30000, [1],
+                                  [1]),
+            ([[30001], [30008], [30009], [30000]], [[], [], [], [1]
+                                                    ], [[], [], [], [1]]))
+
+        self.assertEqual(
+            get_kv_split_metadata(True, 1, 2, 8, 1, 0, 8, 2, 2, 30000, [1],
+                                  [1]),
+            ([[30000], [30008]], [[1], []], [[1], []]))
+
+        self.assertEqual(
+            get_kv_split_metadata(False, 1, 2, 8, 1, 0, 8, 2, 2, 30000, [1],
+                                  [1]),
+            ([[30000], [30008]], [[1], []], [[1], []]))
+
+        self.assertEqual(
+            get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000,
+                                  [1, 2, 3], [1, 2, 3, 4, 5]),
+            ([[30000], [30008]], [[1, 2, 3], [4, 5]], [[1, 2, 3], [1, 2]]))
 
 
 if __name__ == '__main__':

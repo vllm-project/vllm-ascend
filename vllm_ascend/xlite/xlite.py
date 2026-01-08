@@ -26,10 +26,10 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from xlite._C import AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
-from vllm_ascend.utils import is_enable_nz
 
 
 class XliteModel:
@@ -48,16 +48,23 @@ class LlamaXliteModel(XliteModel):
             vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
         dtype = vllm_config.model_config.dtype
         params_dict = dict(runnable.named_parameters())
-        layers = runnable.model.layers
+
+        if hasattr(runnable, "language_model"):
+            layers = runnable.language_model.model.layers
+            model_prefix = "language_model."
+        else:
+            layers = runnable.model.layers
+            model_prefix = ""
 
         config = self._build_model_config(vllm_config)
         xlite_model = Model()
-        xlite_model.embed = params_dict.get("model.embed_tokens.weight")
-        xlite_model.norm = params_dict.get("model.norm.weight")
-        if vllm_config.model_config.hf_config.tie_word_embeddings:
+        xlite_model.embed = params_dict.get(model_prefix +
+                                            "model.embed_tokens.weight")
+        xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
+        if vllm_config.model_config.hf_text_config.tie_word_embeddings:
             xlite_model.head = xlite_model.embed
         else:
-            xlite_model.head = params_dict.get("lm_head.weight")
+            xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
         xlite_model.attn_norm = [
             layer.input_layernorm.weight for layer in layers
         ]
@@ -111,7 +118,9 @@ class LlamaXliteModel(XliteModel):
         return (xlite_model, freq_cis, config.hidden_size, dtype)
 
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_text_config
+        if hasattr(hf_config, "text_config"):
+            hf_config = hf_config.text_config
         config = ModelConfig()
         config.vocab_size = hf_config.vocab_size
         config.hidden_size = hf_config.hidden_size
@@ -134,7 +143,7 @@ class LlamaXliteModel(XliteModel):
         config.moe_tp_size = 1
 
         config.attn_type = AttnMHA
-        config.weight_nz = is_enable_nz()
+        config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len
@@ -166,6 +175,7 @@ def xlite_model_init(
         "LlamaForCausalLM": LlamaXliteModel,
         "Qwen2ForCausalLM": LlamaXliteModel,
         "Qwen3ForCausalLM": LlamaXliteModel,
+        "Qwen3VLForConditionalGeneration": LlamaXliteModel,
     }
 
     architecture = vllm_config.model_config.architectures[0]
@@ -247,7 +257,13 @@ class XliteWrapper:
         if not with_prefill or self.full_mode:
             batch = attn_metadata.num_prefills + attn_metadata.num_decodes
             seq_lens = attn_metadata.seq_lens[:batch]
-            query_lens = attn_metadata.query_lens[:batch]
+            seq_tensor = torch.cat([
+                torch.tensor([0]),
+                torch.tensor(attn_metadata.actual_seq_lengths_q)
+            ],
+                                   dim=0)
+            query_lens = seq_tensor[1:] - seq_tensor[:-1]
+            query_lens = query_lens[:batch]
             cached_lens = seq_lens - query_lens
 
             xlite_attn_metadata = ModelAttnMeta()

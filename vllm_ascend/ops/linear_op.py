@@ -36,6 +36,8 @@ How to extend a new linear op? Taking column parallel op as an example:
 Row parallel op follows a similar approach - inherit from RowColumnParallelOp and register the new class in get_row_parallel_op.
 """
 
+import re
+from functools import lru_cache
 from typing import Optional, Union
 
 import torch
@@ -51,13 +53,13 @@ from vllm.distributed import (split_tensor_along_last_dim,
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (dense_optim_enable, enable_sp,
-                               flashcomm2_enable,
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable, shared_expert_dp_enabled)
@@ -133,7 +135,7 @@ class CustomRowParallelOp(CustomLinearOp):
 
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
-        if dense_optim_enable():
+        if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
             torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
             return output
@@ -482,6 +484,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 
 class SequenceRowParallelOp(CustomRowParallelOp):
 
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.unique_prefix = None
+
     def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -507,7 +513,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                              bias=bias_)
         else:
             output = torch.ops.vllm.matmul_and_reduce(input_parallel,
-                                                      self.prefix)
+                                                      self.unique_prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -543,8 +549,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         from vllm_ascend.quantization.quant_config import AscendLinearMethod
-        from vllm_ascend.quantization.w8a8 import (AscendW8A8LinearMethod,
-                                                   quant_per_tensor)
+        from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method,
@@ -566,8 +571,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 and isinstance(self.layer.quant_method.quant_method,
                                AscendW8A8LinearMethod)):
             if x.dtype != torch.int8:
-                x_quant = quant_per_tensor(
-                    x, self.layer.aclnn_input_scale_reciprocal,
+                x_quant = torch.ops.vllm.quantize(
+                    x, self.layer.aclnn_input_scale,
+                    self.layer.aclnn_input_scale_reciprocal,
                     self.layer.aclnn_input_offset)
             else:
                 x_quant = x
@@ -600,22 +606,28 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.reduce_results = self.layer.reduce_results
+        self.unique_prefix = self.layer.unique_prefix
 
 
 def _get_column_parallel_op(
         prefix, layer
 ) -> Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp]]:
-    if mlp_tp_enable() and "gate_up_proj" in prefix:
+    if "gate_up_proj" in prefix and mlp_tp_enable(
+    ) and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
     if enable_sp():
         if "shared_expert" in prefix:
             return None
-        if "gate_up_proj" in prefix:
-            return SequenceColumnParallelOp(layer)
-        if "in_proj" in prefix:
-            return SequenceColumnParallelOp(layer)
-        if "qkv_proj" in prefix or "conv1d" in prefix:
-            return SequenceColumnParallelOp(layer)
+        sp_column_prefix = [
+            "gate_up_proj",  # first MLP of most LLMs 
+            "in_proj",  # gated deltanet of Qwen3 Next
+            "qkv_proj",  # qkv linear of most LLMs
+            "conv1d",  # gated deltanet of Qwen3 Next
+            "query_key_value",  # qkv linear of Bailing
+        ]
+        for a_prefix in sp_column_prefix:
+            if a_prefix in prefix:
+                return SequenceColumnParallelOp(layer)
 
     return None
 
@@ -625,7 +637,7 @@ def _get_row_parallel_op(
 ) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                     Flashcomm2OProjRowParallelOp, MatmulAllreduceRowParallelOp,
                     SequenceRowParallelOp]]:
-    if "down_proj" in prefix and mlp_tp_enable():
+    if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
@@ -637,8 +649,15 @@ def _get_row_parallel_op(
     if enable_sp():
         if "shared_expert" in prefix:
             return None
-        if "o_proj" in prefix or "out_proj" in prefix or "down_proj" in prefix:
-            return SequenceRowParallelOp(layer)
+        sp_row_prefixes = [
+            "o_proj",  # attn output linear of most LLMs
+            "out_proj",  # attn output linear of Qwen3 Next
+            "down_proj",  # second MLP of most LLMs
+            "attention.dense",  # attn output linear of Bailing
+        ]
+        for a_prefix in sp_row_prefixes:
+            if a_prefix in prefix:
+                return SequenceRowParallelOp(layer)
 
     return None
 
@@ -670,3 +689,27 @@ def get_replicated_op(disable_tp, prefix,
         return None
 
     return CustomReplicatedOp(layer)
+
+
+def is_moe_layer(prefix: str) -> bool:
+
+    @lru_cache(maxsize=1)
+    def get_moe_params():
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        config = vllm_config.model_config.hf_text_config
+        n_routed_experts = getattr(config, 'n_routed_experts', 0)
+        first_k_dense_replace = getattr(config, 'first_k_dense_replace',
+                                        float('inf'))
+        moe_layer_freq = getattr(config, 'moe_layer_freq', 1)
+        return n_routed_experts, first_k_dense_replace, moe_layer_freq
+
+    match = re.search(r'layers\.(\d+)\.', prefix)
+    if match is None:
+        return False
+    layer_idx = int(match.group(1))
+
+    n_routed_experts, first_k_dense_replace, moe_layer_freq = get_moe_params()
+
+    return (n_routed_experts is not None and layer_idx >= first_k_dense_replace
+            and layer_idx % moe_layer_freq == 0)

@@ -142,7 +142,7 @@ pip install -r requirements-dev.txt
 
 There are several principles to follow when writing unit tests:
 
-- The test file path should be consistent with the source file and start with the `test_` prefix, such as: `vllm_ascend/worker/worker_v1.py` --> `tests/ut/worker/test_worker_v1.py`
+- The test file path should be consistent with the source file and start with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> `tests/ut/worker/test_worker.py`
 - The vLLM Ascend test uses unittest framework. See [here](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
 - All unit tests can be run on CPUs, so you must mock the device-related function to host.
 - Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
@@ -231,13 +231,13 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # Run all the single card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
 
 # Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_dynamic_npugraph_batchsize.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
 
 # Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_offline_inference.py::test_models
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py::test_models_output
 ```
 
 ::::
@@ -246,12 +246,13 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_offline_inference.p
 
 This will reproduce the E2E test. See [vllm_ascend_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml).
 
+Run nightly multi-node test cases locally refer to section of `Running Locally` of [Multi Node Test](./multi_node_test.md).
+
 #### E2E test example:
 
 - Offline test example: [`tests/e2e/singlecard/test_offline_inference.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_offline_inference.py)
 - Online test examples: [`tests/e2e/singlecard/test_prompt_embedding.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_prompt_embedding.py)
-- Correctness test example: [`tests/e2e/singlecard/test_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph.py)
-- Reduced Layer model test example: [test_torchair_graph_mode.py - DeepSeek-V3-Pruning](https://github.com/vllm-project/vllm-ascend/blob/20767a043cccb3764214930d4695e53941de87ec/tests/e2e/multicard/test_torchair_graph_mode.py#L48)
+- Correctness test example: [`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)
 
     The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
     1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.

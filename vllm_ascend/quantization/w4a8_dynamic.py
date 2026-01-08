@@ -27,7 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -35,8 +35,6 @@ class AscendW4A8DynamicLinearMethod:
     """
 
     def __init__(self):
-        self.transpose_weight = True
-
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
             "group_size", 256)
@@ -170,8 +168,8 @@ class AscendW4A8DynamicLinearMethod:
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        if self.transpose_weight:
-            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten().to(
             torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -214,8 +212,6 @@ class AscendW4A8DynamicFusedMoEMethod:
     """
 
     def __init__(self):
-        self.transpose_weight = True
-
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -340,6 +336,7 @@ class AscendW4A8DynamicFusedMoEMethod:
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -371,8 +368,12 @@ class AscendW4A8DynamicFusedMoEMethod:
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(
-                topk_ids, 0, global_num_experts - global_redundant_expert_num)
+            random_matrix = torch.rand(topk_ids.size(0),
+                                       global_num_experts -
+                                       global_redundant_expert_num,
+                                       device=topk_ids.device)
+            topk_ids = torch.argsort(
+                random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
         topk_weights = topk_weights.to(x.dtype)
 
@@ -390,7 +391,6 @@ class AscendW4A8DynamicFusedMoEMethod:
             use_int4_w4a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
@@ -458,11 +458,10 @@ class AscendW4A8DynamicFusedMoEMethod:
                                           torch.quint4x2, -1, False)
 
     def process_weights_after_loading(self, layer):
-        if self.transpose_weight:
-            layer.w13_weight.data = layer.w13_weight.data.transpose(
-                1, 2).contiguous()
-            layer.w2_weight.data = layer.w2_weight.data.transpose(
-                1, 2).contiguous()
+        layer.w13_weight.data = layer.w13_weight.data.transpose(
+            1, 2).contiguous()
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1,
+                                                              2).contiguous()
 
         w13_weight_scale_second = layer.w13_weight_scale_second.data if hasattr(
             layer, "w13_weight_scale_second") else None
@@ -483,10 +482,7 @@ class AscendW4A8DynamicFusedMoEMethod:
 
         self.update_bias(layer, w13_bias, w2_bias)
 
-        if is_enable_nz():
-            layer.w13_weight.data = torch_npu.npu_format_cast(
-                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(
-                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
