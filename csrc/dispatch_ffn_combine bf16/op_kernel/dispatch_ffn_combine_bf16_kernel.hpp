@@ -196,7 +196,7 @@ public:
     {
         GMM1(params);
 
-        AscendC::CrossCoreWaitFlag<0x2>(2);         // GMM2等swiglu-1
+        AscendC::CrossCoreWaitFlag<0x2>(2);
 
         GMM2(params);
     }
@@ -208,7 +208,7 @@ public:
     {
         Dispatch(params);
         AscendC::SyncAll<true>();
-        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);       // swiglu通知GMM2【2】
+        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);
 
         CombineV2(params);
     }
@@ -369,7 +369,6 @@ CATLASS_DEVICE
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx != params.rank) {
                 int32_t intPer512 = CACHE_LINE / sizeof(int);
-                // 这块区域初始化为0，如果check到发现数据（512B）非0，则说明数据已经到了
                 for(int32_t checkIdx = 0; checkIdx < params.EP * params.expertPerRank; checkIdx += intPer512) {
                     __gm__ int32_t* sync_check = reinterpret_cast<__gm__ int32_t*>(shmem() + peermemInfo.offsetPeerTokenPerExpert) + tokenPerExpertLayout(dstEpIdx, 0, checkIdx);
                     gm_signal_wait_until_ne(sync_check, 0);
@@ -435,7 +434,6 @@ CATLASS_DEVICE
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx != params.rank) {
                 int32_t intPer512 = CACHE_LINE / sizeof(int);
-                // 这块区域初始化为0，如果check到发现数据（512B）非0，则说明数据已经到了
                 for(int32_t checkIdx = 0; checkIdx < params.EP * params.expertPerRank; checkIdx += intPer512) {
                     __gm__ int32_t* sync_check = reinterpret_cast<__gm__ int32_t*>(shmem() + peermemInfo.offsetPeerTokenPerExpert) + tokenPerExpertLayout(dstEpIdx, 0, checkIdx);
                     gm_signal_wait_until_ne(sync_check, 0);
@@ -471,7 +469,6 @@ CATLASS_DEVICE
     void GetSumPreRank(AscendC::GlobalTensor<int32_t> & tokenPerExpert, AscendC::GlobalTensor<int32_t> & result,
         uint32_t expertPerRank, uint32_t rankId, uint32_t EP) {
         int32_t cursum = 0;
-        //单纯分核计算前缀和
         if (coreIdx < EP) {
             for (int32_t i = 0; i < rankId * expertPerRank; i++) {
                 cursum += tokenPerExpert(tokenPerExpertLayout(coreIdx, 0, i));
@@ -510,7 +507,7 @@ CATLASS_DEVICE
         int64_t gmGroupOffsetC = 0;
         uint32_t startCoreIdx = 0;
         uint32_t syncGroupIdx = 0;
-        AscendC::CrossCoreWaitFlag<0x2>(0); // 等待aiv计算cumsumformm
+        AscendC::CrossCoreWaitFlag<0x2>(0);
         AicSyncAll();
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
@@ -578,7 +575,7 @@ CATLASS_DEVICE
                 if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
                     blockMmad.SynchronizeBlock();
                 }
-                blockMmad.Finalize(syncLoopIdx, 1);         // GMM1通知swiglu【1】
+                blockMmad.Finalize(syncLoopIdx, 1);
             }
 
             preCurrentmSum += currentM;
@@ -590,7 +587,7 @@ CATLASS_DEVICE
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
             blockMmad.SynchronizeBlock();
         }
-        blockMmad.Finalize(syncLoopIdx + 1, 1);             // GMM1通知swiglu【2】
+        blockMmad.Finalize(syncLoopIdx + 1, 1);
     }
 
     CATLASS_DEVICE
@@ -643,7 +640,7 @@ CATLASS_DEVICE
             uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
             // Loop through the matmul of each groupIdx
             if (params.expertPerRank > lastDequantExpertNum && groupIdx + 1 == params.expertPerRank - lastDequantExpertNum) {
-                AscendC::CrossCoreWaitFlag<0x2>(2);     // GMM2等swigluquant-2
+                AscendC::CrossCoreWaitFlag<0x2>(2);
             }
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
                 if (loopIdx + coreNum >= coreLoops) {
@@ -701,7 +698,7 @@ CATLASS_DEVICE
     void Dispatch(Params const &params) {
         icache_preload(8);
         int64_t localTokenPerExpertOffset = peermemInfo.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
-        GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;     // 把通信矩阵全部放到peermem
+        GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;
         uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
 
         moe_init_routing_v2<ElementA>(reinterpret_cast<GM_ADDR> (params.ptrA), params.expertIdx, shmem() + peermemInfo.offsetA,
@@ -711,8 +708,7 @@ CATLASS_DEVICE
 
         AscendC::SyncAll<true>();
         CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
-        // AscendC::SyncAll<true>();
-        // shmem.CrossRankSync();
+
         if (coreIdx == coreNum - 1) {
             GetCumsumForMMAIV(tokenPerExpert, cumsumMM, params.expertPerRank, params.rank, params.EP);
         }
@@ -731,7 +727,6 @@ CATLASS_DEVICE
         int32_t syncLoopIdx = -1;
         BlockEpilogue1 blockEpilogue(resource);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
-            // 第i个core从第i个rank的peermem读数据
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
                 uint32_t rowStart = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum1;
                 if (rowStart < params.maxOutputSize) {
@@ -751,9 +746,7 @@ CATLASS_DEVICE
                     MatrixCoord offsetPeer{rowSrc, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
                     int64_t gmOffsetPeer = params.layoutA.GetOffset(offsetPeer);
-                    // 通信Data
                     CopyGMToGM(gmA[gmOffsetA], gmRemoteA[gmOffsetPeer], rows * params.problemShape.k(), params.ubMoveNum);
-                    // 通信scale
                     if constexpr (std::is_same_v<ElementA, int8_t>) {
                         CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
                     }
@@ -765,7 +758,7 @@ CATLASS_DEVICE
                 AscendC::CrossCoreWaitFlag<0x2>(syncLoopIdx / 8 + 1);
             }
             AscendC::SyncAll<true>();
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);   // V通知C当前轮的通信已完成
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(0);
 
             if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0) && groupIdx == params.expertPerRank - 1 && prevGroupSum1 > 0) {
                 uint32_t rowStartThisCore = 0;
@@ -800,9 +793,9 @@ CATLASS_DEVICE
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
         if (lastDequantExpertNum < params.expertPerRank) {
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);           // swiglu通知GMM2【1】
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(2);
         }
-        AscendC::CrossCoreWaitFlag<0x2>(syncLoopIdx /8 + 1);        // Swiglu等GMM1【2】
+        AscendC::CrossCoreWaitFlag<0x2>(syncLoopIdx /8 + 1);
         AscendC::SyncAll<true>();
         if (prevGroupSum1 - dequantSum < params.maxOutputSize) {
             uint32_t rowStartThisCore = prevGroupSum1 - dequantSum;;
@@ -827,9 +820,6 @@ CATLASS_DEVICE
 
     CATLASS_DEVICE
     void CombineV2(Params const &params) {
-        // for(int32_t dstEpIdx = 0; dstEpIdx < params.EP; dstEpIdx ++) {
-        //     mPreSumBeforeRank[dstEpIdx] = preSumBeforeRank(dstEpIdx * 16);
-        // }
         BlockScheduler blockScheduler;
         uint32_t n2 = params.problemShape.k();
         uint32_t k2 = params.problemShape.n() / 2;
@@ -870,7 +860,7 @@ CATLASS_DEVICE
                 GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
 
                 int32_t m0 = 32;
-                int32_t m_rows = (actualBlockShape.m() + m0 - 1) / m0; //分块数量，每个块(m0, actualBlockShape.n())
+                int32_t m_rows = (actualBlockShape.m() + m0 - 1) / m0;
                 int32_t aiv_m_rows = m_rows / 2;
                 if (aivSubCoreIdx == 1 && aiv_m_rows * 2 < m_rows) {
                     aiv_m_rows += 1;
@@ -989,10 +979,10 @@ private:
 
         CATLASS_DEVICE
         PeermemInfo(const Params & params, const HcclShmem & shmem) {
-            offsetA = 0;    // 占用1/3的BUFFSIZE
-            offsetPeerPerTokenScale = offsetA + AlignUp(shmem.SegmentSize() / 3, 512); // 占用1MB
-            offsetD = offsetPeerPerTokenScale + MB_SIZE;    // 占用剩下的
-            offsetPeerTokenPerExpert = shmem.SegmentSize() - 2 * MB_SIZE;     // 占用最后2MB
+            offsetA = 0;
+            offsetPeerPerTokenScale = offsetA + AlignUp(shmem.SegmentSize() / 3, 512);
+            offsetD = offsetPeerPerTokenScale + MB_SIZE;
+            offsetPeerTokenPerExpert = shmem.SegmentSize() - 2 * MB_SIZE;
         }
     };
 

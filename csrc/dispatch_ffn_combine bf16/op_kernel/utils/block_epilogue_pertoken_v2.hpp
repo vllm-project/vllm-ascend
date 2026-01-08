@@ -243,15 +243,11 @@ public:
     ){
         is_ping = !is_ping;
         auto event_id = is_ping ? EVENT_ID0 : EVENT_ID1;
-        // auto event_id_2 = is_ping ? EVENT_ID2 : EVENT_ID3;
 
         auto &ubC = ubCList[is_ping];
         auto &ubD = ubDList[is_ping];
         int32_t gmCOffset = preSrcExpertSum * params.n2 + blockCoord.m() * params.n2 + blockCoord.n();
         auto gmTileC = gmC[gmCOffset];
-        // auto &ubCFp32 = ubFp32List[is_ping];
-        // auto &scaleUb = scaleUbList[is_ping];
-        // auto &ubOutFp32 = ubOutFp32List[is_ping];
 
         LayoutC layoutGM{actualBlockShape.m(), actualBlockShape.n(), params.n2};
         LayoutC layoutUB{actualBlockShape.m(), actualBlockShape.n(), n0};
@@ -320,7 +316,7 @@ private:
     bool is_ping = false;
 
 
-    int32_t repeat = 128; //或者64应该也可以
+    int32_t repeat = 128;
 
 
     CopyGmToUbC copyGmToUbC;

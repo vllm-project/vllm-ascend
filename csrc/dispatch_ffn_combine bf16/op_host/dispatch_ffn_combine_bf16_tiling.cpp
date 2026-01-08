@@ -27,7 +27,6 @@ using namespace AscendC;
 using namespace ge;
 
 namespace {
-    // 1. 常量定义
     const char *K_INNER_DEBUG = "DispatchFFNCombineBF16 Tiling Debug";
     constexpr uint32_t ATTR_GROUP_INDEX = 0;
     constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
@@ -54,13 +53,11 @@ static int32_t CeilDev(int32_t num, int32_t div)
     return (num + div - 1) / div;
 }
 
-// 解析并校验 rankId, group, worldSize, isTransB 属性值
 static ge::graphStatus DispatchFFNCombineBF16CheckAttrAndSetTiling(gert::TilingContext *context, DispatchFFNCombineBF16Info& info)
 {
     auto attrs = context->GetAttrs();
     OP_TILING_CHECK(attrs == nullptr, OP_LOGE(K_INNER_DEBUG, "attrs is null."), return ge::GRAPH_FAILED);
 
-    // todo：Attr相关tilingdata的设置、校验、打印
     auto groupPtr = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
     auto maxOutputSizePtr = attrs->GetAttrPointer<int>(ATTR_MAX_OUTPUT_SIZE_INDEX);
     auto is_trans_b = attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B);
@@ -87,7 +84,6 @@ static ge::graphStatus DispatchFFNCombineBF16CheckAttrAndSetTiling(gert::TilingC
     return ge::GRAPH_SUCCESS;
 }
 
-// 提取输入张量 A 和 B 的形状，计算出 M、K、N 值
 static ge::graphStatus DispatchFFNCombineBF16CheckShapeAndSetTiling(gert::TilingContext *context, DispatchFFNCombineBF16Info &info)
 {
     const char *nodeName = context->GetNodeName();
@@ -116,7 +112,6 @@ static ge::graphStatus DispatchFFNCombineBF16CheckShapeAndSetTiling(gert::Tiling
     return ge::GRAPH_SUCCESS;
 }
 
-// 获取当前芯片平台的 AI Core 数目、UB 容量等硬件信息。
 static ge::graphStatus DispatchFFNCombineBF16GetPlatformInfoAndSetTiling(gert::TilingContext *context, DispatchFFNCombineBF16Info& info)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -145,10 +140,6 @@ void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineBF16Info &info)
     cocTilingData.commDataSplit = 1;
     cocTilingData.lenPerLoop = cocTilingData.m0 * cocTilingData.n0 / 2;
 }
-
-// 主调度函数：
-// 获取 tilingData ➝ 检查 Attr ➝ 检查 Shape ➝ 获取平台信息
-// ➝ 调用 SetTilingData（根据rank数目） ➝ 设置 blockDim ➝ 设置 tilingKey ➝ 设置 workspace ➝ 配置通信参数
 
 static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext *context)
 {

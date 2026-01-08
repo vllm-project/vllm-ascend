@@ -311,13 +311,8 @@ public:
         uint32_t epilogueCoreIdx = subblockIdx - moveDataCoreNum;
 
 
-        // uint32_t perCoreData =  blockM / subblockNum;
-        // uint32_t remainderData = blockM % subblockNum;
         uint32_t perCoreData =  blockM / epilogueCoreNum;
         uint32_t remainderData = blockM % epilogueCoreNum;
-
-        // uint32_t tasksForIdx  = subblockIdx < remainderData ? perCoreData + 1 : perCoreData;
-        // uint32_t loopStartIdx = subblockIdx * perCoreData + (subblockIdx < remainderData? subblockIdx : remainderData);
 
         uint32_t tasksForIdx  = epilogueCoreIdx < remainderData ? perCoreData + 1 : perCoreData;
         uint32_t loopStartIdx = epilogueCoreIdx * perCoreData + (epilogueCoreIdx < remainderData? epilogueCoreIdx : remainderData);
@@ -341,24 +336,20 @@ public:
             auto gmTileD = gmD[loopIdx * ChunkTileLen];
             LayoutC layoutUbC{1, blockN};
 
-            // 把C从GM workspace搬到UB
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             copyGmToUbC(ubC, gmTileC, layoutUbC, layoutUbC);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
-            // 在UB上做把C cast成FP32
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
             AscendC::Cast(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, blockN);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
-            //swiglue计算过程
             AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Exp(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Adds(ubCFp32ChunkN, ubCFp32ChunkN, 1.0f, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
-            // //TODO除的时候是否会对之后的数据有影响；
             AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);

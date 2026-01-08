@@ -21,21 +21,6 @@
 extern "C" {
 #endif
 
-/**
- * 算子功能：实现分布式MoE从InitRouting到Unpermute全部算子的融合
- * @brief aclnnDispatchFFNCombineBF16的第一段接口，根据具体的计算流程，计算workspace大小。
- * @domain aclnn_ops_infer
- * @param [in] a: matmul左矩阵，数据类型支持：float16, bf16。
- * @param [in] b: matmul右矩阵，数据类型支持：float16, bf16。
- * @param [in] bias: 偏置，数据类型支持：float16, bf16。
- * @param [in] group: 标识通信域名称的字符串。
- * @param [in] worldsize: 通信域size，支持2/4/8卡。
- * @param [in] epRankId: ep本卡Id。取值范围[0, worldSize)，各卡的rankId不能重复
- * @param [out] c: 计算+通信的结果，数据类型：同输入。
- * @param [out] workspaceSize: 返回需要在npu device侧申请的workspace大小。
- * @param [out] executor: 返回op执行器，包含了算子计算流程。
- * @return aclnnStatus: 返回状态码
- */
 __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineBF16GetWorkspaceSize(const aclTensor* x, const aclTensor* weight1, const aclTensor* weight2,
                                                                                         const aclTensor* expertId, const aclTensor* scale1, const aclTensor* scale2,
                                                                                         const aclTensor* probs,
@@ -43,14 +28,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineBF16Ge
                                                                                         const aclTensor* out,
                                                                                         uint64_t* workspaceSize, aclOpExecutor** executor);
 
-/**
- * @brief aclnnDispatchGmmCombine的第二段接口，用于执行计算。
- * @param [in] workspace: 在npu device侧申请的workspace内存起址。
- * @param [in] workspace_size: 在npu device侧申请的workspace大小，由第一段接口aclnnDispatchFFNCombineBF16GetWorkspaceSize获取。
- * @param [in] exector: op执行器，包含了算子计算流程。
- * @param [in] stream: acl stream流。
- * @return aclnnStatus: 返回状态码
- */
+
 __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineBF16(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                            aclrtStream stream);
 
