@@ -16,8 +16,8 @@ To learn more about the theory and implementation details of context parallel, p
 Currently context parallel can be used together with most other features, supported features are as follows:
 |         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | SpecDecode <br> (MTP) | PD <br> disaggregation | MLAPO |
 | ------- | ----- | ----- | ------ | ------ | ----- | ----- | ----- |
-| **PCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ❌ |
-| **DCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ❌ |
+| **PCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅|
+| **DCP** | ✅    | ✅     | ✅      | ✅       | ✅      | ✅ | ✅ |
 
 ## How to use Context Parallel
 You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and `decode_context_parallel_size`, refer to the following example:
