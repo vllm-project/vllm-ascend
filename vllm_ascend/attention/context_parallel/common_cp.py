@@ -44,6 +44,7 @@ class CPChunkedContextMetadata:
     workspace: torch.Tensor
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
+    chunk_actual_seq_lengths_kv_list: list[list[int]]
     # for mla DCP & PCP
     padded_chunk_seq_lens_npu: torch.Tensor = None
     padded_local_chunk_seq_lens: list[list[int]] | None = None
