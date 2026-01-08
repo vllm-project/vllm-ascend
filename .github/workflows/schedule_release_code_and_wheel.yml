@@ -19,7 +19,7 @@ name: Release Code and Wheel
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */4 * * *'
   push:
     tags:
       - 'v*'
