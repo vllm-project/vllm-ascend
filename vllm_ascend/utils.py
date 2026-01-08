@@ -459,7 +459,13 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     Update ACL graph default capture sizes, so that new sizes
     are more friendly to ascend ops && hardware.
     """
-
+    num_spec_tokens = 0
+    if vllm_config.speculative_config:
+        num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
+    uniform_decode_query_len = 1 + num_spec_tokens
+    vllm_config.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+        uniform_decode_query_len,
+        vllm_config.parallel_config.tensor_parallel_size)
     if vllm_config.model_config is None or \
         vllm_config.model_config.enforce_eager or \
         not _is_default_capture_sizes(vllm_config):
