@@ -25,12 +25,14 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-
+@triton.heuristics({
+    "HAS_BIAS": lambda args: args["norm_bias_ptr"] is not None
+})
 @triton.jit
 def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
                             norm_bias_ptr, output_ptr, output2_ptr, batch_size,
                             hidden_size: tl.constexpr, eps: tl.constexpr,
-                            BLOCK_SIZE: tl.constexpr):
+                            BLOCK_SIZE: tl.constexpr, HAS_BIAS: tl.constexpr):
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
     cols = tl.arange(0, BLOCK_SIZE)
@@ -56,11 +58,12 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
         buffered_values = buffered_values * reciprocal_std
         buffered_values = buffered_values * norm_weight_values
         # add bias
-        norm_bias_values = tl.load(norm_bias_ptr + cols,
-                                   mask=valid_mask,
-                                   other=0.0)
-        buffered_values = buffered_values + norm_bias_values
-        tl.store(output_ptr + input_offsets, buffered_values, mask=valid_mask)
+        if HAS_BIAS:
+            norm_bias_values = tl.load(norm_bias_ptr + cols,
+                                       mask=valid_mask,
+                                       other=0.0)
+            buffered_values = buffered_values + norm_bias_values
+            tl.store(output_ptr + input_offsets, buffered_values, mask=valid_mask)
 
         input_offsets += row_step * hidden_size
 
