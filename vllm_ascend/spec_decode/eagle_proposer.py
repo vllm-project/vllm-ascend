@@ -749,13 +749,6 @@ class EagleProposer(VllmEagleProposer):
             num_reqs = common_attn_metadata.num_reqs
             device = valid_sampled_tokens_count.device
 
-            if num_reqs != spec_decode_metadata.cu_num_draft_tokens.shape[0]:
-                # TODO: This is a serious issue and should be taken care of ASAP
-                # In short, why input_batch.num_reqs != attn_metadata.num_reqs?
-                # Previously in #4963, we modified `query_start_loc`, but this
-                # problem remains unsolved.
-                num_reqs = spec_decode_metadata.cu_num_draft_tokens.shape[0]
-
             token_indices_to_sample = torch.empty((num_reqs, ),
                                                   dtype=torch.int32,
                                                   device=device)
@@ -787,9 +780,9 @@ class EagleProposer(VllmEagleProposer):
                 torch.zeros_like(num_draft_tokens_gpu),
             )
 
-            query_start_loc = common_attn_metadata.query_start_loc[
-                1:1 + num_rejected_tokens_gpu.shape[0]]
-            token_indices_to_sample = query_start_loc - 1 - num_rejected_tokens_gpu
+            token_indices_to_sample = (
+                common_attn_metadata.query_start_loc[1:] - 1 -
+                num_rejected_tokens_gpu)
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
