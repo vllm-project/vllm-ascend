@@ -34,8 +34,8 @@ jobs:
         cp .github/workflows/matchers/* "$HOME"/.cache/pre-commit/matchers/
         ls "$HOME"/.cache/pre-commit/matchers/
 
-    - run: echo "::add-matcher::$HOME/.cache/matchers/actionlint.json"
-    - run: echo "::add-matcher::.$HOME/.cache/matchers/mypy.json"
+    - run: echo "::add-matcher::$HOME/.cache/pre-commit/matchers/actionlint.json"
+    - run: echo "::add-matcher::.$HOME/.cache/pre-commit/matchers/mypy.json"
 
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v6
