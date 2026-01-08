@@ -792,3 +792,59 @@ PROMPT_CONFIGS = {
 @pytest.fixture(params=PROMPT_CONFIGS.keys())
 def vl_config(request):
     return PROMPT_CONFIGS[request.param]
+
+
+@pytest.fixture(autouse=True)
+def cleanup_triton_cache():
+    """
+    Automatically cleanup triton cache after each test case.
+    This prevents cache-related issues between test runs.
+    """
+    yield
+    import subprocess
+    import os
+
+    triton_cache_path = "/root/.triton/cache"
+
+    # Check disk space where triton cache resides
+    try:
+        df_result = subprocess.run(["df", "-h", triton_cache_path],
+                                   capture_output=True,
+                                   text=True,
+                                   timeout=10)
+        if df_result.returncode == 0:
+            lines = df_result.stdout.strip().split('\n')
+            if len(lines) >= 2:
+                # Parse df output: Filesystem Size Used Avail Use% Mounted
+                parts = lines[1].split()
+                if len(parts) >= 5:
+                    _, _, _, avail, use_pct = parts[:5]
+                    logger.info(
+                        f"[Disk Space] {use_pct} used (Available: {avail})")
+                    # Warn if disk is >90% full
+                    use_percent = int(use_pct.rstrip('%'))
+                    if use_percent >= 90:
+                        logger.warning(
+                            f"[Disk Space] WARNING: Disk is {use_pct}% full! "
+                            f"Only {avail} available.")
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        logger.warning(f"[Disk Space] Error checking disk: {e}")
+
+    # Calculate and print cache size before cleanup
+    if os.path.exists(triton_cache_path):
+        try:
+            result = subprocess.run(["du", "-sh", triton_cache_path],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10)
+            if result.returncode == 0:
+                size_info = result.stdout.strip().split('\t')[0]
+                logger.info(f"[Triton Cache] Size before cleanup: {size_info}")
+            else:
+                logger.warning(
+                    f"[Triton Cache] Failed to get size: {result.stderr}")
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            logger.warning(f"[Triton Cache] Error calculating size: {e}")
+
+    # Cleanup the cache
+    # shutil.rmtree(triton_cache_path, ignore_errors=True)
