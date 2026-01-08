@@ -391,7 +391,6 @@ class AscendW4A8DynamicFusedMoEMethod:
             use_int4_w4a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,

@@ -879,7 +879,6 @@ class TestAscendMLAImpl(TestBase):
         B, H, D = 4, self.impl.num_heads, self.impl.v_head_dim  # total: [4, 4, 8]
         test_cases = [(1, 1), (1, 2), (2, 1), (2, 2), (4, 4)]
         for test_case in test_cases:
-            print(test_case)
             self.impl.dcp_size = test_case[0]
             self.impl.pcp_size = test_case[1]
             mock_dcp.world_size = test_case[0]
@@ -1005,8 +1004,6 @@ class TestAscendMLAImpl(TestBase):
                     [chunk_seqlens, chunk_seqlens], dtype=torch.int32)
                 attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens = kv_with_q_head_nomask_seqlens
                 attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens = kv_with_q_tail_nomask_seqlens
-                attn_metadata.prefill.pcp_metadata.pcp_prefill_mask = torch.triu(
-                    torch.ones(10, 10, dtype=torch.float16), 1)
 
                 output = self.impl._forward_prefill(q_nope, q_pe, k_nope, k_pe,
                                                     value, kv_c_and_k_pe_cache,

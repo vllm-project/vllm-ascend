@@ -18,9 +18,6 @@
 import types
 
 import torch
-import torch_npu
-
-_MOE_LOAD_ASYNC_STREAM = None
 
 
 def get_expert_map(self, layer_id):
@@ -69,7 +66,7 @@ def model_register(model, model_config):
     model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)
     model.clear_all_moe_loads = types.MethodType(clear_all_moe_loads, model)
 
-    config = model_config.hf_config
+    config = model_config.hf_text_config
 
     if config.model_type == "qwen3_moe":
         model.num_moe_layers = config.num_hidden_layers
@@ -78,12 +75,3 @@ def model_register(model, model_config):
         model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
     else:
         raise NotImplementedError("EPLB is not supported.")
-
-
-def moe_load_async_stream() -> torch_npu.npu.Stream:
-    global _MOE_LOAD_ASYNC_STREAM
-    if _MOE_LOAD_ASYNC_STREAM is None:
-        # when this function is called before any stream is set,
-        # we return the default stream.
-        _MOE_LOAD_ASYNC_STREAM = torch_npu.npu.Stream()
-    return _MOE_LOAD_ASYNC_STREAM
