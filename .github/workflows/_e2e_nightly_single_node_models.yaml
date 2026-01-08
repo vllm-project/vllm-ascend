@@ -104,8 +104,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
-        if: ${{ inputs.runner == 'linux-aarch64-a2-4' && contains(inputs.model_list, 'Qwen3-Next-80B-A3B-Instruct') }}
+      - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
           BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"

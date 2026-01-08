@@ -148,10 +148,20 @@ run_tests_with_log() {
     fi
 }
 
+install_triton_ascend() {
+    echo "====> Installing triton_ascend"
+    BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
+    BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+    wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+    export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+}
+
 main() {
     check_npu_info
     check_and_config
     show_vllm_info
+    install_triton_ascend
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi
