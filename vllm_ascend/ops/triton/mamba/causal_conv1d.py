@@ -13,8 +13,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-
-PAD_SLOT_ID = -1
+from vllm.attention.backends.utils import PAD_SLOT_ID
 
 
 def causal_conv1d_ref(

@@ -128,10 +128,17 @@ class TestCaMem(PytestBase):
             2000: data2,
         }
 
-        # mock is_pin_memory_available, return False as some machine only has cpu
-        with patch(
-                "vllm_ascend.device_allocator.camem.NPUPlatform.is_pin_memory_available",
-                return_value=False):
+        # Mock torch.empty to force pin_memory=False
+        original_torch_empty = torch.empty
+
+        def mock_torch_empty(*args, **kwargs):
+            # If pin_memory was explicitly set to True, change it to False
+            if 'pin_memory' in kwargs and kwargs['pin_memory'] is True:
+                kwargs['pin_memory'] = False
+            return original_torch_empty(*args, **kwargs)
+
+        with patch("vllm_ascend.device_allocator.camem.torch.empty",
+                   side_effect=mock_torch_empty):
             allocator.sleep(offload_tags="tag1")
 
         # only offload tag1, other tag2 call unmap_and_release

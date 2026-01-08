@@ -25,8 +25,6 @@ import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
 
-from vllm_ascend.platform import NPUPlatform
-
 
 def find_loaded_library(lib_name) -> Optional[str]:
     """
@@ -196,11 +194,10 @@ class CaMemAllocator:
             handle = data.handle
             if data.tag in offload_tags:
                 size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device='cpu',
-                    pin_memory=NPUPlatform.is_pin_memory_available())
+                cpu_backup_tensor = torch.empty(size_in_bytes,
+                                                dtype=torch.uint8,
+                                                device='cpu',
+                                                pin_memory=True)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 ACL_MEMCPY_DEVICE_TO_HOST = 2
                 dest_max = cpu_ptr + size_in_bytes * 2

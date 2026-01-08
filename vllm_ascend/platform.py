@@ -15,9 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import gc
 import os
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
 import torch
@@ -26,18 +25,16 @@ from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
-# todo: please remove it when support controls garbage collection during CUDA graph capture.
-os.environ["VLLM_ENABLE_CUDAGRAPH_GC"] = "1"
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.utils import refresh_block_size
 
 # isort: off
 from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-    enable_sp, get_ascend_device_type, is_vl_model, update_aclgraph_sizes,
-    update_cudagraph_capture_sizes, update_default_aclgraph_sizes,
-    check_kv_extra_config)
+    ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD,
+    COMPILATION_PASS_KEY, AscendDeviceType, enable_sp, get_ascend_device_type,
+    is_vl_model, update_aclgraph_sizes, update_cudagraph_capture_sizes,
+    update_default_aclgraph_sizes, check_kv_extra_config)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -47,7 +44,37 @@ else:
     VllmConfig = None
     FlexibleArgumentParser = None
 
-CUSTOM_OP_REGISTERED = False
+_CUSTOM_OP_REGISTERED = False
+
+
+def config_deprecated_logging():
+    """Configure deprecated logging format, when used deprecated codes
+    in vllm-ascend.
+    """
+    import logging
+    import warnings
+
+    # Customize warning format to be one line
+    def one_line_formatwarning(message, category, filename, lineno, line=None):
+        return f"{filename}:{lineno}: {category.__name__}: {message}"
+
+    warnings.formatwarning = one_line_formatwarning
+
+    logging.captureWarnings(True)
+    warnings.simplefilter("once", DeprecationWarning)
+
+    vllm_logger = logging.getLogger("vllm")
+    warnings_logger = logging.getLogger("py.warnings")
+
+    # Propagate vllm logger handlers to warnings logger, to keep the same
+    # format with vllm
+    if vllm_logger.handlers:
+        warnings_logger.handlers = []
+
+        for handler in vllm_logger.handlers:
+            warnings_logger.addHandler(handler)
+
+    warnings_logger.propagate = False
 
 
 class NPUPlatform(Platform):
@@ -74,7 +101,7 @@ class NPUPlatform(Platform):
         It is a parameter of inductor_config used to register custom passes.
         Currently, we only use Inductor's 'pattern matcher' functionality, so we define our own pass_key.
         """
-        return "graph_fusion_manager"
+        return COMPILATION_PASS_KEY
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
@@ -115,6 +142,8 @@ class NPUPlatform(Platform):
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
+        config_deprecated_logging()
+
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
         return None
@@ -130,24 +159,6 @@ class NPUPlatform(Platform):
     @classmethod
     def set_device(cls, device: torch.device):
         torch.npu.set_device(device)
-
-    @classmethod
-    def empty_cache(cls):
-        torch.npu.empty_cache()
-
-    @classmethod
-    def synchronize(cls):
-        torch.npu.synchronize()
-
-    @classmethod
-    def mem_get_info(cls) -> Tuple[int, int]:
-        return torch.npu.mem_get_info()
-
-    @classmethod
-    def clear_npu_memory(cls):
-        gc.collect()
-        torch.npu.empty_cache()
-        torch.npu.reset_peak_memory_stats()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -174,7 +185,8 @@ class NPUPlatform(Platform):
                          ) if not isinstance(ascend_compilation_config, dict)
                     else ascend_compilation_config)
 
-        elif model_config and hasattr(model_config.hf_config, "index_topk"):
+        elif model_config and hasattr(model_config.hf_text_config,
+                                      "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
         if model_config is None:
@@ -329,7 +341,7 @@ class NPUPlatform(Platform):
             raise AssertionError(
                 f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
                 f"and block_size({cache_config.block_size}) "
-                "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
+                "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
         if is_vl_model(vllm_config):
@@ -350,8 +362,8 @@ class NPUPlatform(Platform):
         # from vllm_ascend.utils import enable_custom_op
         # enable_custom_op()
         # set custom ops path
-        global CUSTOM_OP_REGISTERED
-        if CUSTOM_OP_REGISTERED:
+        global _CUSTOM_OP_REGISTERED
+        if _CUSTOM_OP_REGISTERED:
             return
         CUR_DIR = os.path.dirname(os.path.realpath(__file__))
         CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors",
@@ -364,7 +376,7 @@ class NPUPlatform(Platform):
                     "ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
             else:
                 os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
-        CUSTOM_OP_REGISTERED = True
+        _CUSTOM_OP_REGISTERED = True
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config):

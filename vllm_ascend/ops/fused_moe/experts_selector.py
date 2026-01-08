@@ -17,7 +17,6 @@
 from typing import Callable, Optional
 
 import torch
-import torch_npu
 
 from vllm_ascend.utils import get_weight_prefetch_method
 
@@ -64,6 +63,7 @@ def select_experts(hidden_states: torch.Tensor,
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
         top_k=top_k,
+        renormalize=renormalize,
         topk_group=topk_group,
         num_expert_group=num_expert_group,
         scoring_func=scoring_func,
@@ -102,10 +102,13 @@ def select_experts(hidden_states: torch.Tensor,
 def check_npu_moe_gating_top_k(
         hidden_states: torch.Tensor,
         top_k: int,
+        renormalize: bool,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
         scoring_func: str = "softmax",
         custom_routing_function: Optional[Callable] = None):
+    if scoring_func == "sigmoid" and not renormalize:  #sigmoid + renorm=0 is not supported in current branch
+        return False
     if custom_routing_function is not None:
         return False
     if scoring_func != "softmax" and scoring_func != "sigmoid":
@@ -209,26 +212,25 @@ def _select_experts_with_fusion_ops(
 
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
+    renorm = int(renormalize)
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and \
         e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(
             router_logits.dtype)
-    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+    topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
         router_logits,
         k=top_k,
-        bias=e_score_correction_bias,
         k_group=topk_group,
         group_count=num_expert_group,
-        group_select_mode=1,  # 0: the maximum in the group; 1: topk2.sum(fix)
-        renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+        group_select_mode=1,
+        renorm=renorm,
         norm_type=norm_type,  # 0: softmax; 1: sigmoid
-        # out_flag=False, # todo new api; should the third output be output
-        # y2_flag=False, # old api; should the third output be output
+        out_flag=False,
         routed_scaling_factor=routed_scaling_factor,
-        eps=float(1e-20))
-    if scoring_func == "softmax":
-        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        eps=float(1e-20),
+        bias_opt=e_score_correction_bias,
+    )
 
     return topk_weights, topk_ids
 

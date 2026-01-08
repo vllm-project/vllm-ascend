@@ -51,6 +51,12 @@ class AscendConfig:
             "weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(
             weight_prefetch_config)
+        self.layer_sharding = additional_config.get("layer_sharding", None)
+        logger.info_once(
+            f"Linear layer sharding enabled with config: {self.layer_sharding}. "
+            "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
+            "using it without these features may result in significant performance degradation."
+        )
 
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
@@ -96,7 +102,7 @@ class AscendConfig:
                 try:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_config.num_key_value_heads
+                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
                     self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
@@ -111,7 +117,7 @@ class AscendConfig:
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
-        self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
             self, vllm_config)
         self.enable_npugraph_ex = additional_config.get(
             "enable_npugraph_ex", False)
@@ -126,7 +132,7 @@ class AscendConfig:
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
-            use_sparse = hasattr(vllm_config.model_config.hf_config,
+            use_sparse = hasattr(vllm_config.model_config.hf_text_config,
                                  "index_topk")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError(

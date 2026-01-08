@@ -46,7 +46,7 @@ def test_qwen3_w8a8_quant():
         outputs_0_lst=vllm_target_outputs,
         outputs_1_lst=vllm_quant_w8a8_outputs,
         name_0="vllm_target_outputs",
-        name_1="vllm_w8a16_outputs",
+        name_1="vllm_quant_w8a8_outputs",
     )
 
 
@@ -75,5 +75,5 @@ def test_qwen3_dense_w8a16():
         outputs_0_lst=vllm_target_outputs,
         outputs_1_lst=vllm_quant_w8a16_outputs,
         name_0="vllm_target_outputs",
-        name_1="vllm_w8a16_outputs",
+        name_1="vllm_quant_w8a16_outputs",
     )
