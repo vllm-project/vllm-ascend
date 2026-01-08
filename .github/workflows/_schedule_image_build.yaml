@@ -144,7 +144,7 @@ jobs:
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
-            type=ref,event=workflow_dispatch,suffix=${{ env.SUFFIX }}
+            type=raw,event=workflow_dispatch,suffix=${{ env.SUFFIX }}
           flavor:
             latest=false
 
