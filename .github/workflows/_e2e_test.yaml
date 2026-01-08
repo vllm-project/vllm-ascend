@@ -239,9 +239,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_single_request_aclgraph.py
 
   e2e-4-cards:
-    name: multicard-4
-    needs: [e2e, e2e-2-cards]
-    if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
+    needs: e2e
     runs-on: linux-aarch64-a3-4
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
