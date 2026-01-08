@@ -65,6 +65,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              LogprobsLists, LogprobsTensors, ModelRunnerOutput,
                              SamplerOutput,
                              make_empty_encoder_model_runner_output)
+from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -77,7 +78,6 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 # yapf conflicts with isort for this block
@@ -99,7 +99,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
@@ -230,7 +229,6 @@ class NPUModelRunner(GPUModelRunner):
             self.positions = self._make_buffer(max_buffer_num_tokens,
                                                dtype=torch.int64)
         self.sampler = AscendSampler()
-        self.attn_mask = None
         self.attn_state = None
 
         # Ascend-specific configurations
@@ -264,18 +262,8 @@ class NPUModelRunner(GPUModelRunner):
             use_sparse=self.use_sparse,
             use_mm_prefix=self.model_config is not None
             and self.model_config.is_mm_prefix_lm)
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self._set_up_drafter()
-
-        # sliding window attn mask
-        self.swa_mask = None
-        is_swa = hasattr(self.vllm_config.model_config.hf_text_config,
-                         "sliding_window")
-        if self.model_config is not None and is_swa:
-            self.swa_mask = self.attn_mask_builder.get_swa_mask(
-                self.dtype,
-                self.vllm_config.model_config.hf_text_config.sliding_window)
 
         # kv role
         self.is_kv_producer = False
@@ -370,7 +358,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
-        self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
                                      SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
@@ -379,8 +366,6 @@ class NPUModelRunner(GPUModelRunner):
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.spec_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-            )
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 if self.speculative_config.method == "eagle3":
@@ -494,22 +479,6 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
-    def _make_attention_mask(self, attn_state) -> torch.Tensor:
-        # pcp situation.
-        if self.attn_mask_builder is None:
-            raise ValueError("Attn mask builder is None")
-        # Pooling situation.
-        if self.model_config.runner_type == "pooling":
-            return self.attn_mask_builder.get_attn_mask(2048, torch.bool)
-
-        if self.vllm_config.model_config.use_mla:
-            if self.pcp_size > 1:
-                return self.attn_mask_builder.get_pcp_mla_mask(self.dtype)
-            # mla prefill
-            if attn_state != AscendAttentionState.DecodeOnly:
-                return self.attn_mask_builder.get_mla_mask(self.dtype)
-        return self.attn_mask_builder.get_splitfuse_attn_mask()
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -551,7 +520,6 @@ class NPUModelRunner(GPUModelRunner):
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
-        self.attn_mask = self._make_attention_mask(attn_state)
 
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
@@ -941,7 +909,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_size * self.dcp_size > 1:
                 self.long_seq_metadata = self.pcp_manager.generate_pcp_metadata(
                     total_num_scheduled_tokens, self.query_lens,
-                    self.attn_mask, self.input_batch)
+                    self.input_batch)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
                     slot_mapping = self.pcp_manager.get_padded_slot_mapping(
@@ -997,9 +965,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_computed_tokens_cpu=self.input_batch.
                 num_computed_tokens_cpu_tensor[:num_reqs],
                 positions=self.positions.gpu,
-                attn_mask=self.attn_mask,
-                spec_attn_mask=self.spec_attn_mask,
-                swa_mask=self.swa_mask,
                 attn_state=self.attn_state,
                 max_query_len=max_num_scheduled_tokens,
                 decode_token_per_req=self.decode_token_per_req,
@@ -1009,7 +974,7 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
                 # For pcp + spec decode, we flatten block_table
-                # to avoid irregular spec_attn_mask shape, e.g.,
+                # to avoid irregular attn_mask shape, e.g.,
                 # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
                 # ori block_table: # [d0, d1, p0, p1, p2]
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
@@ -1091,6 +1056,33 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids, inputs_embeds, intermediate_tensors,
                 max_num_scheduled_tokens)
 
+    # all-gather one hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states(hidden_states):
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            hidden_states = hidden_states[:-pad_size, :]
+
+        return hidden_states
+
+    # all-gather a list of hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states_list(hidden_states_list):
+        return [
+            NPUModelRunner._all_gather_hidden_states(hidden_states)
+            for hidden_states in hidden_states_list
+        ]
+
+    # all-gather hidden-states in last layer with aux-hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states_and_aux(hidden_states):
+        if isinstance(hidden_states, tuple):
+            return (NPUModelRunner._all_gather_hidden_states(hidden_states[0]),
+                    NPUModelRunner._all_gather_hidden_states_list(
+                        hidden_states[1]))
+        return NPUModelRunner._all_gather_hidden_states(hidden_states)
+
     def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
@@ -1138,10 +1130,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            pad_size = get_forward_context().pad_size
-            if pad_size > 0:
-                hidden_states = hidden_states[:-pad_size, :]
+            hidden_states = self._all_gather_hidden_states_and_aux(
+                hidden_states)
         return hidden_states if self.pcp_size == 1 else self.pcp_manager.get_restore_hidden_states(
             hidden_states)
 
@@ -1918,7 +1908,6 @@ class NPUModelRunner(GPUModelRunner):
             self.query_start_loc.cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
-            self.attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -1930,8 +1919,7 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
                 long_seq_metadata = None if self.pcp_size * self.dcp_size == 1 else self.pcp_manager.generate_pcp_metadata(
-                    num_tokens, self.query_lens, self.attn_mask,
-                    self.input_batch)
+                    num_tokens, self.query_lens, self.input_batch)
                 if long_seq_metadata is not None:
                     pcp_world_size = get_pcp_group().world_size
                     dcp_world_size = get_dcp_group().world_size
@@ -1939,14 +1927,7 @@ class NPUModelRunner(GPUModelRunner):
                         [0] * dcp_world_size for _ in range(pcp_world_size)
                     ] for _ in range(num_tokens)]
                     long_seq_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
-                # QUESTION: Why do we separately set query_start_loc for spec in the first place?
-                # While in _prepare_inputs we don't?
-                if self.speculative_config:
-                    self.query_start_loc.cpu[:num_reqs + 1] = torch.tensor(
-                        [0] + self.actual_seq_lengths_q[:num_reqs],
-                        device="cpu",
-                        dtype=torch.int32)
-                    self.query_start_loc.copy_to_gpu()
+
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
                     query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
@@ -1961,9 +1942,6 @@ class NPUModelRunner(GPUModelRunner):
                     slot_mapping=slot_mapping.gpu,
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     positions=self.positions.gpu,
-                    attn_mask=self.attn_mask,
-                    spec_attn_mask=self.spec_attn_mask,
-                    swa_mask=self.swa_mask,
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,

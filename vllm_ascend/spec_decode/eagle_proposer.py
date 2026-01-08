@@ -21,6 +21,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 from vllm.v1.spec_decode.eagle import EagleProposer as VllmEagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -39,8 +40,6 @@ from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import shared_expert_dp_enabled
-
-PADDING_SLOT_ID = -1
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -73,7 +72,8 @@ class EagleProposer(VllmEagleProposer):
 
         self.pcp_size = self.runner.pcp_size
         self.decode_threshold = 1 + self.num_speculative_tokens
-
+        self.query_start_loc = self.runner._make_buffer(
+            self.runner.max_num_reqs + 1, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0],
                                        device="cpu",
                                        dtype=torch.int32)
@@ -200,10 +200,14 @@ class EagleProposer(VllmEagleProposer):
             num_computed_tokens_cpu = (
                 self.runner.input_batch.
                 num_computed_tokens_cpu_tensor[:num_reqs])
+            self.query_start_loc.cpu[:num_reqs + 1] = torch.tensor(
+                [0] + self.runner.actual_seq_lengths_q[:num_reqs],
+                device="cpu",
+                dtype=torch.int32)
+            self.query_start_loc.copy_to_gpu()
             common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.runner.query_start_loc.gpu[:num_reqs + 1],
-                query_start_loc_cpu=self.runner.query_start_loc.cpu[:num_reqs +
-                                                                    1],
+                query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs + 1],
                 seq_lens_cpu=self.runner.seq_lens.cpu,
                 seq_lens=self.runner.seq_lens.gpu[:num_reqs],
                 num_reqs=num_reqs,
@@ -217,13 +221,10 @@ class EagleProposer(VllmEagleProposer):
                 slot_mapping=self.runner.input_batch.block_table[0].
                 slot_mapping.gpu,
                 positions=self.runner.positions.gpu,
-                attn_mask=self.runner.attn_mask,
-                spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
             )
-            dummy_compute_logits(self.hidden_states)
 
             builder = self.runner.attn_groups[0][0].get_metadata_builder()
             attn_metadata_eagle = builder.build_for_graph_capture(
@@ -231,6 +232,10 @@ class EagleProposer(VllmEagleProposer):
             attn_metadata = {}
             for layer_name in self.attn_layer_name:
                 attn_metadata[layer_name] = attn_metadata_eagle
+
+        model_input_ids = self.input_ids[:num_tokens]
+        model_positions = self.positions[:num_tokens]
+        model_previous_hidden_states = self.hidden_states[:num_tokens]
         for i in range(self.num_speculative_tokens):
             if i > 0 and in_graph_capturing and aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
@@ -243,12 +248,17 @@ class EagleProposer(VllmEagleProposer):
                     batch_descriptor=batch_descriptor,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     is_draft_model=True):
-                forward_context = get_forward_context()
+
+                if self.enable_shared_expert_dp:
+                    model_previous_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                        model_previous_hidden_states)
+
                 self.model(
-                    input_ids=self.input_ids[:num_tokens],
-                    positions=self.positions[:num_tokens],
-                    hidden_states=self.hidden_states[:num_tokens],
+                    input_ids=model_input_ids,
+                    positions=model_positions,
+                    hidden_states=model_previous_hidden_states,
                 )
+                forward_context = get_forward_context()
                 if (forward_context.cudagraph_runtime_mode
                         == CUDAGraphMode.FULL
                         and not forward_context.capturing):
@@ -258,6 +268,12 @@ class EagleProposer(VllmEagleProposer):
                         num_tokens,
                         self.vllm_config,
                     )
+
+                if self.enable_shared_expert_dp:
+                    model_previous_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        model_previous_hidden_states, True)
+
+                dummy_compute_logits(self.hidden_states)
 
     def _propose(
         self,
@@ -336,10 +352,24 @@ class EagleProposer(VllmEagleProposer):
                 batch_descriptor=batch_descriptor,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
                 is_draft_model=True):
+
+            # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all speculative tokens' proposings.
+            # `model_input_ids`, `model_positions` and `model_hidden_states` are used to represent the inputs of speculative model.
+            model_input_ids = self.input_ids[:num_input_tokens]
+            model_positions = self.positions[:num_input_tokens]
+            model_hidden_states = self.hidden_states[:num_input_tokens]
+
+            if self.enable_shared_expert_dp:
+                # split hidden states along sequence dimension
+                # positions should not be split?
+                model_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                    model_hidden_states)
+                # in acl-graph, `model_hidden_states` should be copy back to `self.hidden_states`?
+
             last_hidden_states, hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                hidden_states=self.hidden_states[:num_input_tokens],
+                input_ids=model_input_ids,
+                positions=model_positions,
+                hidden_states=model_hidden_states,
             )
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -350,6 +380,14 @@ class EagleProposer(VllmEagleProposer):
                     num_input_tokens,
                     self.vllm_config,
                 )
+
+            if self.enable_shared_expert_dp:
+                # merge hidden states along sequence dimension
+                last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    last_hidden_states.contiguous(), True)
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    hidden_states.contiguous(), True)
+
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
@@ -468,10 +506,23 @@ class EagleProposer(VllmEagleProposer):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     is_draft_model=True):
 
+                # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all speculative tokens' proposings.
+                # `model_input_ids`, `model_positions` and `model_hidden_states` are used to represent the inputs of speculative model.
+                model_input_ids = self.input_ids[:input_batch_size]
+                model_positions = self.positions[:input_batch_size]
+                model_hidden_states = self.hidden_states[:input_batch_size]
+
+                if self.enable_shared_expert_dp:
+                    # split hidden states along sequence dimension
+                    # positions should not be split？
+                    model_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                        model_hidden_states)
+                    # in acl-graph, `model_hidden_states` should be copy back to `self.hidden_states`?
+
                 last_hidden_states, hidden_states = self.model(
-                    input_ids=self.input_ids[:input_batch_size],
-                    positions=self.positions[:input_batch_size],
-                    hidden_states=self.hidden_states[:input_batch_size],
+                    input_ids=model_input_ids,
+                    positions=model_positions,
+                    hidden_states=model_hidden_states,
                 )
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -481,6 +532,14 @@ class EagleProposer(VllmEagleProposer):
                         input_batch_size,
                         self.vllm_config,
                     )
+
+                if self.enable_shared_expert_dp:
+                    # merge hidden states along sequence dimension
+                    last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        last_hidden_states.contiguous(), True)
+                    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        hidden_states.contiguous(), True)
+
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
 
@@ -667,8 +726,6 @@ class EagleProposer(VllmEagleProposer):
             slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
-            attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0)
@@ -757,8 +814,6 @@ class EagleProposer(VllmEagleProposer):
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             positions=common_attn_metadata.positions,
-            attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.
