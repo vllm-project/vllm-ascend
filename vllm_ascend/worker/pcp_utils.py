@@ -50,13 +50,12 @@ class PCPManager:
         pcp_rank: int,
         dcp_world_size: int,
         dcp_rank: int,
-        max_buffer_num_tokens: int,
-        max_num_reqs: int,
         device: torch.device,
         vllm_config: VllmConfig,
         use_async_scheduling: bool,
         pin_memory: bool = False,
         use_sparse: bool = False,
+        arange_np: torch.Tensor | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_world_rank = pcp_rank
@@ -67,8 +66,20 @@ class PCPManager:
         self.vllm_config = vllm_config
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
+        self.max_model_len = self.vllm_config.model_config.max_model_len
         self.device = device
         self.use_async_scheduling = use_async_scheduling
+        
+        max_buffer_num_tokens = self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs
+
+        if arange_np is None:
+            self.arange_np = np.arange(
+                max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens),
+                dtype=np.int64,
+            )
+        else:
+            self.arange_np = arange_np
+
         self.pcp_allgather_restore_idx = CpuGpuBuffer(
             max_buffer_num_tokens,
             dtype=torch.int64,
@@ -83,7 +94,7 @@ class PCPManager:
         )
         self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.total_num_sampled_tokens_pcp = 0
-        self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs,), device="cpu", dtype=torch.int64)
+        self.num_pcp_pads_cpu_tensor = torch.zeros((self.max_num_reqs,), device="cpu", dtype=torch.int64)
         self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
         self.pcp_unpad_mask_cpu_tensor = torch.ones(
             (max_buffer_num_tokens,),
@@ -131,7 +142,6 @@ class PCPManager:
     def _get_cumsum_and_arange(
         self,
         num_scheduled_tokens: np.ndarray,
-        arange_np: np.ndarray,
         cumsum_dtype: np.dtype | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Get the cumulative sum and batched arange of the given array.
@@ -145,7 +155,7 @@ class PCPManager:
         # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
         cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens, num_scheduled_tokens)
         # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = arange_np[:total_num_tokens] - cumsums_offsets
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
 
         return cu_num_tokens, arange
 
@@ -167,7 +177,6 @@ class PCPManager:
     def update_tokens_for_pcp(
         self,
         num_scheduled_tokens: np.ndarray,
-        arange_np: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Update token counts and positions for Prefill Context Parallelism (PCP).
@@ -194,8 +203,6 @@ class PCPManager:
         Args:
             num_scheduled_tokens: 1D numpy array of length num_reqs containing
                                   the number of new tokens scheduled per request.
-            arange_np: 1D numpy array of length max_buffer_num_tokens used for
-                       efficient batched arange operations.
 
         Returns:
             Tuple (pcp_tokens, pcp_positions):
@@ -236,7 +243,7 @@ class PCPManager:
 
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
-        cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+        cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
         self.pcp_padded_tokens_length = pcp_padded_arange.shape[0]
         # Build the mask that marks which positions in the padded allgather buffer
         # correspond to real (unpadded) tokens.
@@ -258,8 +265,8 @@ class PCPManager:
         # Build arange-style helpers for pcp tokens and chunk sizes:
         # - pcp_arange gives indices repeated for each token in pcp_tokens
         # - pcp_chunk_arange gives indices repeated for each position inside chunks
-        _, pcp_arange = self._get_cumsum_and_arange(pcp_tokens, arange_np)
-        _, pcp_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes, arange_np)
+        _, pcp_arange = self._get_cumsum_and_arange(pcp_tokens)
+        _, pcp_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes)
 
         # Mask that marks whether a position belongs to the head chunk (True)
         # or the tail chunk (False). For decode requests, tail chunk won't exist
@@ -298,7 +305,7 @@ class PCPManager:
         # same without prefill context parallel.
         if self.num_decode_reqs > 0:
             positions[: self.num_decode_tokens] = self._get_cumsum_and_arange(
-                num_scheduled_tokens[: self.num_decode_reqs], arange_np
+                num_scheduled_tokens[: self.num_decode_reqs]
             )[1]
 
         if self.pcp_use_hybrid_attn:
@@ -329,7 +336,7 @@ class PCPManager:
                 num_prefill_tokens_cu_ranks = num_prefill_tokens_start_loc[:, self.pcp_world_rank]
                 # [0,1,2] [0,1] | [0,1,0,1] [0,1,0] [0,1,0] [0,0]
                 # -> [0,1,2] [3,4] | [0,1,0,1] [2,3,2] [4,5,3] [6,4]
-                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
                 positions_linear[self.num_decode_reqs :] = positions_linear[self.num_decode_reqs :] + np.repeat(
                     num_prefill_tokens_cu_ranks, num_prefill_scheduled_tokens_linear
                 )
@@ -349,11 +356,11 @@ class PCPManager:
                 num_prefill_tokens_allranks = num_prefill_tokens_allranks[..., 0]
                 # [0,1,2,0,1] [0,1,0,1,0,1,0,|0,1,0,1,0,0]
                 _, prefill_arange_allranks = self._get_cumsum_and_arange(
-                    num_prefill_tokens_allranks.flatten(), arange_np
+                    num_prefill_tokens_allranks.flatten()
                 )
                 # [0,1] [0,1,2,3,0,1,2,3]
                 _, prefill_rank_offset = self._get_cumsum_and_arange(
-                    np.ones(self.num_reqs - self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size, arange_np
+                    np.ones(self.num_reqs - self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size
                 )
                 # [0,0,0,3,3] [0,M,2M,3M,0,M,2M,3M] -> [0,0,M,M,2M,2M,3M,0,0,M,M,2M,3M] + D
                 prefill_all_offset = (
@@ -372,7 +379,7 @@ class PCPManager:
                 # [0,1,2,3,4]  [0,1,M,M+1,2M,2M+1,3M,0,1,M,M+1,2M,3M]
                 enter_fa_prefill_restore_idx = np.add(prefill_all_offset, prefill_arange_allranks)
             else:
-                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens)
 
             # decode reorder idx
             enter_fa_decode_restore_idx = None
@@ -381,7 +388,7 @@ class PCPManager:
                 num_decode_pcp_size = np.ones(self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size
                 decode_reqs_offset = np.repeat(np.arange(self.num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
                 decode_ranks_offset = (
-                    self._get_cumsum_and_arange(num_decode_pcp_size, arange_np)[1] * max_scheduled_tokens
+                    self._get_cumsum_and_arange(num_decode_pcp_size)[1] * max_scheduled_tokens
                 )
                 enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
 
@@ -522,7 +529,6 @@ class PCPManager:
         num_scheduled_tokens: dict[str, int],
         with_prefill: bool = True,
         input_batch=None,
-        arange_np=None,
         req_indices=None,
         positions_np=None,
         cu_num_tokens=None,
@@ -540,7 +546,7 @@ class PCPManager:
         for i, req_id in enumerate(input_batch.req_ids):
             num_scheduled_tokens_pcp_full[i] = num_scheduled_tokens[req_id]
         self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens_pcp_full)
-        req_indices_pcp_full = np.repeat(arange_np[: self.num_reqs], num_scheduled_tokens_pcp_full)
+        req_indices_pcp_full = np.repeat(self.arange_np[: self.num_reqs], num_scheduled_tokens_pcp_full)
         cu_num_tokens_pcp_full = np.cumsum(num_scheduled_tokens_pcp_full)
         self.query_start_loc_pcp_full.np[0] = 0
         self.query_start_loc_pcp_full.np[1 : self.num_reqs + 1] = cu_num_tokens_pcp_full
@@ -548,7 +554,7 @@ class PCPManager:
         cumsums_offsets_pcp_full = np.repeat(
             cu_num_tokens_pcp_full - num_scheduled_tokens_pcp_full, num_scheduled_tokens_pcp_full
         )
-        arange_pcp_full = arange_np[:total_num_scheduled_tokens_pcp_full] - cumsums_offsets_pcp_full
+        arange_pcp_full = self.arange_np[:total_num_scheduled_tokens_pcp_full] - cumsums_offsets_pcp_full
         positions_pcp_full_np = self.positions_pcp_full_np[:total_num_scheduled_tokens_pcp_full]
         np.add(input_batch.num_computed_tokens_cpu[req_indices_pcp_full], arange_pcp_full, out=positions_pcp_full_np)
         token_indices_pcp_full = positions_pcp_full_np + req_indices_pcp_full * input_batch.token_ids_cpu.shape[1]
