@@ -165,10 +165,10 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                             torch.float32
                         )
                     )
-                    cp_kv_recover_idx_for_chunk = torch.argsort(kv_inverse_idx_for_chunk)
+                    pcp_allgather_restore_idx_prefill = torch.argsort(kv_inverse_idx_for_chunk)
                 else:
                     kv_inverse_idx_for_chunk = None
-                    cp_kv_recover_idx_for_chunk = None
+                    pcp_allgather_restore_idx_prefill = None
 
                 batch_chunk_seq_mask = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank] == 0
                 batch_chunk_seq_mask = torch.repeat_interleave(
@@ -183,7 +183,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     chunked_req_mask=chunked_req_mask,
                     starts=local_chunk_starts,
                     local_context_lens_allranks=local_context_lens_allranks,
-                    cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
+                    pcp_allgather_restore_idx_prefill=pcp_allgather_restore_idx_prefill,
                     kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk,
                     batch_chunk_seq_mask=batch_chunk_seq_mask,
                     chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices,
@@ -656,7 +656,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         if self.pcp_size > 1:
             prefill_query = get_pcp_group().all_gather(prefill_query, 0)
             prefill_query = torch.index_select(
-                prefill_query, 0, attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk
+                prefill_query, 0, attn_metadata.prefill.chunked_context.pcp_allgather_restore_idx_prefill
             )
         if self.dcp_size > 1:
             prefill_query = get_dcp_group().all_gather(prefill_query, 1)

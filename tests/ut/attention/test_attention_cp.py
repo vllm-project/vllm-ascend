@@ -133,7 +133,7 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata = MagicMock()
         attn_metadata.prefill = MagicMock()
         attn_metadata.prefill.chunked_context = MagicMock()
-        attn_metadata.prefill.chunked_context.cp_kv_recover_idx_for_chunk = torch.tensor(
+        attn_metadata.prefill.chunked_context.pcp_allgather_restore_idx_prefill = torch.tensor(
             [1, 2, 3, 0])
         output = self.impl._prefill_query_all_gather(attn_metadata, query)
 
