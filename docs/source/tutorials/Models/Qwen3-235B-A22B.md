@@ -250,11 +250,11 @@ INFO:     Application startup complete.
 
 ### Multi-node Deployment with Ray
 
-- refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](./ray.md).
+- refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../Features/ray.md).
 
 ### Prefill-Decode Disaggregation
 
-- refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](./pd_disaggregation_mooncake_multi_node.md)
+- refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../Features/pd_disaggregation_mooncake_multi_node.md)
 
 ## Functional Verification
 
