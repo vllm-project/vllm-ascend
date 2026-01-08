@@ -53,10 +53,9 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
                 expected_out_residual = 2 * residual
                 mock_rmsnorm.assert_called_once()
                 assert torch.allclose(out_x, expected_out_x, atol=1e-5)
-                assert torch.allclose(
-                    out_residual, 
-                    expected_out_residual, 
-                    atol=1e-5)
+                assert torch.allclose(out_residual,
+                                      expected_out_residual,
+                                      atol=1e-5)
         else:
             out_x = output
             expected_out_x = 2 * dummy_tensor
