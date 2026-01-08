@@ -47,6 +47,36 @@ else:
 _CUSTOM_OP_REGISTERED = False
 
 
+def config_deprecated_logging():
+    """Configure deprecated logging format, when used deprecated codes
+    in vllm-ascend.
+    """
+    import logging
+    import warnings
+
+    # Customize warning format to be one line
+    def one_line_formatwarning(message, category, filename, lineno, line=None):
+        return f"{filename}:{lineno}: {category.__name__}: {message}"
+
+    warnings.formatwarning = one_line_formatwarning
+
+    logging.captureWarnings(True)
+    warnings.simplefilter("once", DeprecationWarning)
+
+    vllm_logger = logging.getLogger("vllm")
+    warnings_logger = logging.getLogger("py.warnings")
+
+    # Propagate vllm logger handlers to warnings logger, to keep the same
+    # format with vllm
+    if vllm_logger.handlers:
+        warnings_logger.handlers = []
+
+        for handler in vllm_logger.handlers:
+            warnings_logger.addHandler(handler)
+
+    warnings_logger.propagate = False
+
+
 class NPUPlatform(Platform):
 
     _enum = PlatformEnum.OOT
@@ -111,6 +141,8 @@ class NPUPlatform(Platform):
             AscendCompressedTensorsConfig  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
+
+        config_deprecated_logging()
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
