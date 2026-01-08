@@ -1149,7 +1149,7 @@ class MooncakeLayerwiseConnectorWorker:
             session_id = f"{req_meta_update.remote_host}:{agent_meta.te_rpc_port}"
             ret = self.engine.batch_transfer_sync_write(
                 session_id, [self.kv_caches_base_addr[0]],
-                [agent_meta.kv_caches_base_addr[0]], 128)
+                [agent_meta.kv_caches_base_addr[0]], [128])
             if ret < 0:
                 logger.error(
                     f"Mooncake transfer failed to create link to device {session_id}"
