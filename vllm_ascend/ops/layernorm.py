@@ -22,6 +22,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.jit
@@ -72,7 +73,7 @@ def add_rmsnorm_bias(input: torch.Tensor, residual: torch.Tensor,
     norm_weight = norm_weight.contiguous()
     norm_bias = norm_bias.contiguous(
     ) if norm_bias is not None else torch.zeros_like(norm_weight).contiguous()
-    num_vectorcore = 40
+    num_vectorcore = get_vectorcore_num()
     batch_size = input.shape[0]
     hidden_size = input.shape[1]
     BLOCK_SIZE = triton.next_power_of_2(hidden_size)
