@@ -40,10 +40,8 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        FusedExpertsResult,
                                                        setup_moe_comm_method)
 from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
-from vllm_ascend.quantization.w4a8_dynamic import \
-    AscendW4A8DynamicFusedMoEMethod
-from vllm_ascend.quantization.w8a8_dynamic import \
-    AscendW8A8DynamicFusedMoEMethod
+from vllm_ascend.quantization.methods import (AscendW4A8DynamicFusedMoEMethod,
+                                              AscendW8A8DynamicFusedMoEMethod)
 from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                get_ascend_device_type, maybe_trans_nz,
                                npu_stream_switch, shared_expert_dp_enabled,

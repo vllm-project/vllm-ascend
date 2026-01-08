@@ -29,10 +29,13 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import maybe_trans_nz
 
+from .base import AscendLinearScheme, AscendMoEScheme
+from .registry import register_scheme
 
-class AscendW4A8DynamicLinearMethod:
-    """Linear method for Ascend W4A8_DYNAMIC
-    """
+
+@register_scheme("W4A8_DYNAMIC", "linear")
+class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
+    """Linear method for Ascend W4A8_DYNAMIC."""
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -72,23 +75,12 @@ class AscendW4A8DynamicLinearMethod:
 
         return params_dict
 
-    @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
-    def get_perchannel_param(output_size: int,
-                             params_dtype: torch.dtype) -> Dict[str, Any]:
-        return {}
-
     def get_pergroup_param(self,
                            input_size: int,
                            output_size: int,
                            params_dtype: torch.dtype,
                            layer_type: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Create per-group quantization parameters.
-        """
+        """Create per-group quantization parameters."""
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size,
                                                   1,
@@ -121,8 +113,7 @@ class AscendW4A8DynamicLinearMethod:
                              scale: torch.Tensor,
                              per_group_scale: torch.Tensor,
                              is_new_quant: bool = False):
-        """
-        Process the scale for second-level quantization.
+        """Process the scale for second-level quantization.
         
         Args:
             weight: weight tensor [k, n] (in new version, n is already compressed to n/2)
@@ -207,9 +198,9 @@ class AscendW4A8DynamicLinearMethod:
                 layer.weight.data.to(torch.int32))
 
 
-class AscendW4A8DynamicFusedMoEMethod:
-    """FusedMoe method for Ascend W4A8_DYNAMIC.
-    """
+@register_scheme("W4A8_DYNAMIC", "moe")
+class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
+    """FusedMoE method for Ascend W4A8_DYNAMIC."""
 
     def __init__(self):
         self.ep_group = get_ep_group()
@@ -340,7 +331,7 @@ class AscendW4A8DynamicFusedMoEMethod:
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor = None,
+        log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num: int = 0,
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,

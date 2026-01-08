@@ -7,11 +7,11 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.quant_config import AscendQuantConfig
+from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
-class TestAscendQuantConfig(TestBase):
+class TestAscendModelSlimConfig(TestBase):
 
     def setUp(self):
         self.sample_config = {
@@ -25,7 +25,7 @@ class TestAscendQuantConfig(TestBase):
             "shard1.weight": "FLOAT",
             "shard2.weight": "FLOAT",
         }
-        self.ascend_config = AscendQuantConfig(self.sample_config)
+        self.ascend_config = AscendModelSlimConfig(self.sample_config)
         self.ascend_config.packed_modules_mapping = None
 
     def test_init(self):
@@ -34,55 +34,55 @@ class TestAscendQuantConfig(TestBase):
 
     def test_repr(self):
         repr_str = repr(self.ascend_config)
-        self.assertTrue(repr_str.startswith("AscendQuantConfig:\n"))
+        self.assertTrue(repr_str.startswith("AscendModelSlimConfig:\n"))
 
     def test_get_name(self):
-        self.assertEqual(AscendQuantConfig.get_name(),
+        self.assertEqual(AscendModelSlimConfig.get_name(),
                          ASCEND_QUANTIZATION_METHOD)
 
     def test_get_supported_act_dtypes(self):
-        supported_dtypes = AscendQuantConfig.get_supported_act_dtypes()
+        supported_dtypes = AscendModelSlimConfig.get_supported_act_dtypes()
         self.assertEqual(len(supported_dtypes), 3)
 
     def test_get_min_capability(self):
         with self.assertRaises(NotImplementedError):
-            AscendQuantConfig.get_min_capability()
+            AscendModelSlimConfig.get_min_capability()
 
     def test_get_config_filenames(self):
-        filenames = AscendQuantConfig.get_config_filenames()
+        filenames = AscendModelSlimConfig.get_config_filenames()
         self.assertEqual(filenames, ["quant_model_description.json"])
 
     def test_from_config(self):
-        config = AscendQuantConfig.from_config(self.sample_config)
-        self.assertIsInstance(config, AscendQuantConfig)
+        config = AscendModelSlimConfig.from_config(self.sample_config)
+        self.assertIsInstance(config, AscendModelSlimConfig)
         self.assertEqual(config.quant_description, self.sample_config)
 
     @patch('torch.npu.is_available')
     def test_override_quantization_method(self, mock_is_available):
         # Test when NPU is available
         mock_is_available.return_value = True
-        result = AscendQuantConfig.override_quantization_method(None, None)
+        result = AscendModelSlimConfig.override_quantization_method(None, None)
         self.assertIsNone(result)
         hf_quant_cfg = {"quant_method": ""}
-        result = AscendQuantConfig.override_quantization_method(
+        result = AscendModelSlimConfig.override_quantization_method(
             hf_quant_cfg, None)
         self.assertEqual(result, "ascend")
 
         # Test when NPU is not available
         mock_is_available.return_value = False
-        result = AscendQuantConfig.override_quantization_method(None, None)
+        result = AscendModelSlimConfig.override_quantization_method(None, None)
         self.assertIsNone(result)
         hf_quant_cfg = {"quant_method": ""}
-        result = AscendQuantConfig.override_quantization_method(
+        result = AscendModelSlimConfig.override_quantization_method(
             hf_quant_cfg, None)
         self.assertIsNone(result)
 
     def test_get_quant_method_for_linear(self):
         mock_config = MagicMock()
-        mock_config.model_config.hf_text_config.model_type = None
+        mock_config.model_config.hf_config.model_type = None
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer
-        with patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
+        with patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
             patch.object(self.ascend_config, \
                           'is_layer_skipped_ascend',
                           return_value=True):
@@ -91,8 +91,8 @@ class TestAscendQuantConfig(TestBase):
 
         # Test quantized layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.modelslim_config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
 
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
@@ -103,9 +103,9 @@ class TestAscendQuantConfig(TestBase):
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
         mock_config = MagicMock()
-        mock_config.model_config.hf_text_config.model_type = None
-        with patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendKVCacheMethod', \
+        mock_config.model_config.hf_config.model_type = None
+        with patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.modelslim_config.AscendKVCacheMethod', \
                    return_value=MagicMock()) as mock_ascend_kvcache:
             # Test with fa_quant_type
             method = self.ascend_config.get_quant_method(
@@ -117,20 +117,20 @@ class TestAscendQuantConfig(TestBase):
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
         mock_config = MagicMock()
-        mock_config.model_config.hf_text_config.model_type = None
+        mock_config.model_config.hf_config.model_type = None
 
         # Test skipped layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=True), \
-            patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.modelslim_config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
 
         # Test quantized layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.modelslim_config.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
@@ -150,7 +150,7 @@ class TestAscendQuantConfig(TestBase):
 
         # Test inconsistent fused layer shards
         bad_config = {"shard1.weight": "FLOAT", "shard2.weight": "INT8"}
-        config = AscendQuantConfig(bad_config)
+        config = AscendModelSlimConfig(bad_config)
         with self.assertRaises(ValueError):
             config.is_layer_skipped_ascend("fused_layer", fused_mapping)
 

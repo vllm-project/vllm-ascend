@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w8a8_dynamic import \
+from vllm_ascend.quantization.methods.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
 
 
@@ -13,13 +13,13 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     intermediate_size = 128
 
     @patch("torch.distributed.get_rank")
-    @patch("vllm_ascend.quantization.w8a8_dynamic.get_mc2_group")
-    @patch("vllm_ascend.quantization.w8a8_dynamic.get_ascend_config")
-    @patch("vllm_ascend.quantization.w8a8_dynamic.get_ep_group")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ep_group")
     def setUp(self, mock_get_ep_group, mock_get_ascend_config,
               mock_get_mc2_group, mock_get_rank):
         with patch(
-                'vllm_ascend.quantization.w8a8_dynamic.get_current_vllm_config'
+                'vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config'
         ) as mock_get_current_vllm_config:
             mock_vllm_config = Mock()
             mock_vllm_config.quant_config = Mock(

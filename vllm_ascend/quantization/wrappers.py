@@ -15,24 +15,19 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional
+"""Wrapper classes that delegate to actual quantization scheme implementations."""
+
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
-from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizeMethodBase
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod, VocabParallelEmbedding)
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -40,285 +35,57 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
+from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, flashcomm2_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
-from .utils import get_quant_method
 
-
-@register_quantization_config(ASCEND_QUANTIZATION_METHOD)
-class AscendQuantConfig(QuantizationConfig):
-    """Config class for Ascend
-
-    This class is a general class that parse quantization configs
-    that are supported on ascend hardware.
+def get_quant_method(quant_description: Dict[str, Any],
+                     prefix: str,
+                     layer_type: str,
+                     packed_modules_mapping: Optional[Dict[str, Any]] = None,
+                     layer: Optional[torch.nn.Module] = None):
+    """Get the appropriate quantization method for a layer.
+    
+    This is the routing function that dispatches to either ModelSlim or
+    LLM-Compressor implementations based on the quant_description.
+    
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        layer_type: The type of layer ("linear", "moe", "attention").
+        packed_modules_mapping: Mapping for packed/fused modules.
+        layer: The layer module (optional).
+        
+    Returns:
+        An instance of the appropriate quantization method class.
     """
+    if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
+        from .compressed_tensors_config import get_quant_method_llmcompressor
+        return get_quant_method_llmcompressor(layer)
 
-    def __init__(self, quant_config: Dict[str, Any]):
-        super().__init__()
-        self.quant_description = quant_config
-        # TODO(whx): remove this adaptation after adding "shared_head"
-        # to prefix of DeepSeekShareHead in vLLM.
-        extra_quant_dict = {}
-        for k in self.quant_description.keys():
-            if "shared_head" in k:
-                new_k = k.replace(".shared_head.", ".")
-                extra_quant_dict[new_k] = self.quant_description[k]
-            if "weight_packed" in k:
-                new_k = k.replace("weight_packed", "weight")
-                extra_quant_dict[new_k] = self.quant_description[k]
-        self.quant_description.update(extra_quant_dict)
-
-    def __repr__(self) -> str:
-        return "AscendQuantConfig:\n" + super().__repr__()
-
-    @classmethod
-    def get_name(cls) -> str:
-        return ASCEND_QUANTIZATION_METHOD
-
-    @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.int8, torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "Ascend hardware dose not support \"get_min_capability\" feature.")
-
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
-        return ["quant_model_description.json"]
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AscendQuantConfig":
-        return cls(config)
-
-    @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
-        if hf_quant_cfg is not None:
-            quant_method = hf_quant_cfg.get("quant_method", None)
-            if not quant_method and torch.npu.is_available():
-                return ASCEND_QUANTIZATION_METHOD
-        return None
-
-    def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
-        # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
-        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
-        if prefix_mapping:
-            hf_to_vllm_mapper = WeightsMapper(
-                orig_to_new_prefix=prefix_mapping)
-            return hf_to_vllm_mapper._map_name(prefix)
-        return prefix
-
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantizeMethodBase"]:
-        vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_text_config.model_type
-        if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[
-                model_type]
-        prefix = self.quant_prefix_mapper(model_type, prefix)
-        from vllm.attention.layer import Attention
-        if prefix.startswith("language_model"):
-            prefix = prefix.split('.', 1)[-1]
-        if isinstance(layer, LinearBase):
-            if self.is_layer_skipped_ascend(prefix,
-                                            self.packed_modules_mapping):
-                return AscendUnquantizedLinearMethod()
-            return AscendLinearMethod(self, prefix,
-                                      self.packed_modules_mapping, layer)
-        elif isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys() and \
-            self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, FusedMoE):
-            if self.is_layer_skipped_ascend(prefix,
-                                            self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
-            return AscendFusedMoEMethod(self, prefix,
-                                        self.packed_modules_mapping, layer)
-        elif isinstance(layer, VocabParallelEmbedding):
-            if self.is_layer_skipped_ascend(prefix,
-                                            self.packed_modules_mapping):
-                return UnquantizedEmbeddingMethod()
-            return AscendEmbeddingMethod(self, prefix,
-                                         self.packed_modules_mapping, layer)
-        return None
-
-    def is_layer_skipped_ascend(
-        self,
-        prefix: str,
-        fused_mapping: Mapping[str, List[str]] = MappingProxyType({})):
-        # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
-        proj_name = prefix.split(".")[-1]
-        if proj_name in fused_mapping:
-            shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name)
-                for shard_proj_name in fused_mapping[proj_name]
-            ]
-
-            is_skipped = None
-            for shard_prefix in shard_prefixes:
-                is_shard_skipped = self.quant_description[shard_prefix +
-                                                          '.weight'] == "FLOAT"
-
-                if is_skipped is None:
-                    is_skipped = is_shard_skipped
-                elif is_shard_skipped != is_skipped:
-                    raise ValueError(
-                        f"Detected some but not all shards of {prefix} "
-                        "are quantized. All shards of fused layers "
-                        "to have the same precision.")
-        else:
-            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
-
-        assert is_skipped is not None
-        return is_skipped
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
-
-# key: model_type
-# value: orig_to_new_prefix
-QUANT_MODEL_PREFIX_MAPPINGS = {
-    "qwen3_vl_moe": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-}
-
-packed_modules_model_mapping = {
-    "qwen3_moe": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-    },
-    "deepseek_v2": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-    "deepseek_v3": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-    "pangu_ultra_moe": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-    "kimi_k2": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-    "deepseek_v32": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-    # NOTE 1.The quantized MTP layer of deepseek on the NPU is not quantized;
-    # NOTE 2.The description file generated by the current msmodelslim tool does not have
-    # MTP layer info. Please manually add it and set the value to FLOAT.
-    "deepseek_mtp": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
-    },
-    "pangu_ultra_moe_mtp": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-    "qwen3_next": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "in_proj": ["in_proj_qkvz", "in_proj_ba"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
-    },
-    "qwen2_5_vl": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    },
-    "qwen3_vl_moe": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-    },
-    "glm4_moe": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
-    },
-    "longcat_flash": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
-    },
-}
+    from .modelslim_config import get_quant_method_modelslim
+    return get_quant_method_modelslim(quant_description, prefix, layer_type,
+                                      packed_modules_mapping)
 
 
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
+    This wrapper class delegates to the actual quantization scheme implementation
+    based on the quant_config and prefix.
+
     Args:
         quant_config: The Ascend quantization config.
+        prefix: The layer prefix for determining quantization type.
+        packed_modules_mapping: Mapping for packed/fused modules.
+        layer: The layer module (optional).
     """
 
     def __init__(self,
-                 quant_config: AscendQuantConfig,
+                 quant_config: "QuantizeMethodBase",
                  prefix: str,
-                 packed_modules_mapping: Dict[str, Any] | None,
-                 layer: torch.nn.Module = None) -> None:
+                 packed_modules_mapping: Optional[Dict[str, Any]],
+                 layer: Optional[torch.nn.Module] = None) -> None:
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,
                                              "linear",
@@ -431,9 +198,11 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
 
     Args:
         quant_config: The Ascend quantization config.
+        prefix: The layer prefix.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
+    def __init__(self, quant_config: "QuantizeMethodBase",
+                 prefix: str) -> None:
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix, "attention")
 
@@ -459,11 +228,14 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
     Args:
         quant_config: The Ascend quantization config.
+        prefix: The layer prefix.
+        packed_modules_mapping: Mapping for packed/fused modules.
+        layer: The layer module.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
-                 packed_modules_mapping: Dict[str,
-                                              Any], layer: torch.nn.Module):
+    def __init__(self, quant_config: "QuantizeMethodBase", prefix: str,
+                 packed_modules_mapping: Optional[Dict[str, Any]],
+                 layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,
@@ -524,7 +296,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor = None,
+        log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num=0,
         **kwargs,
     ) -> torch.Tensor:
@@ -552,12 +324,18 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
     
-      Args:
-          quant_config: The Ascend quantization config.
+    This is essentially the same as AscendLinearMethod, just with a different name
+    for clarity when used with VocabParallelEmbedding layers.
+
+    Args:
+        quant_config: The Ascend quantization config.
+        prefix: The layer prefix.
+        packed_modules_mapping: Mapping for packed/fused modules.
+        layer: The layer module.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
-                 packed_modules_mapping: Dict[str, Any],
+    def __init__(self, quant_config: "QuantizeMethodBase", prefix: str,
+                 packed_modules_mapping: Optional[Dict[str, Any]],
                  layer: torch.nn.Module) -> None:
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,

@@ -32,28 +32,39 @@ from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
                                                         zero_experts_compute)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
+from .base import AscendLinearScheme, AscendMoEScheme
+from .registry import register_scheme
 
-class AscendW8A8DynamicLinearMethod:
+
+def scale_from_float_to_int64(scale):
+    """Convert float32 scale to int64 representation."""
+    import numpy as np
+    scale = torch.from_numpy(
+        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(),
+                      dtype=np.int32).astype(np.int64)).to(scale.device)
+    return scale
+
+
+@register_scheme("W8A8_DYNAMIC", "linear")
+class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A8_DYNAMIC.
+    
+    This scheme uses dynamic per-token quantization for activations
+    and per-channel quantization for weights.
     """
 
     def __init__(self):
         pass
 
-    @staticmethod
-    def get_weight(input_size: int, output_size: int,
+    def get_weight(self, input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {
             "weight": torch.empty(output_size, input_size, dtype=torch.int8)
         }
         return params_dict
 
-    @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
     def get_perchannel_param(
+        self,
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
@@ -66,15 +77,8 @@ class AscendW8A8DynamicLinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
-        return {}
-
-    @staticmethod
     def apply(
+        self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
@@ -100,9 +104,9 @@ class AscendW8A8DynamicLinearMethod:
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
-class AscendW8A8DynamicFusedMoEMethod:
-    """FusedMoe method for Ascend W8A8_DYNAMIC.
-    """
+@register_scheme("W8A8_DYNAMIC", "moe")
+class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
+    """FusedMoE method for Ascend W8A8_DYNAMIC."""
 
     def __init__(self):
         self.ep_group = get_ep_group()
@@ -128,9 +132,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         except AttributeError:
             self.moe_all_to_all_group_name = ""
 
-    @staticmethod
-    def get_weight(num_experts: int, intermediate_size_per_partition: int,
-                   hidden_sizes: int,
+    def get_weight(self, num_experts: int,
+                   intermediate_size_per_partition: int, hidden_sizes: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(num_experts,
@@ -144,8 +147,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                                               dtype=torch.int8)
         return param_dict
 
-    @staticmethod
-    def get_dynamic_quant_param(num_experts: int,
+    def get_dynamic_quant_param(self, num_experts: int,
                                 intermediate_size_per_partition: int,
                                 hidden_sizes: int,
                                 params_dtype: torch.dtype) -> Dict[str, Any]:
@@ -188,7 +190,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor = None,
+        log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num: int = 0,
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,
@@ -345,11 +347,3 @@ class AscendW8A8DynamicFusedMoEMethod:
             del layer.w2_weight_scale
             del layer.w2_weight_scale_fp32
             torch.npu.empty_cache()
-
-
-def scale_from_float_to_int64(scale):
-    import numpy as np
-    scale = torch.from_numpy(
-        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(),
-                      dtype=np.int32).astype(np.int64)).to(scale.device)
-    return scale
