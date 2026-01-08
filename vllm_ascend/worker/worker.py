@@ -18,6 +18,7 @@
 #
 
 import copy
+import gc
 from types import NoneType
 from typing import Optional
 
@@ -50,18 +51,23 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, check_ascend_device_type,
                                enable_sp, get_ascend_device_type,
-                               register_ascend_customop)
+                               register_ascend_customop, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
+
+if vllm_version_is("0.13.0"):
+    from vllm.model_executor.utils import set_random_seed
+else:
+    from vllm.utils.torch_utils import set_random_seed
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
@@ -146,7 +152,7 @@ class NPUWorker(WorkerBase):
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
@@ -156,7 +162,7 @@ class NPUWorker(WorkerBase):
             }
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
-        free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
+        free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
@@ -173,7 +179,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_config.hidden_size
+        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
         if tags is None or "weights" in tags:
             for name, param in model.named_parameters():
@@ -209,8 +215,8 @@ class NPUWorker(WorkerBase):
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
-        NPUPlatform.set_device(device)
-        NPUPlatform.empty_cache()
+        torch.npu.set_device(device)
+        torch.npu.empty_cache()
 
         if (self.parallel_config.data_parallel_size > 1
                 and self.parallel_config.data_parallel_size_local > 0
@@ -225,11 +231,11 @@ class NPUWorker(WorkerBase):
                 f"be less than or equal to the number of visible devices "
                 f"({visible_device_count}).")
 
-        self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+        self.init_npu_memory = torch.npu.mem_get_info()[0]
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
-        NPUPlatform.seed_everything(self.model_config.seed)
+        set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
         init_device_properties_triton()
         return device
@@ -257,16 +263,18 @@ class NPUWorker(WorkerBase):
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        NPUPlatform.clear_npu_memory()
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        _, total_npu_memory = NPUPlatform.mem_get_info()
+        _, total_npu_memory = torch.npu.mem_get_info()
         self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        free_npu_memory, _ = NPUPlatform.mem_get_info()
+        free_npu_memory, _ = torch.npu.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         assert self.init_npu_memory > free_npu_memory, (
@@ -279,7 +287,7 @@ class NPUWorker(WorkerBase):
         peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.empty_cache()
+        torch.npu.empty_cache()
         torch_allocated_bytes = torch_npu.npu.memory_stats(
         )["allocated_bytes.all.current"]
         total_allocated_bytes = torch_npu.npu.mem_get_info(
@@ -372,24 +380,25 @@ class NPUWorker(WorkerBase):
         self.model_runner.eplb_warmup()
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
                         or []).copy()
-        cg_capture_sizes: list[int] = []
-        if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            cg_capture_sizes = [] if cg_sizes is None else cg_sizes
-            warmup_sizes = [
-                x for x in warmup_sizes if x not in cg_capture_sizes
-            ]
+        if not self.model_config.enforce_eager:
+            cg_capture_sizes: list[int] = []
+            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
+                warmup_sizes = [
+                    x for x in warmup_sizes if x not in cg_capture_sizes
+                ]
 
-        compile_ranges = self.vllm_config.compilation_config.get_compile_ranges(
-        )
-        # For each compile_range, if none of the batch sizes
-        # in warmup_sizes or cudagraph_capture_sizes are in the range,
-        # add the end of the range to ensure compilation/warmup.
-        all_sizes = set(cg_capture_sizes)
-        all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
-        for compile_range in compile_ranges:
-            if not any(x in compile_range for x in all_sizes):
-                warmup_sizes.append(compile_range.end)
+            compile_ranges = self.vllm_config.compilation_config.get_compile_ranges(
+            )
+            # For each compile_range, if none of the batch sizes
+            # in warmup_sizes or cudagraph_capture_sizes are in the range,
+            # add the end of the range to ensure compilation/warmup.
+            all_sizes = set(cg_capture_sizes)
+            all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
+            for compile_range in compile_ranges:
+                if not any(x in compile_range for x in all_sizes):
+                    warmup_sizes.append(compile_range.end)
 
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -402,7 +411,7 @@ class NPUWorker(WorkerBase):
             self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        NPUPlatform.seed_everything(self.model_config.seed)
+        set_random_seed(self.model_config.seed)
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
@@ -467,6 +476,7 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
+        init_batch_invariance()
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
