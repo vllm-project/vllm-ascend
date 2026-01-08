@@ -102,7 +102,6 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
@@ -358,7 +357,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
-        self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
+        self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
@@ -952,6 +951,14 @@ class NPUModelRunner(GPUModelRunner):
                 # prepare_inputs for uniform decode mode by padding query_start_loc
                 num_reqs = num_reqs_padded
 
+            backup = {
+                "query_start_loc": self.query_start_loc.gpu,
+                "query_start_loc_cpu": self.query_start_loc.cpu,
+                "seq_lens_cpu": self.seq_lens.cpu,
+                "seq_lens": self.seq_lens.gpu,
+                "block_table_tensor": blk_table_tensor,
+            }
+
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
@@ -973,6 +980,7 @@ class NPUModelRunner(GPUModelRunner):
                 decode_token_per_req=self.decode_token_per_req,
                 prefill_context_parallel_metadata=self.long_seq_metadata,
                 max_seq_len=0,
+                backup=backup,
             )
 
             if self.speculative_config and self.pcp_size * self.dcp_size > 1:
