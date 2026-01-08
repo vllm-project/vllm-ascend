@@ -21,14 +21,17 @@ def mock_add_rmsnorm_bias(input, residual, norm_weight, norm_bias, eps):
 
 
 @pytest.mark.parametrize("is_310p", [True, False])
-@pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float32, device="cpu")])
+@pytest.mark.parametrize(
+    "residual",
+    [None, torch.randn(4, 8, dtype=torch.float32, device="cpu")])
 @patch("torch.ops.vllm.add_rmsnorm_bias", side_effect=mock_add_rmsnorm_bias)
 @patch("torch_npu.npu_rms_norm", side_effect=mock_npu_rms_norm)
 def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
                          dummy_tensor):
 
     with patch("vllm_ascend.utils.get_ascend_device_type",
-               return_value=AscendDeviceType._310P if is_310p else AscendDeviceType.A3):
+               return_value=AscendDeviceType._310P
+               if is_310p else AscendDeviceType.A3):
         layer = RMSNorm(hidden_size=8, eps=1e-05)
         output = layer.forward_oot(dummy_tensor, residual)
 
@@ -42,7 +45,9 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
 
                 mock_add_rmsnorm.assert_called_once()
                 assert torch.allclose(out_x, expected_out_x, atol=1e-5)
-                assert torch.allclose(out_residual, expected_out_residual, atol=1e-5)
+                assert torch.allclose(out_residual,
+                                      expected_out_residual,
+                                      atol=1e-5)
             else:
                 expected_out_x = 2 * dummy_tensor
                 expected_out_residual = 2 * residual
@@ -53,4 +58,5 @@ def test_RMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p, residual,
             out_x = output
             expected_out_x = 2 * dummy_tensor
             mock_rmsnorm.assert_called_once()
+            
             assert torch.allclose(out_x, expected_out_x, atol=1e-5)
