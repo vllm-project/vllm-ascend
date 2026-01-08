@@ -1056,6 +1056,33 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids, inputs_embeds, intermediate_tensors,
                 max_num_scheduled_tokens)
 
+    # all-gather one hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states(hidden_states):
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            hidden_states = hidden_states[:-pad_size, :]
+
+        return hidden_states
+
+    # all-gather a list of hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states_list(hidden_states_list):
+        return [
+            NPUModelRunner._all_gather_hidden_states(hidden_states)
+            for hidden_states in hidden_states_list
+        ]
+
+    # all-gather hidden-states in last layer with aux-hidden-states in sp scene
+    @staticmethod
+    def _all_gather_hidden_states_and_aux(hidden_states):
+        if isinstance(hidden_states, tuple):
+            return (NPUModelRunner._all_gather_hidden_states(hidden_states[0]),
+                    NPUModelRunner._all_gather_hidden_states_list(
+                        hidden_states[1]))
+        return NPUModelRunner._all_gather_hidden_states(hidden_states)
+
     def _generate_process_reqs_hidden_states(self, maybe_padded_num_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
@@ -1103,10 +1130,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            pad_size = get_forward_context().pad_size
-            if pad_size > 0:
-                hidden_states = hidden_states[:-pad_size, :]
+            hidden_states = self._all_gather_hidden_states_and_aux(
+                hidden_states)
         return hidden_states if self.pcp_size == 1 else self.pcp_manager.get_restore_hidden_states(
             hidden_states)
 
