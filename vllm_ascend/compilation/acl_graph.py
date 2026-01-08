@@ -340,7 +340,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 graph_params.events[runtime_shape],
         ):
             (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
-             spec_attn_mask, sparse_mode, scale, block_table, block_size,
+             attn_mask, sparse_mode, scale, block_table, block_size,
              seq_lens_list, actual_seq_lengths, attn_output,
              softmax_lse) = param
             seq_lens_list = forward_context.attn_metadata[
@@ -380,7 +380,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 num_heads=num_heads,
                 num_key_value_heads=num_kv_heads,
                 input_layout=input_layout,
-                atten_mask=spec_attn_mask,
+                atten_mask=attn_mask,
                 sparse_mode=sparse_mode,
                 scale=scale,
                 antiquant_mode=0,
