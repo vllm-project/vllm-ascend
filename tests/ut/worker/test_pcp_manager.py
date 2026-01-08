@@ -70,7 +70,7 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     input_batch.num_tokens = torch.tensor(num_tokens)
 
     query_lens = torch.tensor(query_lens)
-    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens, None,
+    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens,
                                                input_batch)
 
     if not expect_not_none:
@@ -96,21 +96,6 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
                 assert hasattr(result, 'attn_mask_seqlens')
                 assert hasattr(result, 'head_attn_nomask_seqlens')
                 assert hasattr(result, 'tail_attn_nomask_seqlens')
-
-                if hasattr(result, 'pcp_prefill_mask'
-                           ) and result.pcp_prefill_mask is not None:
-                    if use_mla:
-                        assert result.pcp_prefill_mask.shape == (512, 512)
-                    else:
-                        assert result.pcp_prefill_mask.shape == (2048, 2048)
-            else:
-                if hasattr(result, 'pcp_prefill_mask'):
-                    if result.pcp_prefill_mask is not None:
-                        if use_mla:
-                            assert result.pcp_prefill_mask.shape == (512, 512)
-                        else:
-                            assert result.pcp_prefill_mask.shape == (2048,
-                                                                     2048)
 
 
 @pytest.mark.parametrize(
