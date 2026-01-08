@@ -26,6 +26,7 @@ from torch._inductor.compile_fx import (graph_returns_tuple,
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
+from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -94,10 +95,6 @@ def npugraph_ex_compile(
         graph.recompile()
 
     import torchair
-
-    # TODO: use a better way to lazy register replacement, instead of import one by one
-    # As an example, we directly import here to register replacement.
-    # import vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant  # noqa
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()

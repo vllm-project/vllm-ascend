@@ -211,6 +211,8 @@ class AscendCompilationConfig:
     def __init__(self,
                  fuse_norm_quant: bool = True,
                  fuse_qknorm_rope: bool = False,
+                 graphex_norm_quant: bool = False,
+                 graphex_qknorm_rope: bool = False,
                  **kwargs):
         """
         Initialize the configuration.
@@ -221,10 +223,17 @@ class AscendCompilationConfig:
                 Default: True
             fuse_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
                 Default: False
+            graphex_norm_quant: Whether to enable norm and quant fusion optimization(NPUGraph_ex).
+                When set to True, the system will optimize norm and quant operations.
+                Default: False
+            graphex_qknorm_rope (bool): Whether to enable qknorm and rope fusion optimization.
+                Default: False
             **kwargs: Additional optional parameters for forward compatibility and configuration extension.
         """
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+        self.graphex_norm_quant = graphex_norm_quant
+        self.graphex_qknorm_rope = graphex_qknorm_rope
 
 
 class XliteGraphConfig:
