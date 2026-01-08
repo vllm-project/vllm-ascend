@@ -8,6 +8,7 @@ import vllm.envs as envs_vllm
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -1436,10 +1437,27 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
 
         # Process for Flash Comm V1
-        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            q_c.contiguous(), need_gather_q_kv)
-        kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            kv_no_split.contiguous(), need_gather_q_kv)
+
+        forward_context = get_forward_context()
+        if forward_context.dbo_enabled:
+            forward_context.dbo_template.dbo_mla_preprocess_hook(
+                is_record=True)
+            if get_forward_context().sp_enabled:
+                q_c = tensor_model_parallel_all_gather(q_c.contiguous(), 0)
+
+                kv_no_split = tensor_model_parallel_all_gather(
+                    kv_no_split.contiguous(), 0)
+            forward_context.dbo_template.dbo_mla_preprocess_hook(
+                is_record=False)
+            q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                q_c, need_gather_q_kv, do_comm=False)
+            kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                kv_no_split, need_gather_q_kv, do_comm=False)
+        else:
+            q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                q_c, need_gather_q_kv)
+            kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                kv_no_split, need_gather_q_kv)
 
         for layer in (self.layer_sharding_kwargs or []):
             if is_hidden_layer(layer):
