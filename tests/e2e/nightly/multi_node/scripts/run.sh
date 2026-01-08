@@ -125,6 +125,30 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+install_triton_ascend() {
+    echo "====> Installing triton_ascend"
+
+    BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
+    BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+
+    if ! wget -q -O "${BISHENG_NAME}" "${BISHENG_URL}"; then
+        echo "Failed to download ${BISHENG_NAME}"
+        return 1
+    fi
+    chmod +x "${BISHENG_NAME}"
+
+    if ! "./${BISHENG_NAME}" --install; then
+        rm -f "${BISHENG_NAME}"
+        echo "Failed to install ${BISHENG_NAME}"
+        return 1
+    fi
+    rm -f "${BISHENG_NAME}"
+
+    export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+    echo "====> Triton ascend installation completed"
+}
+
 kill_npu_processes() {
   pgrep python3 | xargs -r kill -9
   pgrep VLLM | xargs -r kill -9
@@ -146,15 +170,6 @@ run_tests_with_log() {
             If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
         fi
     fi
-}
-
-install_triton_ascend() {
-    echo "====> Installing triton_ascend"
-    BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-    BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-    wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-    export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 }
 
 main() {
