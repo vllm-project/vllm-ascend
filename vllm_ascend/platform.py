@@ -23,7 +23,7 @@ from uuid import uuid4
 import torch
 import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode
-from vllm.forward_context import DPMetadata
+from vllm.forward_context import BatchDescriptor, DPMetadata
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.v1.worker.ubatch_utils import UBatchSlices
