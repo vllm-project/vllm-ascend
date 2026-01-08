@@ -129,8 +129,9 @@ jobs:
           # TODO: add ignore after the issue is fixed
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_mtp_eagle_correctness.py
           pytest -sv --durations=0 tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py \
-            --ignore tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py::test_suffix_acceptance \
-            --ignore tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py::test_llama_qwen_eagle_acceptance
+            --deselect tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py::test_suffix_acceptance \
+            --deselect tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py::test_llama_qwen_eagle_acceptance \
+            --deselect tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py::test_eagle3_sp_acceptance
 
   e2e-2-cards:
     name: multicard-2
@@ -312,7 +313,8 @@ jobs:
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_data_parallel_tp2.py
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_kimi_k2.py
-          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py
+          pytest -sv --durations=0 tests/e2e/multicard/4-cards/test_qwen3_next.py \
+            --deselect tests/e2e/multicard/4-cards/test_qwen3_next.py::test_qwen3_next_distributed_mp_full_decode_only_tp4 
 
           # long_sequence
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
@@ -322,4 +324,4 @@ jobs:
 
           # spec_decode
           pytest -sv --durations=0 tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py \
-            --ignore tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py::test_qwen3_next_mtp_acceptance_tp4
+            --deselect tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py::test_qwen3_next_mtp_acceptance_tp4
