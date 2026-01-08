@@ -450,11 +450,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[2], self.impl.kv_lora_rank + 1)
 
     @patch('vllm_ascend.attention.context_parallel.mla_cp.get_forward_context')
-    @patch("torch_npu.atb.npu_multi_head_latent_attention")
+    @patch("torch_npu.npu_fused_infer_attention_score")
     @patch('torch_npu.npu_attention_update')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_forward_decode_pcp_dcp(self, mock_npu_attention_update,
-                                    mock_npu_multi_head_latent_attention,
+                                    mock_npu_fused_infer_attention_score,
                                     mock_get_forward_context):
         self.impl.dcp_size = 2
         self.impl.pcp_size = 2
@@ -470,8 +470,8 @@ class TestAscendMLAImpl(TestBase):
 
         q_nope = torch.randn(B, N, self.impl.qk_nope_head_dim)
         q_pe = torch.randn(B, N, self.impl.qk_rope_head_dim)
-        k_nope = torch.randn(NB, BS, 1, self.impl.kv_lora_rank)
-        k_pe = torch.randn(NB, BS, 1, self.impl.qk_rope_head_dim)
+        k_nope = torch.randn(NB, 1, BS, self.impl.kv_lora_rank)
+        k_pe = torch.randn(NB, 1, BS, self.impl.qk_rope_head_dim)
 
         attn_metadata = MagicMock()
         attn_metadata.attn_state = AscendAttentionState.SpecDecoding
@@ -485,7 +485,7 @@ class TestAscendMLAImpl(TestBase):
 
         mock_npu_attention_update.return_value = (torch.randn(
             B, self.impl.num_heads, self.impl.kv_lora_rank), None)
-        mock_npu_multi_head_latent_attention.return_value = [
+        mock_npu_fused_infer_attention_score.return_value = [
             torch.randn(B, N, self.impl.kv_lora_rank),
             torch.randn(B, N, 1)
         ]
