@@ -16,7 +16,12 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
+import os
+
 from tests.e2e.conftest import VllmRunner
+
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+os.environ["HCCL_BUFFSIZE"] = "1024"
 
 
 def test_kimi_k2_thinking_w4a16_tp4():
@@ -27,9 +32,8 @@ def test_kimi_k2_thinking_w4a16_tp4():
 
     with VllmRunner(
             "vllm-ascend/Kimi-K2-Thinking-Pruning",
-            max_model_len=1024,
+            max_model_len=4096,
             tensor_parallel_size=4,
-            gpu_memory_utilization=0.9,
             compilation_config={
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [1],
