@@ -34,6 +34,10 @@ BASELINES = {
     "eagle3": [0.68, 0.40, 0.18],
 }
 
+BASELINES_SP = {
+    "eagle3": [0.68, 0.40, 0.18],
+}
+
 
 @pytest.fixture
 def test_prompts():
@@ -364,6 +368,114 @@ def test_llama_qwen_eagle_acceptance(
         for num_accepted_tokens in num_accepted_tokens_per_pos
     ]
     golden = BASELINES[method]
+
+    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
+# TODO the function of sp in eagle3 is improving gradually,
+# there are still problems when enable sp + dp and some unknown scenes.
+# this e2e should also be improving gradually.
+@pytest.mark.parametrize("method", ["eagle3"])
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+@pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_eagle3_sp_acceptance(
+    method: str,
+    num_speculative_tokens: int,
+    disable_padded_drafter_batch: bool,
+    async_scheduling: bool,
+):
+    if disable_padded_drafter_batch and async_scheduling:
+        pytest.skip(
+            "skip disable_padded_drafter_batch=True and async_scheduling=True",
+        )
+
+    main_model_name = MODELS[method]["main"]
+    spec_model_name = MODELS[method]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    # sp will only be enabled when query_lens > 1000
+    prompts = [
+        {
+            "role": "user",
+            "content": " " * 1000 + "Hello, my name is",
+        },
+        {
+            "role": "user",
+            "content": " " * 1000 + "The president of the United States is",
+        },
+        {
+            "role": "user",
+            "content": " " * 1000 + "The capital of France is",
+        },
+        {
+            "role": "user",
+            "content": " " * 1000 + "The future of AI is",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+        ) for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        "model": spec_model_name,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+
+    with VllmRunner(
+            main_model_name,
+            enforce_eager=True,
+            max_model_len=8192,
+            disable_log_stats=False,
+            tensor_parallel_size=1,
+            max_num_seqs=256,
+            distributed_executor_backend="mp",
+            gpu_memory_utilization=0.7,
+            speculative_config=speculative_config,
+            compilation_config=compilation_config,
+            async_scheduling=async_scheduling,
+    ) as llm:
+        _ = llm.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [
+        num_accepted_tokens / num_drafts
+        for num_accepted_tokens in num_accepted_tokens_per_pos
+    ]
+    golden = BASELINES_SP[method]
 
     match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
     if not match:
