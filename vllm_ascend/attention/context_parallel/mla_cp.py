@@ -128,6 +128,10 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             attn_mask_seqlens=common_long_seq_metadata.attn_mask_seqlens,
             head_attn_nomask_seqlens=common_long_seq_metadata.head_attn_nomask_seqlens,
             tail_attn_nomask_seqlens=common_long_seq_metadata.tail_attn_nomask_seqlens,
+            kv_with_q_head_nomask_idx_lst=common_long_seq_metadata.kv_with_q_head_nomask_idx_lst,
+            kv_with_q_tail_nomask_idx_lst=common_long_seq_metadata.kv_with_q_tail_nomask_idx_lst,
+            head_attn_nomask_seqlens_lst=common_long_seq_metadata.head_attn_nomask_seqlens_lst,
+            tail_attn_nomask_seqlens_lst=common_long_seq_metadata.tail_attn_nomask_seqlens_lst,
             q_full_idx=common_long_seq_metadata.q_full_idx,
             pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
         )
@@ -473,13 +477,17 @@ class AscendMlaCPImpl(AscendMLAImpl):
         # Use precomputed indices from the metadata (already converted to tensors and on device)
         q_head_idx = attn_metadata.prefill.pcp_metadata.q_head_idx
         q_tail_idx = attn_metadata.prefill.pcp_metadata.q_tail_idx
-        kv_with_q_head_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_nomask_idx
         kv_with_q_head_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_head_mask_idx
-        kv_with_q_tail_nomask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx
         kv_with_q_tail_mask_idx = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_mask_idx
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
-        head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
-        tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
+        kv_with_q_head_nomask_idx_lst = attn_metadata.prefill.pcp_metadata.kv_with_q_head_nomask_idx_lst
+        kv_with_q_tail_nomask_idx_lst = attn_metadata.prefill.pcp_metadata.kv_with_q_tail_nomask_idx_lst
+        head_attn_nomask_seqlens_lst = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens_lst
+        tail_attn_nomask_seqlens_lst = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens_lst
+        assert kv_with_q_head_nomask_idx_lst is not None
+        assert kv_with_q_tail_nomask_idx_lst is not None
+        assert head_attn_nomask_seqlens_lst is not None
+        assert tail_attn_nomask_seqlens_lst is not None
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -487,9 +495,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
             k_pe=k_pe,
             value=value,
             kv_mask_idx=kv_with_q_head_mask_idx,
-            kv_nomask_idx=kv_with_q_head_nomask_idx,
+            kv_nomask_idx=kv_with_q_head_nomask_idx_lst,
             attn_mask_seqlens=attn_mask_seqlens,
-            attn_nomask_seqlens=head_attn_nomask_seqlens,
+            attn_nomask_seqlens=head_attn_nomask_seqlens_lst,
             mask=attn_metadata.attn_mask,
         )
 
@@ -500,9 +508,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
             k_pe=k_pe,
             value=value,
             kv_mask_idx=kv_with_q_tail_mask_idx,
-            kv_nomask_idx=kv_with_q_tail_nomask_idx,
+            kv_nomask_idx=kv_with_q_tail_nomask_idx_lst,
             attn_mask_seqlens=attn_mask_seqlens,
-            attn_nomask_seqlens=tail_attn_nomask_seqlens,
+            attn_nomask_seqlens=tail_attn_nomask_seqlens_lst,
             mask=attn_metadata.attn_mask,
         )
 

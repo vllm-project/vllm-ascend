@@ -561,8 +561,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if self.pcp_size > 1:
-            num_scheduled_tokens[:num_reqs], position_pcp = (
-                self.pcp_manager.update_tokens_for_pcp(num_scheduled_tokens[:num_reqs],)
+            num_scheduled_tokens[:num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
+                num_scheduled_tokens[:num_reqs],
             )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
