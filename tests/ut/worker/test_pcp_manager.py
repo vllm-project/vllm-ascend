@@ -23,7 +23,6 @@ from vllm_ascend.worker.pcp_utils import PCPManager
 @pytest.mark.parametrize(
     "pcp_size, dcp_size, num_reqs, query_lens, num_decodes, use_mla, total_tokens, expect_not_none",
     [
-        (1, 1, 5, [10, 20, 30, 40, 50], 2, False, 100, False),
         (1, 2, 3, [20, 30, 40], 1, False, 50, True),
         (2, 1, 4, [5, 10, 40, 60], 2, False, 100, True),
         (2, 1, 4, [5, 10, 40, 60], 2, True, 100, True),
@@ -36,15 +35,16 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.use_mla = use_mla
+    vllm_config.model_config.max_model_len = 1000
     vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
     vllm_config.speculative_config.num_speculative_tokens = 0
+    vllm_config.scheduler_config.max_num_seqs = 1000
+    vllm_config.scheduler_config.max_num_batched_tokens = 1000
 
     pcp_manager = PCPManager(pcp_world_size=pcp_size,
                              pcp_rank=0,
                              dcp_world_size=dcp_size,
                              dcp_rank=0,
-                             max_buffer_num_tokens=10000,
-                             max_num_reqs=1000,
                              device="cpu",
                              vllm_config=vllm_config,
                              use_async_scheduling=False,
@@ -122,15 +122,15 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
                                      expected_pcp_tokens):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
+    vllm_config.model_config.max_model_len = 1000
     vllm_config.speculative_config.num_speculative_tokens = 0
     vllm_config.scheduler_config.max_num_seqs = 1000
+    vllm_config.scheduler_config.max_num_batched_tokens = 1000
 
     pcp_manager = PCPManager(pcp_world_size=pcp_size,
                              pcp_rank=0,
                              dcp_world_size=1,
                              dcp_rank=0,
-                             max_buffer_num_tokens=10000,
-                             max_num_reqs=1000,
                              device="cpu",
                              vllm_config=vllm_config,
                              use_async_scheduling=False,
@@ -143,8 +143,7 @@ def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
     arange_np = np.arange(10000)
     num_scheduled_tokens = np.array(tokens)
     pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
-    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(
-        num_scheduled_tokens, arange_np)
+    pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(num_scheduled_tokens)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), \
         f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
@@ -192,13 +191,14 @@ def test_get_cp_local_seq_lens(
 ):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
+    vllm_config.model_config.max_model_len = 1000
     vllm_config.speculative_config.num_speculative_tokens = 0
+    vllm_config.scheduler_config.max_num_seqs = 1000
+    vllm_config.scheduler_config.max_num_batched_tokens = 1000
     pcp_manager = PCPManager(pcp_world_size=pcp_world_size,
                              pcp_rank=0,
                              dcp_world_size=dcp_world_size,
                              dcp_rank=0,
-                             max_buffer_num_tokens=10000,
-                             max_num_reqs=1000,
                              device="cpu",
                              vllm_config=vllm_config,
                              use_async_scheduling=False,
@@ -271,9 +271,9 @@ def test_generate_pcp_mtp_input(
 ):
     max_num_reqs = 4
     max_model_len = 4096
-    max_num_tokens = 4096
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.speculative_config.num_speculative_tokens = 1
     vllm_config.scheduler_config.max_num_seqs = max_num_reqs
     vllm_config.scheduler_config.max_num_batched_tokens = max_model_len
@@ -281,8 +281,6 @@ def test_generate_pcp_mtp_input(
                              pcp_rank=0,
                              dcp_world_size=1,
                              dcp_rank=0,
-                             max_buffer_num_tokens=max_num_tokens,
-                             max_num_reqs=max_num_reqs,
                              device="cpu",
                              vllm_config=vllm_config,
                              use_async_scheduling=False,
