@@ -338,7 +338,7 @@ def sample_recovered_tokens(
             vocab_size,
             triton.next_power_of_2(vocab_size),
             NO_DRAFT_PROBS=draft_probs is None,
-            SUB_BLOCK=4 * 1024,
+            VOCAB_BLOCK_SIZE=4 * 1024,
             # TODO: enable multibuffer when accuracy problem is solved.
             multibuffer=False,
         )

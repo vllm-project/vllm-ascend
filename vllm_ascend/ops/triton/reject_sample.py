@@ -187,8 +187,6 @@ def rejection_random_sample_kernel(
                                           (start_idx + pos) * vocab_size +
                                           draft_token_id)
                     uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-                    # NOTE(woosuk): While the draft probability should never be 0,
-                    # we check it to avoid NaNs. If it happens to be 0, we reject.
                     if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
                         # Accept.
                         token_id = draft_token_id
@@ -252,84 +250,76 @@ def sample_recovered_tokens_kernel(
     target_probs_ptr,  # [num_tokens, vocab_size]
     q_ptr,  # [batch_size, vocab_size]
     vocab_size,
+    batch_size,
+    BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_SIZE: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
-    SUB_BLOCK: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr +
-                                               req_idx - 1)
-    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
-    num_draft_tokens = end_idx - start_idx
+    block_idx = tl.program_id(0)
+    block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    grid0_mask = block_offsets < batch_size
 
-    # Early exit for out-of-range positions.
+    start_idxs = tl.where(
+        block_offsets == 0, 0,
+        tl.load(cu_num_draft_tokens_ptr + block_offsets - 1, grid0_mask))
+    end_idxs = tl.load(cu_num_draft_tokens_ptr + block_offsets, grid0_mask)
     pos = tl.program_id(1)
-    if pos >= num_draft_tokens:
-        return
 
-    loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
-    global_recovered_id = -1
-    global_max_p = -1.0
-    if NO_DRAFT_PROBS:
-        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-        orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
-                            draft_token_id)
-        # Temporarily zero out the probability of the draft token.
-        # This is essentially the same as target_prob - draft_prob, except that
-        # n-gram does not have draft_prob. We regard it as 1.
-        tl.store(
-            target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
-            0)
-        for loop_i in range(loop):
-            vocab_start = loop_i * SUB_BLOCK
-            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
-            prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
-                           vocab_offset,
-                           mask=vocab_offset < vocab_size,
-                           other=0)
-            q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
-                        mask=vocab_offset < vocab_size,
-                        other=float("-inf"))
-            new_p = prob / q
-            recovered_id = tl.argmax(new_p, axis=-1)
-            max_p = tl.get_element(new_p, (recovered_id, ))
-            if max_p > global_max_p:
-                global_max_p = max_p
-                global_recovered_id = vocab_start + recovered_id
-    else:
-        for loop_i in range(loop):
-            vocab_start = loop_i * SUB_BLOCK
-            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
-            draft_prob = tl.load(draft_probs_ptr +
-                                 (start_idx + pos) * vocab_size + vocab_offset,
-                                 mask=vocab_offset < vocab_size,
-                                 other=0)
-            target_prob = tl.load(target_probs_ptr +
-                                  (start_idx + pos) * vocab_size +
-                                  vocab_offset,
-                                  mask=vocab_offset < vocab_size,
-                                  other=0)
-            prob = tl.maximum(target_prob - draft_prob, 0)
-            # NOTE(woosuk): We don't need `prob = prob / tl.sum(prob)` here because
-            # `tl.argmax` will select the maximum value.
+    loop = (vocab_size + VOCAB_BLOCK_SIZE - 1) // VOCAB_BLOCK_SIZE
+    for idx in range(BLOCK_SIZE):
+        req_idx = tl.get_element(block_offsets, (idx, ))
+        start_idx = tl.get_element(start_idxs, (idx, ))
+        end_idx = tl.get_element(end_idxs, (idx, ))
+        global_recovered_id = -1
+        global_max_p = -1.0
+        draft_idx = start_idx + pos
+        if draft_idx < end_idx:
+            if NO_DRAFT_PROBS:
+                draft_token_id = tl.load(draft_token_ids_ptr + draft_idx)
+                for loop_i in range(loop):
+                    vocab_start = loop_i * VOCAB_BLOCK_SIZE
+                    vocab_offset = vocab_start + tl.arange(0, VOCAB_BLOCK_SIZE)
+                    prob = tl.load(target_probs_ptr + draft_idx * vocab_size +
+                                   vocab_offset,
+                                   mask=vocab_offset <
+                                   vocab_size & vocab_offset != draft_token_id,
+                                   other=0)
+                    q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
+                                mask=vocab_offset < vocab_size,
+                                other=float("-inf"))
+                    new_p = prob / q
+                    recovered_id = tl.argmax(new_p, axis=-1)
+                    max_p = tl.get_element(new_p, (recovered_id, ))
+                    if max_p > global_max_p:
+                        global_max_p = max_p
+                        global_recovered_id = vocab_start + recovered_id
+            else:
+                for loop_i in range(loop):
+                    vocab_start = loop_i * VOCAB_BLOCK_SIZE
+                    vocab_offset = vocab_start + tl.arange(0, VOCAB_BLOCK_SIZE)
+                    draft_prob = tl.load(draft_probs_ptr +
+                                         draft_idx * vocab_size + vocab_offset,
+                                         mask=vocab_offset < vocab_size,
+                                         other=0)
+                    target_prob = tl.load(target_probs_ptr +
+                                          draft_idx * vocab_size +
+                                          vocab_offset,
+                                          mask=vocab_offset < vocab_size,
+                                          other=0)
+                    prob = tl.maximum(target_prob - draft_prob, 0)
 
-            q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
-                        mask=vocab_offset < vocab_size,
-                        other=float("-inf"))
-            new_p = prob / q
-            recovered_id = tl.argmax(new_p, axis=-1)
-            max_p = tl.get_element(new_p, (recovered_id, ))
-            if max_p > global_max_p:
-                global_max_p = max_p
-                global_recovered_id = vocab_start + recovered_id
+                    q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
+                                mask=vocab_offset < vocab_size,
+                                other=float("-inf"))
+                    new_p = prob / q
+                    recovered_id = tl.argmax(new_p, axis=-1)
+                    max_p = tl.get_element(new_p, (recovered_id, ))
+                    if max_p > global_max_p:
+                        global_max_p = max_p
+                        global_recovered_id = vocab_start + recovered_id
 
-    tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
-
-    if NO_DRAFT_PROBS:
-        # Restore the original probability.
-        tl.store(
-            target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
-            orig_prob)
+            tl.store(output_token_ids_ptr + draft_idx, global_recovered_id)
 
 
 def rejection_greedy_sample_with_triton(output_token_ids, num_draft_tokens,
