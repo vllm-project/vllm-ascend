@@ -24,8 +24,8 @@ from vllm_ascend.quantization.quant_config import (AscendFusedMoEMethod,
                                                    AscendQuantConfig)
 from vllm_ascend.quantization.w4a16 import AscendW4A16FusedMoEMethod
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
-from vllm_ascend.quantization.w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                                                   AscendW8A8DynamicLinearMethod)
+from vllm_ascend.quantization.w8a8_dynamic import (
+    AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod)
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 if TYPE_CHECKING:
@@ -84,10 +84,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         targetting 'Linear' needs to also match
         FusedMoE modules.
         """
-        if (
-            "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
-        ):
+        if ("Linear" not in self.target_scheme_map
+                or "FusedMoE" in self.target_scheme_map):
             return
         self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
 
@@ -173,8 +171,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             self._add_fused_moe_to_target_scheme_map()
             unfused_names = [
-                prefix + proj_name
-                for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
+                prefix + proj_name for proj_name in
+                [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
             ]
             # TODO: refactor this to use expert_mapping and check all layer numbers
             all_scheme_dicts = [
@@ -183,19 +181,17 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             scheme_dict = all_scheme_dicts.pop()
 
             # multiple schemes found
-            if not all([cur_dict == scheme_dict for cur_dict in all_scheme_dicts]):
-                raise ValueError(
-                    "All MoE projections need to have same "
-                    "quantization scheme but found multiple"
-                )
+            if not all(
+                [cur_dict == scheme_dict for cur_dict in all_scheme_dicts]):
+                raise ValueError("All MoE projections need to have same "
+                                 "quantization scheme but found multiple")
 
             if scheme_dict is None:
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
 
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
-            # format = scheme_dict.get("format")
-            
+
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 quant_scheme = AscendW8A8DynamicFusedMoEMethod()
             elif self._is_w4a16(weight_quant, input_quant):
@@ -255,7 +251,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         return scheme
     
     def get_scheme_dict(
-        self, layer: torch.nn.Module, layer_name: str | None = None
+        self,
+        layer: torch.nn.Module,
+        layer_name: str | None = None
     ) -> dict[str, QuantizationArgs | str | None] | None:
         """
         Extract the QuantizationArgs for a given layer.
@@ -267,9 +265,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 "format": str | None
             } | None
         """
-        if should_ignore_layer(
-            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
-        ):
+        if should_ignore_layer(layer_name,
+                               ignore=self.ignore,
+                               fused_mapping=self.packed_modules_mapping):
             return None
 
         if self.target_scheme_map:
@@ -287,9 +285,11 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         return None
 
     def _get_scheme_from_parts(
-            self, weight_quant: QuantizationArgs,
-            input_quant: QuantizationArgs,
-            format: str | None = None,) -> "CompressedTensorsScheme":
+        self,
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
+        format: str | None = None,
+    ) -> "CompressedTensorsScheme":
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
 
