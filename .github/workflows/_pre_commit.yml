@@ -29,14 +29,9 @@ jobs:
     #     mkdir -p ${{ github.workspace }}/.github/workflows/matchers/
     #     cp .github/workflows/matchers/* ${{ github.workspace }}/.github/workflows/matchers/
     #     echo ${{ github.workspace }}
-    - name: Cp problem matchers
-      run: |
-        mkdir -p "$HOME"/.cache/pre-commit/matchers/ && \
-        cp .github/workflows/matchers/* "$HOME"/.cache/pre-commit/matchers/
-        ls "$HOME"/.cache/pre-commit/matchers/
 
-    - run: echo "::add-matcher::$HOME/.cache/pre-commit/matchers/actionlint.json"
-    - run: echo "::add-matcher::.$HOME/.cache/pre-commit/matchers/mypy.json"
+    - run: echo "::add-matcher::$GITHUB_WORKSPACE/.cache/pre-commit/matchers/actionlint.json"
+    - run: echo "::add-matcher::.$GITHUB_WORKSPACE/.cache/pre-commit/matchers/mypy.json"
 
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v6
