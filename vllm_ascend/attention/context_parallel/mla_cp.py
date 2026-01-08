@@ -20,6 +20,7 @@ from vllm_ascend.attention.mla_v1 import (
     BUILD_METADATA_STEP_PREFILL)
 #isort: on
 
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata)
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata, CPChunkedContextMetadata, _process_attn_out_lse,
@@ -293,6 +294,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
                          logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **kwargs)
 
+        # npu_ring_mla needs bfloat16 512x512 mask, different from FIA's int8 2048x2048 mask
+        # TODO: Remove this when mla_cp.py also migrates to FIA
+        self._ring_mla_mask_builder = AttentionMaskBuilder(torch.device("npu"))
+
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group(
         ).rank_in_group if self.pcp_size > 1 else 0
@@ -445,6 +450,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
+        # Use ring_mla-specific mask (bfloat16, 512x512)
+        # TODO: Remove this when mla_cp.py migrates to FIA
+        ring_mla_mask = self._ring_mla_mask_builder.get_mla_mask(
+            self.vllm_config.model_config.dtype)
+
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -455,7 +465,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             kv_nomask_idx=kv_with_q_head_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=head_attn_nomask_seqlens,
-            mask=attn_metadata.attn_mask)
+            mask=ring_mla_mask)
 
         output_tail, lse_tail = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_tail_idx),
@@ -467,7 +477,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             kv_nomask_idx=kv_with_q_tail_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=tail_attn_nomask_seqlens,
-            mask=attn_metadata.attn_mask)
+            mask=ring_mla_mask)
 
         q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
         attn_output = torch.index_select(
