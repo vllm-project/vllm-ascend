@@ -154,13 +154,10 @@ class AscendRMSNorm(RMSNorm):
                     norm_bias=self.bias,
                     eps=self.variance_epsilon)
             return x, residual
-        residual = torch.zeros_like(x, device=x.device, dtype=x.dtype)
-        x, residual = torch.ops.vllm.add_rmsnorm_bias(
-            input=x,
-            residual=residual,
-            norm_weight=self.weight,
-            norm_bias=self.bias,
-            eps=self.variance_epsilon)
+        x, residual = torch_npu.npu_rms_norm(x, self.weight,
+                                             self.variance_epsilon)
+        if self.bias is not None:
+            x.add_(self.bias)
         return x
 
 
