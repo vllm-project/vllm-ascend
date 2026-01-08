@@ -93,6 +93,12 @@ class AscendPrefillContextParallelMetadata:
 
     tail_attn_nomask_seqlens: torch.Tensor = None
 
+    # split long kv into chunks for high performance in MLA
+    kv_with_q_head_nomask_idx_lst: list[torch.Tensor] | None = None
+    kv_with_q_tail_nomask_idx_lst: list[torch.Tensor] | None = None
+    head_attn_nomask_seqlens_lst: list[torch.Tensor] | None = None
+    tail_attn_nomask_seqlens_lst: list[torch.Tensor] | None = None
+
     q_full_idx: torch.Tensor = None
 
     # original query_lens before pcp split
