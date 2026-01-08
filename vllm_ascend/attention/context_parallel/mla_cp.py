@@ -70,6 +70,26 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                                               dtype=torch.uint8,
                                               device=device)
 
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AscendMLAMetadata:
+        metadata_cls = super().build(common_prefix_len, common_attn_metadata)
+        if self.num_prefills == 0 and self.pcp_size > 1:
+            self.slot_mapping[:self.
+                              num_decode_tokens] = self.slot_mapping[:self.
+                                                                     num_decode_tokens
+                                                                     * self.
+                                                                     pcp_size:
+                                                                     self.
+                                                                     pcp_size]
+            self.slot_mapping[self.num_decode_tokens:self.num_decode_tokens *
+                              self.pcp_size].fill_(-1)
+        metadata_cls.slot_mapping = self.slot_mapping
+        return metadata_cls
+
     @classmethod
     def get_cudagraph_support(
         cls: type["AscendMlaCPMetadataBuilder"],
@@ -363,8 +383,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         decode_ql_nope, decode_q_pe = self.reorg_decode_q(
             decode_ql_nope, decode_q_pe)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
-        decode_slots = attn_metadata.slot_mapping[:num_decode_tokens *
-                                                  self.pcp_size:self.pcp_size]
+        decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
         decode_k_pe, decode_k_nope = self.exec_kv_decode(
             decode_kv_no_split, cos, sin, kv_cache, decode_slots)
