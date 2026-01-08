@@ -1564,6 +1564,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             common_prefix_len=common_prefix_len,
                             common_attn_metadata=common_attn_metadata,
                             model=self.get_model(),
+                            is_ubatch_mode=True
                         )
                         for layer_name in kv_cache_group_spec.layer_names:
                             assert type(attn_metadata) is list

@@ -72,6 +72,7 @@ class AscendCommonAttentionMetadata:
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
     decode_threshold: int = 1,
+    is_ubatch_mode: bool = False,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -102,7 +103,8 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
+    if not is_ubatch_mode:
+        assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
