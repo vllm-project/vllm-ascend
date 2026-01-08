@@ -752,6 +752,33 @@ at::Tensor& dispatch_ffn_combine(
     return out;
 }
 
+at::Tensor& dispatch_ffn_combine_bf16(
+    const at::Tensor& x,
+    const at::Tensor& weight1,
+    const at::Tensor& weight2,
+    const at::Tensor& expert_idx,
+    const at::Tensor& scale1,
+    const at::Tensor& scale2,
+    const at::Tensor& probs,
+    c10::string_view group,
+    int64_t max_output_size,
+    at::Tensor& out
+) {
+    char *group_ep_ptr = const_cast<char *>(group.data());
+    EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
+                 x,
+                 weight1,
+                 weight2,
+                 expert_idx,
+                 scale1,
+                 scale2,
+                 probs,
+                 group_ep_ptr,
+                 max_output_size,
+                 out);
+    return out;
+}
+
 at::Tensor npu_lightning_indexer(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
@@ -1388,6 +1415,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     int max_output_size, Tensor! out) -> Tensor"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+    ops.def(
+        "dispatch_ffn_combine_bf16(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
+        "                     Tensor scale1, Tensor scale2, Tensor probs, str group,"
+        "                     int max_output_size, Tensor! out) -> Tensor"
+    );
+    ops.impl("dispatch_ffn_combine_bf16", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine_bf16);
 
     ops.def("matmul_allreduce_add_rmsnorm(Tensor x1, Tensor x2, Tensor residual, Tensor gamma, \
         str groupTp, int tpRankSize, int tpRankId, float epsilon, bool isTransB, bool isGatherAddOut) -> (Tensor output, Tensor add_out)");
