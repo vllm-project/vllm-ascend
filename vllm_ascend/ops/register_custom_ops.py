@@ -13,7 +13,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.triton.rmsnormbias.add_rmsnorm_bias_kernel import add_rmsnorm_bias
+from vllm_ascend.ops.triton.rmsnormbias.add_rmsnorm_bias_kernel import (
+    add_rmsnorm_bias)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
@@ -290,7 +291,8 @@ def add_rmsnorm_bias_impl(input: torch.Tensor, residual: torch.Tensor,
                           norm_weight: torch.Tensor,
                           norm_bias: Optional[torch.Tensor],
                           eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-    x, residual=add_rmsnorm_bias(input, residual, norm_weight, norm_bias,
+    x, residual = add_rmsnorm_bias(input, residual, norm_weight, norm_bias,
+
                      eps)
     return x, residual
 
