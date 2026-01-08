@@ -281,7 +281,7 @@ class AscendFusedMoE(FusedMoE):
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(
             final_hidden_states)
 
-    def forward_impl(
+    def forward_impl(  # type: ignore[override]
             self,
             hidden_states: torch.Tensor,
             router_logits: torch.Tensor,
@@ -491,8 +491,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out
 
-    def forward_impl(self, hidden_states: torch.Tensor,
-                     router_logits: torch.Tensor):
+    def forward_impl(  # type: ignore[override]
+            self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         if self.multistream_overlap_gate:
             set_flash_common3_context(shared_experts=self._shared_experts)
 
