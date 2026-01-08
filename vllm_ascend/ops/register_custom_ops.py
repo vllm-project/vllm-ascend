@@ -1,7 +1,7 @@
+from typing import Optional
 import torch
 import torch.nn.functional as F
 import torch_npu
-from typing import Optional
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -13,10 +13,9 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.triton.rmsnormbias.add_rmsnorm_bias_kernel import add_rmsnorm_bias
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
-from vllm_ascend.ops.triton.rmsnormbias.add_rmsnorm_bias_kernel import add_rmsnorm_bias
-
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
@@ -288,12 +287,10 @@ def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
 
 
 def add_rmsnorm_bias_impl(input: torch.Tensor, residual: torch.Tensor,
-                     norm_weight: torch.Tensor,
-                     norm_bias: Optional[torch.Tensor],
-                     eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-    x, residual=add_rmsnorm_bias(input, residual,
-                     norm_weight,
-                     norm_bias,
+                          norm_weight: torch.Tensor,
+                          norm_bias: Optional[torch.Tensor],
+                          eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    x, residual=add_rmsnorm_bias(input, residual, norm_weight, norm_bias,
                      eps)
     return x, residual
 

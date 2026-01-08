@@ -28,9 +28,7 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
         buffered_values += tl.load(residual_ptr + input_offsets,
                                    mask=valid_mask,
                                    other=0.0)
-        tl.store(output2_ptr + input_offsets,
-                 buffered_values,
-                 mask=valid_mask)
+        tl.store(output2_ptr + input_offsets, buffered_values, mask=valid_mask)
         buffered_values = buffered_values.to(tl.float32)
         # rmsnorm
         squares = buffered_values * buffered_values
