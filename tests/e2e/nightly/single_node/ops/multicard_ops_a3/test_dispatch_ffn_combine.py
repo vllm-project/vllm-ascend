@@ -118,9 +118,11 @@ class TestDisptachFFNCombine:
         scale1_npu = []
         scale2_npu = []
         for i in range(e):
-            weight1_nz_npu.append(torch_npu.npu_format_cast(weight1[i].npu(), 29))
+            weight1_nz_npu.append(
+                torch_npu.npu_format_cast(weight1[i].npu(), 29))
             scale1_npu.append(scale1[i].npu())
-            weight2_nz_npu.append(torch_npu.npu_format_cast(weight2[i].npu(), 29))
+            weight2_nz_npu.append(
+                torch_npu.npu_format_cast(weight2[i].npu(), 29))
             scale2_npu.append(scale2[i].npu())
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
