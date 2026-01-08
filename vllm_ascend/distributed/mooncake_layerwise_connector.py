@@ -162,6 +162,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.kv_caches_base_addr = kv_cache_base_addr
         self.total_layers = total_layers
         self.use_mla = use_mla
+        self.use_sparse = len(block_len) == 3
         self.block_len = block_len
         self._decode_tp_size = decode_tp_size
         self.resharding_stream = resharding_stream
@@ -203,21 +204,35 @@ class KVCacheSendingLayerThread(threading.Thread):
         local_block_ids = req_meta.local_block_ids
 
         if self.pd_head_ratio == 1:
-            layer_local_kv_base_addr = [
-                local_kv_base_addr[i]
-                for i in [2 * layer_idx, 2 * layer_idx + 1]
-            ]
-            layer_remote_kv_base_addr = [
-                remote_kv_base_addrs[i]  # type:ignore
-                for i in [2 * layer_idx, 2 * layer_idx + 1]
-            ]
+            if self.use_sparse:
+                layer_local_kv_base_addr = [
+                    local_kv_base_addr[i]
+                    for i in [3 * layer_idx, 3 * layer_idx + 2]
+                ]
+                layer_remote_kv_base_addr = [
+                    remote_kv_base_addrs[i]  # type:ignore
+                    for i in [3 * layer_idx, 3 * layer_idx + 2]
+                ]
+            else:
+                layer_local_kv_base_addr = [
+                    local_kv_base_addr[i]
+                    for i in [2 * layer_idx, 2 * layer_idx + 1]
+                ]
+                layer_remote_kv_base_addr = [
+                    remote_kv_base_addrs[i]  # type:ignore
+                    for i in [2 * layer_idx, 2 * layer_idx + 1]
+                ]
             grouped_remote_block_ids, grouped_local_block_ids = \
                 group_concurrent_contiguous(remote_block_ids, local_block_ids)
 
             for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                     zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)):
-                block_len = self.block_len[
-                    k % 2] if self.use_mla else self.block_len[0]
+                if self.use_mla:
+                    block_len = (self.block_len[k % 2])
+                elif self.use_sparse:
+                    block_len = (self.block_len[k % 3])
+                else:
+                    block_len = (self.block_len[0])
                 for group_remote_block_id, group_local_block_id in zip(
                         grouped_remote_block_ids, grouped_local_block_ids):
                     src = src_layer_base_addr + group_local_block_id[
@@ -920,7 +935,9 @@ class MooncakeLayerwiseConnectorWorker:
 
         # TODO(tms): Find a more robust way to detect and handle MLA
         self.use_mla = first_kv_cache_tuple[0].size(
-            -1) != first_kv_cache_tuple[1].size(-1)
+            -1) != first_kv_cache_tuple[1].size(-1) and len(
+                first_kv_cache_tuple) == 2
+        self.use_sparse = len(first_kv_cache_tuple) == 3
         if self.use_mla:
             # MLA case.[num_block, block_size, 1, hidden_dim]
             self.num_blocks = first_kv_cache.shape[0]
@@ -934,6 +951,21 @@ class MooncakeLayerwiseConnectorWorker:
             logger.info(
                 "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
                 self.num_blocks, block_shape_norm, block_shape_pe)
+        elif self.use_sparse:
+            self.num_blocks = first_kv_cache.shape[0]
+            block_rank = 3  # [block_size, latent_dim]
+            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
+            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
+            block_shape_k = first_kv_cache_tuple[2].shape[-block_rank:]
+            self.block_len = [
+                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
+                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
+                first_kv_cache[2].element_size() * math.prod(block_shape_k)
+            ]
+            logger.info(
+                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s, block_shape_k: %s",
+                self.num_blocks, block_shape_norm, block_shape_pe,
+                block_shape_k)
         else:
             # [num_block, block_size, num_head, hidden_dim]
             self.num_blocks = first_kv_cache.shape[0]
@@ -944,8 +976,9 @@ class MooncakeLayerwiseConnectorWorker:
             logger.info("num_blocks: %s, block_shape: %s", self.num_blocks,
                         block_shape)
 
-        logger.info("Registering KV_Caches. use_mla: %s, shape %s",
-                    self.use_mla, first_kv_cache.shape)
+        logger.info(
+            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
+            self.use_mla, self.use_sparse, first_kv_cache.shape)
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
@@ -960,9 +993,16 @@ class MooncakeLayerwiseConnectorWorker:
                     kv_caches_base_addr.append(base_addr)
                     ptrs.append(base_addr)
                     lengths.append(region_len)
+            elif self.use_sparse:
+                for i, cache in enumerate(cache_or_caches, 0):
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[i % 3]
+                    kv_caches_base_addr.append(base_addr)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
             else:
                 cache_list = [cache_or_caches
-                              ] if self.use_mla else cache_or_caches
+                              ] if self.use_mla or self.use_sparse  else cache_or_caches
                 for cache in cache_list:
                     base_addr = cache.data_ptr()
                     region_len = self.num_blocks * self.block_len[0]
