@@ -21,7 +21,9 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
 
 # isort: off
+import vllm_ascend.ops.register_custom_ops  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+import vllm_ascend.patch.worker.patch_unquantized_gemm  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_deepseek  # noqa
