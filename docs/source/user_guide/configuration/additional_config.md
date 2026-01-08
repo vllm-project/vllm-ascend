@@ -49,6 +49,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                          |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
+| `layer_sharding` | dict | `{}` | Configuration options for layer sharding linear |
 
 The details of each configuration option are as follows:
 

@@ -2,10 +2,10 @@ import os
 
 import torch
 import torch.distributed as dist
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.distributed.parallel_state import (get_dp_group,
-                                                    get_fc3_quant_x_group,
+from vllm_ascend.distributed.parallel_state import (get_fc3_quant_x_group,
                                                     get_p_tp_group)
 
 
