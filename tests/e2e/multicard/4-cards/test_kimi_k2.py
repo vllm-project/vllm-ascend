@@ -29,9 +29,6 @@ def test_kimi_k2_thinking_w4a16_tp4():
             "vllm-ascend/Kimi-K2-Thinking-Pruning",
             max_model_len=4096,
             tensor_parallel_size=4,
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [1],
-            },
+            gpu_memory_utilization=0.9,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
