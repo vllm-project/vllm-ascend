@@ -754,7 +754,7 @@ class TestPCPDCPGraphParams(TestBase):
 
     @patch('torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
-    @patch('torch_npu.atb.npu_multi_head_latent_attention', MagicMock())
+    @patch('torch_npu.npu_fused_infer_attention_score.out', MagicMock())
     def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end):
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
@@ -793,16 +793,20 @@ class TestPCPDCPGraphParams(TestBase):
         qk_rope_head_dim = 32
         qk_nope_head_dim = 64
         query = torch.randn(4, num_heads, qk_head_dim)
-        q_pe = query[..., qk_nope_head_dim:]
+
         q_nope = query[..., :qk_nope_head_dim]
+        q_pe = query[..., qk_rope_head_dim:]
         k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
         k_pe = torch.randn(4, num_heads, qk_rope_head_dim)
+        input_layout = "BNSD"
+        actual_seq_lengths_kv = [1, 1]
         out = torch.randn(2, 16, 128)
         lse = torch.randn(2, 16, 8)
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
-            (q_nope, q_pe, k_nope, k_pe, block_table, seq_lens, num_heads,
-             scale, num_kv_heads, out, lse))
+            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+             None, 0, scale, block_table, 128,
+             None, actual_seq_lengths_kv, out, lse))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
             update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
