@@ -19,6 +19,10 @@ on:
         description: 'Quay username for pushing images'
         required: false
         type: string
+      workflow_dispatch_tag:
+        description: 'The tag to use for workflow dispatch'
+        required: false
+        type: string
     secrets:
         QUAY_PASSWORD:
             description: 'Quay password for pushing images'
@@ -144,7 +148,7 @@ jobs:
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
-            type=raw,event=workflow_dispatch,suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ inputs.workflow_dispatch_tag }},event=workflow_dispatch,suffix=${{ env.SUFFIX }}
           flavor:
             latest=false
 
