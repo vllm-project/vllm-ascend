@@ -79,10 +79,11 @@ def test_qwen3_moe_distributed_aiv_tp2():
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     port = get_open_port()
+    compilation_config = json.dumps({"cudagraph_capture_sizes": [8]})
     server_args = [
         "--max_model_len", "8192", "--tensor_parallel_size", "2",
         "--enable_expert_parallel", "--quantization", "ascend", "--port",
-        str(port), "--enforce_eager"
+        str(port), "--compilation-config", compilation_config
     ]
     env_dict = {"HCCL_BUFFSIZE": "1024"}
     with RemoteOpenAIServer(model,
@@ -93,7 +94,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         client = server.get_async_client()
         batch = await client.completions.create(model=model,
                                                 prompt="What is deeplearning?",
-                                                max_tokens=300,
+                                                max_tokens=400,
                                                 temperature=0,
                                                 top_p=1.0,
                                                 n=1)
@@ -106,7 +107,8 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     additional_config = {
         "dynamic_eplb": True,
         "num_iterations_eplb_update": 100,
-        "num_wait_worker_iterations": 20
+        "num_wait_worker_iterations": 20,
+        "num_redundant_experts": 2
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     with RemoteOpenAIServer(model,
@@ -117,7 +119,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         client = server.get_async_client()
         batch = await client.completions.create(model=model,
                                                 prompt="What is deeplearning?",
-                                                max_tokens=300,
+                                                max_tokens=400,
                                                 temperature=0,
                                                 top_p=1.0,
                                                 n=1)
