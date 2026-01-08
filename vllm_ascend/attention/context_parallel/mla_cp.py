@@ -564,6 +564,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         if not kv_nomask_idx or len(kv_nomask_idx[0]) == 0:
             return attn_output, attn_lse
 
+        print(kv_nomask_idx, attn_nomask_seqlens)
         for kv_nomask_idx_split, attn_nomask_seqlens_split in zip(kv_nomask_idx, attn_nomask_seqlens):
             k_nope_nomask = torch.index_select(k_nope, 0, kv_nomask_idx_split)
             value_nomask = torch.index_select(value, 0, kv_nomask_idx_split)
