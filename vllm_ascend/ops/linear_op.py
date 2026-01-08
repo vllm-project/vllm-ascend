@@ -49,7 +49,6 @@ import torch_npu
 from torch import nn
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
-from vllm.config import get_current_vllm_config
 from vllm.distributed import (split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
@@ -57,8 +56,6 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend import envs as envs_ascend
-from vllm.model_executor.models.utils import extract_layer_index
-
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
@@ -287,7 +284,6 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             get_tp_group().world_size)
         self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
         self.layer._quant_comm_config = {}
-        self.vllm_config = get_current_vllm_config()
 
     @property
     def comm_group(self):
@@ -407,7 +403,6 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         self.input_size_per_partition = self.layer.input_size_per_partition
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
             flashcomm2_oshard_manager.register_layer(self.layer,
-                                                     self.vllm_config,
                                                      prefetch_step=1)
 
 
@@ -492,7 +487,6 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
-        self.vllm_config = get_current_vllm_config()
 
     def apply_impl(
         self, input_: torch.Tensor
@@ -510,7 +504,7 @@ class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
 
         # Trigger async broadcast before matmul to overlap communication.
         flashcomm2_oshard_manager.trigger_broadcast_for_layer(
-            self.layer.prefix, self.vllm_config)
+            self.layer.prefix)
 
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
         if self.gather_output and self.tp_size > 1:

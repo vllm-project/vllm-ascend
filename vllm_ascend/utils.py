@@ -1017,8 +1017,11 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def flashcomm2_o_shared_enabled() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
+def o_shard_enable() -> bool:
+    layer_sharding = get_ascend_config().layer_sharding
+    if layer_sharding is None:
+        return False
+    return "o_proj" in layer_sharding
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):

@@ -174,9 +174,8 @@ def test_fc2_oshard_for_qwen3_moe() -> None:
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True,
                     enforce_eager=True,
-                    additional_config={
-                        "layer_sharding": ["o_proj"]
-                    }) as vllm_model:
+                    additional_config={"layer_sharding":
+                                       ["o_proj"]}) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 

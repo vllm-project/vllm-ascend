@@ -43,13 +43,12 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
     update_draft_graph_params_workspaces, update_graph_params_workspaces)
+from vllm_ascend.ops.utils import flashcomm2_oshard_manager
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
-                               weak_ref_tensors, flashcomm2_o_shared_enabled, get_flashcomm2_o_shard_layer)
-from vllm_ascend.ops.layer_shard_linear import post_process_after_loading_for_shard_weight_series
+                               weak_ref_tensors)
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
-from vllm_ascend.ops.utils import flashcomm2_oshard_manager
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
