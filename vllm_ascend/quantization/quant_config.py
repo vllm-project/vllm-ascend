@@ -121,13 +121,13 @@ class AscendQuantConfig(QuantizationConfig):
         if model_type in ["minimax", "minimax_m2"]:
             prefix = prefix.replace("mlp", "block_sparse_moe")
 
-        #To adapt to minimax, modify the prefix of the model layer name
-        parts = prefix.split('.')
-        if "experts" in parts and len(parts) > 2:
-            exp_idx = parts.index("experts")
-            if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
-                parts = parts[:exp_idx + 1]
-                prefix = ".".join(parts)
+            #To adapt to minimax, modify the prefix of the model layer name
+            parts = prefix.split('.')
+            if "experts" in parts and len(parts) > 2:
+                exp_idx = parts.index("experts")
+                if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
+                    parts = parts[:exp_idx + 1]
+                    prefix = ".".join(parts)
 
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
