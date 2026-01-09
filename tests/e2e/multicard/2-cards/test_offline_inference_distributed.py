@@ -159,7 +159,7 @@ def test_qwen3_moe_fc2_tp2() -> None:
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
-def test_fc2_oshard_for_qwen3_moe() -> None:
+def test_qwen3_moe_fc2_oshard_tp2() -> None:
     example_prompts = [
         "Hello, my name is",
     ]
@@ -168,14 +168,15 @@ def test_fc2_oshard_for_qwen3_moe() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
-    with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
-                    dtype="auto",
-                    tensor_parallel_size=2,
-                    distributed_executor_backend="mp",
-                    enable_expert_parallel=True,
-                    enforce_eager=True,
-                    additional_config={"layer_sharding":
-                                       ["o_proj"]}) as vllm_model:
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen3-30B-A3B"),
+            dtype="auto",
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+            enable_expert_parallel=True,
+            enforce_eager=
+            True,  # TODO(Levi-JQ): support graph mode for fc2 in Qwen 
+            additional_config={"layer_sharding": ["o_proj"]}) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
