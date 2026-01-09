@@ -20,7 +20,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Verify Multi-node Communication
 
-Refer to [verify multi-node communication environment](../installation.md#verify-multi-node-communication) to verify multi-node communication.
+Refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) to verify multi-node communication.
 
 ### Installation
 
