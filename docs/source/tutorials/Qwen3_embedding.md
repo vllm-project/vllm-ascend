@@ -30,13 +30,13 @@ Using the Qwen3-Embedding-8B model as an example, first run the docker container
 ### Online Inference
 
 ```bash
-vllm serve Qwen/Qwen3-Embedding-8B --runner pooling --host 127.0.0.1 --port 8888
+vllm serve Qwen/Qwen3-Embedding-8B --runner pooling
 ```
 
 Once your server is started, you can query the model with input prompts.
 
 ```bash
-curl http://127.0.0.1:8888/v1/embeddings -H "Content-Type: application/json" -d '{
+curl http://127.0.0.1:8000/v1/embeddings -H "Content-Type: application/json" -d '{
   "input": [
         "The capital of China is Beijing.",
         "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
@@ -48,7 +48,6 @@ curl http://127.0.0.1:8888/v1/embeddings -H "Content-Type: application/json" -d 
 
 ```python
 import torch
-import vllm
 from vllm import LLM
 
 def get_detailed_instruct(task_description: str, query: str) -> str:
@@ -71,6 +70,7 @@ if __name__=="__main__":
     input_texts = queries + documents
 
     model = LLM(model="Qwen/Qwen3-Embedding-8B",
+                runner="pooling",
                 distributed_executor_backend="mp")
 
     outputs = model.embed(input_texts)
@@ -96,7 +96,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-vllm bench serve --model Qwen3-Embedding-8B --backend openai-embeddings --dataset-name random --host 127.0.0.1 --port 8888 --endpoint /v1/embeddings --tokenizer /root/.cache/Qwen3-Embedding-8B --random-input 200 --save-result --result-dir ./
+vllm bench serve --model Qwen3-Embedding-8B --backend openai-embeddings --dataset-name random --endpoint /v1/embeddings --random-input 200 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
