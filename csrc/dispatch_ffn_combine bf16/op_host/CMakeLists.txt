@@ -20,7 +20,7 @@ if (EXISTS ${CMAKE_SOURCE_DIR}/third_party/catlass/include)
 endif()
 
 add_ops_compile_options(
-        OP_NAME DispatchFFNCombine
+        OP_NAME DispatchFFNCombineBF16
         OPTIONS --cce-auto-sync=on
                 -Wno-deprecated-declarations
                 -Werror

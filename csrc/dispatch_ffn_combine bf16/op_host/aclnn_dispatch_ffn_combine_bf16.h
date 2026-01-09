@@ -36,4 +36,4 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineBF16(v
 }
 #endif
 
-#endif  // OP_API_INC_GMM_ALLTOALLV_
+#endif  // OP_API_INC_DISPATCH_FFN_COMBINE_BF16_
