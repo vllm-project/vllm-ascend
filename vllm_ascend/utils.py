@@ -259,8 +259,8 @@ def enable_custom_op():
         _CUSTOM_OP_ENABLED = True
     except ImportError:
         _CUSTOM_OP_ENABLED = False
-        logger.warning(
-            "Warning: Failed to register custom ops, all custom ops will be disabled"
+        raise RuntimeError(
+            "Error: Failed to register custom ops, Please verify if vllm-ascend is correctly installed."
         )
     return _CUSTOM_OP_ENABLED
 

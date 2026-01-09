@@ -218,6 +218,14 @@ class NPUWorker(WorkerBase):
         torch.npu.set_device(device)
         torch.npu.empty_cache()
 
+        # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
+        # from being applied during runtime initialization, which causes bugs
+        # in the RL module. Therefore, we currently use lazy initialization
+        # to avoid this issue. See https://github.com/vllm-project/vllm-ascend/pull/884.
+        # TODO: when the above issue is fixed, remove it.
+        from vllm_ascend.utils import enable_custom_op
+        enable_custom_op()
+
         if (self.parallel_config.data_parallel_size > 1
                 and self.parallel_config.data_parallel_size_local > 0
                 and self.parallel_config.distributed_executor_backend

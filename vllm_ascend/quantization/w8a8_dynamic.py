@@ -96,7 +96,6 @@ class AscendW8A8DynamicLinearMethod:
         # cast quantized weight tensors in NZ format for higher inference speed
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
@@ -245,29 +244,38 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
-        # When VLLM_ASCEND_ENABLE_FUSED_MC2 == 2, use dispatch_gmm_combine_decode, need fp32 scale
-        w2_weight_scale_fp32_flag = (
-            get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
-            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2)
-        if self.dynamic_eplb:
-            w1 = layer.w13_weight_list
-            w1_scale = layer.w13_weight_scale_fp32_list
-            w2 = layer.w2_weight_list
-            w2_scale = layer.w2_weight_scale_fp32_list \
-                if w2_weight_scale_fp32_flag else layer.w2_weight_scale_list
-        else:
-            w1 = [layer.w13_weight]
-            w1_scale = [layer.w13_weight_scale_fp32]
-            w2 = [layer.w2_weight]
-            w2_scale = [
-                layer.w2_weight_scale_fp32
-                if w2_weight_scale_fp32_flag else layer.w2_weight_scale
-            ]
-
+        # TODO(zzzzwwjj): Currently, when VLLM_ASCEND_ENABLE_FUSED_MC2 == 1,
+        # use dispatch_ffn_combine, need int64 scale
         fused_scale_flag = (get_forward_context().moe_comm_type
                             == MoECommType.FUSED_MC2
                             and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1)
+        # TODO(zzzzwwjj): Currently, when VLLM_ASCEND_ENABLE_FUSED_MC2 == 2,
+        # use dispatch_gmm_combine_decode, need fp32 scale
+        weight_scale_fp32_flag = (
+            get_forward_context().moe_comm_type == MoECommType.FUSED_MC2
+            and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2)
+        # TODO(zzzzwwjj): When all of gmm op support tensorlist,
+        # unify weight and weight_scale to tensorlist
+        if self.dynamic_eplb:
+            w1 = layer.w13_weight_list
+            w1_scale = layer.w13_weight_scale_fp32_list \
+                if weight_scale_fp32_flag else layer.w13_weight_scale_list
+            w2 = layer.w2_weight_list
+            w2_scale = layer.w2_weight_scale_fp32_list \
+                if weight_scale_fp32_flag else layer.w2_weight_scale_list
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [
+                layer.w13_weight_scale_fp32
+                if weight_scale_fp32_flag else layer.w13_weight_scale
+            ]
+            w2 = [layer.w2_weight]
+            w2_scale = [
+                layer.w2_weight_scale_fp32
+                if weight_scale_fp32_flag else layer.w2_weight_scale
+            ]
+
+        moe_comm_method = get_forward_context().moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
@@ -326,6 +334,10 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_list = [
                 weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)
             ]
+            layer.w13_weight_scale_list = [
+                weight.clone()
+                for weight in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
             layer.w13_weight_scale_fp32_list = [
                 weight.clone()
                 for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
@@ -341,7 +353,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
-            del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
             del layer.w2_weight_scale_fp32
             torch.npu.empty_cache()
