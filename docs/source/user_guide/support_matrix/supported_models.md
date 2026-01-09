@@ -34,7 +34,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | Gemma-3                       | ✅        |                                                                      || A2/A3 |||||||||||||||||
 | Phi-3/4                       | ✅        |                                                                      || A2/A3 |||||||||||||||||
 | Mistral/Mistral-Instruct      | ✅        |                                                                      || A2/A3 |||||||||||||||||
-| GLM-4.5                       | ✅        |                                                                      || A2/A3 |||||||||||||||||
+| GLM-4.x                       | ✅        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅|||✅||✅|✅|128k||../../tutorials/GLM4.x.md|
 | Kimi-K2-Thinking              | ✅        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/Kimi-K2-Thinking.md) |
 | GLM-4                         | ❌        | [#2255](https://github.com/vllm-project/vllm-ascend/issues/2255)     |||||||||||||||||||
 | GLM-4-0414                    | ❌        | [#2258](https://github.com/vllm-project/vllm-ascend/issues/2258)     |||||||||||||||||||
@@ -76,6 +76,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | Phi-3-Vision/Phi-3.5-Vision    | ✅            |                                                                      || A2/A3 |||||||||||||||||
 | Gemma3                         | ✅            |                                                                      || A2/A3 |||||||||||||||||
 | Llama3.2                       | ✅            |                                                                      || A2/A3 |||||||||||||||||
+| PaddleOCR-VL                   | ✅            |                                                                      || A2/A3 |||||||||||||||||
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |||||||||||||||||||
 | Keye-VL-8B-Preview             | ❌            | [1963](https://github.com/vllm-project/vllm-ascend/issues/1963)      |||||||||||||||||||
 | Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |||||||||||||||||||

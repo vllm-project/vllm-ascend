@@ -24,13 +24,13 @@ class DispatchFFNCombine : public OpDef {
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
     this->Input("w1")
-        .ParamType(REQUIRED)
+        .ParamType(DYNAMIC)
         .DataType({ge::DT_INT8, ge::DT_INT8, ge::DT_INT8})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ})
         .IgnoreContiguous();
     this->Input("w2")
-        .ParamType(REQUIRED)
+        .ParamType(DYNAMIC)
         .DataType({ge::DT_INT8, ge::DT_INT8, ge::DT_INT8})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ})
@@ -41,12 +41,12 @@ class DispatchFFNCombine : public OpDef {
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
     this->Input("scale1")
-        .ParamType(REQUIRED)
+        .ParamType(DYNAMIC)
         .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
     this->Input("scale2")
-        .ParamType(REQUIRED)
+        .ParamType(DYNAMIC)
         .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
