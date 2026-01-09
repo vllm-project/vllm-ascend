@@ -19,6 +19,7 @@ Qwen3-Next
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-R1.md
+GLM4.x.md
 Kimi-K2-Thinking
 pd_colocated_mooncake_multi_instance
 pd_disaggregation_mooncake_single_node
