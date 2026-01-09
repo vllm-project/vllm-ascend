@@ -1078,7 +1078,7 @@ class MooncakeLayerwiseConnectorWorker:
         ):
             # enable decode prefix cache
             if self.use_mla or self.use_sparse:
-                num_kv_head = 1
+                num_kv_head = self._decode_tp_size
             else:
                 num_kv_head = self.vllm_config.model_config.hf_config.num_key_value_heads
             num_replica_groups = self.tp_size // num_kv_head if self.tp_size >= num_kv_head else 1
@@ -1168,8 +1168,13 @@ class MooncakeLayerwiseConnectorWorker:
 
     def update_decoder_info(self, req_id, req_meta):
         req_meta_update = copy.deepcopy(req_meta)
-        req_meta_update.remote_port = req_meta_update.remote_port + (
-            self.tp_rank // self.pd_tp_ratio) % self._decode_tp_size
+        if self.use_mla or self.use_sparse:
+            pd_tp_ratio = self.tp_size // self._decode_tp_size
+            req_meta_update.remote_port = req_meta_update.remote_port + (
+                self.tp_rank // pd_tp_ratio) % self._decode_tp_size
+        else:
+            req_meta_update.remote_port = req_meta_update.remote_port + (
+                self.tp_rank // self.pd_tp_ratio) % self._decode_tp_size
         if req_meta_update.remote_engine_id not in self.remote_kv_caches_base_addr or \
             req_meta_update.remote_port not in self.remote_kv_caches_base_addr[req_meta_update.remote_engine_id]:
             try:
