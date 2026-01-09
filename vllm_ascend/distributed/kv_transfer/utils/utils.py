@@ -59,4 +59,3 @@ def get_transfer_timeout_value():
                                         '7'))  # type: ignore
     return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 +
                3000)
-

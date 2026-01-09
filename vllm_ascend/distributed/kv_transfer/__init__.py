@@ -21,7 +21,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import \
 
 def register_connector():
     KVConnectorFactory.register_connector(
-        "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
+        "MooncakeConnectorV1",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
         "MooncakeConnector")
 
     KVConnectorFactory.register_connector(
@@ -40,5 +41,6 @@ def register_connector():
         "MooncakeLayerwiseConnector")
 
     KVConnectorFactory.register_connector(
-        "UCMConnector", "vllm_ascend.distributed.kv_transfer.ucm_connector",
+        "UCMConnector",
+        "vllm_ascend.distributed.kv_transfer.ucm_connector",
         "UCMConnectorV1")
