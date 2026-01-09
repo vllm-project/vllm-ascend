@@ -164,11 +164,11 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher = TokenDispatcherWithAllGather(**kwargs)
 
         # Mock NPU functions
-        self.patcher_npu_moe_init_routing_v2 = patch(
-            'torch_npu.npu_moe_init_routing_v2')
-        self.mock_npu_moe_init_routing_v2 = self.patcher_npu_moe_init_routing_v2.start(
+        self.patcher_npu_moe_init_routing_custom = patch(
+            'torch.ops._C_ascend.npu_moe_init_routing_custom')
+        self.mock_npu_moe_init_routing_custom = self.patcher_npu_moe_init_routing_custom.start(
         )
-        self.mock_npu_moe_init_routing_v2.return_value = (
+        self.mock_npu_moe_init_routing_custom.return_value = (
             torch.randn(6, 128),  # sorted_hidden_states
             torch.tensor([0, 1, 2, 3, 4, 5]),  # expanded_row_idx
             torch.tensor([0, 1, 0, 1, 0, 1]),  # expanded_expert_idx
@@ -180,7 +180,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(6, 128)
 
     def tearDown(self):
-        self.patcher_npu_moe_init_routing_v2.stop()
+        self.patcher_npu_moe_init_routing_custom.stop()
         self.patcher_npu_moe_token_unpermute.stop()
 
     def test_token_dispatch_without_expert_map(self):
@@ -192,8 +192,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
                                                  topk_ids, None)
 
         # Verify npu_moe_init_routing is called
-        self.mock_npu_moe_init_routing_v2.assert_called_once()
-        args, kwargs = self.mock_npu_moe_init_routing_v2.call_args
+        self.mock_npu_moe_init_routing_custom.assert_called_once()
+        args, kwargs = self.mock_npu_moe_init_routing_custom.call_args
 
         self.assertEqual(results.group_list_type, 1)
 
@@ -207,8 +207,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
                                                  topk_ids, None)
 
         # Verify npu_moe_init_routing is called
-        self.mock_npu_moe_init_routing_v2.assert_called_once()
-        args, kwargs = self.mock_npu_moe_init_routing_v2.call_args
+        self.mock_npu_moe_init_routing_custom.assert_called_once()
+        args, kwargs = self.mock_npu_moe_init_routing_custom.call_args
 
         self.assertEqual(results.group_list_type, 1)
 
@@ -366,11 +366,11 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_dynamic_quant.return_value = (torch.randn(16, 16),
                                                     torch.randn(16))
 
-        # Mock torch_npu.npu_moe_init_routing_v2
-        patcher11 = patch('torch_npu.npu_moe_init_routing_v2')
-        self.mock_npu_moe_init_routing_v2 = patcher11.start()
+        # Mock torch.ops._C_ascend.npu_moe_init_routing_custom
+        patcher11 = patch('torch.ops._C_ascend.npu_moe_init_routing_custom')
+        self.mock_npu_moe_init_routing_custom = patcher11.start()
         self.addCleanup(patcher11.stop)
-        self.mock_npu_moe_init_routing_v2.return_value = (torch.randn(
+        self.mock_npu_moe_init_routing_custom.return_value = (torch.randn(
             16, 16), torch.arange(16), None, torch.randn(16))
 
         # Mock torch.repeat_interleave
