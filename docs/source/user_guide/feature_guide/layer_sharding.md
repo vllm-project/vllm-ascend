@@ -1,4 +1,4 @@
-# Layer Sharding Guide
+# Layer Sharding Linear Guide
 
 ## Overview
 
