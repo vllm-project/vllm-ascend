@@ -134,6 +134,12 @@ class KVPoolWorker:
                                                    self.use_mla, partitions)
 
         real_backend = backend_map.get(self.backend.lower())
+
+        # be removed later
+        if self.backend == "mooncake":
+            self.head_or_tp_rank = self.tp_rank
+            self.put_step = 1
+
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config)
 
@@ -245,7 +251,7 @@ class KVPoolWorker:
                 token_len = request.load_spec.kvpool_cached_tokens + 1
             else:
                 token_len = request.load_spec.kvpool_cached_tokens
-            request.token_len_chunk = token_len
+            request.load_spec.token_len = token_len
             if self.use_layerwise:
                 layerwise_retriever = self.retrieve_layer(request)
                 next(layerwise_retriever)  # first layer load
