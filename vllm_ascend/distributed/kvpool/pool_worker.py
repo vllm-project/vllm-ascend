@@ -136,7 +136,7 @@ class KVPoolWorker:
         real_backend = backend_map.get(self.backend.lower())
 
         # be removed later
-        if real_backend == "mooncake":
+        if self.backend == "mooncake":
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
