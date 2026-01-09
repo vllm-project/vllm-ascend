@@ -150,15 +150,6 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                          topk_idx:torch.Tensor, 
                          metadata: AFDConnectorMetadata,
                          ubatch_idx: int = 0) -> Any:
-        # if not self.use_aclgraph and self.ffn_size <= self.rank < self.ffn_size + self.min_size:
-        #     for dst in self.dst_list:
-        #         self.send_metadata(metadata,dst,self.p2p_pg)
-        if not self.use_aclgraph:
-            print(f'send_attn_output start rank:{self.rank}')
-            dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-            print(f'send_attn_output dst is {dst}')
-            self.process_group.send_object(metadata,dst)
-            
         return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
                                                 self.hccl_comm_name,
                                                 self.hccl_comm_name2,
@@ -204,15 +195,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
     
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: CAMM2NAFDConnectorMetadata, ubatch_idx: int = 0) -> Any: 
-        # afdConnectorMetadata = None
-        # if not self.use_aclgraph and self.rank >= self.attn_size:
-        #     afdConnectorMetadata = self.recv_metadata()
         afdmetadata = None
-        if not self.use_aclgraph:
-            src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-            afdmetadata = self.process_group.recv_object(src)
-            print(f'recv_attn_output start rank:{self.rank}')
-
         batch_size = metadata.batch_size
         h = metadata.h
         k = metadata.k
@@ -242,7 +225,6 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         # Only support ffn rank < attn rank
         return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size)
         
-    #TODO(yxj):to support inequal AF
     def send_is_ubatch(self,data):
         for dst in self.dst_list:
             # Serialize object to tensor and get the size as well
@@ -261,7 +243,6 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                     dst=dst,
                                     group=self.p2p_pg)
     
-    #TODO(yxj):to support inequal AF
     def recv_is_ubatch(self):
         src = self.p2p_rank % self.min_size + self.ffn_size
         print(f'src in recv_metadata is {src}')
