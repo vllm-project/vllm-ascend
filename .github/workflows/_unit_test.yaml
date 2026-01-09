@@ -1,0 +1,92 @@
+name: 'unit test'
+
+on:
+  workflow_call:
+    inputs:
+      vllm:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      type:
+        required: true
+        type: string
+
+jobs:
+  unit-test:
+    name: unit test
+    runs-on: ${{ inputs.runner }}
+    container:
+      image: ${{ inputs.image }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        SOC_VERSION: ascend910b1
+        MAX_JOBS: 4
+    steps:
+      - name: Install packages
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
+          python3 -m pip uninstall -y triton
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
+          python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
+
+      - name: Install Ascend toolkit & triton_ascend
+        shell: bash -l {0}
+        run: |
+          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
+          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+
+      - name: Run unit test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
+            --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
+            --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
+            --ignore tests/ut/kv_connector/test_remote_decode_lifecycle.py \
+            --ignore tests/ut/core/test_scheduler_dynamic_batch.py
+
+      - name: Upload coverage to Codecov
+        # only upload coverage when commits merged
+        if: ${{ inputs.type == 'schedule' }}
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: vllm-ascend
+          verbose: true

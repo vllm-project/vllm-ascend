@@ -19,7 +19,8 @@ name: Release Code and Wheel
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    # UTC+8: 10am, 16pm
+    - cron: '0 2,8 * * *'
   push:
     tags:
       - 'v*'
