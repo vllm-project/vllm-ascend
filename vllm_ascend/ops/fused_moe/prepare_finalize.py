@@ -197,6 +197,10 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not (self.enable_shared_expert_dp or self.replace_allreduce):
             if self.tp_size > 1:
                 assert context_metadata is not None
+                # Cannot reuse `split_hidden_states` from prepare phase as it
+                # may share memory with original hidden_states. Since shared
+                # experts may use the original tensor, reusing it would cause
+                # in-place modification during all_gather, corrupting the data.
                 padded_hidden_states_shape = context_metadata[
                     "padded_hidden_states_shape"]
                 gathered_hidden_states = torch.empty(

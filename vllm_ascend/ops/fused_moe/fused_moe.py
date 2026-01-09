@@ -15,9 +15,11 @@
 # limitations under the License.
 #
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Callable, Optional
 
 import torch
+import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
@@ -424,6 +426,69 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
         self._gate = gate
 
+        # Wrap the quant_method's process_weights_after_loading to validate that
+        # splitting shared expert computation (gate_up projection + activation,
+        # then down projection) yields identical results to integrated
+        # computation after weight loading.
+        original_fn = self.quant_method.process_weights_after_loading
+
+        @wraps(original_fn)
+        def quant_method_process_weights_after_loading(*args, **kwargs):
+            result = original_fn(*args, **kwargs)
+            self._validate_shared_expert_consistency()
+            return result
+        self.quant_method.process_weights_after_loading = \
+            quant_method_process_weights_after_loading
+
+    def _shared_experts_part1(self, hidden_states: torch.Tensor):
+        shared_gate_up, _ = self._shared_experts.gate_up_proj(
+            hidden_states)  # type: ignore
+        return shared_gate_up
+
+    def _shared_experts_part2(self, hidden_states: torch.Tensor,
+                              shared_gate_up: torch.Tensor):
+        shared_act = self._shared_experts.act_fn(
+            shared_gate_up)  # type: ignore
+        shared_out, _ = self._shared_experts.down_proj(
+            shared_act)  # type: ignore
+
+        # Qwen3-Next specific gating mechanism
+        if self._shared_experts.expert_gate is not None:
+            shared_out = F.sigmoid(
+                self._shared_experts.expert_gate(hidden_states)  # type: ignore
+            ) * shared_out
+        return shared_out
+
+    def _validate_shared_expert_consistency(self):
+        """Validate that split shared expert computation matches integrated
+        computation."""
+        test_input = torch.rand(
+            10, self.hidden_size, device='npu', dtype=self.moe_config.in_dtype
+        ) * 2 - 1  # Random input for testing, scoped to [-1, 1]
+
+        integrated_out = self._shared_experts(test_input)
+        part1_out = self._shared_experts_part1(test_input)
+        split_out = self._shared_experts_part2(test_input, part1_out)
+
+        if not torch.allclose(integrated_out, split_out):
+            diff = (integrated_out - split_out).abs()
+            logger.error(
+                "SharedFusedMoE shared experts split computation does not "
+                "match the integrated computation.")
+            logger.error(f"Max absolute difference: {diff.max().item()}")
+            logger.error("Integrated output - sum: %s, norm: %s",
+                         integrated_out.sum().item(),
+                         integrated_out.norm().item())
+            logger.error("Split output - sum: %s, norm: %s",
+                         split_out.sum().item(),
+                         split_out.norm().item())
+            raise ValueError(
+                "SharedFusedMoE shared experts split computation does not "
+                "match the integrated computation.")
+        logger.info_once(
+            "SharedFusedMoE shared experts split computation matches the "
+            "integrated computation.")
+
     @property
     def gate(self) -> Optional[torch.nn.Module]:
         return self._gate if self.use_overlapped else None
@@ -466,15 +531,11 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # Execute the gate projection and activation concurrently with the
             # dispatch communication.
             maybe_wait_event(fused_moe_evts.before_dispatch)
-            shared_gate_up, _ = self._shared_experts.gate_up_proj(
-                hidden_states)  # type: ignore
+            part1_out = self._shared_experts_part1(hidden_states)
             # Execute the down projection concurrently with the combine
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
-            shared_act = self._shared_experts.act_fn(
-                shared_gate_up)  # type: ignore
-            shared_out, _ = self._shared_experts.down_proj(
-                shared_act)  # type: ignore
+            shared_out = self._shared_experts_part2(hidden_states, part1_out)
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
