@@ -69,6 +69,7 @@ _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
+_DRAFT_ADAPT_FUSED_MC2_MODE_2 = None
 
 
 def _print_callback_on_stream(*args):
@@ -842,8 +843,8 @@ def is_moe_model(vllm_config: VllmConfig):
     return _IS_MOE_MODEL
 
 
-def speculative_enable_dispatch_gmm_combine_decode(
-        vllm_config: VllmConfig) -> bool:
+def _draft_adapt_fused_mc2_mode_2(vllm_config: VllmConfig) -> bool:
+    # when draft is MOE Arch and non-w8a8, disable fused_mc2_mode_2
     if vllm_config.speculative_config is None:
         return True
     speculative_method = getattr(vllm_config.speculative_config, "method",
@@ -851,12 +852,29 @@ def speculative_enable_dispatch_gmm_combine_decode(
     if speculative_method in [None, "ngram", "suffix"]:
         return True
     if speculative_method in ["eagle", "eagle3"]:
-        return False
+        draft_model_config = vllm_config.speculative_config.draft_model_config
+        if _is_contain_expert(draft_model_config.hf_text_config.to_dict()):
+            hf_text_config = draft_model_config.hf_text_config
+            quant_type = getattr(hf_text_config, 'moe_quantize', None)
+            if quant_type is None:
+                quant_type = getattr(hf_text_config, 'quantize', None)
+            return quant_type == "w8a8_dynamic"
+        else:
+            return False
     if speculative_method == "mtp":
         mtp_quant_type = getattr(vllm_config.model_config.hf_text_config,
                                  "mtp_quantize", None)
         return mtp_quant_type == "w8a8_dynamic"
     return False
+
+
+def speculative_enable_dispatch_gmm_combine_decode(
+        vllm_config: VllmConfig) -> bool:
+    global _DRAFT_ADAPT_FUSED_MC2_MODE_2
+    if _DRAFT_ADAPT_FUSED_MC2_MODE_2 is None:
+        _DRAFT_ADAPT_FUSED_MC2_MODE_2 = _draft_adapt_fused_mc2_mode_2(
+            vllm_config)
+    return _DRAFT_ADAPT_FUSED_MC2_MODE_2
 
 
 def _is_contain_expert(config: Any):
