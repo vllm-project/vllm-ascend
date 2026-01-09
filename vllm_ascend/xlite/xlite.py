@@ -255,7 +255,7 @@ class XliteWrapper:
         ]
 
         if not with_prefill or self.full_mode:
-            batch = attn_metadata.num_prefills + attn_metadata.num_decodes
+            batch = torch.count_nonzero(attn_metadata.seq_lens).item()
             seq_lens = attn_metadata.seq_lens[:batch]
             seq_tensor = torch.cat([
                 torch.tensor([0]),
