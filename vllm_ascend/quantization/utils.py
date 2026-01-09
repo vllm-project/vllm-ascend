@@ -14,6 +14,7 @@ from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
 from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
                          AscendW8A8PDMixLinearMethod)
+from .w8a8mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from .w8a16 import AscendW8A16LinearMethod
 
 ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
@@ -40,7 +41,10 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     },
     "W8A16": {
         "linear": AscendW8A16LinearMethod,
-    }
+    },
+    "W8A8_MXFP8": {
+        "linear": AscendW8A8MXFP8DynamicLinearMethod,
+    },
 }
 
 
@@ -113,3 +117,9 @@ def get_quant_method_modelslim(
             )
     raise NotImplementedError("Currently, vLLM Ascend only supports following quant types:" \
                                 f"{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}")
+
+
+def is_mx_quant_type(instance: Any) -> bool:
+    """Checks if the quantization method is a mix-precision type."""
+    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod, )
+    return isinstance(instance, MX_QUANT_TYPES)
