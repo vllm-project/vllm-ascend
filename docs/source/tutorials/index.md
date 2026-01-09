@@ -21,6 +21,7 @@ DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-R1.md
 Kimi-K2-Thinking
+PaddleOCR-VL
 pd_colocated_mooncake_multi_instance
 pd_disaggregation_mooncake_single_node
 pd_disaggregation_mooncake_multi_node
