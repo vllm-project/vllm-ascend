@@ -8,11 +8,13 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 @triton.heuristics(
     {"HAS_BIAS": lambda args: args["norm_bias_ptr"] is not None})
+@triton.heuristics(
+    {"HAS_Z": lambda args: args["residual_ptr"] is not None})
 @triton.jit
 def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
                             norm_bias_ptr, output_ptr, output2_ptr, batch_size,
                             hidden_size: tl.constexpr, eps: tl.constexpr,
-                            BLOCK_SIZE: tl.constexpr, HAS_BIAS: tl.constexpr):
+                            BLOCK_SIZE: tl.constexpr, HAS_BIAS: tl.constexpr,HAS_Z: tl.constexpr):
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
     cols = tl.arange(0, BLOCK_SIZE)
@@ -27,9 +29,10 @@ def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
         buffered_values = tl.load(input_ptr + input_offsets,
                                   mask=valid_mask,
                                   other=0.0)
-        buffered_values += tl.load(residual_ptr + input_offsets,
-                                   mask=valid_mask,
-                                   other=0.0)
+        if HAS_Z:
+            buffered_values += tl.load(residual_ptr + input_offsets,
+                                       mask=valid_mask,
+                                       other=0.0)
         tl.store(output2_ptr + input_offsets, buffered_values, mask=valid_mask)
         buffered_values = buffered_values.to(tl.float32)
         # rmsnorm
