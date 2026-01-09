@@ -45,7 +45,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
-from .utils import get_quant_method
+from .utils import get_quant_method, is_mx_quant_type
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -401,7 +401,8 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name \
+                or is_mx_quant_type(self.quant_method):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
 
