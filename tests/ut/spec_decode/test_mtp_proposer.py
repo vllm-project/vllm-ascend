@@ -278,6 +278,7 @@ class TestMtpProposer:
             [0, 8, 16, 24], dtype=torch.int32)
         mock_common_attn_metadata.seq_lens = torch.tensor([8, 8, 8],
                                                           dtype=torch.int32)
+        mock_common_attn_metadata.num_actual_tokens = 24
         mock_common_attn_metadata.num_reqs = 3
         mock_common_attn_metadata.num_computed_tokens_cpu = torch.tensor(
             [5, 6, 7], dtype=torch.int32)
@@ -293,10 +294,12 @@ class TestMtpProposer:
         mock_runner.actual_seq_lengths_q = MagicMock()
         mock_runner.attn_state = MagicMock()
         mock_runner.graph_pad_size = 0
+        mock_runner.pcp_size = 1
         mock_runner.decode_token_per_req = MagicMock()
 
         proposer = MagicMock(spec=MtpProposer)
         proposer.runner = mock_runner
+        proposer.pcp_size = 1
         proposer.arange = torch.arange(100, dtype=torch.int32)
         proposer.prepare_inputs_padded = MtpProposer.prepare_inputs_padded.__get__(
             proposer)
