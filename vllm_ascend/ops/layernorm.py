@@ -57,7 +57,7 @@ class AscendRMSNorm(RMSNorm):
                 x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                               self.variance_epsilon)
             else:
-                if self.bias:
+                if self.bias is not None:
                     x, residual = torch.ops.vllm.add_rmsnorm_bias(
                         input=x,
                         residual=residual,
@@ -68,7 +68,7 @@ class AscendRMSNorm(RMSNorm):
                     x, _, residual = torch_npu.npu_add_rms_norm(
                         x, residual, self.weight, self.variance_epsilon)
             return x, residual
-        if self.bias:
+        if self.bias is not None:
             x, residual = torch.ops.vllm.add_rmsnorm_bias(
                 input=x,
                 residual=residual,
