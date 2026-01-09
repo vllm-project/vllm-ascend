@@ -104,7 +104,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         timeout = datetime.timedelta(seconds=300)
         if self.is_vaild_rank_for_inequal_AF(self.rank):
             self.p2p_pg = init_afd_process_group(
-                backend="gloo",
+                backend="hccl",
                 init_method=(
                     f"tcp://{self.config.afd_config.afd_host}"
                     f":{self.config.afd_config.afd_port}"
@@ -224,52 +224,36 @@ class CAMM2NAFDConnector(AFDConnectorBase):
     def is_attn_top_min_size_rank(self,rank):
         # Only support ffn rank < attn rank
         return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size)
-        
-    def send_is_ubatch(self,data):
-        for dst in self.dst_list:
-            # Serialize object to tensor and get the size as well
-            object_tensor = torch.frombuffer(pickle.dumps(data), dtype=torch.uint8)
-
-            size_tensor = torch.tensor([object_tensor.numel()],
-                                        dtype=torch.long,
-                                        device="cpu")
-            # Send object size
-            torch.distributed.send(size_tensor,
-                                    dst=dst,
-                                    group=self.p2p_pg)
-
-            # Send object
-            torch.distributed.send(object_tensor,
-                                    dst=dst,
-                                    group=self.p2p_pg)
     
-    def recv_is_ubatch(self):
+    def send_is_ubatch(self, data):  
+        for dst in self.dst_list:
+            object_bytes = pickle.dumps(data)
+            object_tensor_cpu = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
+            
+            object_tensor_npu = torch.empty(object_tensor_cpu.shape, 
+                                            dtype=torch.uint8, 
+                                            device="npu")
+            object_tensor_npu.copy_(object_tensor_cpu)
+            
+            size_tensor = torch.tensor([object_tensor_cpu.numel()],
+                                        dtype=torch.long,
+                                        device="npu")
+            
+            torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
+            torch.distributed.send(object_tensor_npu, dst=dst, group=self.p2p_pg)
+    def recv_is_ubatch(self):        
         src = self.p2p_rank % self.min_size + self.ffn_size
-        print(f'src in recv_metadata is {src}')
-        print(f'self.p2p_rank in recv_metadata is {self.p2p_rank}')
-        print(f'self.min_size in recv_metadata is {self.min_size}')
-        size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
-
-        # Receive object size
-        rank_size = torch.distributed.recv(size_tensor,
-                                        src=src,
-                                        group=self.p2p_pg)
-
-        # Tensor to receive serialized objects into.
-        object_tensor = torch.empty(  # type: ignore[call-overload]
-            size_tensor.item(),  # type: ignore[arg-type]
-            dtype=torch.uint8,
-            device="cpu")
-
-        rank_object = torch.distributed.recv(object_tensor,
-                                            src=src,
-                                            group=self.p2p_pg)
-
-        assert rank_object == rank_size, (
-            "Received object sender rank does not match the size sender rank.")
-
-        data = pickle.loads(object_tensor.numpy().tobytes())
-        return data
+        
+        size_tensor = torch.empty(1, dtype=torch.long, device="npu")
+        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)    
+        object_tensor_npu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="npu")
+        rank_object = torch.distributed.recv(object_tensor_npu, src=src, group=self.p2p_pg)
+        
+        assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
+        
+        object_tensor_cpu = object_tensor_npu.cpu()
+        data = pickle.loads(object_tensor_cpu.numpy().tobytes())
+        return data    
 
 def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               topk_weights: torch.Tensor,
