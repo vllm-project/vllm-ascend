@@ -1077,7 +1077,10 @@ class MooncakeLayerwiseConnectorWorker:
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys(
         ):
             # enable decode prefix cache
-            num_kv_head = self.vllm_config.model_config.hf_config.num_key_value_heads if self.use_mla is False else 1
+            if self.use_mla or self.use_sparse:
+                num_kv_head = 1
+            else:
+                num_kv_head = self.vllm_config.model_config.hf_config.num_key_value_heads
             num_replica_groups = self.tp_size // num_kv_head if self.tp_size >= num_kv_head else 1
             replica_group_idx = self.tp_rank % num_replica_groups
             req_ids = sorted(list(connector_metadata.requests.keys()))
@@ -1086,7 +1089,7 @@ class MooncakeLayerwiseConnectorWorker:
                 if i % num_replica_groups == replica_group_idx
             ]
             if selected_req_ids:
-                if self.use_mla:
+                if self.use_mla or self.use_sparse:
                     reshape_cache_event = attn_metadata[
                         layer_name].reshape_cache_event
                 else:
