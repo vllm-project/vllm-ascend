@@ -42,26 +42,29 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 95,
-    "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 240,
-    "max_out_len": 1500,
-    "batch_size": 60,
-    "baseline": 1,
-    "threshold": 0.97
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "baseline": 95,
+        "threshold": 5,
+    },
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+        "num_prompts": 240,
+        "max_out_len": 1500,
+        "batch_size": 60,
+        "baseline": 1,
+        "threshold": 0.97,
+    },
+]
 
 
 @pytest.mark.asyncio
@@ -76,17 +79,28 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
         "VLLM_ASCEND_ENABLE_DEBSE_OPTIMIZE": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
+        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1",
     }
     server_args = [
         "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
-        "36864", "--block-size", "128", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9", "--compilation_config",
+        str(tp_size),
+        "--port",
+        str(port),
+        "--max-model-len",
+        "36864",
+        "--max-num-batched-tokens",
+        "36864",
+        "--block-size",
+        "128",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--compilation_config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 24, 48, 60]}',
-        "--reasoning-parser", "deepseek_r1", "--distributed_executor_backend",
-        "mp"
+        "--reasoning-parser",
+        "deepseek_r1",
+        "--distributed_executor_backend",
+        "mp",
     ]
     if mode == "single":
         server_args.remove("--compilation_config")
@@ -97,11 +111,9 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

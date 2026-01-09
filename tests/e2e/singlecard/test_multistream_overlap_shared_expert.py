@@ -39,59 +39,62 @@ def test_models_with_multistream_overlap_shared_expert(
     max_tokens: int,
 ) -> None:
     prompts = [
-        "Hello, my name is", "The president of the United States is",
-        "The capital of France is", "The future of AI is"
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=True,
-            cudagraph_capture_sizes=[4, 8, 16, 32],
-            additional_config={
-                "multistream_overlap_shared_expert": True,
-            },
-            quantization="ascend",
+        model,
+        max_model_len=1024,
+        enforce_eager=True,
+        cudagraph_capture_sizes=[4, 8, 16, 32],
+        additional_config={
+            "multistream_overlap_shared_expert": True,
+        },
+        quantization="ascend",
     ) as runner:
-        vllm_moe_ms_eager_outputs = runner.model.generate(
-            prompts, sampling_params)
+        vllm_moe_ms_eager_outputs = runner.model.generate(prompts, sampling_params)
 
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            cudagraph_capture_sizes=[4, 8, 16, 32],
-            additional_config={
-                "multistream_overlap_shared_expert": True,
-            },
-            quantization="ascend",
+        model,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[4, 8, 16, 32],
+        additional_config={
+            "multistream_overlap_shared_expert": True,
+        },
+        quantization="ascend",
     ) as runner:
-        vllm_moe_ms_aclgraph_outputs = runner.model.generate(
-            prompts, sampling_params)
+        vllm_moe_ms_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
 
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=True,
-            cudagraph_capture_sizes=[4, 8, 16, 32],
-            quantization="ascend",
+        model,
+        max_model_len=1024,
+        enforce_eager=True,
+        cudagraph_capture_sizes=[4, 8, 16, 32],
+        quantization="ascend",
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
     vllm_moe_ms_eager_outputs_list = []
     for output in vllm_moe_ms_eager_outputs:
         vllm_moe_ms_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     vllm_moe_ms_aclgraph_outputs_list = []
     for output in vllm_moe_ms_aclgraph_outputs:
         vllm_moe_ms_aclgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
         vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,

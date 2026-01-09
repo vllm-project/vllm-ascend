@@ -10,9 +10,13 @@ DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
 
-def bgmv_shrink_cpu_impl(x: torch.Tensor, w: torch.Tensor,
-                         indices: torch.Tensor, y: torch.tensor,
-                         scaling: float) -> torch.Tensor:
+def bgmv_shrink_cpu_impl(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    indices: torch.Tensor,
+    y: torch.tensor,
+    scaling: float,
+) -> torch.Tensor:
     W = w[indices, :, :].transpose(-1, -2).to(torch.float32)
     z = torch.bmm(x.unsqueeze(1).to(torch.float32), W).squeeze()
     y[:, :] += z * scaling
@@ -36,10 +40,7 @@ def test_bgmv_shrink():
     torch.ops._C_ascend.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0.5)
 
     # Compare the results.
-    torch.testing.assert_close(y_npu.cpu(),
-                               y,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(y_npu.cpu(), y, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

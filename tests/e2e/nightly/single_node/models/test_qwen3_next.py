@@ -33,27 +33,30 @@ batch_size_dict = {
 VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
-aisbench_cases = [{
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 4 * performance_batch_size,
-    "max_out_len": 1500,
-    "batch_size": performance_batch_size,
-    "baseline": 1,
-    "threshold": 0.97
-}, {
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "top_k": 20,
-    "baseline": 95,
-    "threshold": 5
-}]
+aisbench_cases = [
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+        "num_prompts": 4 * performance_batch_size,
+        "max_out_len": 1500,
+        "batch_size": performance_batch_size,
+        "baseline": 1,
+        "threshold": 0.97,
+    },
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "top_k": 20,
+        "baseline": 95,
+        "threshold": 5,
+    },
+]
 
 
 @pytest.mark.asyncio
@@ -61,8 +64,9 @@ aisbench_cases = [{
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("max_num_batched_tokens", MAX_NUM_BATCHED_TOKENS)
-async def test_models(model: str, mode: str, tp_size: int,
-                      max_num_batched_tokens: int) -> None:
+async def test_models(
+    model: str, mode: str, tp_size: int, max_num_batched_tokens: int
+) -> None:
     port = get_open_port()
     env_dict = {
         "OMP_NUM_THREADS": "10",
@@ -87,17 +91,13 @@ async def test_models(model: str, mode: str, tp_size: int,
         "64",
     ]
     if mode == "aclgraph":
-        server_args.extend(
-            ["--compilation-config",
-             json.dumps(compilation_config)])
+        server_args.extend(["--compilation-config", json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

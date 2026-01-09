@@ -22,7 +22,6 @@ from vllm_ascend.patch.worker.patch_minicpm import forward
 
 
 class TestPatchMiniCPM(TestBase):
-
     def setUp(self):
         self.mock_self = MagicMock()
 
@@ -69,9 +68,7 @@ class TestPatchMiniCPM(TestBase):
         self.assertTrue(torch.equal(args[1], self.mock_k))
         self.assertTrue(torch.equal(args[2], self.mock_v))
 
-        self.mock_self.o_proj.assert_called_once_with(
-            self.mock_self.attn.return_value)
+        self.mock_self.o_proj.assert_called_once_with(self.mock_self.attn.return_value)
 
         self.assertEqual(result.shape, (3, 256))
-        self.assertTrue(
-            torch.equal(result, self.mock_self.o_proj.return_value[0]))
+        self.assertTrue(torch.equal(result, self.mock_self.o_proj.return_value[0]))

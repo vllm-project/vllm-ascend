@@ -42,14 +42,16 @@ def test_execue_duration_enabled_discrepancy():
         torch.npu.synchronize()
         cpu_duration = (time.perf_counter() - cpu_start) * 1000
     npu_durations = ProfileExecuteDuration().pop_captured_sync()
-    assert npu_durations and 'forward' in npu_durations
+    assert npu_durations and "forward" in npu_durations
     assert not ProfileExecuteDuration._observations
 
     # Assert discrepancy between CPU and NPU duration is within 50% roughly
-    diff = abs(cpu_duration - npu_durations['forward']) / max(
-        cpu_duration, npu_durations['forward'])
+    diff = abs(cpu_duration - npu_durations["forward"]) / max(
+        cpu_duration, npu_durations["forward"]
+    )
     assert diff <= 0.5, (
-        f"CPU={cpu_duration:.2f}ms, NPU={npu_durations['forward']:.2f}ms")
+        f"CPU={cpu_duration:.2f}ms, NPU={npu_durations['forward']:.2f}ms"
+    )
 
     gc.collect()
     torch.npu.empty_cache()

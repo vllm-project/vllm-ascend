@@ -41,15 +41,18 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor):
 @pytest.mark.parametrize("is_310p", [True, False])
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
-@patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj",
-       side_effect=lambda x: None)
-def test_SiluAndMul_forward(mock_maybe_prefetch_mlp_down_proj,
-                            mock_maybe_wait_prefetch_done, mock_swiglu,
-                            is_310p, dummy_tensor):
-
-    with patch("vllm_ascend.utils.get_ascend_device_type",
-               return_value=AscendDeviceType._310P
-               if is_310p else AscendDeviceType.A3):
+@patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj", side_effect=lambda x: None)
+def test_SiluAndMul_forward(
+    mock_maybe_prefetch_mlp_down_proj,
+    mock_maybe_wait_prefetch_done,
+    mock_swiglu,
+    is_310p,
+    dummy_tensor,
+):
+    with patch(
+        "vllm_ascend.utils.get_ascend_device_type",
+        return_value=AscendDeviceType._310P if is_310p else AscendDeviceType.A3,
+    ):
         layer = SiluAndMul()
         out = layer.forward(dummy_tensor)
 
@@ -68,9 +71,9 @@ def test_SiluAndMul_forward(mock_maybe_prefetch_mlp_down_proj,
         mock_maybe_wait_prefetch_done.assert_called_once()
 
         actual_arg = mock_swiglu.call_args[0][0]
-        assert torch.allclose(
-            actual_arg,
-            expected_arg), "npu_swiglu called with unexpected input"
+        assert torch.allclose(actual_arg, expected_arg), (
+            "npu_swiglu called with unexpected input"
+        )
 
         expected_out = dummy_tensor + 1
         assert torch.allclose(out, expected_out)

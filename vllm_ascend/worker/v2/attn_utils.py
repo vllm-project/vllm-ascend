@@ -29,8 +29,10 @@ from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         AscendPrefillContextParallelMetadata)
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    AscendPrefillContextParallelMetadata,
+)
 
 _ATTENTION_MASK_BUILDER = None
 
@@ -93,7 +95,8 @@ def build_attn_metadata(
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,
-            max_seq_len=max_seq_len)
+            max_seq_len=max_seq_len,
+        )
 
         attn_metadata_builder = attn_metadata_builders[i]
         metadata = attn_metadata_builder.build(
@@ -115,8 +118,8 @@ def build_attn_state(
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
         if isinstance(
-                vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-                EncoderOnlyAttentionSpec,
+            vllm_config.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            EncoderOnlyAttentionSpec,
         ):
             attn_state = AscendAttentionState.PrefillNoCache
         else:
@@ -127,16 +130,20 @@ def build_attn_state(
     # but only one token is not hit in cache.
     elif np.all(num_scheduled_tokens == 1):
         attn_state = AscendAttentionState.DecodeOnly
-        if (vllm_config.speculative_config
-                and vllm_config.speculative_config.method == 'mtp'):
+        if (
+            vllm_config.speculative_config
+            and vllm_config.speculative_config.method == "mtp"
+        ):
             # SpecDecoding now supports seq_len=1 and seq_len=2
             # In Prefilling Decoding Disaggregation scenario, SpecDecoding
             # need to supports seq_len=1
             attn_state = AscendAttentionState.SpecDecoding
     # Speculative decoding.
     elif np.all(num_valid_tokens == 1):
-        if (vllm_config.speculative_config
-                and vllm_config.speculative_config.method == 'mtp'):
+        if (
+            vllm_config.speculative_config
+            and vllm_config.speculative_config.method == "mtp"
+        ):
             attn_state = AscendAttentionState.SpecDecoding
         else:
             attn_state = AscendAttentionState.ChunkedPrefill

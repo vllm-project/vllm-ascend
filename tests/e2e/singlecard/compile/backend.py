@@ -43,9 +43,7 @@ class TestBackend:
         self.graph_pre_pass = None
         self.graph_post_pass = None
 
-    def post_pass(self,
-                  graph: fx.Graph,
-                  runtime_shape: int | None = None) -> fx.Graph:
+    def post_pass(self, graph: fx.Graph, runtime_shape: int | None = None) -> fx.Graph:
         """
         Apply custom graph transformation passes.
         """
@@ -57,12 +55,12 @@ class TestBackend:
         return graph
 
     def compile(
-            self,
-            graph: fx.GraphModule,
-            example_inputs: list[Any],
-            compiler_config: dict[str, Any],
-            runtime_shape: Optional[int] = None,
-            key: Optional[str] = None
+        self,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
+        runtime_shape: Optional[int] = None,
+        key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
         """
         Compile the FX graph using vLLM's Ascend compiler interface.
@@ -82,8 +80,7 @@ class TestBackend:
         )
         return compiled_fn, None
 
-    def __call__(self, gm: fx.GraphModule,
-                 example_inputs: Optional[List[Any]]):
+    def __call__(self, gm: fx.GraphModule, example_inputs: Optional[List[Any]]):
         """
         Make the backend callable by torch.compile().
         Returns a compiled executable function.
@@ -98,17 +95,17 @@ class TestBackend:
         )
         return compiled_fn
 
-    def find_nodes_by_target(self, graph: fx.GraphModule,
-                             target: OpOverload) -> List[fx.Node]:
+    def find_nodes_by_target(
+        self, graph: fx.GraphModule, target: OpOverload
+    ) -> List[fx.Node]:
         """Helper to find all FX nodes that call a specific operator."""
         return [
-            node for node in graph.graph.nodes
-            if hasattr(node, 'target') and node.target == target
+            node
+            for node in graph.graph.nodes
+            if hasattr(node, "target") and node.target == target
         ]
 
-    def check_before_ops(self,
-                         ops: Sequence[OpOverload],
-                         fully_replaced: bool = True):
+    def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced: bool = True):
         """
         Verify that the original (unfused) operators exist before the pass
         and are fully removed afterward (if fully_replaced=True).
@@ -120,7 +117,9 @@ class TestBackend:
 
             assert num_pre > 0, f"Op {op} not found in pre-pass graph"
             if fully_replaced:
-                assert num_post == 0, f"Unexpected op {op} in post-pass graph: {num_post} nodes remain"
+                assert num_post == 0, (
+                    f"Unexpected op {op} in post-pass graph: {num_post} nodes remain"
+                )
 
     def check_after_ops(self, ops: Sequence[OpOverload]):
         """Verify that the fused operator appears in the transformed graph."""

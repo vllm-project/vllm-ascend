@@ -22,12 +22,10 @@ from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
-from vllm_ascend.worker.v2.sample.penalties import \
-    apply_penalties_and_temperature
+from vllm_ascend.worker.v2.sample.penalties import apply_penalties_and_temperature
 
 
 class AscendSampler(Sampler):
-
     def sample(
         self,
         logits: torch.Tensor,
@@ -45,8 +43,9 @@ class AscendSampler(Sampler):
         if sampling_metadata.min_p is not None:
             apply_min_p(logits, sampling_metadata.min_p)
         # Apply top_k and/or top_p. This might return a new tensor.
-        logits = apply_top_k_top_p(logits, sampling_metadata.top_k,
-                                   sampling_metadata.top_p)
+        logits = apply_top_k_top_p(
+            logits, sampling_metadata.top_k, sampling_metadata.top_p
+        )
 
         sampled = gumbel_sample(
             logits,

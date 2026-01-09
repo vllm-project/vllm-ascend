@@ -51,8 +51,7 @@ def get_cluster_dns_list(world_size: int) -> List[str]:
 
     leader_dns = os.getenv("LWS_LEADER_ADDRESS")
     if not leader_dns:
-        raise RuntimeError(
-            "environment variable LWS_LEADER_ADDRESS is not set")
+        raise RuntimeError("environment variable LWS_LEADER_ADDRESS is not set")
 
     # Expected format:
     # <leader-name>.<group-name>.<namespace>
@@ -63,8 +62,7 @@ def get_cluster_dns_list(world_size: int) -> List[str]:
     leader_name, group_name, namespace = parts[0], parts[1], parts[2]
 
     worker_dns_list = [
-        f"{leader_name}-{idx}.{group_name}.{namespace}"
-        for idx in range(1, world_size)
+        f"{leader_name}-{idx}.{group_name}.{namespace}" for idx in range(1, world_size)
     ]
 
     return [leader_dns, *worker_dns_list]
@@ -77,6 +75,7 @@ def get_cluster_ips(word_size: int = 2) -> list[str]:
 
 def get_avaliable_port(start_port: int = 6000, end_port: int = 7000) -> int:
     import socket
+
     for port in range(start_port, end_port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:

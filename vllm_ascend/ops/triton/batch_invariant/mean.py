@@ -56,7 +56,9 @@ def mean_kernel(
         mask = n_offsets < N
 
         # Calculate input indices
-        input_idx = m_idx * input_stride0 + n_offsets * input_stride1 + k_idx * input_stride2
+        input_idx = (
+            m_idx * input_stride0 + n_offsets * input_stride1 + k_idx * input_stride2
+        )
         # Load and accumulate
         vals = tl.load(input_ptr + input_idx, mask=mask, other=0.0)
         acc += tl.sum(vals)
@@ -87,7 +89,8 @@ def mean_dim(
     """
     # Validate inputs
     assert -input_.ndim <= dim < input_.ndim, (
-        f"Invalid dimension {dim} for tensor with {input_.ndim} dimensions")
+        f"Invalid dimension {dim} for tensor with {input_.ndim} dimensions"
+    )
 
     # Handle negative dim
     if dim < 0:
@@ -123,7 +126,7 @@ def mean_dim(
         output_shape = shape.copy()
         output_shape[dim] = 1
     else:
-        output_shape = shape[:dim] + shape[dim + 1:]
+        output_shape = shape[:dim] + shape[dim + 1 :]
 
     # Create output tensor
     output = torch.empty(output_shape, dtype=dtype, device=input_.device)
@@ -135,7 +138,7 @@ def mean_dim(
         output_2d = output.reshape(M, K)
 
     # Launch kernel
-    grid = (M * K, )
+    grid = (M * K,)
     BLOCK_SIZE = 1024
 
     mean_kernel[grid](
@@ -165,13 +168,17 @@ def mean_batch_invariant(
     if len(dim) == 1:
         return mean_dim(input_, dim[0], keepdim=keepdim)
     else:
-        assert input_.dtype in {torch.float16, torch.bfloat16, torch.float32
-                                }, ("only float types supported for now")
+        assert input_.dtype in {torch.float16, torch.bfloat16, torch.float32}, (
+            "only float types supported for now"
+        )
         if len(dim) == 0:
             dim = list(range(input_.ndim))
         n_elems = 1
         for d in dim:
             n_elems *= input_.shape[d]
-        return torch.sum(input_, dim=dim, keepdim=keepdim,
-                         dtype=torch.float32).to(dtype
-                                                 or input_.dtype) / n_elems
+        return (
+            torch.sum(input_, dim=dim, keepdim=keepdim, dtype=torch.float32).to(
+                dtype or input_.dtype
+            )
+            / n_elems
+        )

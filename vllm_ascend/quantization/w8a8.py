@@ -20,17 +20,24 @@ from typing import Any, Dict, Optional
 import torch
 import torch_npu
 
-from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, AscendDeviceType,
-                               get_ascend_device_type,
-                               get_weight_prefetch_method, maybe_trans_nz)
+from vllm_ascend.utils import (
+    COMPRESSED_TENSORS_METHOD,
+    AscendDeviceType,
+    get_ascend_device_type,
+    get_weight_prefetch_method,
+    maybe_trans_nz,
+)
 
 
-def quant_per_tensor(in_tensor: torch.Tensor,
-                     input_scale: torch.Tensor,
-                     input_offset: torch.Tensor,
-                     function=False):
-    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset,
-                                  torch.qint8, -1, function)
+def quant_per_tensor(
+    in_tensor: torch.Tensor,
+    input_scale: torch.Tensor,
+    input_offset: torch.Tensor,
+    function=False,
+):
+    return torch_npu.npu_quantize(
+        in_tensor, input_scale, input_offset, torch.qint8, -1, function
+    )
 
 
 class AscendW8A8LinearMethod:
@@ -49,9 +56,7 @@ class AscendW8A8LinearMethod:
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
     ) -> Dict[str, Any]:
-        params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.int8)
-        }
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     @staticmethod
@@ -69,24 +74,20 @@ class AscendW8A8LinearMethod:
         params_dict = {}
         params_dict["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
         if params_dtype == torch.bfloat16:
-            params_dict["deq_scale"] = torch.empty(output_size,
-                                                   dtype=torch.float32)
+            params_dict["deq_scale"] = torch.empty(output_size, dtype=torch.float32)
         elif params_dtype == torch.float16:
-            params_dict["deq_scale"] = torch.empty(output_size,
-                                                   dtype=torch.int64)
-        params_dict["weight_scale"] = torch.empty(output_size,
-                                                  1,
-                                                  dtype=params_dtype)
-        params_dict["weight_offset"] = torch.empty(output_size,
-                                                   1,
-                                                   dtype=params_dtype)
+            params_dict["deq_scale"] = torch.empty(output_size, dtype=torch.int64)
+        params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
+        params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_pergroup_param(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        layer_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -112,10 +113,12 @@ class AscendW8A8LinearMethod:
                 quant_comm_config = {}
             comm_fn = quant_comm_config.get("communication_fn")
             enable_flashcomm2_quant_comm = comm_fn is not None and (
-                "o_proj" in layer.prefix or "out_proj" in layer.prefix)
+                "o_proj" in layer.prefix or "out_proj" in layer.prefix
+            )
             if enable_flashcomm2_quant_comm:
                 quant_input_x = x.contiguous().view(
-                    -1, layer.aclnn_input_scale_reciprocal.size(0))
+                    -1, layer.aclnn_input_scale_reciprocal.size(0)
+                )
                 quant_x = torch.ops.vllm.quantize(
                     quant_input_x,
                     layer.aclnn_input_scale,
@@ -173,14 +176,14 @@ class AscendW8A8LinearMethod:
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
         layer.aclnn_input_scale = torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor),
-            requires_grad=False)
+            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
+        )
         layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor),
-            requires_grad=False)
+            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
+        )
         layer.aclnn_input_offset = torch.nn.Parameter(
-            layer.input_offset.data.repeat(expanding_factor),
-            requires_grad=False).to(layer.aclnn_input_scale.dtype)
+            layer.input_offset.data.repeat(expanding_factor), requires_grad=False
+        ).to(layer.aclnn_input_scale.dtype)
         if get_ascend_device_type() != AscendDeviceType._310P:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight.data = maybe_trans_nz(layer.weight.data)
@@ -189,5 +192,4 @@ class AscendW8A8LinearMethod:
         ascend_quant_method = getattr(layer, "ascend_quant_method", "")
         if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             deq_scale = layer.input_scale.data * layer.weight_scale.data
-            layer.deq_scale = torch.nn.Parameter(deq_scale,
-                                                 requires_grad=False)
+            layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)

@@ -25,8 +25,8 @@ from vllm_ascend.model_loader.netloader.netloader import ModelNetLoaderElastic
 
 
 class DummyDeviceConfig:
-    device = 'cuda'
-    device_type = 'cuda'
+    device = "cuda"
+    device_type = "cuda"
 
 
 class DummyParallelConfig:
@@ -41,13 +41,12 @@ class DummyVllmConfig:
 
 
 class DummyModelConfig:
-    model = 'dummy-model'
+    model = "dummy-model"
     dtype = torch.float32
 
 
 @pytest.fixture
 def default_load_config():
-
     class DummyLoadConfig:
         model_loader_extra_config = None
         load_format = "default"
@@ -56,7 +55,6 @@ def default_load_config():
 
 
 def make_loader_with_config(extra):
-
     class DummyLoadConfig:
         model_loader_extra_config = extra
         load_format = "default"
@@ -67,9 +65,7 @@ def make_loader_with_config(extra):
 def test_init_with_extra_config_file(tmp_path, monkeypatch):
     # Generate test JSON file
     config_content = {
-        "SOURCE": [{
-            "device_id": 0
-        }],
+        "SOURCE": [{"device_id": 0}],
         "MODEL": "foo-model",
         "LISTEN_PORT": 5001,
         "INT8_CACHE": "hbm",
@@ -81,8 +77,8 @@ def test_init_with_extra_config_file(tmp_path, monkeypatch):
     dummy_logger = MagicMock()
     monkeypatch.setattr("vllm.logger.logger", dummy_logger)
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix",
-        lambda x: True)
+        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: True
+    )
 
     extra = {"CONFIG_FILE": str(config_file)}
     loader = make_loader_with_config(extra)
@@ -97,17 +93,15 @@ def test_init_with_extra_config(monkeypatch):
     dummy_logger = MagicMock()
     monkeypatch.setattr("vllm.logger.logger", dummy_logger)
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix",
-        lambda x: True)
+        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: True
+    )
 
     extra = {
-        "SOURCE": [{
-            "device_id": 0
-        }],
+        "SOURCE": [{"device_id": 0}],
         "MODEL": "foo",
         "LISTEN_PORT": "4000",
         "INT8_CACHE": "dram",
-        "OUTPUT_PREFIX": "/tmp/"
+        "OUTPUT_PREFIX": "/tmp/",
     }
     loader = make_loader_with_config(extra)
     assert loader.model_path == "foo"
@@ -121,8 +115,8 @@ def test_init_with_invalid_config(monkeypatch):
     dummy_logger = MagicMock()
     monkeypatch.setattr("vllm.logger.logger", dummy_logger)
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix",
-        lambda x: False)
+        "vllm_ascend.model_loader.netloader.utils.is_valid_path_prefix", lambda x: False
+    )
     # c
     extra = {
         "SOURCE": None,
@@ -143,7 +137,6 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     monkeypatch.setattr("torch.distributed.get_rank", lambda: 0)
 
     class FakeContext:
-
         def __enter__(self):
             pass
 
@@ -153,35 +146,39 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     monkeypatch.setattr("torch.device", lambda d: FakeContext())
     # patch deep copy
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.deepcopy", lambda x: x)
+        "vllm_ascend.model_loader.netloader.netloader.deepcopy", lambda x: x
+    )
     # patch set_default_torch_dtype
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.set_default_torch_dtype",
-        lambda dtype: FakeContext())
+        lambda dtype: FakeContext(),
+    )
     # patch initialize_model
     dummy_model = MagicMock(spec=nn.Module)
     dummy_model.eval.return_value = dummy_model
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.initialize_model",
-        lambda **kwargs: dummy_model)
+        lambda **kwargs: dummy_model,
+    )
     # patch elastic_load
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.elastic_load",
-        lambda **kwargs: dummy_model)
+        lambda **kwargs: dummy_model,
+    )
     # patch process_weights_after_loading
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading",
-        lambda *a, **k: None)
+        lambda *a, **k: None,
+    )
     # patch get_ip
     monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
     # patch find_free_port
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.find_free_port",
-        lambda: 8888)
+        "vllm_ascend.model_loader.netloader.netloader.find_free_port", lambda: 8888
+    )
 
     # patch ElasticServer
     class DummyElasticServer:
-
         def __init__(*a, **k):
             pass
 
@@ -189,17 +186,15 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.ElasticServer",
-        DummyElasticServer)
+        "vllm_ascend.model_loader.netloader.netloader.ElasticServer", DummyElasticServer
+    )
     # write output_prefix to the temporary directory
     extra = {
-        "SOURCE": [{
-            "device_id": 0
-        }],
+        "SOURCE": [{"device_id": 0}],
         "MODEL": "foo",
         "LISTEN_PORT": 5555,
         "OUTPUT_PREFIX": str(tmp_path) + "/output_",
-        "INT8_CACHE": "no"
+        "INT8_CACHE": "no",
     }
     loader = make_loader_with_config(extra)
     vllm_config = DummyVllmConfig()
