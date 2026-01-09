@@ -800,7 +800,6 @@ def cleanup_triton_cache():
     Automatically cleanup triton cache before each test case.
     This prevents cache-related issues between test runs.
     """
-    yield
     import shutil
     import glob
     import os
@@ -901,6 +900,12 @@ def cleanup_triton_cache():
         except Exception as e:
             logger.warning(f"[/tmp/tmp*] Error checking tmp files: {e}")
 
+
+    if os.path.exists(triton_cache_path):
+        size = get_cache_size(triton_cache_path)
+        logger.info(f"[Triton Cache] Size before test: {size}")
+
+    yield
     # Check disk space for both /root/.triton/cache and /tmp
     check_disk_space(triton_cache_path, "Disk Space (/root/.triton)")
     check_disk_space(tmp_path, "Disk Space (/tmp)")
@@ -914,7 +919,7 @@ def cleanup_triton_cache():
         logger.info(f"[Triton Cache] Size before cleanup: {size}")
 
     # Cleanup triton cache BEFORE each test
-    shutil.rmtree(triton_cache_path, ignore_errors=True)
+    # shutil.rmtree(triton_cache_path, ignore_errors=True)
 
     # Print cache size (should be empty or very small since we cleaned before)
     if os.path.exists(triton_cache_path):
