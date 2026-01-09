@@ -891,18 +891,21 @@ def cleanup_triton_cache():
         except Exception as e:
             logger.warning(f"[/tmp/tmp*] Error checking tmp files: {e}")
 
-    # ==================== Before test (setup) ====================
-    # Cleanup triton cache BEFORE each test
-    shutil.rmtree(triton_cache_path, ignore_errors=True)
 
-
-    # ==================== After test (teardown) ====================
     # Check disk space for both /root/.triton/cache and /tmp
     check_disk_space(triton_cache_path, "Disk Space (/root/.triton)")
     check_disk_space(tmp_path, "Disk Space (/tmp)")
 
     # Check /tmp/tmp* files
     check_tmp_files()
+
+    # Print cache size before cleanup
+    if os.path.exists(triton_cache_path):
+        size = get_cache_size(triton_cache_path)
+        logger.info(f"[Triton Cache] Size before cleanup: {size}")
+        
+    # Cleanup triton cache BEFORE each test
+    shutil.rmtree(triton_cache_path, ignore_errors=True)
 
     # Print cache size (should be empty or very small since we cleaned before)
     if os.path.exists(triton_cache_path):
