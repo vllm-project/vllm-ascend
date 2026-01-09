@@ -627,6 +627,9 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
 
+    from vllm.distributed.device_communicators.shm_broadcast import \
+        MessageQueue  # noqa
+
     # Signal handler used for graceful termination.
     # SystemExit exception is only raised once to allow this and worker
     # processes to terminate without error
