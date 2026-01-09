@@ -223,6 +223,8 @@ class LoadSpec:
     # Whether the scheduler allow us to load the tokens
     can_load: bool
 
+    token_len: int = 0
+
 
 @dataclass
 class RequestTracker:
