@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""W8A8 MXFP8 Dynamic quantization scheme for Ascend NPU."""
 
 from typing import Any, Dict, Optional
 
@@ -48,16 +47,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
         }
         return params_dict
-
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> Dict[str, Any]:
-        return {}
-
-    def get_perchannel_param(
-        self,
-        output_size: int,
-        params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
-        return {}
 
     def get_pergroup_param(self,
                            input_size: int,
