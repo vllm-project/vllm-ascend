@@ -184,8 +184,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             return quant_method
         if isinstance(layer, FusedMoE):
             # Delayed import to avoid circular import
-            from vllm_ascend.ops.fused_moe.fused_moe import (
-                AscendUnquantizedFusedMoEMethod)
+            from vllm_ascend.ops.fused_moe.fused_moe import \
+                AscendUnquantizedFusedMoEMethod
 
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # collect schemes

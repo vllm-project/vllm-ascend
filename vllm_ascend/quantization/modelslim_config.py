@@ -352,7 +352,8 @@ class AscendModelSlimConfig(QuantizationConfig):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
                 # Delayed import to avoid circular import
-                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+                from vllm_ascend.ops.linear import \
+                    AscendUnquantizedLinearMethod
                 return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping, layer)
@@ -364,8 +365,8 @@ class AscendModelSlimConfig(QuantizationConfig):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
                 # Delayed import to avoid circular import
-                from vllm_ascend.ops.fused_moe.fused_moe import (
-                    AscendUnquantizedFusedMoEMethod)
+                from vllm_ascend.ops.fused_moe.fused_moe import \
+                    AscendUnquantizedFusedMoEMethod
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping, layer)
