@@ -207,8 +207,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                          name="KVCacheStoreRecvingThread")
 
     def _handle_request(self, req_meta: ReqMeta):
-        token_len = req_meta.load_spec.token_len
-        req_id = req_meta.req_id  # type: ignore[union-attr]
+        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
+        req_id = req_meta.req_id
         mask_num = (
             req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
             // self.block_size * self.block_size)
