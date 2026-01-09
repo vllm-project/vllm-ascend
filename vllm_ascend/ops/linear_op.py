@@ -423,7 +423,7 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         if self.reduce_results and self.tp_size > 1:
             output = torch_npu.npu_mm_all_reduce_base(input_parallel,
-                                                      self.weight_t,
+                                                      self.layer.weight.t(),
                                                       self.hcomm_info,
                                                       bias=bias_)
         else:
@@ -449,10 +449,6 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         else:
             cls._HCOMM_INFO = group.get_hccl_comm_name(rank)
         return cls._HCOMM_INFO
-
-    def update_attrs(self):
-        super().update_attrs()
-        self.weight_t = self.layer.weight.t()
 
 
 class SequenceColumnParallelOp(CustomColumnParallelOp):
