@@ -19,6 +19,7 @@ on:
 jobs:
   e2e:
     name: singlecard
+    # needs: [e2e-4-cards]
     runs-on: ${{ inputs.runner }}-1
     container:
       image: ${{ inputs.image }}
@@ -135,6 +136,7 @@ jobs:
 
   e2e-2-cards:
     name: multicard-2
+    # needs: [e2e-4-cards]
     runs-on: linux-aarch64-a3-2
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-a3-ubuntu22.04-py3.11
@@ -244,8 +246,8 @@ jobs:
 
   e2e-4-cards:
     name: multicard-4
-    needs: [e2e, e2e-2-cards]
-    if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
+    # needs: [e2e, e2e-2-cards]
+    # if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
