@@ -14,13 +14,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-name: vLLM Main Schedule Test
+name: Refresh codecov
 
 on:
-  # Run full e2e tests UTC+8: 10am, 16pm, 22pm, 4am
   schedule:
-    - cron: '0 2,8,14,20 * * *'
-  workflow_dispatch:
+    # UTC+8: 8am, 12pm, 16pm
+    - cron: '0 0,4,8 * * *'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -30,10 +29,14 @@ defaults:
     shell: bash -el {0}
 
 jobs:
-  e2e-test:
-    uses: ./.github/workflows/_e2e_test.yaml
+  refresh-codecov:
+    name: refresh codecov
+    strategy:
+      matrix:
+        vllm_version: [2f4e6548efec402b913ffddc8726230d9311948d]
+    uses: ./.github/workflows/_unit_test.yaml
     with:
-      vllm: main
-      runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
-      type: full
+      vllm: ${{ matrix.vllm_version }}
+      runner: linux-amd64-cpu-16-hk
+      image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
+      type: schedule
