@@ -200,7 +200,7 @@ def get_prefix_mapping(model_type: str) -> Dict[str, str]:
 
 
 def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
-                          packed_modules_mapping: Dict[str, Any]) -> str:
+                          packed_modules_mapping: Dict[str, Any]) -> Optional[str]:
     """Determine the quantization type for a linear layer.
     
     Args:

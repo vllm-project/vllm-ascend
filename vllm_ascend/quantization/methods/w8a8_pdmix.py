@@ -14,12 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+"""W8A8 Prefill-Decode Mix quantization methods.
 
-from typing import Any, Dict, cast
+This module provides quantization methods that use different strategies
+for prefill and decode phases:
+- Prefill: Uses dynamic W8A8 quantization
+- Decode (KV consumer): Uses static W8A8 quantization
+"""
+
+from typing import Any, Dict, Optional
 
 import torch
 from vllm.config import get_current_vllm_config
 
+from .base import AscendLinearScheme
 from .registry import register_scheme
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
@@ -27,54 +35,70 @@ from .w8a8_static import AscendW8A8LinearMethod
 
 
 @register_scheme("W8A8_MIX", "linear")
-class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
-    """Linear method for W8A8 prefill-decode mix.
-    
-    Uses static W8A8 for KV consumer (decode) and dynamic W8A8 for prefill.
+class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
+    """Linear method for W8A8 prefill-decode mix quantization.
+
+    This scheme uses composition to delegate to the appropriate quantization
+    method based on the execution phase:
+    - Static W8A8 for KV consumer (decode phase)
+    - Dynamic W8A8 for prefill phase
+
+    The static method is used for weight/parameter specifications since
+    it requires more parameters (input_scale, deq_scale, etc.) that are
+    needed for static quantization during decode.
     """
 
     def __init__(self):
-        self.kv_transfer_config = get_current_vllm_config().kv_transfer_config
-        super().__init__()
+        self._static_method = AscendW8A8LinearMethod()
+        self._dynamic_method = AscendW8A8DynamicLinearMethod()
 
-    def apply(self, layer, x, bias=None, tp_rank=0):
-        if layer.is_kv_consumer:
-            return AscendW8A8LinearMethod.apply(self, layer, x, bias, tp_rank)
-        else:
-            return AscendW8A8DynamicLinearMethod.apply(self, layer, x, bias,
-                                                       tp_rank)
+        kv_transfer_config = get_current_vllm_config().kv_transfer_config
+        self._is_kv_consumer = (kv_transfer_config is not None
+                                and kv_transfer_config.is_kv_consumer)
+
+    def get_weight(self, input_size: int, output_size: int,
+                   params_dtype: torch.dtype) -> Dict[str, Any]:
+        return self._static_method.get_weight(input_size, output_size,
+                                              params_dtype)
 
     def get_pertensor_param(self, params_dtype: torch.dtype) -> Dict[str, Any]:
-        return AscendW8A8LinearMethod.get_pertensor_param(self, params_dtype)
+        return self._static_method.get_pertensor_param(params_dtype)
 
     def get_perchannel_param(
         self,
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        return AscendW8A8LinearMethod.get_perchannel_param(
-            self, output_size, params_dtype)
+        return self._static_method.get_perchannel_param(output_size,
+                                                        params_dtype)
 
-    def process_weights_after_loading(self, layer):
-        AscendW8A8LinearMethod.process_weights_after_loading(
-            cast(AscendW8A8LinearMethod, self), layer)
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        tp_rank: Optional[int] = 0,
+    ) -> torch.Tensor:
+        if layer.is_kv_consumer:
+            return self._static_method.apply(layer, x, bias, tp_rank)
+        else:
+            return self._dynamic_method.apply(layer, x, bias, tp_rank)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._static_method.process_weights_after_loading(layer)
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
-        layer.is_kv_consumer = self.kv_transfer_config is not None and self.kv_transfer_config.is_kv_consumer
+        layer.is_kv_consumer = self._is_kv_consumer
 
 
 @register_scheme("W8A8_MIX", "moe")
 class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
-    """FusedMoE method for W8A8 prefill-decode mix."""
-
-    def __init__(self):
-        super().__init__()
 
     def get_dynamic_quant_param(self, num_experts: int,
                                 intermediate_size_per_partition: int,
                                 hidden_sizes: int,
                                 params_dtype: torch.dtype) -> Dict[str, Any]:
-        param_dict = AscendW8A8DynamicFusedMoEMethod.get_dynamic_quant_param(
-            self, num_experts, intermediate_size_per_partition, hidden_sizes,
+        param_dict = super().get_dynamic_quant_param(
+            num_experts, intermediate_size_per_partition, hidden_sizes,
             params_dtype)
         param_dict["w2_deq_scale"] = torch.empty(num_experts,
                                                  hidden_sizes,
