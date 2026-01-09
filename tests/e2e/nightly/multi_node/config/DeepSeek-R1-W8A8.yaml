@@ -57,7 +57,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"recompute_scheduler_enable":true,"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"recompute_scheduler_enable":true,"enable_prefill_optimizations":true}'
 
   -
     server_cmd: >
@@ -96,7 +96,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"recompute_scheduler_enable":true,"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"recompute_scheduler_enable":true,"enable_prefill_optimizations":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
