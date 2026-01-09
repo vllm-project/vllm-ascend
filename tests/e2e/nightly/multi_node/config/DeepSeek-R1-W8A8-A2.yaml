@@ -28,15 +28,15 @@ deployment:
       --no-enable-prefix-caching
       --max-num-seqs 16
       --tensor-parallel-size 4
-      --max-model-len 16384
-      --max-num-batched-tokens 4096
+      --max-model-len 36864
+      --max-num-batched-tokens 6000
       --enable-expert-parallel
       --async-scheduling
       --trust-remote-code
       --quantization ascend
       --gpu-memory-utilization 0.9
       --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
-      --additional-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 
   -
     server_cmd: >
@@ -50,13 +50,13 @@ deployment:
       --no-enable-prefix-caching
       --max-num-seqs 16
       --tensor-parallel-size 4
-      --max-model-len 16384
-      --max-num-batched-tokens 4096
+      --max-model-len 36864
+      --max-num-batched-tokens 6000
       --enable-expert-parallel
       --async-scheduling
       --trust-remote-code
       --quantization ascend
       --gpu-memory-utilization 0.9
       --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
-      --additional-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 benchmarks:
