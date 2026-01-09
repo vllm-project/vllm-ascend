@@ -52,6 +52,9 @@ jobs:
           - name: qwen3-8b
             os: linux-aarch64-a2-1
             tests: tests/e2e/nightly/single_node/models/test_qwen3_8b.py
+          - name: qwen3next
+            os: linux-aarch64-a2-4
+            ests: tests/e2e/nightly/single_node/models/test_qwen3_next.py
           - name: qwen3-32b
             os: linux-aarch64-a2-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_32b.py
@@ -61,6 +64,9 @@ jobs:
           - name: test_custom_op
             os: linux-aarch64-a2-1
             tests: tests/e2e/nightly/single_node/ops/singlecard_ops
+          - name: test_custom_op_multi_card
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.13.0
