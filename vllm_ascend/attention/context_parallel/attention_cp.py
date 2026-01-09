@@ -327,17 +327,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         output = attn_out_mask
         attn_lse = attn_lse_mask
         if k_nomask is not None:
-            if attn_metadata.prefill is not None and attn_metadata.prefill.chunked_context is None:
-                output = self._npu_attn_out_lse_update(attn_lse_mask,
-                                                       attn_lse_nomask,
-                                                       attn_out_mask,
-                                                       attn_out_nomask)
-                attn_lse = None
-            else:
-                output, attn_lse = self._update_out_and_lse(
-                    torch.stack([attn_out_nomask, attn_out_mask], dim=0),
-                    torch.stack([attn_lse_nomask, attn_lse_mask], dim=0))
-
+            output, attn_lse = self._npu_attn_out_lse_update(
+                attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask)
         return output, attn_lse
 
     def _npu_attn_out_lse_update(self, attn_lse_mask, attn_lse_nomask,
@@ -353,13 +344,14 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_out_nomask = attn_out_nomask.to(torch.float32)
         attn_lse_mask = attn_lse_mask.to(torch.float32)
         attn_lse_nomask = attn_lse_nomask.to(torch.float32)
-        attn_output = [attn_out_nomask, attn_out_mask]
-        attn_lse = [attn_lse_nomask, attn_lse_mask]
-        update_type = 0
-        output, _ = torch_npu.npu_attention_update(attn_lse, attn_output,
-                                                   update_type)
-        output = output.view(T, N, D)
-        return output
+        attn_output_list = [attn_out_nomask, attn_out_mask]
+        attn_lse_list = [attn_lse_nomask, attn_lse_mask]
+        update_type = 1
+        attn_output, attn_lse = torch_npu.npu_attention_update(
+            attn_lse_list, attn_output_list, update_type)
+        attn_output = attn_output.view(T, N, D)
+        attn_lse = attn_lse.view(T, N, 1)
+        return attn_output, attn_lse
 
     def _forward_prefill_cp(self, query: torch.Tensor, key: torch.Tensor,
                             value: torch.Tensor,
@@ -539,21 +531,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
-
-    def _update_out_and_lse(self, out_list: torch.Tensor,
-                            lse_list: torch.Tensor) -> torch.Tensor:
-        """LSE_final = log(sum(exp(LSE_i))), O_final = sum(exp(LSE_i - LSE_final) * O_i)
-        Args:
-            out_list: shape = [N, batch_size, num_heads, head_size]
-            lse_list: shape = [N, batch_size, num_heads, 1]
-        Returns:
-            out_final: shape = [batch_size, num_heads, head_size]
-            lse_final: shape = [batch_size, num_heads, 1]
-        """
-        lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
-        out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list,
-                              dim=0)
-        return out_final, lse_final
 
     def _update_chunk_attn_out_lse_with_current_attn_out_lse(
             self, current_attn_output_prefill, current_attn_lse_prefill,
@@ -765,8 +742,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         # Split out lse
         attn_out_allgather, attn_lse_allgather = torch.split(
             x, [D, 1], dim=-1)  # [N, S, H, D], [N, S, H, 1]
-        context_output, context_lse = self._update_out_and_lse(
-            attn_out_allgather, attn_lse_allgather)
+        context_output, context_lse = self._npu_attn_out_lse_update(
+            attn_lse_allgather[1], attn_lse_allgather[0],
+            attn_out_allgather[1], attn_out_allgather[0])
         return context_output, context_lse
 
     def forward_impl(
