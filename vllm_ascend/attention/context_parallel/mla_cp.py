@@ -69,6 +69,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                                               self.decode_threshold,
                                               dtype=torch.uint8,
                                               device=device)
+        self.block_size = (self.block_size *
+                           self.cp_virtual_block_size) // np.gcd(
+                               self.block_size, self.cp_virtual_block_size)
 
     def build(
         self,
