@@ -384,9 +384,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # For sink attention
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
-        self.attn_mask_builder = AttentionMaskBuilder(self.device)
-        self.sparse_mode_with_sinks = 4 if (self.sinks is not None and self.sliding_window is not None) else 3
         self.sinks = sinks
+        self.attn_mask_builder = AttentionMaskBuilder(device="npu")
+        self.sparse_mode_with_sinks = 4 if (self.sinks is not None and self.sliding_window is not None) else 3
 
     @staticmethod
     def update_graph_params(

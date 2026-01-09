@@ -275,6 +275,8 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
             "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
+            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+            "truncate": False,
         }
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, scaling_factor, dtype, **extra_kwargs
