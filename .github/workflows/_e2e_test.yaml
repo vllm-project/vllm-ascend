@@ -96,7 +96,6 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
           # basic 
-          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_async_scheduling.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_batch_invariant.py
@@ -114,6 +113,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_sampler.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_vlm.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_xlite.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py
 
           # compile
           pytest -sv --durations=0 tests/e2e/singlecard/compile/test_norm_quant_fusion.py
@@ -241,7 +241,6 @@ jobs:
 
   e2e-4-cards:
     name: multicard-4
-    needs: [e2e, e2e-2-cards]
     if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
