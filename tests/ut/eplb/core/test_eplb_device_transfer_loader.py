@@ -11,22 +11,13 @@ import vllm_ascend.eplb.core.eplb_device_transfer_loader as loader
 def mock_adaptor():
     adaptor = MagicMock()
 
-    adaptor.expert_map_per_layer_cpu = {
-        0: {
-            10: torch.tensor(1),
-            20: torch.tensor(0)
-        }
-    }
+    adaptor.expert_map_per_layer_cpu = {0: {10: torch.tensor(1), 20: torch.tensor(0)}}
 
     adaptor.expert_param_per_layer = {
-        0: {
-            0: [[torch.tensor([1.0])]],
-            1: [[torch.tensor([2.0])]]
-        }
+        0: {0: [[torch.tensor([1.0])]], 1: [[torch.tensor([2.0])]]}
     }
 
-    adaptor.buffer_tensor_list = [[[torch.tensor([3.0])],
-                                   [torch.tensor([4.0])]]]
+    adaptor.buffer_tensor_list = [[[torch.tensor([3.0])], [torch.tensor([4.0])]]]
     return adaptor
 
 
@@ -34,15 +25,17 @@ def test_generate_task_and_state_flow(mock_adaptor):
     loader_obj = loader.D2DExpertWeightLoader()
     loader_obj.set_adator(mock_adaptor)
 
-    with patch("torch.distributed.P2POp") as mock_p2p, \
-         patch("torch.distributed.isend", return_value="isend_op"), \
-         patch("torch.distributed.irecv", return_value="irecv_op"):
-
+    with (
+        patch("torch.distributed.P2POp") as mock_p2p,
+        patch("torch.distributed.isend", return_value="isend_op"),
+        patch("torch.distributed.irecv", return_value="irecv_op"),
+    ):
         mock_p2p.side_effect = lambda op, tensor, rank: (op, tensor, rank)
 
         loader_obj.state = loader.ExpertWeightUpdateState.READY
-        loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)],
-                                                     {20: torch.tensor(0)}, 0)
+        loader_obj.generate_expert_d2d_transfer_task(
+            [(1, 10)], [(2, 20)], {20: torch.tensor(0)}, 0
+        )
         assert loader_obj.comm_op_list is None
         loader_obj.state = loader.ExpertWeightUpdateState.WAITING
 
@@ -60,8 +53,9 @@ def test_asyn_transfer_and_update(mock_adaptor):
 
     reqs: list[MagicMock] = []
 
-    with patch("torch.distributed.batch_isend_irecv",
-               return_value=[MagicMock(), MagicMock()]):
+    with patch(
+        "torch.distributed.batch_isend_irecv", return_value=[MagicMock(), MagicMock()]
+    ):
         loader_obj.asyn_expert_weight_transfer(reqs)
 
     assert loader_obj.state == loader.ExpertWeightUpdateState.TRANSFERRING

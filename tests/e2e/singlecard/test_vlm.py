@@ -20,6 +20,7 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
+
 import os
 from unittest.mock import patch
 
@@ -44,11 +45,13 @@ def test_multimodal_vl(vl_config):
     images = [image] * len(img_questions)
     prompts = vl_config["prompt_fn"](img_questions)
 
-    with VllmRunner(vl_config["model"],
-                    mm_processor_kwargs=vl_config["mm_processor_kwargs"],
-                    max_model_len=8192,
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    limit_mm_per_prompt={"image": 1}) as vllm_model:
+    with VllmRunner(
+        vl_config["model"],
+        mm_processor_kwargs=vl_config["mm_processor_kwargs"],
+        max_model_len=8192,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        limit_mm_per_prompt={"image": 1},
+    ) as vllm_model:
         outputs = vllm_model.generate_greedy(
             prompts=prompts,
             images=images,
@@ -63,35 +66,37 @@ def test_multimodal_vl(vl_config):
 
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_audio():
-    audio_prompt = "".join([
-        f"Audio {idx+1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
-        for idx in range(2)
-    ])
+    audio_prompt = "".join(
+        [f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(2)]
+    )
     question = "What sport and what nursery rhyme are referenced?"
-    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n"
-              f"{audio_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
     mm_data = {
         "audio": [
-            asset.audio_and_sample_rate for asset in
-            [AudioAsset("mary_had_lamb"),
-             AudioAsset("winning_call")]
+            asset.audio_and_sample_rate
+            for asset in [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
         ]
     }
     inputs = {"prompt": prompt, "multi_modal_data": mm_data}
 
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=10,
-                                     stop_token_ids=None)
+    sampling_params = SamplingParams(
+        temperature=0.2, max_tokens=10, stop_token_ids=None
+    )
 
-    with VllmRunner("Qwen/Qwen2-Audio-7B-Instruct",
-                    max_model_len=4096,
-                    max_num_seqs=5,
-                    dtype="bfloat16",
-                    limit_mm_per_prompt={"audio": 2},
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    gpu_memory_utilization=0.9) as runner:
+    with VllmRunner(
+        "Qwen/Qwen2-Audio-7B-Instruct",
+        max_model_len=4096,
+        max_num_seqs=5,
+        dtype="bfloat16",
+        limit_mm_per_prompt={"audio": 2},
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        gpu_memory_utilization=0.9,
+    ) as runner:
         outputs = runner.generate(inputs, sampling_params=sampling_params)
 
         assert outputs is not None, "Generated outputs should not be None."

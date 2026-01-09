@@ -22,17 +22,18 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.worker.gpu.input_batch import (InputBatch,
-                                            combine_sampled_and_draft_tokens,
-                                            prepare_pos_seq_lens,
-                                            prepare_prefill_inputs)
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    combine_sampled_and_draft_tokens,
+    prepare_pos_seq_lens,
+    prepare_prefill_inputs,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
-                                              build_attn_state)
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
@@ -45,7 +46,7 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with (torch_cuda_wrapper(), uva_wrapper()):
+        with torch_cuda_wrapper(), uva_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -85,7 +86,8 @@ class NPUModelRunner(GPUModelRunner):
         # we need to adjust triton operators in sampler,
         # so reinitialize sampler here.
         self.sampler: AscendSampler = AscendSampler(
-            logprobs_mode=self.model_config.logprobs_mode, )
+            logprobs_mode=self.model_config.logprobs_mode,
+        )
 
         # actual seq lengths for query (used in attention backends).
         self.actual_seq_lengths_q: list[int] = []
@@ -134,15 +136,14 @@ class NPUModelRunner(GPUModelRunner):
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens = np.array(
-            [scheduler_output.num_scheduled_tokens[i] for i in req_ids],
-            dtype=np.int32)
+            [scheduler_output.num_scheduled_tokens[i] for i in req_ids], dtype=np.int32
+        )
         num_valid_tokens = num_scheduled_tokens
         if scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
                 [
-                    num_tokens - len(
-                        scheduler_output.scheduled_spec_decode_tokens.get(
-                            i, []))
+                    num_tokens
+                    - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
                     for num_tokens, i in zip(num_scheduled_tokens, req_ids)
                 ],
                 dtype=np.int32,
@@ -172,9 +173,9 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits = torch.arange(num_reqs + 1,
-                                         device=self.device,
-                                         dtype=torch.int32)
+            cu_num_logits = torch.arange(
+                num_reqs + 1, device=self.device, dtype=torch.int32
+            )
         else:
             draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens = np.array(
@@ -189,10 +190,9 @@ class NPUModelRunner(GPUModelRunner):
 
             np.cumsum(
                 num_draft_tokens + 1,
-                out=self.input_buffers.cu_num_logits.np[1:num_reqs + 1],
+                out=self.input_buffers.cu_num_logits.np[1 : num_reqs + 1],
             )
-            cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(
-                num_reqs + 1)
+            cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(num_reqs + 1)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping_npu)
@@ -200,20 +200,15 @@ class NPUModelRunner(GPUModelRunner):
         # Get query_start_loc.
         np.cumsum(
             num_scheduled_tokens,
-            out=self.input_buffers.query_start_loc.np[1:num_reqs + 1],
+            out=self.input_buffers.query_start_loc.np[1 : num_reqs + 1],
         )
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
-        self.input_buffers.query_start_loc.np[num_reqs + 1:] = num_tokens
+        self.input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
         self.input_buffers.query_start_loc.copy_to_gpu()
-        query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[:
-                                                                     num_reqs +
-                                                                     1]
-        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[:
-                                                                     num_reqs +
-                                                                     1]
-        query_start_loc_np = self.input_buffers.query_start_loc.np[:num_reqs +
-                                                                   1]
+        query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[: num_reqs + 1]
+        query_start_loc_np = self.input_buffers.query_start_loc.np[: num_reqs + 1]
 
         # Get prefill tokens.
         prepare_prefill_inputs(
@@ -254,7 +249,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, self.input_buffers.positions[:num_tokens])
+            query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
+        )
 
         # Layer name -> attention metadata.
         # TODO(Ronald1995): try to add a new method `build_attn_metadata` in
@@ -269,8 +265,9 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_cpu=self.input_buffers.seq_lens_cpu,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            num_computed_tokens_cpu=self.req_states.
-            num_computed_tokens_cpu[idx_mapping_cpu],
+            num_computed_tokens_cpu=self.req_states.num_computed_tokens_cpu[
+                idx_mapping_cpu
+            ],
             block_tables=block_tables,
             # torch_npu._reshape_and_cache operator requires slot_mappings to
             # be torch.int32.
@@ -348,20 +345,19 @@ class NPUModelRunner(GPUModelRunner):
         # TODO(Ronald1995): update num_computed_tokens_cpu by considering
         # num_rejectd_tokens.
         for req_id, num_computed_token in zip(
-                scheduler_output.scheduled_cached_reqs.req_ids,
-                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+            scheduler_output.scheduled_cached_reqs.req_ids,
+            scheduler_output.scheduled_cached_reqs.num_computed_tokens,
         ):
             req_index = self.req_states.req_id_to_index[req_id]
-            self.req_states.num_computed_tokens_cpu[
-                req_index] = num_computed_token
+            self.req_states.num_computed_tokens_cpu[req_index] = num_computed_token
 
         # update seq_lens_cpu
         for i, req_id in enumerate(req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[
-                req_index]
-            self.input_buffers.seq_lens_cpu[
-                i] = num_computed_tokens + num_scheduled_tokens[req_id]
+            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
+            self.input_buffers.seq_lens_cpu[i] = (
+                num_computed_tokens + num_scheduled_tokens[req_id]
+            )
 
     def eplb_warmup(self):
         # TODO(Ronald1995): just define the method in case calling error in

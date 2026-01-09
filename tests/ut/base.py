@@ -21,7 +21,6 @@ from vllm_ascend.utils import adapt_patch, register_ascend_customop
 
 
 class TestBase(unittest.TestCase):
-
     def __init__(self, *args, **kwargs):
         # adapt patch by default.
         adapt_patch(True)

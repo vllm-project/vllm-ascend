@@ -21,7 +21,7 @@ import sys
 from datetime import datetime
 
 p = re.compile(
-    r'@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$'
+    r"@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$"
 )
 
 
@@ -34,9 +34,9 @@ def parse_lines(lines):
         m = p.search(ln)
         if not m:
             continue
-        user = m.group('user')
-        sha = m.group('sha')
-        datestr = m.group('date').strip()
+        user = m.group("user")
+        sha = m.group("sha")
+        datestr = m.group("date").strip()
         try:
             dt = datetime.fromisoformat(datestr)
         except Exception:
@@ -51,27 +51,26 @@ def parse_lines(lines):
 
 def main():
     ap = argparse.ArgumentParser(
-        description=
-        "Format and sort contributor lines by date (newest first). Outputs markdown table by default."
+        description="Format and sort contributor lines by date (newest first). Outputs markdown table by default."
     )
     ap.add_argument(
-        'file',
-        nargs='?',
-        help=
-        'input file (default stdin), output from collect_user_first_contribution.sh'
+        "file",
+        nargs="?",
+        help="input file (default stdin), output from collect_user_first_contribution.sh",
     )
     ap.add_argument(
-        '--start',
+        "--start",
         type=int,
         default=1,
-        help='minimum number for table (oldest row will have this number)')
-    ap.add_argument('--repo',
-                    default='vllm-project/vllm-ascend',
-                    help='repo used for commit links')
+        help="minimum number for table (oldest row will have this number)",
+    )
+    ap.add_argument(
+        "--repo", default="vllm-project/vllm-ascend", help="repo used for commit links"
+    )
     args = ap.parse_args()
 
     if args.file:
-        with open(args.file, 'r', encoding='utf-8') as f:
+        with open(args.file, "r", encoding="utf-8") as f:
             lines = f.readlines()
     else:
         lines = sys.stdin.readlines()

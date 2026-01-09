@@ -9,14 +9,15 @@ from vllm import config
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
-from vllm_ascend.ops.linear import (AscendMergedColumnParallelLinear,
-                                    AscendReplicatedLinear,
-                                    AscendRowParallelLinear,
-                                    AscendUnquantizedLinearMethod)
+from vllm_ascend.ops.linear import (
+    AscendMergedColumnParallelLinear,
+    AscendReplicatedLinear,
+    AscendRowParallelLinear,
+    AscendUnquantizedLinearMethod,
+)
 
 
 class BaseLinearTest(unittest.TestCase):
-
     def setUp(self):
         self.mock_group = mock.MagicMock()
         self.mock_group.world_size = 2
@@ -30,20 +31,27 @@ class BaseLinearTest(unittest.TestCase):
         self.mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
 
         self.patches = [
-            patch("vllm_ascend.ascend_config.get_ascend_config",
-                  return_value=self.mock_ascend_config),
-            patch("vllm_ascend.distributed.parallel_state.get_otp_group",
-                  return_value=self.mock_group),
-            patch("vllm_ascend.distributed.parallel_state.get_mlp_tp_group",
-                  return_value=self.mock_group),
-            patch("vllm_ascend.ops.linear_op.get_tp_group",
-                  return_value=self.mock_group),
+            patch(
+                "vllm_ascend.ascend_config.get_ascend_config",
+                return_value=self.mock_ascend_config,
+            ),
+            patch(
+                "vllm_ascend.distributed.parallel_state.get_otp_group",
+                return_value=self.mock_group,
+            ),
+            patch(
+                "vllm_ascend.distributed.parallel_state.get_mlp_tp_group",
+                return_value=self.mock_group,
+            ),
+            patch(
+                "vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group
+            ),
             patch(
                 "vllm.distributed.parallel_state.get_tp_group",
                 return_value=self.mock_group,
             ),
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
-            patch("vllm_ascend.utils.oproj_tp_enable", return_value=True)
+            patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
         ]
 
         for p in self.patches:
@@ -55,7 +63,6 @@ class BaseLinearTest(unittest.TestCase):
 
 
 class TestAscendUnquantizedLinearMethod(TestBase):
-
     def setUp(self):
         self.method = AscendUnquantizedLinearMethod()
         self.layer = mock.MagicMock()
@@ -82,9 +89,7 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
-
     def test_mlp_optimize(self):
-
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
@@ -101,7 +106,6 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         linear(input_tensor)
 
     def test_oproj_tp(self):
-
         config._current_vllm_config = MagicMock()
 
         ascend_config._ASCEND_CONFIG = MagicMock()
@@ -121,9 +125,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
-
     def test_merged_mlp_tp_init(self):
-
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
@@ -138,23 +140,20 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
 
 
 class TestAscendReplicatedLinear(BaseLinearTest):
-
     def test_init_disable_tp(self):
         linear = AscendReplicatedLinear(
             input_size=16,
             output_size=8,
         )
-        self.assertTrue(
-            isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
+        self.assertTrue(isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
 
     def test_init_without_disable_tp(self):
         linear = AscendReplicatedLinear(
             input_size=16,
             output_size=8,
         )
-        self.assertTrue(
-            isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
+        self.assertTrue(isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -92,8 +92,12 @@ class RotaryEmbedding(nn.Module):
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
-        inv_freq = 1.0 / (base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
+        inv_freq = 1.0 / (
+            base
+            ** (
+                torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim
+            )
+        )
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
@@ -124,15 +128,15 @@ class RotaryEmbedding(nn.Module):
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
         query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
         key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
@@ -168,14 +172,13 @@ def test_rotary_embedding_quant_with_leading_dim(
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    rope = RotaryEmbedding(head_size, rotary_dim, max_position, base,
-                           is_neox_style, dtype)
+    rope = RotaryEmbedding(
+        head_size, rotary_dim, max_position, base, is_neox_style, dtype
+    )
     rope = rope.to(dtype=dtype)
     num_tokens = batch_size * seq_len
-    positions = torch.randint(0, max_position, (batch_size * seq_len, ))
-    qkv_tensor = torch.randn(num_tokens,
-                             num_heads * head_size * 3,
-                             dtype=dtype)
+    positions = torch.randint(0, max_position, (batch_size * seq_len,))
+    qkv_tensor = torch.randn(num_tokens, num_heads * head_size * 3, dtype=dtype)
     query, key, _ = qkv_tensor.split(
         [num_heads * head_size, num_heads * head_size, num_heads * head_size],
         dim=-1,
@@ -192,21 +195,18 @@ def test_rotary_embedding_quant_with_leading_dim(
     )
 
     # Compare the results.
-    torch.testing.assert_close(query.view(ref_query.size()),
-                               ref_query,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(key.view(ref_key.size()),
-                               ref_key,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(
+        query.view(ref_query.size()), ref_query, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
+    )
+    torch.testing.assert_close(
+        key.view(ref_key.size()), ref_key, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
+    )
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
 
 class ModelwithRotaryEmbedding(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -302,21 +302,19 @@ def test_capture_rotary_embedding_in_aclgraph(
         assert "_C_ascend.rotary_embedding" in graph
         return gm
 
-    static_positions = torch.randint(0, max_position_embeddings,
-                                     (num_tokens, ))
-    static_hidden_states = torch.randn(num_tokens,
-                                       num_heads * head_size,
-                                       dtype=dtype,
-                                       device="npu")
+    static_positions = torch.randint(0, max_position_embeddings, (num_tokens,))
+    static_hidden_states = torch.randn(
+        num_tokens, num_heads * head_size, dtype=dtype, device="npu"
+    )
     compiled_model = torch.compile(model, backend=custom_op_checking_backend)
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
         # warmup the fx graph before capture
         for i in range(3):
-            static_output = compiled_model(static_positions,
-                                           static_hidden_states,
-                                           offsets=None)
+            static_output = compiled_model(
+                static_positions, static_hidden_states, offsets=None
+            )
     stream.wait_stream(torch.npu.current_stream())
 
     aclgraph = torch.npu.NPUGraph()
@@ -325,14 +323,12 @@ def test_capture_rotary_embedding_in_aclgraph(
         # Capture the model in aclgraph.
         static_output = compiled_model(static_positions, static_hidden_states)
     # Capture the model in aclgraph.
-    random_filled_positions = torch.randint(0,
-                                            max_position_embeddings,
-                                            (num_tokens, ),
-                                            device="npu")
-    random_filled_hidden_states = torch.randn(num_tokens,
-                                              num_heads * head_size,
-                                              dtype=dtype,
-                                              device="npu")
+    random_filled_positions = torch.randint(
+        0, max_position_embeddings, (num_tokens,), device="npu"
+    )
+    random_filled_hidden_states = torch.randn(
+        num_tokens, num_heads * head_size, dtype=dtype, device="npu"
+    )
     static_positions.copy_(random_filled_positions)
     static_hidden_states.copy_(random_filled_hidden_states)
 
@@ -342,10 +338,9 @@ def test_capture_rotary_embedding_in_aclgraph(
         ACL_GRPAH_FIRST_RUN = False
         return
     output_reference = model(static_positions, static_hidden_states)
-    torch.testing.assert_close(static_output,
-                               output_reference,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(
+        static_output, output_reference, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
+    )
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

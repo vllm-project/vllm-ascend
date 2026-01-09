@@ -17,11 +17,13 @@ from vllm.triton_utils import tl, triton
 from .utils import prepare_chunk_offsets, safe_exp
 
 
-@triton.heuristics({
-    'USE_G': lambda args: args['g'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
-@triton.jit(do_not_specialize=['T'])
+@triton.heuristics(
+    {
+        "USE_G": lambda args: args["g"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
+@triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
     q,
     k,
@@ -48,8 +50,10 @@ def chunk_fwd_kernel_o(
     T_max = T
 
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(
-            tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int64)
@@ -71,12 +75,15 @@ def chunk_fwd_kernel_o(
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
         for i_k in range(tl.cdiv(K, BK)):
-            p_q = tl.make_block_ptr(q, (T, K), (Hg * K, 1),
-                                    (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k, (K, T), (1, Hg * K),
-                                    (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-            p_h = tl.make_block_ptr(h_base, (K, V), (V, 1),
-                                    (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            p_q = tl.make_block_ptr(
+                q, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
+            )
+            p_k = tl.make_block_ptr(
+                k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
+            )
+            p_h = tl.make_block_ptr(
+                h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0)
+            )
             # [BT, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             # [BK, BT]
@@ -102,10 +109,12 @@ def chunk_fwd_kernel_o(
         m_A = o_i[:, None] >= o_i[None, :]
         b_A = tl.where(m_A, b_A, 0)
 
-        p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_t * BT, i_v * BV),
-                                (BT, BV), (1, 0))
-        p_o = tl.make_block_ptr(o, (T, V), (H * V, 1), (i_t * BT, i_v * BV),
-                                (BT, BV), (1, 0))
+        p_v = tl.make_block_ptr(
+            v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
+        )
+        p_o = tl.make_block_ptr(
+            o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
+        )
 
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # to fix mma -> mma layout conversion
@@ -129,7 +138,7 @@ def chunk_fwd_o(
     BT = chunk_size
 
     if scale is None:
-        scale = k.shape[-1]**-0.5
+        scale = k.shape[-1] ** -0.5
 
     o = torch.empty_like(v)
     if cu_seqlens is None:
@@ -141,7 +150,7 @@ def chunk_fwd_o(
         )
 
     def grid(meta):
-        return (triton.cdiv(V, meta['BV']), N * H)
+        return (triton.cdiv(V, meta["BV"]), N * H)
 
     g = g.transpose(1, 2).contiguous()
     chunk_fwd_kernel_o[grid](

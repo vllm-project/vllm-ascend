@@ -24,9 +24,7 @@ from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendW8A16LinearMethod:
-    """Linear method for Ascend W8A16.
-
-    """
+    """Linear method for Ascend W8A16."""
 
     def __init__(self) -> None:
         pass
@@ -37,9 +35,7 @@ class AscendW8A16LinearMethod:
         output_size: int,
         params_dtype: torch.dtype = torch.bfloat16,
     ) -> Dict[str, Any]:
-        params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.int8)
-        }
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
     @staticmethod
@@ -52,19 +48,17 @@ class AscendW8A16LinearMethod:
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size,
-                                                  1,
-                                                  dtype=params_dtype)
-        params_dict["weight_offset"] = torch.empty(output_size,
-                                                   1,
-                                                   dtype=params_dtype)
+        params_dict["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
+        params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_pergroup_param(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        layer_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -79,7 +73,8 @@ class AscendW8A16LinearMethod:
             weight=layer.weight,
             antiquant_scale=layer.weight_scale,
             antiquant_offset=layer.weight_offset,
-            bias=bias)
+            bias=bias,
+        )
         return output
 
     def process_weights_after_loading(self, layer):

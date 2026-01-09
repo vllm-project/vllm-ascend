@@ -25,41 +25,46 @@ from tests.e2e.model_utils import check_outputs_equal
 
 
 def test_qwen3_moe_full_decode_only_tp2():
-    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
-        del os.environ['HCCL_OP_EXPANSION_MODE']
+    if "HCCL_OP_EXPANSION_MODE" in os.environ:
+        del os.environ["HCCL_OP_EXPANSION_MODE"]
     prompts = [
-        "Hello, my name is", "The president of the United States is",
-        "The capital of France is", "The future of AI is"
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
     model = "Qwen/Qwen3-30B-A3B"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
-    with VllmRunner(model,
-                    max_model_len=1024,
-                    tensor_parallel_size=2,
-                    compilation_config={
-                        "cudagraph_mode": "FULL_DECODE_ONLY",
-                        "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
-                    }) as runner:
-        vllm_fullgraph_outputs = runner.model.generate(prompts,
-                                                       sampling_params)
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
+        },
+    ) as runner:
+        vllm_fullgraph_outputs = runner.model.generate(prompts, sampling_params)
 
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            cudagraph_capture_sizes=[4, 8, 24, 48, 60],
-            tensor_parallel_size=2,
+        model,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[4, 8, 24, 48, 60],
+        tensor_parallel_size=2,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
     vllm_fullgraph_outputs_list = []
     for output in vllm_fullgraph_outputs:
         vllm_fullgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
         vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,
@@ -70,41 +75,46 @@ def test_qwen3_moe_full_decode_only_tp2():
 
 
 def test_qwen3_moe_full_graph_tp2():
-    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
-        del os.environ['HCCL_OP_EXPANSION_MODE']
+    if "HCCL_OP_EXPANSION_MODE" in os.environ:
+        del os.environ["HCCL_OP_EXPANSION_MODE"]
     prompts = [
-        "Hello, my name is", "The president of the United States is",
-        "The capital of France is", "The future of AI is"
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
     model = "Qwen/Qwen3-30B-A3B"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
-    with VllmRunner(model,
-                    max_model_len=1024,
-                    tensor_parallel_size=2,
-                    compilation_config={
-                        "cudagraph_mode": "FULL",
-                        "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
-                    }) as runner:
-        vllm_fullgraph_outputs = runner.model.generate(prompts,
-                                                       sampling_params)
+    with VllmRunner(
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        compilation_config={
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
+        },
+    ) as runner:
+        vllm_fullgraph_outputs = runner.model.generate(prompts, sampling_params)
 
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            cudagraph_capture_sizes=[4, 8, 24, 48, 60],
-            tensor_parallel_size=2,
+        model,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[4, 8, 24, 48, 60],
+        tensor_parallel_size=2,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
     vllm_fullgraph_outputs_list = []
     for output in vllm_fullgraph_outputs:
         vllm_fullgraph_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     vllm_eager_outputs_list = []
     for output in vllm_eager_outputs:
         vllm_eager_outputs_list.append(
-            (output.outputs[0].index, output.outputs[0].text))
+            (output.outputs[0].index, output.outputs[0].text)
+        )
 
     check_outputs_equal(
         outputs_0_lst=vllm_eager_outputs_list,

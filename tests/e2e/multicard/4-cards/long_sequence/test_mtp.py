@@ -26,127 +26,137 @@ os.environ["HCCL_BUFFSIZE"] = "512"
 
 def test_pcp_dcp_mtp1_eager():
     prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
+        "The capital of France is",
+        "Hello, my name is Tom, I am",
+        "The president of United States is",
+        "AI future is",
     ]
     model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 1,
-                "method": "deepseek_mtp",
-            },
-            enforce_eager=True,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 1,
+            "method": "deepseek_mtp",
+        },
+        enforce_eager=True,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
 
 def test_pcp_dcp_mtp3_eager():
     prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
+        "The capital of France is",
+        "Hello, my name is Tom, I am",
+        "The president of United States is",
+        "AI future is",
     ]
     model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            enforce_eager=True,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        enforce_eager=True,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
 
 def test_pcp_dcp_mtp3_piecewise_graph():
     prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
+        "The capital of France is",
+        "Hello, my name is Tom, I am",
+        "The president of United States is",
+        "AI future is",
     ]
     model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            compilation_config={
-                "cudagraph_mode": "PIECEWISE",
-                "cudagraph_capture_sizes": [4, 8, 16],
-            },
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        compilation_config={
+            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_capture_sizes": [4, 8, 16],
+        },
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
 
 def test_pcp_dcp_mtp3_full_graph():
     prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
+        "The capital of France is",
+        "Hello, my name is Tom, I am",
+        "The president of United States is",
+        "AI future is",
     ]
     model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [4, 8, 16],
-            },
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [4, 8, 16],
+        },
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
 
 def test_dcp_mtp3_full_graph():
     prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
+        "The capital of France is",
+        "Hello, my name is Tom, I am",
+        "The president of United States is",
+        "AI future is",
     ]
     model = "wemaster/deepseek_mtp_main_random_bf16"
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [4, 8, 16],
-            },
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [4, 8, 16],
+        },
     ) as runner:
         runner.generate_greedy(prompts, 32)
