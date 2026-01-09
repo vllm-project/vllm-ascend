@@ -77,7 +77,8 @@ async def test_models(model: str) -> None:
         "--trust-remote-code",
         "--gpu-memory-utilization",
         "0.65",
-        "--enforce-eager",
+        "--compilation-config",
+        '{"cudagraph_capture_sizes": [32]}',
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
