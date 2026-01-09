@@ -21,7 +21,7 @@ on:
       tag:
         description: 'Docker tag for build results'
         type: string
-        default: manual
+        default: main
         required: true
 
 jobs:
