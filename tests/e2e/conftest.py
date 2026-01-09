@@ -801,6 +801,7 @@ def cleanup_triton_cache():
     This prevents cache-related issues between test runs.
     """
     yield
+    import shutil
     import subprocess
     import os
 
@@ -847,4 +848,4 @@ def cleanup_triton_cache():
             logger.warning(f"[Triton Cache] Error calculating size: {e}")
 
     # Cleanup the cache
-    # shutil.rmtree(triton_cache_path, ignore_errors=True)
+    shutil.rmtree(triton_cache_path, ignore_errors=True)
