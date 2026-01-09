@@ -216,9 +216,15 @@ class EagleProposer(VllmEagleProposer):
                         :num_reqs * self.decode_threshold]
 
             builder = self.runner.attn_groups[0][0].get_metadata_builder()
-            attn_metadata_eagle = builder.build_for_graph_capture(
-                common_attn_metadata, AscendAttentionState.SpecDecoding
-            )  # TODO: check which one should we use, ChunkedPrefill or SpecDecoding
+            # TODO: check which one should we use, ChunkedPrefill or SpecDecoding
+            if self.vllm_config.model_config.use_mla:
+                attn_metadata_eagle = builder.build_for_graph_capture(
+                    common_attn_metadata, AscendAttentionState.SpecDecoding
+                )
+            else:
+                attn_metadata_eagle = builder.build_for_graph_capture(
+                    common_attn_metadata, AscendAttentionState.ChunkedPrefill
+                )
             attn_metadata = {}
             for layer_name in self.attn_layer_names:
                 attn_metadata[layer_name] = attn_metadata_eagle
@@ -233,7 +239,7 @@ class EagleProposer(VllmEagleProposer):
                     aclgraph_runtime_mode == CUDAGraphMode.FULL):
                 aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-            update_cos_sin(self.positions[:num_tokens])  # TODO: check it
+            update_cos_sin(self.positions[:num_tokens])
 
             with set_ascend_forward_context(
                     attn_metadata,
@@ -256,7 +262,7 @@ class EagleProposer(VllmEagleProposer):
 
                 positions, previous_hidden_states = self.maybe_pad_and_reduce(
                     positions, previous_hidden_states
-                )  # TODO: check difference with ealge
+                )
 
                 self.model(
                     input_ids=input_ids,
@@ -385,7 +391,6 @@ class EagleProposer(VllmEagleProposer):
                 common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = \
                     query_start_loc_p
 
-        # -------------------- determine cudagraph mode --------------------- #
         num_input_tokens = self.maybe_pad_for_graph(num_tokens,
                                                     num_scheduled_tokens)
 
@@ -398,7 +403,7 @@ class EagleProposer(VllmEagleProposer):
             max_query_len = common_attn_metadata.max_query_len
             uniform_decode_query_len = 1 + self.num_speculative_tokens
             uniform_decode = (
-                max_query_len in list(  # TODO: problematic
+                max_query_len in list(
                     range(1, uniform_decode_query_len + 1))
                 and scheduler_output.total_num_scheduled_tokens
                 == self.runner.input_batch.num_reqs * uniform_decode_query_len)
@@ -414,9 +419,7 @@ class EagleProposer(VllmEagleProposer):
                  uniform_decode=uniform_decode,
                  has_lora=has_lora,
              )
-        # ------------------------------------------------------------------- #
 
-        # -------------------- build attention metadata --------------------- #
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
             graph_pad_size = num_input_tokens
@@ -454,7 +457,6 @@ class EagleProposer(VllmEagleProposer):
         for layer_name in self.indexer_layer_names:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
-        # ------------------------------------------------------------------- #
 
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
@@ -469,7 +471,6 @@ class EagleProposer(VllmEagleProposer):
                 is_multimodal=is_mm_embed,
             )
 
-        # ---------------------- generate first token ----------------------- #
         # TODO: check for compatibility with mtp
         update_cos_sin(self.positions[:num_input_tokens])
 
@@ -542,7 +543,6 @@ class EagleProposer(VllmEagleProposer):
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
             return torch.stack(draft_token_ids_list, dim=1)
-        # ------------------------------------------------------------------- #
 
         if self.uses_mrope:
             positions = target_positions[:, last_token_indices]
@@ -572,7 +572,7 @@ class EagleProposer(VllmEagleProposer):
             num_accept_tokens = \
                 query_lens_d.to(self.device) - num_reject_tokens
             ori_seq_len = attn_metadata_i.seq_lens + 1
-            ori_seq_len = ori_seq_len - 1  # TODO: check it
+            ori_seq_len = ori_seq_len - 1
             mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
             # slot_mapping index base offset:
@@ -633,14 +633,12 @@ class EagleProposer(VllmEagleProposer):
         a large amount of code for pcpdcp attention metadata update
         """
 
-        # -------- determine cudagraph mode for the rest generations -------- #
         input_batch_size = self.maybe_pad_for_graph(batch_size, batch_size)
 
         (input_batch_size, batch_size_across_dp,
          _) = self.runner._sync_metadata_across_dp(input_batch_size,
                                                    self.runner.with_prefill)
 
-        # TODO: check it
         uniform_decode = True
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
@@ -654,10 +652,7 @@ class EagleProposer(VllmEagleProposer):
                  uniform_decode=uniform_decode,
                  has_lora=has_lora,
              )
-        # ------------------------------------------------------------------- #
 
-        # ---- update common attention metadata for the rest generations ---- #
-        # TODO: find out should we set it
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
             graph_pad_size = input_batch_size
@@ -689,15 +684,17 @@ class EagleProposer(VllmEagleProposer):
             common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                 self.token_arange_np[:batch_size + 1]).clone()
 
-        common_attn_metadata.decode_token_per_req = 1  # TODO: check it
+        common_attn_metadata.decode_token_per_req = 1
         common_attn_metadata.attn_mask = (
             self.attn_mask_builder.get_splitfuse_attn_mask())
-        common_attn_metadata.attn_state = AscendAttentionState.SpecDecoding  # check it
+        if self.vllm_config.model_config.use_mla:
+            common_attn_metadata.attn_state = AscendAttentionState.SpecDecoding
+        else:
+            common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.num_input_tokens = input_batch_size
         """
         prefill_context_parallel_metadata may be important, but pcpdcp
         """
-        # ------------------------------------------------------------------- #
 
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
@@ -738,7 +735,6 @@ class EagleProposer(VllmEagleProposer):
             common_attn_metadata.seq_lens[:batch_size].masked_fill_(
                 exceeds_max_model_len, 1)
 
-            # TODO: what aboue max_seq_len
             common_attn_metadata.seq_lens_cpu[:batch_size] = (
                 common_attn_metadata.seq_lens_cpu[:batch_size] + 1)
             exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] > \
@@ -847,7 +843,7 @@ class EagleProposer(VllmEagleProposer):
                     input_ids = self.input_ids[:input_batch_size]
                     inputs_embeds = None
                 _positions = self._get_positions(
-                    input_batch_size)  # TODO: check it
+                    input_batch_size)
                 hidden_states = self.hidden_states[:input_batch_size]
 
                 # split hidden states along sequence dimension
@@ -863,7 +859,7 @@ class EagleProposer(VllmEagleProposer):
                 self.maybe_update_attn_params(input_batch_size)
                 _positions, hidden_states = self.maybe_all_gather_and_unpad(
                     _positions, last_hidden_states, hidden_states
-                )  # TODO: last_hidden_states from eagle3 should take care
+                )
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
