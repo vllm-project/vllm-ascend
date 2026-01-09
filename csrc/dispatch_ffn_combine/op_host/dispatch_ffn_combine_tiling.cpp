@@ -27,7 +27,7 @@ using namespace AscendC;
 using namespace ge;
 
 namespace {
-    // 1. Constant definitions
+    // 1. 常量定义
     const char *K_INNER_DEBUG = "DispatchFFNCombine Tiling Debug";
     constexpr uint32_t ATTR_GROUP_INDEX = 0;
     constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
@@ -54,13 +54,13 @@ static int32_t CeilDev(int32_t num, int32_t div)
     return (num + div - 1) / div;
 }
 
-// Parse and validate rankId, group, worldSize, and isTransB attributes
+// 解析并校验 rankId, group, worldSize, isTransB 属性值
 static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo& info)
 {
     auto attrs = context->GetAttrs();
     OP_TILING_CHECK(attrs == nullptr, OP_LOGE(K_INNER_DEBUG, "attrs is null."), return ge::GRAPH_FAILED);
 
-    // TODO: set, validate, and print tiling data related to attributes
+    // todo：Attr相关tilingdata的设置、校验、打印
     auto groupPtr = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
     auto maxOutputSizePtr = attrs->GetAttrPointer<int>(ATTR_MAX_OUTPUT_SIZE_INDEX);
     auto is_trans_b = attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B);
@@ -87,7 +87,7 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     return ge::GRAPH_SUCCESS;
 }
 
-// Extract shapes of input tensors A and B to compute M, K, N
+// 提取输入张量 A 和 B 的形状，计算出 M、K、N 值
 static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo &info)
 {
     const char *nodeName = context->GetNodeName();
@@ -116,7 +116,7 @@ static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingCont
     return ge::GRAPH_SUCCESS;
 }
 
-// Get hardware info such as AI Core count and UB capacity for the current chip platform.
+// 获取当前芯片平台的 AI Core 数目、UB 容量等硬件信息。
 static ge::graphStatus DispatchFFNCombineGetPlatformInfoAndSetTiling(gert::TilingContext *context, DispatchFFNCombineInfo& info)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -146,9 +146,9 @@ void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
     cocTilingData.lenPerLoop = cocTilingData.m0 * cocTilingData.n0 / 2;
 }
 
-// Main scheduling function:
-// Get tilingData ➝ check Attr ➝ check Shape ➝ get platform info 
-// ➝ call SetTilingData (based on rank count) ➝ set blockDim ➝ set tilingKey ➝ set workspace ➝ configure communication parameters
+// 主调度函数：
+// 获取 tilingData ➝ 检查 Attr ➝ 检查 Shape ➝ 获取平台信息 
+// ➝ 调用 SetTilingData（根据rank数目） ➝ 设置 blockDim ➝ 设置 tilingKey ➝ 设置 workspace ➝ 配置通信参数
 
 static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *context)
 {
@@ -228,9 +228,14 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
-
+                            info.maxOutputSize * info.N * sizeof(int16_t) +
+                            info.maxOutputSize * n2 * sizeof(int16_t) +
+                            info.maxOutputSize * info.K * sizeof(int8_t) +
+                            info.maxOutputSize * k2 * sizeof(int8_t) + 
+                            info.worldSize * sizeof(int32_t) * 16;
+                            // std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
+                            // std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
+    
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 
 
