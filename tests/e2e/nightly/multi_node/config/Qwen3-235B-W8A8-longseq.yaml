@@ -12,7 +12,6 @@ env_common:
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128
   DYNAMIC_EPLB: true
-  VLLM_ALLOW_LONG_MAX_MODEL_LEN: 1
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
