@@ -69,8 +69,8 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        return self._static_method.get_perchannel_param(output_size,
-                                                        params_dtype)
+        return self._static_method.get_perchannel_param(
+            output_size, params_dtype)
 
     def apply(
         self,

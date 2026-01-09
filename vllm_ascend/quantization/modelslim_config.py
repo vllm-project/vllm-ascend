@@ -45,7 +45,6 @@ from .methods import get_scheme_class
 
 logger = init_logger(__name__)
 
-
 # key: model_type
 # value: orig_to_new_prefix
 QUANT_MODEL_PREFIX_MAPPINGS: Dict[str, Dict[str, str]] = {
@@ -199,8 +198,9 @@ def get_prefix_mapping(model_type: str) -> Dict[str, str]:
     return QUANT_MODEL_PREFIX_MAPPINGS.get(model_type, {})
 
 
-def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
-                          packed_modules_mapping: Dict[str, Any]) -> Optional[str]:
+def get_linear_quant_type(
+        quant_description: Dict[str, Any], prefix: str,
+        packed_modules_mapping: Dict[str, Any]) -> Optional[str]:
     """Determine the quantization type for a linear layer.
     
     Args:
