@@ -203,7 +203,6 @@ at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& scale2,
     const at::Tensor& probs,
     c10::string_view group,
-    int64_t max_output_size,
     at::Tensor& out
 ) {
     return out;
