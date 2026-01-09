@@ -66,7 +66,7 @@ from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
 from typing import Any, Optional, Union
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, AscendAFD
-from vllm.distributed.afd_transfer.afd_connector.metadata import M2NAFDConnectorMetadata
+from vllm_ascend.distributed.metadata import M2NAFDConnectorMetadata
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
 

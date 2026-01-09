@@ -17,6 +17,8 @@
 
 from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
+from vllm.distributed.afd_transfer.afd_connector.factory import \
+    AFDConnectorFactory
 from .M2NAFDConnector import *
 
 def register_connector():
@@ -38,3 +40,16 @@ def register_connector():
         "MooncakeLayerwiseConnector",
         "vllm_ascend.distributed.mooncake_layerwise_connector",
         "MooncakeLayerwiseConnector")
+
+def register_afd_connector():
+    AFDConnectorFactory.register_connector(
+        "m2nconnector", "vllm_ascend.distributed.M2NAFDConnector",
+        "M2NAFDConnector")
+
+    AFDConnectorFactory.register_connector(
+        "camm2nconnector", "vllm_ascend.distributed.CAMM2NAFDConnector",
+        "CAMM2NAFDConnector")
+
+    AFDConnectorFactory.register_connector(
+        "camp2pconnector", "vllm_ascend.distributed.CAMP2PAFDConnector",
+        "CAMP2PAFDConnector")

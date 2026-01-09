@@ -395,5 +395,8 @@ setup(
             "ascend_enhanced_model = vllm_ascend:register_model",
             "ascend_kv_connector = vllm_ascend:register_connector"
         ],
+        "vllm.afd_connectors": [
+            "ascend_afd_connector = vllm_ascend:register_afd_connector"
+        ],
     },
 )

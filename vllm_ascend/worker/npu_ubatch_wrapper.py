@@ -2,37 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import copy
 
 import torch
 
-import vllm.envs as envs
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id)
-from vllm.forward_context import (create_forward_context, get_forward_context,
-                                  override_forward_context, DPMetadata)
+from vllm.forward_context import get_forward_context, override_forward_context, DPMetadata
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
-from vllm.utils import has_deep_gemm
-from vllm_ascend.worker.ubatching import UBatchContext, make_ubatch_contexts
+from vllm.v1.worker.ubatching import make_ubatch_contexts
+from vllm.v1.worker.gpu_ubatch_wrapper import (
+    UBatchWrapper as GPUUBatchWrapper,
+    UbatchMetadata
+)
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class UbatchMetadata:
-    context: UBatchContext
-    input_ids: torch.Tensor
-    positions: torch.Tensor
-    inputs_embeds: Optional[torch.Tensor]
-    intermediate_tensors: Optional[IntermediateTensors]
-    num_tokens: int
 
 
 @dataclass
@@ -42,132 +32,101 @@ class ACLGraphMetaData:
     outputs: Optional[Any] = None
 
 
-class SMControlContextManager:
+@contextmanager
+def _torch_cuda_wrapper():
+    """NPU特有的上下文管理器，用于替换torch.cuda API为torch.npu API"""
 
-    def __init__(self, comm_sms: int, set_comm_sms: Callable[[int], None],
-                 set_compute_sms: Callable[[int], None]):
-        """
-        Context manager for controlling SM (Streaming Multiprocessor)
-        allocation. Upon entering the context, it sets the number of SMs
-        allocated for communication and computation to comm_sms and
-        total_sms - comm_sms respectively. Upon exiting, it restores the
-        allocation to use all available SMs (i.e. total_sms).
-        Args:
-            comm_sms (int): The number of SMs to allocate for communication.
-                (The remainder will be used for computation.)
-            set_comm_sms (Callable[[int], None]):
-                A function that sets the number of SMs for communication.
-            set_compute_sms (Callable[[int], None]):
-                A function that sets the number of SMs for computation.
-        """
+    class _EventPlaceholder:
 
-        assert current_platform.is_cuda(), \
-            "SM control is currently only supported on CUDA"
+        def __init__(self, *args, **kwargs) -> None:
+            self.record = lambda: None
+            self.synchronize = lambda: None
 
-        props = torch.npu.get_device_properties(torch.npu.current_device())
-        total_sms = props.multi_processor_count
+    class _StreamPlaceholder:
 
-        assert comm_sms < total_sms
-        self.total_sms = total_sms
-        self.compute_sms = total_sms - comm_sms
-        self.comm_sms = comm_sms
-        self.set_comm_sms = set_comm_sms
-        self.set_compute_sms = set_compute_sms
+        def __init__(self, *args, **kwargs) -> None:
+            pass
 
+    # Backup original
+    original_cuda = None
+    if hasattr(torch, 'cuda'):
+        original_cuda = torch.cuda
+
+    try:
+        # replace cuda APIs with npu APIs
+        torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = torch.npu.Stream
+        torch.cuda.default_stream = torch.npu.default_stream
+        torch.cuda.current_stream = torch.npu.current_stream
+        torch.cuda.stream = torch.npu.stream
+        torch.cuda.set_stream = torch.npu.set_stream
+        yield
+    except Exception:
+        torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = _StreamPlaceholder
+        torch.cuda.default_stream = _StreamPlaceholder
+        torch.cuda.current_stream = _StreamPlaceholder
+        torch.cuda.stream = _StreamPlaceholder
+        torch.cuda.set_stream = torch.npu.set_stream
+    finally:
+        if original_cuda:
+            torch.cuda = original_cuda
+        else:
+            del torch.cuda
+
+
+class _EmptyContextManager:
     def __enter__(self):
-        self.set_comm_sms(self.comm_sms)
-        self.set_compute_sms(self.compute_sms)
+        pass
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.set_comm_sms(self.total_sms)
-        self.set_compute_sms(self.total_sms)
+        pass
 
 
-class UBatchWrapper:
-
+class UBatchWrapper(GPUUBatchWrapper):
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
                  runtime_mode: CUDAGraphMode, device: torch.npu.device):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
+
         self.comm_stream = torch.npu.Stream(device=device)
-        # Ubatch threads plus the main thread
+
         self.ready_barrier = threading.Barrier(
             self.vllm_config.parallel_config.num_ubatches + 1
         )
 
         self.aclgraphs: dict[int, ACLGraphMetaData] = {}
+        self.cudagraphs = self.aclgraphs
 
         self.aclgraph_wrapper = None
+        self.cudagraph_wrapper = None  # 为了兼容父类引用
         self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
             self.aclgraph_wrapper = ACLGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode)
+            self.cudagraph_wrapper = self.aclgraph_wrapper
             self.graph_pool = current_platform.get_global_graph_pool()
 
+        self.sm_control = _EmptyContextManager()
+        
         self.device = device
 
-    # TODO HXY 这里要重新写，npu当然没有sm这种东西，得改成aiv和aic，但不知道是啥，先注释掉再说
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
-        comm_sms = envs.VLLM_DBO_COMM_SMS
+        return _EmptyContextManager()
 
-        set_comm_sms = lambda sms: None
-        if vllm_config.parallel_config.enable_expert_parallel:
-            # Currently only DeepEP highthroughput supports SM control so this
-            # only affects that case.
-            all2all_manager = get_ep_group(
-            ).device_communicator.all2all_manager
-
-            if all2all_manager.max_sms_used() is not None:
-                comm_sms = min(comm_sms, all2all_manager.max_sms_used())
-
-            if comm_sms > 0:
-                set_comm_sms = lambda sms: all2all_manager.set_num_sms(sms)
-
-        # TODO(lucas): support other kernels besides DeepGEMM
-        set_compute_sms = lambda sms: None
-        if has_deep_gemm() and comm_sms > 0:
-            import deep_gemm as dg
-            set_compute_sms = lambda sms: dg.set_num_sms(sms)
-
-        return SMControlContextManager(comm_sms=comm_sms,
-                                       set_comm_sms=set_comm_sms,
-                                       set_compute_sms=set_compute_sms)
-
-    def __getattr__(self, key: str):
-        # allow accessing the attributes of the runnable.
-        if hasattr(self.runnable, key):
-            return getattr(self.runnable, key)
-        raise AttributeError(f"Attribute {key} not exists in the runnable of "
-                             f"aclgraph wrapper: {self.runnable}")
-
-    def unwrap(self) -> Callable:
-        # in case we need to access the original runnable.
-        return self.runnable
-
+    @_torch_cuda_wrapper()
     def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
         """
-        Capture a aclgraph for a microbatched run.
-        The logic here is somewhat complicated because we need to make sure that
-        each of the ubatch threads initialize the cuda context before we start
-        the graph capture.
-        The flow is as follows:
-        1. The main thread starts up each ubatch thread. Each thread will
-        initialize its cuda context (torch.npu.current_blas_handle())
-        before going to sleep upon entering the ubatch_context.
-        2. The main thread starts the graph capture and wakes up the first
-        ubatch thread.
-        3. Each ubatch thread runs the model to completion and returns the
-        completed output tensors back to the main thread.
-        4. The main thread stores the captured aclgraph along with its metadata
-        and returns
+        NPU：Capture a ACLGraph for a microbatched run.
         """
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
             torch.npu.set_device(self.device)
             ubatch_context = ubatch_metadata.context
+            # NPU特殊逻辑：不需要初始化blas_handle
             with ubatch_context:
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
@@ -198,9 +157,9 @@ class UBatchWrapper:
                                           ))
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait()  # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for all threads to be ready
 
-            # Capture the aclgraph
+            # Capture the ACLGraph
             aclgraph_metadata = \
                 ACLGraphMetaData(
                             aclgraph=torch.npu.NPUGraph(),
@@ -222,6 +181,7 @@ class UBatchWrapper:
             self.aclgraphs[num_tokens] = aclgraph_metadata
         return aclgraph_metadata.outputs
 
+    @_torch_cuda_wrapper()
     def _run_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
 
         @torch.inference_mode()
@@ -240,8 +200,7 @@ class UBatchWrapper:
 
         # Ubatch threads will manually manage the forward context, so we
         # override it to None here so we can have it restored correctly
-        # after both threads have finished
-        # TODO HXY 这里强行override了才导致这边的里面要Get的时候拿不到正确的东西了
+        # after all threads have finished
         with override_forward_context(None):
             ubatch_threads = []
             for metadata in ubatch_metadata:
@@ -253,7 +212,7 @@ class UBatchWrapper:
                                             ))
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait()  # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for all threads to be ready
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
@@ -262,11 +221,11 @@ class UBatchWrapper:
             result = torch.cat(sorted_results, dim=0)
             return result
 
+    @_torch_cuda_wrapper()
     def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
                               positions, inputs_embeds, intermediate_tensors,
                               compute_stream, dp_metadata, batch_descriptor,
                               aclgraph_runtime_mode, afd_metadata) -> list[UbatchMetadata]:
-
         # Create one forward context per ubatch
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
@@ -318,45 +277,29 @@ class UBatchWrapper:
 
         return ubatch_metadata
 
-    def _slice_model_inputs(self, tokens_slice: slice, input_ids, positions,
-                            inputs_embeds, intermediate_tensors):
-        sliced_input_ids = input_ids[tokens_slice]
-        # if we are using mrope. Mrope adds an additional dimension to the
-        # positions tensor
-        if positions.ndim == 2:
-            sliced_positions = positions[:, tokens_slice]
-        else:
-            sliced_positions = positions[tokens_slice]
-        sliced_inputs_embeds = inputs_embeds[
-            tokens_slice] if inputs_embeds else None
-        sliced_intermediate_tensors = intermediate_tensors[
-            tokens_slice] if intermediate_tensors else None
-
-        return (sliced_input_ids, sliced_positions, sliced_inputs_embeds,
-                sliced_intermediate_tensors)
-
+    @_torch_cuda_wrapper()
     def __call__(self, *args, **kwargs):
-        # TODO: 后续待修改成DBO多线程方式
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         ubatch_slices = forward_context.ubatch_slices
-        aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
         afd_metadata = forward_context.afd_metadata
+        
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
 
             # This is to account for the case where ubatching was aborted.
             # When we capture full graphs we only capture one graph per shape,
-            # meaning that if we have a ubatched  aclgraph for the current
+            # meaning that if we have a ubatched graph for the current
             # num_tokens, we don't have a non-ubatched one. Without this
-            # check, the aclgraph wrapper will try to capture a aclgraph
+            # check, the graph wrapper will try to capture a graph
             # for this shape during a normal run.
-            if aclgraph_runtime_mode is CUDAGraphMode.FULL:
+            if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
                 if batch_descriptor.num_tokens in self.aclgraphs:
-                    aclgraph_runtime_mode = CUDAGraphMode.NONE
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
 
-            if aclgraph_runtime_mode in (CUDAGraphMode.NONE,
+            if cudagraph_runtime_mode in (CUDAGraphMode.NONE,
                                           CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
             else:
@@ -378,7 +321,7 @@ class UBatchWrapper:
         assert dp_metadata is not None
 
         if num_tokens not in self.aclgraphs \
-            and aclgraph_runtime_mode is CUDAGraphMode.FULL:
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
@@ -393,7 +336,7 @@ class UBatchWrapper:
                 afd_metadata=afd_metadata)
             return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.aclgraphs \
-            and aclgraph_runtime_mode is CUDAGraphMode.FULL:
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             aclgraph_metadata = self.aclgraphs[num_tokens]
             aclgraph_metadata.aclgraph.replay()
             print("UBatchWrapper replay")
