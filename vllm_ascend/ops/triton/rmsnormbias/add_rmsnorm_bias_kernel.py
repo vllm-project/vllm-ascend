@@ -8,13 +8,13 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 @triton.heuristics(
     {"HAS_BIAS": lambda args: args["norm_bias_ptr"] is not None})
-@triton.heuristics(
-    {"HAS_Z": lambda args: args["residual_ptr"] is not None})
+@triton.heuristics({"HAS_Z": lambda args: args["residual_ptr"] is not None})
 @triton.jit
 def add_rmsnorm_bias_kernel(input_ptr, residual_ptr, norm_weight_ptr,
                             norm_bias_ptr, output_ptr, output2_ptr, batch_size,
                             hidden_size: tl.constexpr, eps: tl.constexpr,
-                            BLOCK_SIZE: tl.constexpr, HAS_BIAS: tl.constexpr,HAS_Z: tl.constexpr):
+                            BLOCK_SIZE: tl.constexpr, HAS_BIAS: tl.constexpr,
+                            HAS_Z: tl.constexpr):
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
     cols = tl.arange(0, BLOCK_SIZE)
