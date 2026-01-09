@@ -990,16 +990,14 @@ class TestUtils(unittest.TestCase):
             self.assertEqual(s, mock_socket)
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger"
-    )
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
     def test_ensure_zmq_send_success(self, mock_logger):
         mock_socket = MagicMock()
         ensure_zmq_send(mock_socket, b"hello")
         mock_socket.send.assert_called_once_with(b"hello")
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger"
-    )
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
     def test_ensure_zmq_send_retry_and_fail(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
@@ -1009,8 +1007,7 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(mock_socket.send.call_count, 2)
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger"
-    )
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
     def test_ensure_zmq_recv_success(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
@@ -1022,8 +1019,7 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(data, b"response")
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger"
-    )
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
     def test_ensure_zmq_recv_timeout_and_fail(self, mock_logger):
         mock_socket = MagicMock()
         mock_poller = MagicMock()
