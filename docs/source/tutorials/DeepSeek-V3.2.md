@@ -36,17 +36,19 @@ We strongly recommend you to install triton ascend package to speed up the infer
 
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
 
-Source the Ascend BiSheng toolkit, execute the command:
+Install the Ascend BiSheng toolkit, execute the command:
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
+BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
 ```
 
 Install Triton Ascend:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
-pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 ```
 
 :::

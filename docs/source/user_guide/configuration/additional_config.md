@@ -48,6 +48,8 @@ The following table lists additional configuration options available in vLLM Asc
 | `num_wait_worker_iterations`        | int  | `30`    | The forward iterations when the EPLB worker will finish CPU tasks. In our test default value 30 can cover most cases. |
 | `expert_map_record_path`            | str  | `None`  | Save the expert load calculation results to a new expert table in the specified directory.                |
 | `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                          |
+| `enable_kv_nz`                      | bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
+| `layer_sharding` | dict | `{}` | Configuration options for layer sharding linear |
 
 The details of each configuration option are as follows:
 
@@ -105,7 +107,8 @@ An example of additional configuration is as follows:
         "embedding_tensor_parallel_size": 8,
         "mlp_tensor_parallel_size": 8,
     },
+    "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
-    "refresh": False,
+    "refresh": False
 }
 ```

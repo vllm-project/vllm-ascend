@@ -9,11 +9,15 @@ RED="\033[0;31m"
 NC="\033[0m" # No Color
 
 # Configuration
-LOG_DIR="/root/.cache/tests/logs"
-OVERWRITE_LOGS=true
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+# Home path for aisbench
 export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+
+# Logging configurations
 export VLLM_LOGGING_LEVEL="INFO"
+# Reduce glog verbosity for mooncake
+export GLOG_minloglevel=1
+# Set transformers to offline mode to avoid downloading models during tests
 export TRANSFORMERS_OFFLINE="1"
 
 # Function to print section headers
@@ -22,7 +26,7 @@ print_section() {
 }
 
 print_failure() {
-    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: $1${NC}"
     exit 1
 }
 
@@ -121,6 +125,31 @@ install_extra_components() {
     echo "====> Extra components installation completed"
 }
 
+install_triton_ascend() {
+    echo "====> Installing triton_ascend"
+
+    BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
+    BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+
+    if ! wget -q -O "${BISHENG_NAME}" "${BISHENG_URL}"; then
+        echo "Failed to download ${BISHENG_NAME}"
+        return 1
+    fi
+    chmod +x "${BISHENG_NAME}"
+
+    if ! "./${BISHENG_NAME}" --install; then
+        rm -f "${BISHENG_NAME}"
+        echo "Failed to install ${BISHENG_NAME}"
+        return 1
+    fi
+    rm -f "${BISHENG_NAME}"
+
+    export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
+    which bishengir-compile
+    python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+    echo "====> Triton ascend installation completed"
+}
+
 kill_npu_processes() {
   pgrep python3 | xargs -r kill -9
   pgrep VLLM | xargs -r kill -9
@@ -131,7 +160,7 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/test_multi_node.py
+    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/scripts/test_multi_node.py
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
@@ -148,6 +177,7 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
+    install_triton_ascend
     if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
         install_extra_components
     fi

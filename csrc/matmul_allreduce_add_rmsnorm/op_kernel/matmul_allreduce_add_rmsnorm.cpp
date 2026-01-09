@@ -33,6 +33,9 @@ extern "C" __global__ __aicore__ void matmul_allreduce_add_rmsnorm(
     __gm__ void* mc2CcTiling = (__gm__ void*)(&(tilingData->mc2CcTiling));
     auto contextGM0 = AscendC::GetHcclContext<AscendC::HCCL_GROUP_ID_0>();
 
+    hccl_.Init(contextGM0, mc2InitTiling);
+    hccl_.SetCcTiling(mc2CcTiling); 
+
     if ASCEND_IS_AIC {
         MatmulAllreduceAddRmsnormAicKernel<DTYPE_X1, DTYPE_Y> op;
         op.Init(x1, x2, residual, gamma, y, workspace, &tiling_data, hccl_);

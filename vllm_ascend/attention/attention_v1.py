@@ -34,10 +34,11 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendMetadataForDecode, AscendMetadataForPrefill)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         AscendMetadataForDecode,
-                                         AscendMetadataForPrefill, enable_cp,
-                                         split_decodes_and_prefills,
+                                         enable_cp, split_decodes_and_prefills,
                                          using_paged_attention)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
@@ -63,7 +64,7 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
         if enable_cp():
-            from vllm_ascend.attention.attention_cp import \
+            from vllm_ascend.attention.context_parallel.attention_cp import \
                 AscendAttentionCPImpl
             return AscendAttentionCPImpl
         return AscendAttentionBackendImpl
@@ -71,7 +72,7 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
         if enable_cp():
-            from vllm_ascend.attention.attention_cp import \
+            from vllm_ascend.attention.context_parallel.attention_cp import \
                 AscendAttentionCPMetadataBuilder
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
@@ -176,15 +177,14 @@ class AscendMetadata:
     causal: bool = True
     # runner_type in model_config.
     model_runner_type: str = ""
+    # prefill reshape_and_cache event
+    reshape_cache_event: torch.npu.Event = None
 
     # sliding window attention mask
     swa_mask: Optional[torch.Tensor] = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
-    # Does this backend/builder support ACL Graphs for attention (default: no).
-    aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS
     # AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
@@ -198,6 +198,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
@@ -219,6 +220,17 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+        self.attn_mask_builder = AttentionMaskBuilder(self.device)
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendAttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Explicit override in case the underlying builder specialized this getter.
+        # @override omitted only because of mypy limitation due to type variable.
+        return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -243,9 +255,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
-        attn_mask = common_attn_metadata.attn_mask
-        swa_mask = common_attn_metadata.swa_mask
         attn_state = common_attn_metadata.attn_state
+
+        # Get attn_mask and swa_mask from singleton AttentionMaskBuilder
+        attn_mask = self.attn_mask_builder.get_attention_mask(
+            self.model_config)
+
+        swa_mask = None
+        is_swa = hasattr(self.model_config.hf_text_config, 'sliding_window')
+        if self.model_config is not None and is_swa:
+            swa_mask = self.attn_mask_builder.get_swa_mask(
+                self.model_config.dtype,
+                self.model_config.hf_text_config.sliding_window)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(
@@ -284,7 +305,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             )
         else:
             raise NotImplementedError(
-                "Currently we only support building dummy metadata for DecodeOnly state"
+                "Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state"
             )
 
         attn_metadata.attn_state = attn_state
@@ -326,6 +347,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
 
     def full_graph_fia(self, query: torch.Tensor, key: torch.Tensor,
                        value: torch.Tensor, attn_metadata: AscendMetadata,
@@ -430,8 +452,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     block_table=attn_metadata.block_tables,
                     context_lens=attn_metadata.seq_lens,
                     out=output)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens, workspace)
 
             # Handle graph capturing mode
             stream = torch_npu.npu.current_stream()
@@ -564,11 +585,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            pre_tokens=self.sliding_window
-            if self.sliding_window else SWA_INT_MAX,
-            next_tokens=0 if self.sliding_window else SWA_INT_MAX,
-            atten_mask=attn_metadata.swa_mask
-            if self.sliding_window else attn_metadata.attn_mask,
+            atten_mask=attn_metadata.attn_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=block_size,
@@ -577,7 +594,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=4 if self.sliding_window else 3,
+            sparse_mode=3,
         )
 
         attn_output = attn_output.view(num_tokens, self.num_heads,
@@ -647,6 +664,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
 
         if len(kv_cache) > 1:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
@@ -667,6 +686,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots[:attn_metadata.num_actual_tokens])
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
         return key, value
 
     def forward_impl(

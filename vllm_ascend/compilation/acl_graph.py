@@ -162,6 +162,13 @@ class ACLGraphWrapper:
                         # any other acl graph.
                         output = weak_ref_tensors(output)
 
+            # here we always use weak ref for the workspaces
+            # to save memory
+            global _graph_params
+            global _draft_graph_params
+            weak_ref_workspaces(_graph_params)
+            weak_ref_workspaces(_draft_graph_params)
+
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)
@@ -193,6 +200,16 @@ class ACLGraphWrapper:
         torch.npu.synchronize()
         entry.aclgraph.replay()
         return entry.output
+
+
+def weak_ref_workspaces(params):
+    if params is None:
+        return
+    for num_tokens in params.workspaces:
+        if params.workspaces[num_tokens] is None:
+            continue
+        params.workspaces[num_tokens] = weak_ref_tensors(
+            params.workspaces[num_tokens])
 
 
 def _update_attn_pa_params(update_stream, forward_context, runtime_shape):
@@ -323,7 +340,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 graph_params.events[runtime_shape],
         ):
             (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
-             spec_attn_mask, sparse_mode, scale, block_table, block_size,
+             attn_mask, sparse_mode, scale, block_table, block_size,
              seq_lens_list, actual_seq_lengths, attn_output,
              softmax_lse) = param
             seq_lens_list = forward_context.attn_metadata[
@@ -363,7 +380,7 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                 num_heads=num_heads,
                 num_key_value_heads=num_kv_heads,
                 input_layout=input_layout,
-                atten_mask=spec_attn_mask,
+                atten_mask=attn_mask,
                 sparse_mode=sparse_mode,
                 scale=scale,
                 antiquant_mode=0,
@@ -463,7 +480,7 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
             seq_len = decode_meta.cp_seq_len
 
             # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular spec_attn_mask shape,
+            # to avoid irregular attn_mask shape,
             # so there's no need to divide runtime_shape by spec_multiple
             pad_length = runtime_shape - len(seq_len)
             pad_tensor = torch.zeros(pad_length,
@@ -523,7 +540,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
     global _graph_params
     if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
+        _graph_params.workspaces[num_tokens] = workspace
 
 
 def get_graph_params():

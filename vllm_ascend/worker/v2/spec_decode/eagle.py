@@ -105,17 +105,10 @@ class AscendEagleSpeculator(EagleSpeculator):
     ):
         """Update attention metadata for decode phase on Ascend NPUs."""
         attn_state = AscendAttentionState.DecodeOnly
-        attn_mask = make_attention_mask(
-            self.vllm_config,
-            attn_state,
-            self.dtype,
-            self.device,
-        )
         seq_lens_cpu = self._get_seq_lens_cpu()
         # attn_metadata is build in vllm's super class.
-        # We need to update attn_mask, attn_state for each layer's metadata.
+        # We need to update attn_state for each layer's metadata.
         for metadata in attn_metadata.values():
-            metadata["attn_mask"] = attn_mask
             metadata["attn_state"] = attn_state
             metadata["seq_lens_cpu"] = seq_lens_cpu
 

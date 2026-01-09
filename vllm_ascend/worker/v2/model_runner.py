@@ -30,8 +30,7 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
-                                              build_attn_state,
-                                              make_attention_mask)
+                                              build_attn_state)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
@@ -85,9 +84,6 @@ class NPUModelRunner(GPUModelRunner):
         # so reinitialize sampler here.
         self.sampler: AscendSampler = AscendSampler(
             logprobs_mode=self.model_config.logprobs_mode, )
-
-        # decode token per request (used in attention backends).
-        self.decode_token_per_req = 1
 
         # we need to copy num_computed_tokens back to cpu to help
         # update actual seq_lens_cpu. gpu attention backend doesn't need these
@@ -144,12 +140,6 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs,
             num_scheduled_tokens,
             num_valid_tokens,
-        )
-        attn_mask = make_attention_mask(
-            self.vllm_config,
-            attn_state,
-            self.dtype,
-            self.device,
         )
 
         idx_mapping_list = [
@@ -270,7 +260,6 @@ class NPUModelRunner(GPUModelRunner):
             # be torch.int32.
             slot_mappings=slot_mappings.to(torch.int32),
             kv_cache_config=self.kv_cache_config,
-            attn_mask=attn_mask,
             attn_state=attn_state,
         )
 

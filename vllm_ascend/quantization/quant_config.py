@@ -116,7 +116,7 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        model_type = vllm_config.model_config.hf_text_config.model_type
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
@@ -297,6 +297,12 @@ packed_modules_model_mapping = {
         ],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    },
+    "longcat_flash": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
 }
 
@@ -514,6 +520,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -524,9 +531,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         return self.quant_method.apply(
             layer, x, router_logits, top_k, renormalize, use_grouped_topk,
             global_num_experts, expert_map, topk_group, num_expert_group,
-            custom_routing_function, scoring_func, e_score_correction_bias,
-            is_prefill, enable_force_load_balance, log2phy,
-            global_redundant_expert_num, **kwargs)
+            custom_routing_function, scoring_func, routed_scaling_factor,
+            e_score_correction_bias, is_prefill, enable_force_load_balance,
+            log2phy, global_redundant_expert_num, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
