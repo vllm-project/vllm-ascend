@@ -912,12 +912,15 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
-                    slot_mapping = self.pcp_manager.get_padded_slot_mapping(
+                    slot_mapping_pcp = self.pcp_manager.get_padded_slot_mapping(
                         total_num_scheduled_tokens,
                         slot_mapping,
                     )
                     blk_table.slot_mapping.gpu[:self.pcp_manager.
-                                               num_actual_tokens_pcp_padded] = slot_mapping
+                                               num_actual_tokens_pcp_padded] = slot_mapping_pcp
+                    slot_mapping = blk_table.slot_mapping.gpu[:self.
+                                                              pcp_manager.
+                                                              num_actual_tokens_pcp_padded]
 
             # NOTE: This is a temporary hack, now in GPUModelRunner, this prepare_inputs
             # has been split to multiple parts, and there are 3 parts that is related to this

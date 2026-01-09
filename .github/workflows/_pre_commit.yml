@@ -12,15 +12,27 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-16-hk
+    container:
+      # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+    env:
+      GOPROXY: https://goproxy.io,direct
+      GITHUB_WORKSPACE: /__w/vllm-ascend/vllm-ascend
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-      with:
-        python-version: "3.11"
-    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
+    # With problem matchers in a container, the output of $GITHUB_WORKSPACE and ${{ github.workspace }} are different.
+    # So we will just copy it into the path ${{ github.workspace }}. see https://github.com/actions/runner/issues/2058
+    - name: cp problem matchers
+      run: |
+        cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
+        cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+
+    - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+    - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v6
       with:
@@ -30,13 +42,16 @@ jobs:
     - name: Install vllm
       working-directory: vllm-empty
       run: |
-        pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-        VLLM_TARGET_DEVICE=empty pip install .
+        VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
     - name: Install vllm-ascend dev
       run: |
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+    - name: Run pre-commit
       env:
+        PRE_COMMIT_COLOR: always
+        FORCE_COLOR: "1"
+        TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
-      with:
-        extra_args: --all-files --hook-stage manual
+      run: |
+        pre-commit run --all-files --hook-stage manual

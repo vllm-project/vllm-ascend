@@ -53,6 +53,7 @@ def test_ilama_lora(ilama_lora_files):
             max_model_len=1024,
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_num_seqs=16,
+            enforce_eager=True,
     ) as vllm_model:
 
         output1 = do_sample(vllm_model.model, ilama_lora_files, lora_id=1)

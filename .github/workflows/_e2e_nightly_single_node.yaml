@@ -123,8 +123,7 @@ jobs:
           pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-      - name: Install triton-ascend
-        if: ${{ inputs.name == 'test_custom_op' }}
+      - name: Install Ascend toolkit & triton_ascend
         shell: bash -l {0}
         run: |
           BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
@@ -143,10 +142,6 @@ jobs:
         run: |
           # ignore test_dispatch_ffn_combine until the test is fixed
           pytest -sv ${{ inputs.tests }} \
-          --ignore=tests/e2e/nightly/ops/test_dispatch_ffn_combine.py \
-          --ignore=tests/e2e/nightly/ops/test_fused_moe.py \
-          --ignore=tests/e2e/nightly/ops/test_rotary_embedding.py \
-          --ignore=tests/e2e/nightly/ops/test_matmul_allreduce_add_rmsnorm.py
-
+          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
 

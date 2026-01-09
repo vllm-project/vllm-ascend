@@ -38,6 +38,8 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
 from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, flashcomm2_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
+from .methods import is_mx_quant_type
+
 
 def get_quant_method(quant_description: Dict[str, Any],
                      prefix: str,
@@ -160,7 +162,8 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name \
+                or is_mx_quant_type(self.quant_method):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
 

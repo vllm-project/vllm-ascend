@@ -77,6 +77,12 @@ jobs:
           - name: multi-node-qwenw8a8-2node-longseq
             config_file_path: Qwen3-235B-W8A8-longseq.yaml
             size: 2
+          - name: multi-node-qwen-disagg-pd
+            config_file_path: Qwen3-235B-disagg-pd.yaml
+            size: 2
+          - name: multi-node-qwen-vl-disagg-pd
+            config_file_path: Qwen3-VL-235B-disagg-pd.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -158,9 +164,9 @@ jobs:
       fail-fast: false
       matrix:
         test_config:
-          - name: custom-op-dispatch_gmm_combine_decode
+          - name: custom-multi-ops
             os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/single_node/ops/multicard_ops/test_dispatch_gmm_combine_decode.py
+            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}

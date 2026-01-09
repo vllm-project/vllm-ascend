@@ -1,31 +1,22 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+import json
+import os
 from typing import Any
 
 import openai
 import pytest
-from vllm.utils.network_utils import get_open_port
+from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
+    "vllm-ascend/Qwen3-Next-80B-A3B-Instruct",
 ]
+
+MODES = ["aclgraph"]
+
+TENSOR_PARALLELS = [4]
+MAX_NUM_BATCHED_TOKENS = [1024, 4096, 8192, 32768]
 
 prompts = [
     "San Francisco is a",
@@ -35,13 +26,31 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
+batch_size_dict = {
+    "linux-aarch64-a2-4": 64,
+    "linux-aarch64-a3-4": 64,
+}
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
+performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
+
 aisbench_cases = [{
+    "case_type": "performance",
+    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+    "request_conf": "vllm_api_stream_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+    "num_prompts": 4 * performance_batch_size,
+    "max_out_len": 1500,
+    "batch_size": performance_batch_size,
+    "baseline": 1,
+    "threshold": 0.97
+}, {
     "case_type": "accuracy",
     "dataset_path": "vllm-ascend/gsm8k-lite",
     "request_conf": "vllm_api_general_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
+    "top_k": 20,
     "baseline": 95,
     "threshold": 5
 }]
@@ -49,37 +58,38 @@ aisbench_cases = [{
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-async def test_models(model: str) -> None:
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
+@pytest.mark.parametrize("max_num_batched_tokens", MAX_NUM_BATCHED_TOKENS)
+async def test_models(model: str, mode: str, tp_size: int,
+                      max_num_batched_tokens: int) -> None:
     port = get_open_port()
     env_dict = {
         "OMP_NUM_THREADS": "10",
         "OMP_PROC_BIND": "false",
         "HCCL_BUFFSIZE": "1024",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     }
+    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
-        "--quantization",
-        "ascend",
-        "--async-scheduling",
-        "--no-enable-prefix-caching",
-        "--data-parallel-size",
-        "1",
         "--tensor-parallel-size",
-        "4",
-        "--enable-expert-parallel",
+        str(tp_size),
         "--port",
         str(port),
         "--max-model-len",
         "40960",
         "--max-num-batched-tokens",
-        "8192",
-        "--max-num-seqs",
-        "32",
+        str(max_num_batched_tokens),
         "--trust-remote-code",
         "--gpu-memory-utilization",
-        "0.65",
-        "--compilation-config",
-        '{"cudagraph_capture_sizes": [32]}',
+        "0.8",
+        "--max-num-seqs",
+        "64",
     ]
+    if mode == "aclgraph":
+        server_args.extend(
+            ["--compilation-config",
+             json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -97,8 +107,7 @@ async def test_models(model: str) -> None:
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         print(choices)
+        if mode == "single":
+            return
         # aisbench test
-        run_aisbench_cases(model,
-                           port,
-                           aisbench_cases,
-                           server_args=server_args)
+        run_aisbench_cases(model, port, aisbench_cases)

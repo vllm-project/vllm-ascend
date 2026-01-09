@@ -12,7 +12,8 @@
 name: Image Build and Push
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    # UTC+8: 8am, 12pm, 16pm, 22pm
+    - cron: '0 0,4,8,14 * * *'
   push:
     tags:
       - 'v*'
@@ -21,7 +22,7 @@ on:
       tag:
         description: 'Docker tag for build results'
         type: string
-        default: manual
+        default: main
         required: true
 
 jobs:
