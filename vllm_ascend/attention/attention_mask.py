@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
+from vllm.distributed import get_pcp_group
+
+from vllm_ascend.platform import ModelConfig
+from vllm_ascend.utils import singleton
 
 
 def _generate_attn_mask(max_seq_len, dtype):
@@ -29,6 +33,7 @@ def _generate_attn_mask(max_seq_len, dtype):
     return attn_mask
 
 
+@singleton
 class AttentionMaskBuilder:
 
     def __init__(self, device: torch.device):
@@ -38,6 +43,7 @@ class AttentionMaskBuilder:
         self.mla_mask = None
         self.chunked_prefill_attn_mask = None
         self.pcp_mla_mask = None
+        self.swa_mask = None
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
@@ -73,3 +79,24 @@ class AttentionMaskBuilder:
             self.pcp_mla_mask = torch.triu(
                 torch.ones(512, 512, device=self.device, dtype=dtype), 1)
         return self.pcp_mla_mask
+
+    def get_swa_mask(self, dtype: torch.dtype, sliding_window):
+        if self.swa_mask is None or self.swa_mask.dtype != dtype:
+            if sliding_window is not None:
+                mask = torch.ones(2048, 2048, dtype=torch.bool)
+                triu_mask = torch.triu(mask, diagonal=1).to(self.device)
+                tril_mask = torch.tril(mask, -sliding_window).to(self.device)
+                self.swa_mask = triu_mask + tril_mask
+        return self.swa_mask
+
+    def get_attention_mask(self, model_config: ModelConfig):
+        if model_config.runner_type == "pooling":
+            return self.get_attn_mask(2048, torch.bool)
+
+        return self.get_splitfuse_attn_mask()
+
+    def get_final_mla_mask(self, model_config: ModelConfig):
+        if get_pcp_group().world_size > 1:
+            return self.get_pcp_mla_mask(model_config.dtype)
+        # Prefill stages use 512x512 mask with appropriate dtype
+        return self.get_mla_mask(model_config.dtype)

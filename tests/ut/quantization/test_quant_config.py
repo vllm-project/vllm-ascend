@@ -79,7 +79,7 @@ class TestAscendQuantConfig(TestBase):
 
     def test_get_quant_method_for_linear(self):
         mock_config = MagicMock()
-        mock_config.model_config.hf_config.model_type = None
+        mock_config.model_config.hf_text_config.model_type = None
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer
         with patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
@@ -103,7 +103,7 @@ class TestAscendQuantConfig(TestBase):
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
         mock_config = MagicMock()
-        mock_config.model_config.hf_config.model_type = None
+        mock_config.model_config.hf_text_config.model_type = None
         with patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
             patch('vllm_ascend.quantization.quant_config.AscendKVCacheMethod', \
                    return_value=MagicMock()) as mock_ascend_kvcache:
@@ -117,7 +117,7 @@ class TestAscendQuantConfig(TestBase):
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
         mock_config = MagicMock()
-        mock_config.model_config.hf_config.model_type = None
+        mock_config.model_config.hf_text_config.model_type = None
 
         # Test skipped layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=True), \

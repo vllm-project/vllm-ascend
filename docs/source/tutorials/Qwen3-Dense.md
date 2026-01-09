@@ -61,7 +61,10 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
 # Note you should download the weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A2 machines:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# For Atlas A3 machines:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
@@ -165,8 +168,8 @@ export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-# Enable dense model and general optimizations for better performance.
-export VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1
+# Enable MLP prefetch for better performance.
+export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -181,6 +184,7 @@ vllm serve /model/Qwen3-32B-W8A8 \
   --max-model-len 5500 \
   --max-num-batched-tokens 40960 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80]}' \
   --port 8113 \
   --block-size 128 \
   --gpu-memory-utilization 0.9
@@ -190,6 +194,8 @@ vllm serve /model/Qwen3-32B-W8A8 \
 - /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
 
 - If the model is not a quantized model, remove the `--quantization ascend` parameter.
+
+- **[Optional]** `--additional-config '{"pa_shape_list":[48,64,72,80]}'`: `pa_shape_list` specifies the batch sizes where you want to switch to the PA operator. This is a temporary tuning knob. Currently, the attention operator dispatch defaults to the FIA operator. In some batch-size (concurrency) settings, FIA may have suboptimal performance. By setting `pa_shape_list`, when the runtime batch size matches one of the listed values, vLLM-Ascend will replace FIA with the PA operator to prevent performance degradation. In the future, FIA will be optimized for these scenarios and this parameter will be removed.
 
 - If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./Qwen3-Dense.md#key-optimization-points)、[optimization-highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
 
@@ -331,7 +337,7 @@ In dense model scenarios, the MLP's gate_up_proj and down_proj linear layers oft
 
 It is important to emphasize that, since we use vector computations to hide the weight prefetching pipeline, the setting of the prefetch buffer size is crucial. If the buffer size is too small, the optimization benefits will not be fully realized, while a larger buffer size may lead to resource contention, resulting in performance degradation. To accommodate different scenarios, we have exposed two environment variables `VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE` and `VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE` to allow for flexible buffer size configuration based on the specific workload.
 
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` and `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE = 1` to be enabled.
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_PREFETCH_MLP = 1` to be enabled.
 
 ### 6. Zerolike Elimination
 This elimination removes unnecessary operations related to zero-like tensors in Attention forward, improving the efficiency of matrix operations and reducing memory usage.

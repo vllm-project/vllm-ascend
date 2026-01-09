@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, List, Optional
 
@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_config,
                                get_ascend_device_type)
@@ -41,7 +42,7 @@ class AscendPrefillContextParallelMetadata:
 
     cp_kv_recover_idx_for_chunk: torch.Tensor = None
 
-    num_actual_tokens_pcp_padded: Optional[int] = None
+    num_actual_tokens_pcp_padded: int = 0
 
     num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
 
@@ -65,8 +66,6 @@ class AscendPrefillContextParallelMetadata:
 
     q_full_idx: torch.Tensor = None
 
-    pcp_prefill_mask: torch.Tensor = None
-
     # original query_lens before pcp split
     query_lens_pcp_full_cpu: torch.Tensor = None
 
@@ -75,51 +74,22 @@ class AscendPrefillContextParallelMetadata:
 
 
 @dataclass
-class AscendCommonAttentionMetadata:
+class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
     For many of the tensors we keep both NPU and CPU versions.
     """
+    seq_lens_cpu: torch.Tensor = None
+    num_computed_tokens_cpu: torch.Tensor = None
 
-    query_start_loc: torch.Tensor
-    query_start_loc_cpu: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
-
-    seq_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
-
-    seq_lens: torch.Tensor
-    """same to seq_lens_cpu, for compatibility with some new attn metadata
-    (such as GDN)."""
-
-    num_computed_tokens_cpu: torch.Tensor
-    """(batch_size,), the number of computed tokens for each request"""
-
-    num_reqs: int
-    """Number of requests"""
-    num_actual_tokens: int
-    """Total number of tokens in batch"""
-
-    max_query_len: int
-    """Max token number of request in batch"""
-
-    decode_token_per_req: int
+    decode_token_per_req: int = 1
     """decode token number per request"""
 
-    block_table_tensor: torch.Tensor
-
-    slot_mapping: torch.Tensor
-
-    actual_seq_lengths_q: list[int]
+    actual_seq_lengths_q: list[int] = field(default_factory=list)
 
     positions: torch.Tensor = None
-
-    attn_mask: torch.Tensor = None
-
-    spec_attn_mask: torch.Tensor = None
 
     attn_state: Any = None
 
@@ -131,8 +101,6 @@ class AscendCommonAttentionMetadata:
 
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
-
-    causal: bool = True
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int,
@@ -149,19 +117,20 @@ class AscendCommonAttentionMetadata:
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
             decode_token_per_req=self.decode_token_per_req,
-            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
-            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            # NOTE: keep all tokens for block_table_tensor and slot_mapping otherwise
+            # there will be error about shape mismatch during reshape and cache.
+            # This is really strange since vLLM slices them as well
+            block_table_tensor=self.block_table_tensor,
+            slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions[:num_actual_tokens],
-            attn_mask=self.attn_mask,
-            spec_attn_mask=self.spec_attn_mask,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,
             prefill_context_parallel_metadata=self.
             prefill_context_parallel_metadata,
-        )
+            max_seq_len=self.max_seq_len)
 
 
 def filter_chunked_req_indices(
