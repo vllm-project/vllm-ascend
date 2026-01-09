@@ -192,7 +192,7 @@ class ACLGraphWrapper:
                 f"got {new_input_addresses}")
 
         logger.info_once("Replaying aclgraph")
-        # In async scheduling or multi-threaded (MT) scenarios when graph mode contain FULL, it is possible that
+        # In async scheduling or multi-threaded (MT) scenarios when graph mode is FULL, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.
         # To ensure proper ordering, we must call synchronize here before replaying,
