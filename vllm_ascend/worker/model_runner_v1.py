@@ -1356,7 +1356,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # send is_ubatch to ffn side
         is_ubatch = True if ubatch_slices else False
         # to support inequal AF,[ffn_size,ffn_size + min_size) send
-        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
+        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank) and self.afd_connector:
             logger.debug(f'yxj self.afd_connector.rank in prepare input is {self.afd_connector.rank}')
             self.afd_connector.send_is_ubatch(is_ubatch)
         logger.debug(f'yxj send is_ubatch in prepare input is {is_ubatch}')
@@ -2567,7 +2567,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # send is_ubatch to ffn side
         is_ubatch = True if ubatch_slices else False
         # to support inequal AF,[ffn_size,ffn_size + min_size) send
-        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank):
+        if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.rank) and self.afd_connector:
             logger.debug(f'yxj self.afd_connector.rank in dummy_run is {self.afd_connector.rank}')
             self.afd_connector.send_is_ubatch(is_ubatch)
         logger.debug(f'send is_ubatch in dummy_run  is {is_ubatch}')

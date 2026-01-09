@@ -236,14 +236,11 @@ class CAMM2NAFDConnector(AFDConnectorBase):
     
     def is_vaild_rank_for_inequal_AF(self,rank):
         # Only support ffn rank < attn rank
-        if (rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size:
-            return True
-        return False
+        return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size)
     
     def is_attn_top_min_size_rank(self,rank):
-        if rank >= self.ffn_size and rank < self.ffn_size + self.min_size:
-            return True
-        return False
+        # Only support ffn rank < attn rank
+        return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size)
         
     #TODO(yxj):to support inequal AF
     def send_is_ubatch(self,data):
