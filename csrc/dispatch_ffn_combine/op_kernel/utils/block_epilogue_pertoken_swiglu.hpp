@@ -84,16 +84,16 @@ public:
     };
 
     CATLASS_DEVICE
-    BlockEpilogue(Arch::Resource<ArchTag> const &resource, Params const &params = Params{}) : params(params)
+    BlockEpilogue(Arch::Resource<ArchTag> const &resource, int32_t n, Params const &params = Params{}) : params(params)
     {
         size_t ubOffset = 0;
         int32_t eventVMTE2 = 0;
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
         int32_t eventVMTE3 = 0;
-        constexpr uint32_t blockN = 4096;
-        constexpr uint32_t ChunkTileLen = blockN / 2;
-        constexpr uint32_t HalfChunkTileLen = ChunkTileLen / 2;
+        uint32_t blockN = n;
+        uint32_t ChunkTileLen = blockN / 2;
+        uint32_t HalfChunkTileLen = ChunkTileLen / 2;
 
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             ubCList[i] = resource.ubBuf.template GetBufferByByte<ElementC>(ubOffset);
