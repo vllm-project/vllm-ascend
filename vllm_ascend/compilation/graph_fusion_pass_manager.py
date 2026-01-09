@@ -21,6 +21,8 @@ from vllm.compilation.inductor_pass import get_pass_context
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
+from vllm_ascend.utils import enable_sp_by_pass
+
 
 class GraphFusionPassManager:
     """
@@ -58,3 +60,8 @@ class GraphFusionPassManager:
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
             self.passes.append(QKNormRopeFusionPass(config))
+
+        if enable_sp_by_pass(config):
+            from .passes.sequence_parallelism import \
+                AscendSequenceParallelismPass
+            self.passes.append(AscendSequenceParallelismPass(config))
