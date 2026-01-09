@@ -236,7 +236,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
     
     def is_vaild_rank_for_inequal_AF(self,rank):
         # Only support ffn rank < attn rank
-        return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size)
+        return ((rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size)
     
     def is_attn_top_min_size_rank(self,rank):
         # Only support ffn rank < attn rank
