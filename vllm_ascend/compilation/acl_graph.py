@@ -197,7 +197,7 @@ class ACLGraphWrapper:
         # before the grph replay of iteration i-1.
         # To ensure proper ordering, we must call synchronize here before replaying,
         # so that update_attn_params only executes after the previous graph replay has fully completed.
-        if self.runtime_mode == CUDAGraphMode.FULL_DECODE_ONLY and self.runtime_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+        if self.runtime_mode == CUDAGraphMode.FULL:
             torch.npu.synchronize()
         entry.aclgraph.replay()
         return entry.output
