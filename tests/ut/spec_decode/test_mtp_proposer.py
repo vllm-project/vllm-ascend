@@ -278,6 +278,7 @@ class TestMtpProposer:
             [0, 8, 16, 24], dtype=torch.int32)
         mock_common_attn_metadata.seq_lens = torch.tensor([8, 8, 8],
                                                           dtype=torch.int32)
+        mock_common_attn_metadata.num_actual_tokens = 24
         mock_common_attn_metadata.num_reqs = 3
         mock_common_attn_metadata.num_computed_tokens_cpu = torch.tensor(
             [5, 6, 7], dtype=torch.int32)
@@ -291,14 +292,14 @@ class TestMtpProposer:
 
         mock_runner = MagicMock()
         mock_runner.actual_seq_lengths_q = MagicMock()
-        mock_runner.attn_mask = MagicMock()
-        mock_runner.spec_attn_mask = MagicMock()
         mock_runner.attn_state = MagicMock()
         mock_runner.graph_pad_size = 0
+        mock_runner.pcp_size = 1
         mock_runner.decode_token_per_req = MagicMock()
 
         proposer = MagicMock(spec=MtpProposer)
         proposer.runner = mock_runner
+        proposer.pcp_size = 1
         proposer.arange = torch.arange(100, dtype=torch.int32)
         proposer.prepare_inputs_padded = MtpProposer.prepare_inputs_padded.__get__(
             proposer)
@@ -334,5 +335,3 @@ class TestMtpProposer:
         assert spec_common_attn_metadata.num_actual_tokens == total_num_tokens
         assert spec_common_attn_metadata.max_query_len == 8
         assert spec_common_attn_metadata.actual_seq_lengths_q == proposer.runner.actual_seq_lengths_q
-        assert spec_common_attn_metadata.attn_mask == proposer.runner.attn_mask
-        assert spec_common_attn_metadata.spec_attn_mask == proposer.runner.spec_attn_mask

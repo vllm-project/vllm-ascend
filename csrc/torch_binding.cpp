@@ -636,10 +636,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
 std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(
     const at::Tensor &x,
     const at::Tensor &expert_ids,
-    const at::Tensor &gmm1_permuted_weight,
-    const at::Tensor &gmm1_permuted_weight_scale,
-    const at::Tensor &gmm2_weight,
-    const at::Tensor &gmm2_weight_scale,
+    const at::TensorList &gmm1_permuted_weight,
+    const at::TensorList &gmm1_permuted_weight_scale,
+    const at::TensorList &gmm2_weight,
+    const at::TensorList &gmm2_weight_scale,
     const at::Tensor &expert_scales,
     const c10::optional<at::Tensor> &expert_smooth_scales,
     const c10::optional<at::Tensor> &x_active_mask,
@@ -660,7 +660,8 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(
 
     bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
     int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    at::Tensor ep_recv_count = at::empty({num_local_experts * ep_rank_size}, expert_ids.options());
+    auto opts = expert_ids.options().dtype(at::kLong);
+    at::Tensor expert_token_nums = at::empty({num_local_experts}, opts);
 
     vector<char> group_ep_chrs(group_ep.begin(), group_ep.end());
     group_ep_chrs.push_back('\0');
@@ -689,8 +690,8 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(
         global_bs,
         // output tensors
         output,
-        ep_recv_count);
-    return {output, ep_recv_count};
+        expert_token_nums);
+    return {output, expert_token_nums};
 }
 
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
@@ -1218,10 +1219,65 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k(
+    const at::Tensor& x,
+    int64_t k,
+    int64_t k_group,
+    int64_t group_count,
+    int64_t group_select_mode,
+    int64_t renorm,
+    int64_t norm_type,
+    bool out_flag,
+    double routed_scaling_factor,
+    double eps,
+    const c10::optional<at::Tensor>& bias_opt
+    )
+{
+    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
+        x.scalar_type());
+
+    auto x_size = x.sizes();
+    auto rows = x_size[0];
+    auto expert_num = x_size[1];
+    const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
+    if (bias.defined()) {
+        TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
+        TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
+        auto bias_size = bias.sizes();
+        TORCH_CHECK(bias_size[0] == expert_num, "The bias first dim should be same as x second dim");
+    }
+    at::Tensor y = at::empty({rows, k}, x.options());
+    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(aclnnMoeGatingTopK,
+                    x,                 
+                    bias,
+                    k,                  
+                    k_group,             
+                    group_count,         
+                    group_select_mode,   
+                    renorm,              
+                    norm_type,            
+                    out_flag,            
+                    routed_scaling_factor, 
+                    eps,                
+                    y,                
+                    expert_idx,        
+                    out
+                ); 
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+
     // vLLM-Ascend custom ops
     ops.def("weak_ref_tensor(Tensor input) -> Tensor");
     ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
@@ -1287,16 +1343,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("grouped_matmul_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant);
 
     ops.def(
-        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor gmm1_permuted_weight,"
-        "                            Tensor gmm1_permuted_weight_scale,"
-        "                            Tensor gmm2_weight, Tensor gmm2_weight_scale,"
+        "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor[] gmm1_permuted_weight,"
+        "                            Tensor[] gmm1_permuted_weight_scale,"
+        "                            Tensor[] gmm2_weight, Tensor[] gmm2_weight_scale,"
         "                            Tensor expert_scales, Tensor? expert_smooth_scales=None,"
         "                            Tensor? x_active_mask=None,"
         "                            str group_ep='',"
         "                            int ep_rank_size=0, int ep_rank_id=0, int moe_expert_num=0,"
         "                            int shared_expert_num=1, int shared_expert_rank_num=0,"
         "                            int quant_mode=0,"
-        "                            int global_bs=0) -> (Tensor output, Tensor ep_recv_count)"
+        "                            int global_bs=0) -> (Tensor output, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 
@@ -1357,6 +1413,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "num_ranks) -> Tensor");
     ops.impl("combine_prefill", torch::kPrivateUse1,
              &vllm_ascend::combine_prefill);
+    
     ops.def(
         "npu_moe_init_routing_custom(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
         "                            int expert_capacity=-1, int expert_num=-1, int drop_pad_mode=0, int expert_tokens_num_type=0, "
@@ -1364,4 +1421,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int row_idx_type=0) -> (Tensor, Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_moe_init_routing_custom", torch::kPrivateUse1, &vllm_ascend::npu_moe_init_routing_custom);
+    // vLLM-Ascend custom ops
+    ops.def(
+        "moe_gating_top_k(Tensor x, "
+                            "int k, "
+                            "int k_group, "
+                            "int group_count, "
+                            "int group_select_mode, "
+                            "int renorm, "
+                            "int norm_type, "
+                            "bool out_flag, "
+                            "float routed_scaling_factor, "
+                            "float eps,"
+                            "Tensor? bias_opt=None)"
+                            
+        "-> (Tensor y ,Tensor expert_idx, Tensor out)"
+        );
+    ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
 }

@@ -66,8 +66,6 @@ class AscendPrefillContextParallelMetadata:
 
     q_full_idx: torch.Tensor = None
 
-    pcp_prefill_mask: torch.Tensor = None
-
     # original query_lens before pcp split
     query_lens_pcp_full_cpu: torch.Tensor = None
 
@@ -92,12 +90,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     actual_seq_lengths_q: list[int] = field(default_factory=list)
 
     positions: torch.Tensor = None
-
-    attn_mask: torch.Tensor = None
-
-    spec_attn_mask: torch.Tensor = None
-
-    swa_mask: torch.Tensor = None
 
     attn_state: Any = None
 
@@ -125,14 +117,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
             decode_token_per_req=self.decode_token_per_req,
-            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
-            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            # NOTE: keep all tokens for block_table_tensor and slot_mapping otherwise
+            # there will be error about shape mismatch during reshape and cache.
+            # This is really strange since vLLM slices them as well
+            block_table_tensor=self.block_table_tensor,
+            slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions[:num_actual_tokens],
-            attn_mask=self.attn_mask,
-            spec_attn_mask=self.spec_attn_mask,
-            swa_mask=self.swa_mask,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,
