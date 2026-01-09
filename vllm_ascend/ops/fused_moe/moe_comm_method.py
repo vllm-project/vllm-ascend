@@ -306,11 +306,11 @@ class FusedMC2CommImpl(MoECommMethod):
             out = torch.empty_like(hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
-                weight1=w1[0],
-                weight2=w2[0],
+                weight1=w1,
+                weight2=w2,
                 expert_idx=topk_ids,
-                scale1=w1_scale[0],
-                scale2=w2_scale[0],
+                scale1=w1_scale,
+                scale2=w2_scale,
                 probs=topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
