@@ -912,12 +912,15 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch)
                 blk_table.slot_mapping.gpu[maybe_pcp_full_tokens:].fill_(-1)
                 if self.pcp_size > 1:
-                    slot_mapping = self.pcp_manager.get_padded_slot_mapping(
+                    slot_mapping_pcp = self.pcp_manager.get_padded_slot_mapping(
                         total_num_scheduled_tokens,
                         slot_mapping,
                     )
                     blk_table.slot_mapping.gpu[:self.pcp_manager.
-                                               num_actual_tokens_pcp_padded] = slot_mapping
+                                               num_actual_tokens_pcp_padded] = slot_mapping_pcp
+                    slot_mapping = blk_table.slot_mapping.gpu[:self.
+                                                              pcp_manager.
+                                                              num_actual_tokens_pcp_padded]
 
             # NOTE: This is a temporary hack, now in GPUModelRunner, this prepare_inputs
             # has been split to multiple parts, and there are 3 parts that is related to this
@@ -1013,9 +1016,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
                 self.spec_decode_common_attn_metadata = common_attn_metadata
-                if self.speculative_config.method in ("eagle", "eagle3") and \
-                        (self.vllm_config.speculative_config.enforce_eager \
-                         or self.use_async_scheduling):
+                if num_reqs != base_num_reqs or total_num_scheduled_tokens != num_input_tokens:
                     self.spec_decode_common_attn_metadata = \
                         self.spec_decode_common_attn_metadata.unpadded(
                             total_num_scheduled_tokens, base_num_reqs)

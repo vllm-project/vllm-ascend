@@ -16,6 +16,7 @@ Qwen3_reranker
 Qwen3-8B-W4A8
 Qwen3-32B-W4A4
 Qwen3-Next
+Qwen3-Omni-30B-A3B-Thinking.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-R1.md
