@@ -473,38 +473,46 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
                 graph_params.handles[runtime_shape],
                 graph_params.events[runtime_shape],
         ):
-            (q_nope, q_pe, k_nope, k_pe, block_table, seq_len, num_heads,
-             scale, num_kv_heads, attn_output, softmax_lse) = param
+
+            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+             spec_attn_mask, sparse_mode, scale, block_table, block_size,
+             actual_seq_lengths, actual_seq_lengths_kv, attn_output,
+             softmax_lse) = param
 
             decode_meta = forward_context.attn_metadata[key].decode
             seq_len = decode_meta.cp_seq_len
+            if isinstance(seq_len, torch.Tensor):
+                seq_len = seq_len.tolist()
+            actual_seq_lengths_kv = seq_len
 
-            # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular attn_mask shape,
-            # so there's no need to divide runtime_shape by spec_multiple
-            pad_length = runtime_shape - len(seq_len)
-            pad_tensor = torch.zeros(pad_length,
-                                     dtype=seq_len.dtype,
-                                     device=seq_len.device)
-            seq_len = torch.cat([seq_len, pad_tensor], dim=0)
+            pad_length = runtime_shape - len(actual_seq_lengths_kv)
+            if pad_length > 0:
+                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
+                    runtime_shape - len(actual_seq_lengths_kv))
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 
-            torch_npu.atb.npu_multi_head_latent_attention(
+            torch_npu.npu_fused_infer_attention_score.out(
                 q_nope,
-                q_pe,
                 k_nope,
-                k_pe,
-                block_table,
-                seq_len,
-                num_heads,
-                scale,
-                num_kv_heads,
-                return_lse=True,
-                calc_type="calc_type_ring",
+                k_nope,
+                query_rope=q_pe,
+                key_rope=k_pe,
+                num_heads=num_heads,
+                num_key_value_heads=num_kv_heads,
+                input_layout=input_layout,
+                atten_mask=spec_attn_mask,
+                sparse_mode=sparse_mode,
+                scale=scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                softmax_lse_flag=True,
+                block_table=block_table,
+                block_size=block_size,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                actual_seq_lengths=actual_seq_lengths,
                 workspace=graph_params.workspaces.get(runtime_shape),
-                output=attn_output,
-                lse=softmax_lse)
+                out=[attn_output, softmax_lse])
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
