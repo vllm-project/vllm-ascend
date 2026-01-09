@@ -62,6 +62,26 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
 
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AscendMLAMetadata:
+        metadata_cls = super().build(common_prefix_len, common_attn_metadata)
+        if self.num_prefills == 0 and self.pcp_size > 1:
+            self.slot_mapping[:self.
+                              num_decode_tokens] = self.slot_mapping[:self.
+                                                                     num_decode_tokens
+                                                                     * self.
+                                                                     pcp_size:
+                                                                     self.
+                                                                     pcp_size]
+            self.slot_mapping[self.num_decode_tokens:self.num_decode_tokens *
+                              self.pcp_size].fill_(-1)
+        metadata_cls.slot_mapping = self.slot_mapping
+        return metadata_cls
+
     @classmethod
     def get_cudagraph_support(
         cls: type["AscendMlaCPMetadataBuilder"],
@@ -110,7 +130,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             tail_attn_nomask_seqlens=common_long_seq_metadata.
             tail_attn_nomask_seqlens,
             q_full_idx=common_long_seq_metadata.q_full_idx,
-            pcp_prefill_mask=common_long_seq_metadata.pcp_prefill_mask,
             pcp_allgather_restore_idx=common_long_seq_metadata.
             pcp_allgather_restore_idx)
 
@@ -187,7 +206,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         ).item()
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # For pcp + spec decode, we flatten seq_lens and block_table
-            # to avoid irregular spec_attn_mask shape
+            # to avoid irregular attn_mask shape
             return self.num_decodes_flatten + self.num_prefills
         else:
             return self.num_decodes_flatten
@@ -350,8 +369,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         decode_ql_nope, decode_q_pe = self.reorg_decode_q(
             decode_ql_nope, decode_q_pe)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
-        decode_slots = attn_metadata.slot_mapping[:num_decode_tokens *
-                                                  self.pcp_size:self.pcp_size]
+        decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
         decode_k_pe, decode_k_nope = self.exec_kv_decode(
             decode_kv_no_split, cos, sin, kv_cache, decode_slots)
@@ -406,7 +424,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
-        mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -417,7 +434,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             kv_nomask_idx=kv_with_q_head_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=head_attn_nomask_seqlens,
-            mask=mask)
+            mask=attn_metadata.attn_mask)
 
         output_tail, lse_tail = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_tail_idx),
@@ -429,7 +446,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             kv_nomask_idx=kv_with_q_tail_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=tail_attn_nomask_seqlens,
-            mask=mask)
+            mask=attn_metadata.attn_mask)
 
         q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
         attn_output = torch.index_select(
