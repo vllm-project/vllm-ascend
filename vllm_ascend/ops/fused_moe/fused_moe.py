@@ -430,15 +430,15 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # splitting shared expert computation (gate_up projection + activation,
         # then down projection) yields identical results to integrated
         # computation after weight loading.
-        original_fn = self.quant_method.process_weights_after_loading
+        original_process_weights = self.quant_method.process_weights_after_loading
 
-        @wraps(original_fn)
-        def quant_method_process_weights_after_loading(*args, **kwargs):
-            result = original_fn(*args, **kwargs)
+        @wraps(original_process_weights)
+        def wrapped_process_weights(*args, **kwargs):
+            result = original_process_weights(*args, **kwargs)
             self._validate_shared_expert_consistency()
             return result
-        self.quant_method.process_weights_after_loading = \
-            quant_method_process_weights_after_loading
+
+        self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
         shared_gate_up, _ = self._shared_experts.gate_up_proj(
