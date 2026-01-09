@@ -2,7 +2,8 @@ name: Nightly Image Build Schedule
 
 on:
   schedule:
-    - cron: '0 0,4,8,12,15 * * *'
+    # UTC+8: 20pm, 23pm
+    - cron: '0 12,15 * * *'
 
 # This workflow builds and pushes Docker images for nightly-ci
 # It will be built base on the quay.io/ascend/vllm-ascend:main
