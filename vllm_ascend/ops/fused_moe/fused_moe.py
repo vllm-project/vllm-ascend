@@ -453,7 +453,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             shared_act)  # type: ignore
 
         # Qwen3-Next specific gating mechanism
-        if self._shared_experts.expert_gate is not None:
+        if hasattr(self._shared_experts, "expert_gate") and \
+            self._shared_experts.expert_gate is not None:
             shared_out = F.sigmoid(
                 self._shared_experts.expert_gate(hidden_states)  # type: ignore
             ) * shared_out
