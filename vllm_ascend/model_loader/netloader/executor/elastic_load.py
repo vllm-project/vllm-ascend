@@ -16,6 +16,10 @@
 
 import torch
 import torch_npu
+from vllm.distributed.utils import (
+    stateless_destroy_torch_distributed_process_group,
+    stateless_init_torch_distributed_process_group,
+)
 from vllm.logger import logger
 
 from .netloader_pg import (destroy_stateless_process_group,
@@ -67,7 +71,7 @@ class P2PLoad:
                 port=self.source_port,
                 rank=0,
                 world_size=2,
-                group_name='netloader',
+                backend="hccl",
             )
             logger.info(
                 f"Finish init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
@@ -84,8 +88,9 @@ class P2PLoad:
                     if len(param.shape) == 0:
                         continue
                     receiver_pg.recv([param], 1, 0).wait()
-                torch.distributed.barrier(group=receiver_pg,
-                                          device_ids=[model_device.index])
+                torch.distributed.barrier(
+                    group=receiver_pg, device_ids=[model_device.index]
+                )
 
             torch_npu.npu.synchronize(trans_stream)
 
@@ -139,7 +144,7 @@ class P2PSend:
                 port=self.listen_port,
                 rank=1,
                 world_size=2,
-                group_name='netloader',
+                backend="hccl",
             )
             logger.info(
                 f"Finish init_process_group, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"
@@ -155,12 +160,14 @@ class P2PSend:
                     if "aclnn_input_scale" in name:
                         continue
                     if name in int8_params:
-                        sender_pg.send([int8_params[name].to(model_device)], 0,
-                                       0).wait()
+                        sender_pg.send(
+                            [int8_params[name].to(model_device)], 0, 0
+                        ).wait()
                     else:
                         sender_pg.send([param.contiguous()], 0, 0).wait()
-                torch.distributed.barrier(group=sender_pg,
-                                          device_ids=[model_device.index])
+                torch.distributed.barrier(
+                    group=sender_pg, device_ids=[model_device.index]
+                )
             torch_npu.npu.synchronize(trans_stream)
             logger.info(
                 f"Finish send, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"

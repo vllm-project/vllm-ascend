@@ -16,15 +16,16 @@
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import (clear_ascend_config, get_ascend_config,
-                                       init_ascend_config)
+from vllm_ascend.ascend_config import (
+    clear_ascend_config,
+    get_ascend_config,
+    init_ascend_config,
+)
 
 
 class TestAscendConfig(TestBase):
-
     @staticmethod
     def _clean_up_ascend_config(func):
-
         def wrapper(*args, **kwargs):
             clear_ascend_config()
             func(*args, **kwargs)
@@ -54,7 +55,7 @@ class TestAscendConfig(TestBase):
             "multistream_overlap_shared_expert": True,
             "expert_map_path": "test_expert_map_path",
             "refresh": True,
-            "enable_kv_nz": False
+            "enable_kv_nz": False,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")

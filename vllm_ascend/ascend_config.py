@@ -28,29 +28,32 @@ class AscendConfig:
     """
 
     def __init__(self, vllm_config: "VllmConfig"):
-        additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        additional_config = (
+            vllm_config.additional_config
+            if vllm_config.additional_config is not None
+            else {}
+        )
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
-        self.xlite_graph_config = XliteGraphConfig(xlite_graph_config,
-                                                   vllm_config)
+        self.xlite_graph_config = XliteGraphConfig(xlite_graph_config, vllm_config)
 
         ascend_compilation_config = additional_config.get(
-            "ascend_compilation_config", {})
+            "ascend_compilation_config", {}
+        )
         self.ascend_compilation_config = AscendCompilationConfig(
-            **ascend_compilation_config)
+            **ascend_compilation_config
+        )
 
-        finegrained_tp_config = additional_config.get("finegrained_tp_config",
-                                                      {})
+        finegrained_tp_config = additional_config.get("finegrained_tp_config", {})
         self.finegrained_tp_config = FinegrainedTPConfig(
-            finegrained_tp_config, vllm_config)
+            finegrained_tp_config, vllm_config
+        )
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
 
-        weight_prefetch_config = additional_config.get(
-            "weight_prefetch_config", {})
-        self.weight_prefetch_config = WeightPrefetchConfig(
-            weight_prefetch_config)
+        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
+        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
         logger.info_once(
             f"Linear layer sharding enabled with config: {self.layer_sharding}. "
@@ -62,69 +65,86 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
         self.expert_map_record_path = additional_config.get(
-            "expert_map_record_path",
-            None)  # Provide path to export expert map
-        self.init_redundancy_expert = additional_config.get(
-            "init_redundancy_expert", 0)
+            "expert_map_record_path", None
+        )  # Provide path to export expert map
+        self.init_redundancy_expert = additional_config.get("init_redundancy_expert", 0)
         self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
         self.num_iterations_eplb_update = additional_config.get(
-            "num_iterations_eplb_update", 400)
+            "num_iterations_eplb_update", 400
+        )
         self.gate_eplb = additional_config.get("gate_eplb", False)
         self.num_wait_worker_iterations = additional_config.get(
-            "num_wait_worker_iterations", 30)
-        self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp",
-            False) and vllm_config.parallel_config.enable_expert_parallel
+            "num_wait_worker_iterations", 30
+        )
+        self.enable_shared_expert_dp = (
+            additional_config.get("enable_shared_expert_dp", False)
+            and vllm_config.parallel_config.enable_expert_parallel
+        )
         if self.enable_shared_expert_dp:
             from vllm_ascend.utils import enable_sp
-            assert enable_sp(vllm_config=vllm_config,
-                             enable_shared_expert_dp=True)
+
+            assert enable_sp(vllm_config=vllm_config, enable_shared_expert_dp=True)
         self.multistream_overlap_shared_expert = additional_config.get(
-            "multistream_overlap_shared_expert", False)
+            "multistream_overlap_shared_expert", False
+        )
         self.multistream_overlap_gate = additional_config.get(
-            "multistream_overlap_gate", False)
+            "multistream_overlap_gate", False
+        )
         self.recompute_scheduler_enable = additional_config.get(
-            "recompute_scheduler_enable", False)
-        self.enable_cpu_binding = additional_config.get(
-            "enable_cpu_binding", False)
+            "recompute_scheduler_enable", False
+        )
+        self.enable_cpu_binding = additional_config.get("enable_cpu_binding", False)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
-        if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
+        if (
+            vllm_config.kv_transfer_config is not None
+            and not vllm_config.model_config.is_deepseek_mla
+        ):
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
-                "prefill", {"tp_size": 1})["tp_size"]
+                "prefill", {"tp_size": 1}
+            )["tp_size"]
             decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
-                "decode", {"tp_size": 1})["tp_size"]
-            assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
+                "decode", {"tp_size": 1}
+            )["tp_size"]
+            assert prefill_tp_size % decode_tp_size == 0, (
+                "Prefill TP size must be divisible by Decode TP size."
+            )
             self.pd_tp_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio > 1:
                 try:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
-                    self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
+                    num_kv_head = (
+                        vllm_config.model_config.hf_text_config.num_key_value_heads
+                    )
+                    self.num_head_replica = (
+                        prefill_tp_size // num_kv_head
+                        if prefill_tp_size >= num_kv_head
+                        else 1
+                    )
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
                     self.pd_head_ratio = prefill_tp_size // decode_tp_size
                 except Exception:
-                    raise ValueError(
-                        "The text_config extracted from the model config does not have "
-                        "`num_key_value_heads` attribute. This indicates a mismatch "
-                        "between the model config and vLLM's expectations. Please "
-                        "ensure that the model config is compatible with vLLM."
+                    raise AssertionError(
+                        "Can not get num_key_value_heads from model_config"
                     )
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
-                    "Only support P node tp size lagger then D node tp size")
+                    "Only support P node tp size lagger then D node tp size"
+                )
         self.SLO_limits_for_dynamic_batch = additional_config.get(
-            "SLO_limits_for_dynamic_batch", -1)
+            "SLO_limits_for_dynamic_batch", -1
+        )
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
+
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
-            self, vllm_config)
-        self.enable_npugraph_ex = additional_config.get(
-            "enable_npugraph_ex", False)
+            self, vllm_config
+        )
+        self.enable_npugraph_ex = additional_config.get("enable_npugraph_ex", False)
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
@@ -132,20 +152,22 @@ class AscendConfig:
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
 
         self.enable_async_exponential = bool(
-            additional_config.get("enable_async_exponential", False))
+            additional_config.get("enable_async_exponential", False)
+        )
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
-            use_sparse = hasattr(vllm_config.model_config.hf_text_config,
-                                 "index_topk")
+            use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
-                raise RuntimeError(
-                    "enable_kv_nz is only supported for mla currently.")
-            if vllm_config.kv_transfer_config is None \
-                or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise RuntimeError("enable_kv_nz is only supported for mla currently.")
+            if (
+                vllm_config.kv_transfer_config is None
+                or not vllm_config.kv_transfer_config.is_kv_consumer
+            ):
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can "
-                    "only be used in D node.")
+                    "only be used in D node."
+                )
 
 
 class FinegrainedTPConfig:
@@ -155,13 +177,17 @@ class FinegrainedTPConfig:
 
     def __init__(self, finegrained_tp_config: dict, vllm_config):
         self.oproj_tensor_parallel_size = finegrained_tp_config.get(
-            "oproj_tensor_parallel_size", 0)
+            "oproj_tensor_parallel_size", 0
+        )
         self.lmhead_tensor_parallel_size = finegrained_tp_config.get(
-            "lmhead_tensor_parallel_size", 0)
+            "lmhead_tensor_parallel_size", 0
+        )
         self.embedding_tensor_parallel_size = finegrained_tp_config.get(
-            "embedding_tensor_parallel_size", 0)
+            "embedding_tensor_parallel_size", 0
+        )
         self.mlp_tensor_parallel_size = finegrained_tp_config.get(
-            "mlp_tensor_parallel_size", 0)
+            "mlp_tensor_parallel_size", 0
+        )
 
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
@@ -173,7 +199,10 @@ class FinegrainedTPConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in graph mode"
                 )
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+            if (
+                vllm_config.kv_transfer_config is None
+                or not vllm_config.kv_transfer_config.is_kv_consumer
+            ):
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
@@ -187,7 +216,8 @@ class FinegrainedTPConfig:
             )
         if self.mlp_tensor_parallel_size > 0:
             enabled_configs.append(
-                f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
+                f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}"
+            )
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
             self.lmhead_tensor_parallel_size,
@@ -195,12 +225,13 @@ class FinegrainedTPConfig:
             self.mlp_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
-            if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError(
-                    "module tp sizes must divide data_parallel_size")
+            if (
+                module_tp_size > 0
+                and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0
+            ):
+                raise AssertionError("module tp sizes must divide data_parallel_size")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
-            logger.info(
-                f"finegrained_tp_config enabled: {', '.join(enabled_configs)}")
+            logger.info(f"finegrained_tp_config enabled: {', '.join(enabled_configs)}")
 
 
 class AscendCompilationConfig:
@@ -212,13 +243,12 @@ class AscendCompilationConfig:
     deployed on Ascend platforms.
     """
 
-    def __init__(self,
-                 fuse_norm_quant: bool = True,
-                 fuse_qknorm_rope: bool = False,
-                 **kwargs):
+    def __init__(
+        self, fuse_norm_quant: bool = True, fuse_qknorm_rope: bool = False, **kwargs
+    ):
         """
         Initialize the configuration.
-        
+
         Args:
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
@@ -264,24 +294,26 @@ class WeightPrefetchConfig:
             "qkv": 1.0,
             "o": 1.0,
         },
-        "moe": {
-            "gate_up": 0.8
-        }
+        "moe": {"gate_up": 0.8},
     }
 
     def __init__(self, weight_prefetch_config: dict):
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get(
-            "prefetch_ratio", self.prefetch_ratio)
+            "prefetch_ratio", self.prefetch_ratio
+        )
 
 
 _ASCEND_CONFIG: Optional[AscendConfig] = None
 
 
 def init_ascend_config(vllm_config):
-    additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-    refresh = additional_config.get("refresh",
-                                    False) if additional_config else False
+    additional_config = (
+        vllm_config.additional_config
+        if vllm_config.additional_config is not None
+        else {}
+    )
+    refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
     if _ASCEND_CONFIG is not None and not refresh:
         return _ASCEND_CONFIG

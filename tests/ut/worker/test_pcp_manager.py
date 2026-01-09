@@ -29,25 +29,35 @@ from vllm_ascend.worker.pcp_utils import PCPManager
         (2, 1, 4, [5, 10, 40, 60], 2, True, 100, True),
         (2, 1, 3, [5, 10, 15], 3, False, 50, True),
         (2, 1, 3, [40, 50, 60], 0, False, 150, True),
-    ])
-def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
-                                     num_decodes, use_mla, total_tokens,
-                                     expect_not_none):
+    ],
+)
+def test_generate_pcp_metadata_basic(
+    pcp_size,
+    dcp_size,
+    num_reqs,
+    query_lens,
+    num_decodes,
+    use_mla,
+    total_tokens,
+    expect_not_none,
+):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.use_mla = use_mla
     vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
     vllm_config.speculative_config.num_speculative_tokens = 0
 
-    pcp_manager = PCPManager(pcp_world_size=pcp_size,
-                             pcp_rank=0,
-                             dcp_world_size=dcp_size,
-                             dcp_rank=0,
-                             max_buffer_num_tokens=10000,
-                             max_num_reqs=1000,
-                             device="cpu",
-                             vllm_config=vllm_config,
-                             pin_memory=False)
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=0,
+        dcp_world_size=dcp_size,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        pin_memory=False,
+    )
     input_batch = MagicMock()
     input_batch.num_reqs = num_reqs
 
@@ -70,32 +80,31 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     input_batch.num_tokens = torch.tensor(num_tokens)
 
     query_lens = torch.tensor(query_lens)
-    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens,
-                                               input_batch)
+    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens, input_batch)
 
     if not expect_not_none:
         assert result is None, f"Expected to return None, but got {type(result)}"
     else:
         assert result is not None, "Expected to return a metadata object, but got None."
 
-        assert hasattr(result, 'num_actual_tokens_pcp_padded')
-        assert hasattr(result, 'num_computed_tokens_of_pcp_dcp')
+        assert hasattr(result, "num_actual_tokens_pcp_padded")
+        assert hasattr(result, "num_computed_tokens_of_pcp_dcp")
 
         if pcp_size > 1:
-            assert hasattr(result, 'pcp_allgather_restore_idx')
+            assert hasattr(result, "pcp_allgather_restore_idx")
 
             has_prefill_requests = (num_reqs - num_decodes) > 0
             if has_prefill_requests:
-                assert hasattr(result, 'q_head_idx_tensor')
-                assert hasattr(result, 'q_tail_idx_tensor')
-                assert hasattr(result, 'q_full_idx')
-                assert hasattr(result, 'kv_with_q_head_nomask_idx_tensor')
-                assert hasattr(result, 'kv_with_q_head_mask_idx_tensor')
-                assert hasattr(result, 'kv_with_q_tail_nomask_idx_tensor')
-                assert hasattr(result, 'kv_with_q_tail_mask_idx_tensor')
-                assert hasattr(result, 'attn_mask_seqlens')
-                assert hasattr(result, 'head_attn_nomask_seqlens')
-                assert hasattr(result, 'tail_attn_nomask_seqlens')
+                assert hasattr(result, "q_head_idx_tensor")
+                assert hasattr(result, "q_tail_idx_tensor")
+                assert hasattr(result, "q_full_idx")
+                assert hasattr(result, "kv_with_q_head_nomask_idx_tensor")
+                assert hasattr(result, "kv_with_q_head_mask_idx_tensor")
+                assert hasattr(result, "kv_with_q_tail_nomask_idx_tensor")
+                assert hasattr(result, "kv_with_q_tail_mask_idx_tensor")
+                assert hasattr(result, "attn_mask_seqlens")
+                assert hasattr(result, "head_attn_nomask_seqlens")
+                assert hasattr(result, "tail_attn_nomask_seqlens")
 
 
 @pytest.mark.parametrize(
@@ -103,47 +112,55 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     [
         # Case 1: prefill only
         ([8, 12, 16], 3, [0, 0, 0], [8, 12, 16], 4, 0, [2, 4, 4]),
-
         # # Case 2: mix prefill and decode
         ([8, 4, 12], 3, [8, 4, 0], [8, 0, 12], 4, 0, [2, 2, 4]),
-
         # # Case 3: request which need to be padded
         ([3, 7, 9], 3, [0, 0, 0], [3, 7, 9], 4, 0, [2, 2, 4]),
-
         # Case 4: single request
         ([10], 1, [0], [10], 4, 0, [4]),
-    ])
-def test_update_tokens_for_pcp_basic(tokens, num_reqs, num_computed_tokens,
-                                     num_prompt_tokens, pcp_size, pcp_rank,
-                                     expected_pcp_tokens):
+    ],
+)
+def test_update_tokens_for_pcp_basic(
+    tokens,
+    num_reqs,
+    num_computed_tokens,
+    num_prompt_tokens,
+    pcp_size,
+    pcp_rank,
+    expected_pcp_tokens,
+):
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.speculative_config.num_speculative_tokens = 0
 
-    pcp_manager = PCPManager(pcp_world_size=pcp_size,
-                             pcp_rank=0,
-                             dcp_world_size=1,
-                             dcp_rank=0,
-                             max_buffer_num_tokens=10000,
-                             max_num_reqs=1000,
-                             device="cpu",
-                             vllm_config=vllm_config,
-                             pin_memory=False)
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=0,
+        dcp_world_size=1,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        pin_memory=False,
+    )
     input_batch = MagicMock()
     input_batch.num_reqs = num_reqs
-    input_batch.num_computed_tokens_cpu = np.array(num_computed_tokens,
-                                                   dtype=np.int32)
+    input_batch.num_computed_tokens_cpu = np.array(num_computed_tokens, dtype=np.int32)
     input_batch.num_prompt_tokens = np.array(num_prompt_tokens, dtype=np.int32)
     arange_np = np.arange(10000)
     pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(
-        np.array(tokens), arange_np, num_reqs, 1)
+        np.array(tokens), arange_np, num_reqs, 1
+    )
 
-    assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), \
+    assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), (
         f"Expected pcp_tokens: {expected_pcp_tokens}, got: {pcp_tokens_result}"
+    )
 
     total_pcp_tokens: int = np.sum(pcp_tokens_result)
-    assert positions_result.shape == (total_pcp_tokens,), \
+    assert positions_result.shape == (total_pcp_tokens,), (
         f"Positions shape mismatch. Expected length {total_pcp_tokens}, got {positions_result.shape}"
+    )
 
 
 # yapf: disable

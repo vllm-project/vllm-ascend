@@ -36,16 +36,18 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 95,
-    "threshold": 5
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "baseline": 95,
+        "threshold": 5,
+    }
+]
 
 
 @pytest.mark.asyncio
@@ -65,7 +67,7 @@ async def test_models(model: str) -> None:
     speculative_config = {"num_speculative_tokens": 1, "method": "mtp"}
     compilation_config = {
         "cudagraph_capture_sizes": [24],
-        "cudagraph_mode": "FULL_DECODE_ONLY"
+        "cudagraph_mode": "FULL_DECODE_ONLY",
     }
     additional_config: dict[str, Any] = {
         "enable_shared_expert_dp": False,
@@ -74,31 +76,40 @@ async def test_models(model: str) -> None:
         "num_iterations_eplb_update": 14000,
         "num_wait_worker_iterations": 30,
         "init_redundancy_expert": 0,
-        "gate_eplb": False
+        "gate_eplb": False,
     }
     server_args = [
-        "--quantization", "ascend", "--seed", "1024",
-        "--no-enable-prefix-caching", "--data-parallel-size", "4",
-        "--tensor-parallel-size", "4", "--enable-expert-parallel", "--port",
-        str(port), "--max-model-len", "40000", "--max-num-batched-tokens",
-        "4096", "--max-num-seqs", "12", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.92"
+        "--quantization",
+        "ascend",
+        "--seed",
+        "1024",
+        "--no-enable-prefix-caching",
+        "--data-parallel-size",
+        "4",
+        "--tensor-parallel-size",
+        "4",
+        "--enable-expert-parallel",
+        "--port",
+        str(port),
+        "--max-model-len",
+        "40000",
+        "--max-num-batched-tokens",
+        "4096",
+        "--max-num-seqs",
+        "12",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.92",
     ]
-    server_args.extend(
-        ["--speculative-config",
-         json.dumps(speculative_config)])
-    server_args.extend(
-        ["--compilation-config",
-         json.dumps(compilation_config)])
+    server_args.extend(["--speculative-config", json.dumps(speculative_config)])
+    server_args.extend(["--compilation-config", json.dumps(compilation_config)])
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,
@@ -109,7 +120,4 @@ async def test_models(model: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        run_aisbench_cases(model,
-                           port,
-                           aisbench_cases,
-                           server_args=server_args)
+        run_aisbench_cases(model, port, aisbench_cases, server_args=server_args)

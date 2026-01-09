@@ -19,6 +19,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 ### Model Weight
 
 require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:
+
 - `Qwen2.5-VL-3B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct)
 - `Qwen2.5-VL-7B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)
 - `Qwen2.5-VL-32B-Instruct`:[Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)
@@ -469,6 +470,7 @@ INFO 12-05 08:51:20 [loggers.py:127] Engine 000: Avg prompt throughput: 0.0 toke
 ### Using Language Model Evaluation Harness
 
 The accuracy of some models is already within our CI monitoring scope, including:
+
 - `Qwen2.5-VL-7B-Instruct`
 - `Qwen3-VL-8B-Instruct`
 
@@ -547,6 +549,7 @@ lm_eval \
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

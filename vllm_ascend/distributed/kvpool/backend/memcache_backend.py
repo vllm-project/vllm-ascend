@@ -16,7 +16,6 @@ class MmcDirect(Enum):
 
 
 class MemcacheBackend(Backend):
-
     def __init__(self, parallel_config: ParallelConfig):
         try:
             from memcache_hybrid import DistributedObjectStore  # type: ignore
@@ -24,7 +23,8 @@ class MemcacheBackend(Backend):
             raise ImportError(
                 "Please install memcache by following the instructions at "
                 "https://gitee.com/ascend/memfabric_hybrid "  # noqa: E501
-                "to run vLLM with MemcacheConnector.") from e
+                "to run vLLM with MemcacheConnector."
+            ) from e
         try:
             self.rank = parallel_config.rank
             self.store = DistributedObjectStore()
@@ -34,8 +34,7 @@ class MemcacheBackend(Backend):
             logger.error("Configuration loading failed: %s", e)
             raise
         except Exception as exc:
-            logger.error(
-                "An error occurred while loading the configuration: %s", exc)
+            logger.error("An error occurred while loading the configuration: %s", exc)
             raise
 
     def set_device(self):
@@ -48,22 +47,22 @@ class MemcacheBackend(Backend):
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
 
-    def get(self, key: list[str], addr: list[list[int]],
-            size: list[list[int]]):
+    def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
-            res = self.store.batch_get_into_layers(key, addr, size,
-                                                   MmcDirect.COPY_G2L.value)
+            res = self.store.batch_get_into_layers(
+                key, addr, size, MmcDirect.COPY_G2L.value
+            )
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")
         except Exception as e:
             logger.error(f"Failed to get key {key}. {e}")
 
-    def put(self, key: list[str], addr: list[list[int]],
-            size: list[list[int]]):
+    def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
-            res = self.store.batch_put_from_layers(key, addr, size,
-                                                   MmcDirect.COPY_L2G.value)
+            res = self.store.batch_put_from_layers(
+                key, addr, size, MmcDirect.COPY_L2G.value
+            )
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")

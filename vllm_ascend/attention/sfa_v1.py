@@ -10,7 +10,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import MLACommonMetadataBuilder
 from vllm.v1.attention.backends.utils import AttentionCGSupport
@@ -21,20 +21,30 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         trans_rope_weight, transdata,
-                                         wait_for_kv_layer_from_connector)
-from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    trans_rope_weight,
+    transdata,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.ops.layer_shard_linear import (
-    is_hidden_layer, post_process_after_loading_for_shard_weight_series,
+    is_hidden_layer,
+    post_process_after_loading_for_shard_weight_series,
     reach_layer_for_shard_weight_series,
-    register_all_layers_to_shard_weight_series)
+    register_all_layers_to_shard_weight_series,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
-                               enable_dsa_cp, maybe_trans_nz)
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
+    _round_up,
+    dispose_layer,
+    enable_sp,
+    maybe_trans_nz,
+    replace_layer,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -42,7 +52,6 @@ if TYPE_CHECKING:
 
 
 class AscendSFABackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -57,8 +66,9 @@ class AscendSFABackend(AttentionBackend):
         return AscendSFAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int,
-                           head_size: int) -> tuple[int, ...]:
+    def get_kv_cache_shape(
+        num_blocks: int, block_size: int, num_kv_heads: int, head_size: int
+    ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -85,6 +95,7 @@ class AscendSFAMetadata:
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -131,32 +142,40 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        self.metadata_cls = (metadata_cls if metadata_cls is not None else
-                             AscendSFAMetadata)
+        self.metadata_cls = (
+            metadata_cls if metadata_cls is not None else AscendSFAMetadata
+        )
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
         self.block_size = vllm_config.cache_config.block_size
-        self.max_blocks = (vllm_config.model_config.max_model_len +
-                           self.block_size - 1) // self.block_size
+        self.max_blocks = (
+            vllm_config.model_config.max_model_len + self.block_size - 1
+        ) // self.block_size
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
+            assert self.decode_threshold <= 16, (
+                f"decode_threshold exceeded \
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
+            )
 
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.enable_sfa_cp = enable_dsa_cp()
+        self.enable_sfa_cp = enable_sp() and hasattr(
+            self.model_config.hf_text_config, "index_topk"
+        )
 
         assert not (
             self.enable_sfa_cp
             and self.vllm_config.compilation_config.cudagraph_mode
             == CUDAGraphMode.FULL_DECODE_ONLY
-        ), "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
+        ), (
+            "FlashComm1 is not compatible with FULL_DECODE_ONLY. Please set graph_mode to 'piecewise' or disable FlashComm1."
+        )
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
     @classmethod
@@ -169,8 +188,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def reorder_batch(self, input_batch: "NPUInputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(
+        self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput"
+    ) -> bool:
         # No need to reorder for Ascend SFA
         return False
 
@@ -186,14 +206,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        input_positions = common_attn_metadata.positions[:
-                                                         num_input_tokens].long(
-                                                         )
+        input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         has_prefill = any(query_lens_cpu > self.decode_threshold)
 
-        cum_query_lens = common_attn_metadata.query_start_loc[1:num_reqs + 1]
+        cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         if has_prefill:
             cos, sin = get_cos_and_sin_mla(input_positions)
@@ -211,8 +229,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             local_end = min(local_end_with_pad, num_actual_tokens)
 
             pad_size = num_tokens_pad - cos.shape[0]
-            assert cos.shape == sin.shape, \
+            assert cos.shape == sin.shape, (
                 f"cos.shape must be equal to sin.shape, got {cos.shape} and {sin.shape}"
+            )
 
             if pad_size > 0:
                 cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
@@ -220,27 +239,27 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
             pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
             if pad_size_slot > 0:
-                slot_mapping = nn.functional.pad(slot_mapping,
-                                                 (0, pad_size_slot),
-                                                 value=-1)
+                slot_mapping = nn.functional.pad(
+                    slot_mapping, (0, pad_size_slot), value=-1
+                )
             else:
                 slot_mapping = slot_mapping[:num_tokens_pad]
 
             cos = cos[local_start:local_end_with_pad]
             sin = sin[local_start:local_end_with_pad]
-            slot_mapping_cp = torch.full(size=(num_tokens_per_device, ),
-                                         fill_value=-1,
-                                         dtype=slot_mapping.dtype,
-                                         device=slot_mapping.device)
-            assert cos.shape[0] == num_tokens_per_device, \
+            slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
+            assert cos.shape[0] == num_tokens_per_device, (
                 f"cos.shape[0] must be equal to num_tokens_per_device, \
                     got {cos.shape[0]} and {num_tokens_per_device}"
-            assert slot_mapping_cp.shape[0] == num_tokens_per_device, \
+            )
+            assert slot_mapping_cp.shape[0] == num_tokens_per_device, (
                 f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
                     got {slot_mapping_cp.shape[0]} and {num_tokens_per_device}"
-            assert slot_mapping.shape[0] == num_tokens_pad, \
+            )
+            assert slot_mapping.shape[0] == num_tokens_pad, (
                 f"slot_mapping.shape[0] must be equal to num_tokens_pad, \
                     got {slot_mapping.shape[0]} and {num_tokens_pad}"
+            )
 
             actual_seq_lengths_query = torch.empty_like(cum_query_lens)
             actual_seq_lengths_key = torch.empty_like(seq_lens)
@@ -285,13 +304,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
-            attn_mask=self.attn_mask_builder.get_attention_mask(
-                self.model_config),
+            attn_mask=self.attn_mask_builder.get_attention_mask(self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_tables=block_table,
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
-            sfa_cp_context=sfa_cp_context)
+            sfa_cp_context=sfa_cp_context,
+        )
 
     def build_for_graph_capture(
         self,
@@ -299,8 +318,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
         if attn_state in {
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
         }:
             attn_metadata = self.build(
                 common_prefix_len=0,
@@ -342,27 +361,28 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
 
         # MLA Args
-        self.q_lora_rank = kwargs['q_lora_rank']
-        self.kv_lora_rank = kwargs['kv_lora_rank']
-        self.qk_nope_head_dim = kwargs['qk_nope_head_dim']
-        self.qk_rope_head_dim = kwargs['qk_rope_head_dim']
-        self.qk_head_dim = kwargs['qk_head_dim']
-        self.v_head_dim = kwargs['v_head_dim']
-        self.rotary_emb = kwargs['rotary_emb']
-        self.q_proj = kwargs['q_proj'] if self.q_lora_rank is None else kwargs[
-            'q_b_proj']
-        self.fused_qkv_a_proj = kwargs.get('fused_qkv_a_proj', None)
-        self.kv_b_proj = kwargs['kv_b_proj']
-        self.o_proj = kwargs['o_proj']
-        self.indexer = kwargs['indexer']
-        self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
-        self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
-        self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
+        self.q_lora_rank = kwargs["q_lora_rank"]
+        self.kv_lora_rank = kwargs["kv_lora_rank"]
+        self.qk_nope_head_dim = kwargs["qk_nope_head_dim"]
+        self.qk_rope_head_dim = kwargs["qk_rope_head_dim"]
+        self.qk_head_dim = kwargs["qk_head_dim"]
+        self.v_head_dim = kwargs["v_head_dim"]
+        self.rotary_emb = kwargs["rotary_emb"]
+        self.q_proj = (
+            kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        )
+        self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj", None)
+        self.kv_b_proj = kwargs["kv_b_proj"]
+        self.o_proj = kwargs["o_proj"]
+        self.indexer = kwargs["indexer"]
+        self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa", None)
+        self.kv_a_layernorm = kwargs.get("kv_a_layernorm", None)
+        self.q_a_layernorm = kwargs.get("q_a_layernorm", None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         self.num_heads_per_rank = self.num_heads // self.tp_size
-        self.q_b_proj = kwargs['q_b_proj']
+        self.q_b_proj = kwargs["q_b_proj"]
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -378,15 +398,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.enable_sfa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
             self.layer_sharding_kwargs = []
-            for layer_name in (get_ascend_config().layer_sharding or []):
+            for layer_name in get_ascend_config().layer_sharding or []:
                 if layer_name in kwargs:
                     self.layer_sharding_kwargs.append(kwargs[layer_name])
                 else:
                     logger.warning_once(
                         f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
                     )
-            register_all_layers_to_shard_weight_series(
-                self.layer_sharding_kwargs)
+            register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
@@ -403,15 +422,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
         kv_b_proj_weight = torch_npu.npu_format_cast(
-            self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T
+            self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND
+        ).T
         assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank, self.local_num_heads *
-            (self.qk_nope_head_dim + self.v_head_dim)), (
-                f"{kv_b_proj_weight.shape=}, "
-                f"{self.kv_lora_rank=}, "
-                f"{self.local_num_heads=}, "
-                f"{self.qk_nope_head_dim=}, "
-                f"{self.v_head_dim=}")
+            self.kv_lora_rank,
+            self.local_num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        ), (
+            f"{kv_b_proj_weight.shape=}, "
+            f"{self.kv_lora_rank=}, "
+            f"{self.local_num_heads=}, "
+            f"{self.qk_nope_head_dim=}, "
+            f"{self.v_head_dim=}"
+        )
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.local_num_heads,
@@ -419,7 +441,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
 
         # Convert from (L, N, V) to (N, L, V)
         self.W_UV = W_UV.transpose(0, 1).contiguous()
@@ -432,7 +455,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
         dispose_layer(self.kv_b_proj)
         if self.enable_sfa_cp:
-            for layer in (self.layer_sharding_kwargs or []):
+            for layer in self.layer_sharding_kwargs or []:
                 if is_hidden_layer(layer):
                     post_process_after_loading_for_shard_weight_series(layer)
 
@@ -444,14 +467,18 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             reasons = []
             if self.fused_qkv_a_proj is None or not isinstance(
-                    quant_method, AscendW8A8LinearMethod):
+                quant_method, AscendW8A8LinearMethod
+            ):
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers.")
+                    "thus mlapo is disabled for these layers."
+                )
             if self.enable_sfa_cp:
-                reasons.append("Currently mlapo does not support SFA with CP,"
-                               "thus mlapo is disabled for these layers.")
+                reasons.append(
+                    "Currently mlapo does not support SFA with CP,"
+                    "thus mlapo is disabled for these layers."
+                )
             if reasons:
                 self.enable_mlapo = False
                 for msg in reasons:
@@ -466,34 +493,35 @@ class AscendSFAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): We should not judge by whether `has_prefill` or not.
         # The true criteria for judgment is tensorA's shape[0] <= 1024 (num_tokens <= 1024).
         # This is a bug in the previous code.
-        if x.dtype in [torch.float16, torch.bfloat16] \
-                and hasattr(torch.ops._C_ascend, "batch_matmul_transpose") \
-                and not self.enable_sfa_cp \
-                and not has_prefill:
+        if (
+            x.dtype in [torch.float16, torch.bfloat16]
+            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
+            and not self.enable_sfa_cp
+            and not has_prefill
+        ):
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             b, _, _ = x.shape
-            res = torch.empty((b, self.num_heads, self.v_head_dim),
-                              dtype=x.dtype,
-                              device=x.device)
+            res = torch.empty(
+                (b, self.num_heads, self.v_head_dim), dtype=x.dtype, device=x.device
+            )
             torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
             x = res.reshape(-1, self.num_heads * self.v_head_dim)
         else:
             # Convert from (B, N, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads,
-                       self.kv_lora_rank).transpose(0, 1)
+            x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
             # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
             x = torch.bmm(x, self.W_UV)
             # # Convert from (N, B, V) to (B, N * V)
-            x = x.transpose(0,
-                            1).reshape(-1,
-                                       self.local_num_heads * self.v_head_dim)
+            x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
         return x
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
-        q_nope, q_pe = self.q_proj(x)[0]\
-            .view(-1, self.local_num_heads, self.qk_head_dim)\
+        q_nope, q_pe = (
+            self.q_proj(x)[0]
+            .view(-1, self.local_num_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        )
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
@@ -515,7 +543,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         S = 1
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(
-            B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+            B, N, S, self.kv_lora_rank + self.qk_rope_head_dim
+        )
         cache_mode = "PA"
 
         if self.enable_sfa_cp:
@@ -531,7 +560,21 @@ class AscendSFAImpl(MLAAttentionImpl):
                 cache_mode=cache_mode,
                 is_output_kv=True,
             )
-            return k_pe, k_nope
+            # TODO: Temporarily adapt SFA-CP and replace it later with PCP. --clrs97
+            k_pe = get_tp_group().all_gather(k_pe, 0)
+            k_nope = get_tp_group().all_gather(k_nope, 0)
+
+            if kv_cache is not None:
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[0].view(-1, k_nope.shape[-1]),
+                    slots.view(-1, 1),
+                    k_nope.view(-1, k_nope.shape[-1]),
+                )
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[1].view(-1, k_pe.shape[-1]),
+                    slots.view(-1, 1),
+                    k_pe.view(-1, k_pe.shape[-1]),
+                )
         else:
             torch_npu.npu_kv_rmsnorm_rope_cache(
                 kv_no_split,
@@ -566,72 +609,83 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
 
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
-            ..., self.q_lora_rank:].contiguous()
+            ..., self.q_lora_rank :
+        ].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[
-            ..., :self.q_lora_rank].contiguous()
+            ..., : self.q_lora_rank
+        ].contiguous()
 
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         wd_qkv = torch.cat((kv_a_proj_wt, q_a_proj_wt), dim=-1)
         wd_qkv = wd_qkv.t().contiguous()
-        wd_qkv = transdata(wd_qkv,
-                           block_size=(16, 32)).unsqueeze(0).contiguous()
+        wd_qkv = transdata(wd_qkv, block_size=(16, 32)).unsqueeze(0).contiguous()
         self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
         kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[
-            self.q_lora_rank:].contiguous()
-        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[:self.
-                                                           q_lora_rank].contiguous(
-                                                           )
+            self.q_lora_rank :
+        ].contiguous()
+        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[
+            : self.q_lora_rank
+        ].contiguous()
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
-            self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
-        kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl,
-                                              self.qk_rope_head_dim)
+            self.kv_lora_rank + self.qk_rope_head_dim, -1
+        ).contiguous()
+        kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl, self.qk_rope_head_dim)
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(
-            self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl),
-                                       dim=-1).contiguous()
+            self.kv_lora_rank + self.qk_rope_head_dim
+        ).contiguous()
+        self.deq_scale_qkv = torch.cat(
+            (kv_a_proj_deq_scl, q_a_proj_deq_scl), dim=-1
+        ).contiguous()
 
         kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[
-            self.q_lora_rank:].contiguous()
-        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[:self.
-                                                            q_lora_rank].contiguous(
-                                                            )
+            self.q_lora_rank :
+        ].contiguous()
+        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[
+            : self.q_lora_rank
+        ].contiguous()
 
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(
-            self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
-        kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias,
-                                              self.qk_rope_head_dim)
+            self.kv_lora_rank + self.qk_rope_head_dim, -1
+        ).contiguous()
+        kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias, self.qk_rope_head_dim)
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(
-            self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias),
-                                        dim=-1).contiguous()
+            self.kv_lora_rank + self.qk_rope_head_dim
+        ).contiguous()
+        self.quant_bias_qkv = torch.cat(
+            (kv_a_proj_qt_bias, q_a_proj_qt_bias), dim=-1
+        ).contiguous()
 
         wu_q = self.q_proj.weight.data
-        wu_q = wu_q.t().reshape(self.num_heads,
-                                self.qk_nope_head_dim + self.qk_rope_head_dim,
-                                -1)
+        wu_q = wu_q.t().reshape(
+            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1
+        )
         wu_q = trans_rope_weight(wu_q, self.qk_rope_head_dim)
         wu_q = wu_q.reshape(
-            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim),
-            -1)
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim), -1
+        )
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
         self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
 
         qb_deq_scl = self.q_proj.deq_scale.data
         qb_deq_scl = qb_deq_scl.reshape(
-            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
+            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1
+        )
         qb_deq_scl = trans_rope_weight(qb_deq_scl, self.qk_rope_head_dim)
         self.qb_deq_scl = qb_deq_scl.reshape(
-            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
 
         qb_qt_bias = self.q_proj.quant_bias.data
         qb_qt_bias = qb_qt_bias.reshape(
-            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
+            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1
+        )
         qb_qt_bias = trans_rope_weight(qb_qt_bias, self.qk_rope_head_dim)
         self.qb_qt_bias = qb_qt_bias.reshape(
-            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
 
         device = self.q_proj.weight.device
         self.gamma1 = self.q_a_layernorm.weight.data
@@ -648,9 +702,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
         ascend_config = get_ascend_config()
-        if self.vllm_config.kv_transfer_config is not None and \
-                self.vllm_config.kv_transfer_config.is_kv_consumer and \
-                ascend_config.recompute_scheduler_enable:
+        if (
+            self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_consumer
+            and ascend_config.recompute_scheduler_enable
+        ):
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
             self.fused_qkv_a_proj.quant_bias = None
@@ -668,7 +724,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_input_tokens: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            hidden_states.contiguous(), need_gather_q_kv)
+            hidden_states.contiguous(), need_gather_q_kv
+        )
         k_nope, k_pe = kv_cache[0], kv_cache[1]
         ql_nope = torch.empty(
             (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
@@ -733,7 +790,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             if self.enable_sfa_cp and not forward_context.in_profile_run:
-                for layer in (self.layer_sharding_kwargs or []):
+                for layer in self.layer_sharding_kwargs or []:
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
@@ -766,9 +823,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 need_gather_q_kv=need_gather_q_kv)
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
-                               dependency=hidden_states,
-                               enabled=self.enable_prefetch)
+            maybe_npu_prefetch(
+                inputs=self.fused_qkv_a_proj.weight,
+                dependency=hidden_states,
+                enabled=self.enable_prefetch,
+            )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -778,9 +837,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Process for Flash Comm V1
             if need_gather_q_kv:
                 q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    q_c.contiguous(), need_gather_q_kv)
+                    q_c.contiguous(), need_gather_q_kv
+                )
                 kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    kv_no_split.contiguous(), need_gather_q_kv)
+                    kv_no_split.contiguous(), need_gather_q_kv
+                )
 
             q, k = self.indexer_select_pre_process(
                 x=hidden_states,
@@ -795,24 +856,20 @@ class AscendSFAImpl(MLAAttentionImpl):
             slot_mapping = attn_metadata.slot_mapping
             if self.enable_sfa_cp:
                 assert attn_metadata.sfa_cp_context is not None
-                slot_mapping = attn_metadata.sfa_cp_context.slot_mapping_cp
-                actual_seq_lengths_query = attn_metadata.sfa_cp_context.actual_seq_lengths_query
-                actual_seq_lengths_key = attn_metadata.sfa_cp_context.actual_seq_lengths_key
+                slot_mapping_cp = attn_metadata.sfa_cp_context.slot_mapping_cp
+                actual_seq_lengths_query = (
+                    attn_metadata.sfa_cp_context.actual_seq_lengths_query
+                )
+                actual_seq_lengths_key = (
+                    attn_metadata.sfa_cp_context.actual_seq_lengths_key
+                )
 
-            k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache,
-                                        slot_mapping)
+            self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, slot_mapping_cp)
 
-            if self.enable_sfa_cp:
-                assert k_pe is not None
-                assert k_nope is not None
-                # support all_gather kv async for communication calculation overlap
-                fused_kv_no_split, kv_ag_handle = all_gather_async(
-                    torch.cat([
-                        k_pe.view(-1, k_pe.shape[-1]),
-                        k_nope.view(-1, k_nope.shape[-1]),
-                        k.view(-1, k.shape[-1])
-                    ],
-                              dim=1), get_tp_group())
+            if self.enable_sfa_cp and attn_metadata.sfa_cp_context is not None:
+                for layer in self.layer_sharding_kwargs or []:
+                    if is_hidden_layer(layer):
+                        reach_layer_for_shard_weight_series(layer)
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
@@ -849,8 +906,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin=sin,
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
-            need_gather_q_kv=need_gather_q_kv)
-
+            need_gather_q_kv=need_gather_q_kv,
+        )
         attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv_cache[0],
@@ -869,10 +926,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output, has_prefill)
-        maybe_npu_prefetch(inputs=self.o_proj.weight,
-                           dependency=attn_output,
-                           max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                           enabled=self.enable_prefetch)
+        maybe_npu_prefetch(
+            inputs=self.o_proj.weight,
+            dependency=attn_output,
+            max_size=MAX_O_PROJ_PREFETCH_SIZE,
+            enabled=self.enable_prefetch,
+        )
         output[...] = self.o_proj(attn_output)[0]
         return output_padded
 
@@ -886,7 +945,8 @@ class AscendSFAImpl(MLAAttentionImpl):
     ):
         k_proj, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
         k_proj = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            k_proj, need_gather_q_kv)
+            k_proj, need_gather_q_kv
+        )
         k = self.k_norm(k_proj).unsqueeze(1)
         k = k.view(-1, 1, self.head_dim)
 
@@ -896,12 +956,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            q, k = rope_forward_triton(q,
-                                       k,
-                                       cos,
-                                       sin,
-                                       rope_dim=self.qk_rope_head_dim,
-                                       is_neox_style=True)
+            q, k = rope_forward_triton(
+                q, k, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=True
+            )
         else:
             k_pe, k_nope = torch.split(
                 k,
@@ -942,27 +999,40 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_pe, q_nope = torch.split(
                 q,
                 [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
-                dim=-1)  # [b,s,64,64+64]
+                dim=-1,
+            )  # [b,s,64,64+64]
 
             q_pe = q_pe.unsqueeze(2)
             q_pe = torch_npu.npu_rotary_mul(q_pe, cos_q, sin_q)
             q_pe = q_pe.squeeze(2)
             q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
 
+            k_pe, k_nope = torch.split(
+                k,
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                dim=-1,
+            )  # [b,s,64+64]
+
+            k_pe = k_pe.unsqueeze(2)
+            k_pe = torch_npu.npu_rotary_mul(k_pe, cos, sin)
+            k_pe = k_pe.squeeze(2)
+
+            k = torch.cat([k_pe, k_nope], dim=-1)  # [b*s,128]
+
+        if self.enable_sfa_cp:
+            k = get_tp_group().all_gather(k, 0)
+
         if kv_cache is not None:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event = torch.npu.Event()
-            torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, k.shape[-1]),
-                                             attn_metadata.slot_mapping.view(
-                                                 -1, 1),
-                                             k.view(-1,
-                                                    k.shape[-1]))  # b, s, n, d
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+            torch_npu.npu_scatter_nd_update_(
+                kv_cache[2].view(-1, k.shape[-1]),
+                attn_metadata.slot_mapping.view(-1, 1),
+                k.view(-1, k.shape[-1]),
+            )  # b, s, n, d
 
         weights, _ = self.weights_proj(x)
         weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            weights, need_gather_q_kv)
+            weights, need_gather_q_kv
+        )
 
         block_table = attn_metadata.block_tables
 
@@ -976,5 +1046,48 @@ class AscendSFAImpl(MLAAttentionImpl):
             layout_query="TND",
             layout_key="PA_BSND",
             sparse_count=2048,
-            sparse_mode=3)
+            sparse_mode=3,
+        )
         return topk_indices
+
+    def _replace_linear_class_for_sfa_cp(self):
+        vllm_config = get_current_vllm_config()
+        # Dispose tensor from the original q_proj
+        dispose_layer(self.q_proj)
+        # Construct the new q_proj using ReplicatedLinear
+        new_q_proj = ReplicatedLinear(
+            self.q_lora_rank,
+            self.local_num_heads * self.qk_head_dim,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=self.q_proj.prefix,
+        )
+        # Replace the q_proj with the new one
+        replace_layer(self.q_proj, new_q_proj)
+
+        # Dispose tensor from the original kv_b_proj
+        dispose_layer(self.kv_b_proj)
+        # Construct the new kv_b_proj using ReplicatedLinear
+        new_kv_b_proj = ReplicatedLinear(
+            self.kv_lora_rank,
+            self.local_num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=self.kv_b_proj.prefix,
+        )
+        # Replace the kv_b_proj with the new one
+        replace_layer(self.kv_b_proj, new_kv_b_proj)
+
+        # Dispose tensor from the original o_proj
+        dispose_layer(self.o_proj)
+        # Construct the new o_proj using ReplicatedLinear
+        config = vllm_config.model_config.hf_text_config
+        new_o_proj = ReplicatedLinear(
+            config.num_attention_heads * config.v_head_dim,
+            config.hidden_size,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=self.o_proj.prefix,
+        )
+        # Replace the o_proj with the new one
+        replace_layer(self.o_proj, new_o_proj)

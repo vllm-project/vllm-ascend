@@ -3,19 +3,21 @@
 ## Environmental Dependencies
 
 * Software:
-  * Python >= 3.10, < 3.12
-  * CANN == 8.3.rc2
-  * PyTorch == 2.8.0, torch-npu == 2.8.0
-  * vLLM：main branch
-  * vLLM-Ascend：main branch
+    * Python >= 3.10, < 3.12
+    * CANN == 8.3.rc2
+    * PyTorch == 2.8.0, torch-npu == 2.8.0
+    * vLLM：main branch
+    * vLLM-Ascend：main branch
 
 ### KV Pool Parameter Description
+
 **kv_connector_extra_config**: Additional Configurable Parameters for Pooling.  
 **lookup_rpc_port**: Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
 **load_async**: Whether to Enable Asynchronous Loading. The default value is false.  
 **backend**: Set the storage backend for kvpool, with the default being mooncake.
 
 ### Environment Variable Configuration
+
 To guarantee uniform hash generation, it is required to synchronize the PYTHONHASHSEED environment variable across all nodes upon enabling KV Pool.
 
 ```bash
@@ -23,6 +25,7 @@ export PYTHONHASHSEED=0
 ```
 
 ## Example of using Mooncake as a KV Pool backend
+
 * Software:
     * Check NPU HCCN Configuration:
 
@@ -35,7 +38,7 @@ export PYTHONHASHSEED=0
     * Install Mooncake
 
         Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
-        Installation and Compilation Guide: https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.
+        Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
         First, we need to obtain the Mooncake project. Refer to the following command:
 
         ```shell
@@ -75,8 +78,8 @@ export PYTHONHASHSEED=0
 
         **Note:**
 
-        - Adjust the Python path according to your specific Python installation
-        - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
+        * Adjust the Python path according to your specific Python installation
+        * Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
 
         ```shell
         export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
@@ -273,7 +276,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 }
 ```
 
-#### 2、Start proxy_server.
+#### 2、Start proxy_server
 
 ```
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \

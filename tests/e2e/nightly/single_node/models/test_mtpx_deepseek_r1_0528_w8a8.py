@@ -38,27 +38,31 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_gsm8k = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 95,
-    "threshold": 5
-}]
+aisbench_gsm8k = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/gsm8k-lite",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "baseline": 95,
+        "threshold": 5,
+    }
+]
 
-aisbench_aime = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/aime2024",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 86.67,
-    "threshold": 7
-}]
+aisbench_aime = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/aime2024",
+        "request_conf": "vllm_api_general_chat",
+        "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
+        "max_out_len": 32768,
+        "batch_size": 32,
+        "baseline": 86.67,
+        "threshold": 7,
+    }
+]
 
 
 @pytest.mark.asyncio
@@ -71,12 +75,12 @@ async def test_models(model: str, mode: str) -> None:
         "OMP_PROC_BIND": "false",
         "HCCL_BUFFSIZE": "1024",
         "VLLM_RPC_TIMEOUT": "3600000",
-        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000"
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000",
     }
     speculative_config = {"num_speculative_tokens": 2, "method": "mtp"}
     compilation_config = {
         "cudagraph_capture_sizes": [56],
-        "cudagraph_mode": "FULL_DECODE_ONLY"
+        "cudagraph_mode": "FULL_DECODE_ONLY",
     }
     server_args = [
         "--quantization",
@@ -99,31 +103,23 @@ async def test_models(model: str, mode: str) -> None:
     ]
     if mode == "mtp2":
         server_args.extend(["--max-num-batched-tokens", "4096"])
-        server_args.extend(
-            ["--speculative-config",
-             json.dumps(speculative_config)])
+        server_args.extend(["--speculative-config", json.dumps(speculative_config)])
         server_args.extend(["--gpu-memory-utilization", "0.92"])
         aisbench_cases = aisbench_gsm8k
     if mode == "mtp3":
         env_dict["HCCL_OP_EXPANSION_MODE"] = "AIV"
         server_args.extend(["--max-num-batched-tokens", "2048"])
         speculative_config["num_speculative_tokens"] = 3
-        server_args.extend(
-            ["--speculative-config",
-             json.dumps(speculative_config)])
+        server_args.extend(["--speculative-config", json.dumps(speculative_config)])
         server_args.extend(["--gpu-memory-utilization", "0.9"])
-        server_args.extend(
-            ["--compilation-config",
-             json.dumps(compilation_config)])
+        server_args.extend(["--compilation-config", json.dumps(compilation_config)])
         aisbench_cases = aisbench_aime
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,
@@ -134,7 +130,4 @@ async def test_models(model: str, mode: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        run_aisbench_cases(model,
-                           port,
-                           aisbench_cases,
-                           server_args=server_args)
+        run_aisbench_cases(model, port, aisbench_cases, server_args=server_args)

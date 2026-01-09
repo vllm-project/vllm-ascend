@@ -29,9 +29,7 @@ def get_inputs():
     rmsnorm_bias = torch.randn(4)
     scale = torch.ones(4)
     offset = torch.zeros(4)
-    return [
-        rms_norm_input, residual, rms_norm_weight, scale, offset, rmsnorm_bias
-    ]
+    return [rms_norm_input, residual, rms_norm_weight, scale, offset, rmsnorm_bias]
 
 
 def _extra_stream_scope_check_for_test(match) -> bool:
@@ -62,13 +60,11 @@ def test_extra_stream_scope_check():
     """Test the stream scope check logic."""
 
     class MockNode:
-
         def __init__(self, stream_label=None):
             self.op = "call_function"
             self.meta = {"stream_label": stream_label}
 
     class MockMatch:
-
         def __init__(self, nodes):
             self.nodes = nodes
 
@@ -94,18 +90,22 @@ def test_extra_stream_scope_check():
 
 
 def test_replacement_function_without_torch_npu(caplog):
-    with mock.patch.dict(sys.modules, {
-            'torch_npu': None,
-            'torchair': None,
-            'torch_npu.dynamo': None
-    }):
-        if 'vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant' in sys.modules:
+    with mock.patch.dict(
+        sys.modules, {"torch_npu": None, "torchair": None, "torch_npu.dynamo": None}
+    ):
+        if (
+            "vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant"
+            in sys.modules
+        ):
             del sys.modules[
-                'vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant']
+                "vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant"
+            ]
 
         try:
-            from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import \
-                replacement_add_rms_norm_quant_with_bias
+            from vllm_ascend.compilation.npugraph_ex_passes.add_rms_norm_quant import (
+                replacement_add_rms_norm_quant_with_bias,
+            )
+
             result = replacement_add_rms_norm_quant_with_bias(epsilon=1e-5)
             assert result is None
         except (ImportError, AttributeError):
@@ -135,10 +135,10 @@ def test_get_inputs_sp_pattern_with_bias():
     # Verify shapes
     assert rms_norm_input.shape == (2, 4)
     assert residual.shape == (2, 4)
-    assert rms_norm_weight.shape == (4, )
-    assert rmsnorm_bias.shape == (4, )
-    assert scale.shape == (4, )
-    assert offset.shape == (4, )
+    assert rms_norm_weight.shape == (4,)
+    assert rmsnorm_bias.shape == (4,)
+    assert scale.shape == (4,)
+    assert offset.shape == (4,)
 
     # Verify number of inputs
     assert len(inputs) == 6

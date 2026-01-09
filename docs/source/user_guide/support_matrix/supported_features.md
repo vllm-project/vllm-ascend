@@ -2,7 +2,7 @@
 
 The feature support principle of vLLM Ascend is: **aligned with the vLLM**. We are also actively collaborating with the community to accelerate support.
 
-Functional call: https://docs.vllm.ai/en/latest/features/tool_calling/
+Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>
 
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
@@ -44,5 +44,3 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [graph_mode]: https://github.com/vllm-project/vllm-ascend/issues/767
 [apc]: https://github.com/vllm-project/vllm-ascend/issues/732
 [cp]: https://docs.vllm.ai/en/stable/performance/optimization.html#chunked-prefill
-[1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
-[ray]: https://github.com/vllm-project/vllm-ascend/issues/1751

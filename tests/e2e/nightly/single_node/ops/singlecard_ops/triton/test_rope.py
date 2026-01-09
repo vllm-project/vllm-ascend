@@ -20,8 +20,8 @@ DEFAULT_RTOL = 1e-3
 
 
 def rotate_neox(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -33,8 +33,8 @@ def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
 
 
 def _rope_pytorch_native(
-        query, key, cos, sin, rope_dim,
-        is_neox_style) -> tuple[torch.Tensor, torch.Tensor | None]:
+    query, key, cos, sin, rope_dim, is_neox_style
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """PyTorch-native implementation equivalent to forward()."""
     assert key is not None
     orig_dtype = query.dtype
@@ -93,49 +93,25 @@ def test_rotary_embedding_triton_kernel(
         rotary_dim = head_size
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
-    q_trt = torch.randn(num_tokens,
-                        num_q_heads,
-                        head_size,
-                        dtype=dtype,
-                        device=device)
-    k_trt = torch.randn(num_tokens,
-                        num_k_heads,
-                        head_size,
-                        dtype=dtype,
-                        device=device)
-    q_gold = torch.randn(num_tokens,
-                         num_q_heads,
-                         head_size,
-                         dtype=dtype,
-                         device=device)
-    k_gold = torch.randn(num_tokens,
-                         num_k_heads,
-                         head_size,
-                         dtype=dtype,
-                         device=device)
+    q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
+    k_trt = torch.randn(num_tokens, num_k_heads, head_size, dtype=dtype, device=device)
+    q_gold = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
+    k_gold = torch.randn(num_tokens, num_k_heads, head_size, dtype=dtype, device=device)
     q_trt.copy_(q_gold)
     k_trt.copy_(k_gold)
-    q_trt, k_trt = rope_forward_triton(q_trt,
-                                       k_trt,
-                                       cos,
-                                       sin,
-                                       rope_dim=rotary_dim,
-                                       is_neox_style=is_neox_style)
-    q_gold, k_gold = _rope_pytorch_native(q_gold,
-                                          k_gold,
-                                          cos,
-                                          sin,
-                                          rope_dim=rotary_dim,
-                                          is_neox_style=is_neox_style)
+    q_trt, k_trt = rope_forward_triton(
+        q_trt, k_trt, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style
+    )
+    q_gold, k_gold = _rope_pytorch_native(
+        q_gold, k_gold, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style
+    )
     # Compare the results.
-    torch.testing.assert_close(q_trt.view(q_gold.size()),
-                               q_gold,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(k_trt.view(k_gold.size()),
-                               k_gold,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(
+        q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
+    )
+    torch.testing.assert_close(
+        k_trt.view(k_gold.size()), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL
+    )
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

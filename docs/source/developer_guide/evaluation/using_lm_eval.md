@@ -1,8 +1,11 @@
 # Using lm-eval
+
 This document guides you to conduct accuracy testing using [lm-eval][1].
 
 ## Online Server
+
 ### 1. Start the vLLM server
+
 You can run docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
@@ -130,6 +133,7 @@ The markdown format results is as below:
 ```
 
 ## Offline Server
+
 ### 1. Run docker container
 
 You can run docker container on a single NPU:
@@ -161,6 +165,7 @@ docker run --rm \
 ```
 
 ### 2. Run GSM8K using lm-eval for accuracy testing
+
 Install lm-eval in the container:
 
 ```bash

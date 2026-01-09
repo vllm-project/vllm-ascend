@@ -38,35 +38,38 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [{
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/textvqa-lite",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "textvqa/textvqa_gen_base64",
-    "max_out_len": 2048,
-    "batch_size": 128,
-    "baseline": 76.22,
-    "temperature": 0,
-    "top_k": -1,
-    "top_p": 1,
-    "repetition_penalty": 1,
-    "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/textvqa-perf-1080p",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "textvqa/textvqa_gen_base64",
-    "num_prompts": 512,
-    "max_out_len": 256,
-    "batch_size": 128,
-    "temperature": 0,
-    "top_k": -1,
-    "top_p": 1,
-    "repetition_penalty": 1,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
-}]
+aisbench_cases = [
+    {
+        "case_type": "accuracy",
+        "dataset_path": "vllm-ascend/textvqa-lite",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "textvqa/textvqa_gen_base64",
+        "max_out_len": 2048,
+        "batch_size": 128,
+        "baseline": 76.22,
+        "temperature": 0,
+        "top_k": -1,
+        "top_p": 1,
+        "repetition_penalty": 1,
+        "threshold": 5,
+    },
+    {
+        "case_type": "performance",
+        "dataset_path": "vllm-ascend/textvqa-perf-1080p",
+        "request_conf": "vllm_api_stream_chat",
+        "dataset_conf": "textvqa/textvqa_gen_base64",
+        "num_prompts": 512,
+        "max_out_len": 256,
+        "batch_size": 128,
+        "temperature": 0,
+        "top_k": -1,
+        "top_p": 1,
+        "repetition_penalty": 1,
+        "request_rate": 0,
+        "baseline": 1,
+        "threshold": 0.97,
+    },
+]
 
 
 @pytest.mark.asyncio
@@ -77,25 +80,34 @@ async def test_models(model: str, tp_size: int) -> None:
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
         "VLLM_ASCEND_ENABLE_NZ": "0",
-        "HCCL_OP_EXPANSION_MODE": "AIV"
+        "HCCL_OP_EXPANSION_MODE": "AIV",
     }
     server_args = [
-        "--no-enable-prefix-caching", "--mm-processor-cache-gb", "0",
+        "--no-enable-prefix-caching",
+        "--mm-processor-cache-gb",
+        "0",
         "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "30000", "--max-num-batched-tokens",
-        "40000", "--max-num-seqs", "400", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.8", "--compilation_config",
-        '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        str(tp_size),
+        "--port",
+        str(port),
+        "--max-model-len",
+        "30000",
+        "--max-num-batched-tokens",
+        "40000",
+        "--max-num-seqs",
+        "400",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.8",
+        "--compilation_config",
+        '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            server_port=port,
-                            env_dict=env_dict,
-                            auto_port=False) as server:
+    with RemoteOpenAIServer(
+        model, server_args, server_port=port, env_dict=env_dict, auto_port=False
+    ) as server:
         client = server.get_async_client()
         batch = await client.completions.create(
             model=model,

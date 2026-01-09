@@ -1,10 +1,8 @@
 # test_policy_abstract.py
-from vllm_ascend.eplb.core.policy.policy_abstract import (DynamicConfig,
-                                                          EplbPolicy)
+from vllm_ascend.eplb.core.policy.policy_abstract import DynamicConfig, EplbPolicy
 
 
 class DummyPolicy(EplbPolicy):
-
     def rebalance_experts(self, current_expert_table, expert_workload):
         return 1, current_expert_table
 

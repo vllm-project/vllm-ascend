@@ -153,6 +153,7 @@ In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`.
 We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environment with 1P1D for better performance.
 
 Before you start, please
+
 1. prepare the script `launch_online_dp.py` on each node.
 
     ```
@@ -660,6 +661,7 @@ Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.

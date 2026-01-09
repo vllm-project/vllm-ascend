@@ -4,7 +4,6 @@ from vllm.config import ParallelConfig
 
 
 class Backend(ABC):
-
     def __init__(self, parallel_config: ParallelConfig):
         pass
 
@@ -19,11 +18,9 @@ class Backend(ABC):
         pass
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]],
-            sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         pass
 
     @abstractmethod
-    def get(self, keys: list[str], addrs: list[list[int]],
-            sizes: list[list[int]]):
+    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         pass

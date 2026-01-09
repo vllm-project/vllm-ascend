@@ -11,28 +11,21 @@ torch.set_printoptions(threshold=float("inf"))
 
 
 class TestMatrixMultiplication(unittest.TestCase):
-
     def compute_golden(self, a, b, res1, m, n):
         """Compute reference result (golden)"""
-        torch.bmm(a.transpose(0, 1),
-                  b,
-                  out=res1.view(-1, m, n).transpose(0, 1))
+        torch.bmm(a.transpose(0, 1), b, out=res1.view(-1, m, n).transpose(0, 1))
 
     def assert_tensors_almost_equal(self, actual, expected, dtype):
         """Check if two tensors are approximately equal (considering floating point errors)"""
         self.assertEqual(actual.shape, expected.shape, "Shape mismatch")
 
         # Check for NaN
-        self.assertFalse(
-            torch.isnan(actual).any(), "Actual result contains NaN")
-        self.assertFalse(
-            torch.isnan(expected).any(), "Expected result contains NaN")
+        self.assertFalse(torch.isnan(actual).any(), "Actual result contains NaN")
+        self.assertFalse(torch.isnan(expected).any(), "Expected result contains NaN")
 
         # Check for Inf
-        self.assertFalse(
-            torch.isinf(actual).any(), "Actual result contains Inf")
-        self.assertFalse(
-            torch.isinf(expected).any(), "Expected result contains Inf")
+        self.assertFalse(torch.isinf(actual).any(), "Actual result contains Inf")
+        self.assertFalse(torch.isinf(expected).any(), "Expected result contains Inf")
 
         # Set different tolerances based on data type
         if dtype == torch.float16:
@@ -54,8 +47,9 @@ class TestMatrixMultiplication(unittest.TestCase):
                 f"Relative error too large: {relative_diff} > {rtol}. Max difference: {max_diff}",
             )
 
-        self.assertLessEqual(max_diff, atol,
-                             f"Absolute error too large: {max_diff} > {atol}")
+        self.assertLessEqual(
+            max_diff, atol, f"Absolute error too large: {max_diff} > {atol}"
+        )
 
     def test_boundary_conditions(self):
         """Test boundary conditions"""
@@ -85,11 +79,9 @@ class TestMatrixMultiplication(unittest.TestCase):
                     res2 = torch.empty((b, m, n), dtype=dtype, device="npu")
 
                     self.compute_golden(a, b_tensor, res1, m, n)
-                    torch.ops._C_ascend.batch_matmul_transpose(
-                        a, b_tensor, res2)
+                    torch.ops._C_ascend.batch_matmul_transpose(a, b_tensor, res2)
 
-                    self.assert_tensors_almost_equal(res1.view(-1, m, n), res2,
-                                                     dtype)
+                    self.assert_tensors_almost_equal(res1.view(-1, m, n), res2, dtype)
 
     def test_random_shapes(self):
         """Test randomly generated shapes"""
@@ -104,18 +96,15 @@ class TestMatrixMultiplication(unittest.TestCase):
                 k = random.randint(1, 500)
                 n = random.randint(1, 500)
 
-                with self.subTest(dtype=dtype,
-                                  shape=f"Random ({b}, {m}, {k}, {n})"):
+                with self.subTest(dtype=dtype, shape=f"Random ({b}, {m}, {k}, {n})"):
                     a = torch.randn(b, m, k, dtype=dtype, device="npu")
                     b_tensor = torch.randn(m, k, n, dtype=dtype, device="npu")
                     res1 = torch.empty((b, m * n), dtype=dtype, device="npu")
                     res2 = torch.empty((b, m, n), dtype=dtype, device="npu")
 
                     self.compute_golden(a, b_tensor, res1, m, n)
-                    torch.ops._C_ascend.batch_matmul_transpose(
-                        a, b_tensor, res2)
-                    self.assert_tensors_almost_equal(res1.view(-1, m, n), res2,
-                                                     dtype)
+                    torch.ops._C_ascend.batch_matmul_transpose(a, b_tensor, res2)
+                    self.assert_tensors_almost_equal(res1.view(-1, m, n), res2, dtype)
 
     def test_zero_values(self):
         """Test zero input values"""
@@ -132,8 +121,7 @@ class TestMatrixMultiplication(unittest.TestCase):
                 self.compute_golden(a, b_tensor, res1, m, n)
                 torch.ops._C_ascend.batch_matmul_transpose(a, b_tensor, res2)
 
-                self.assert_tensors_almost_equal(res1.view(-1, m, n), res2,
-                                                 dtype)
+                self.assert_tensors_almost_equal(res1.view(-1, m, n), res2, dtype)
                 self.assertTrue(torch.all(res2 == 0))
 
 

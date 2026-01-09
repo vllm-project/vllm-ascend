@@ -4,57 +4,33 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: 'examples/.*' # Exclude examples from all hooks by default
+exclude: 'vllm/third_party/.*'
 repos:
-- repo: https://github.com/codespell-project/codespell
-  rev: v2.4.1
-  hooks:
-    - id: codespell
-      args: [
-        --toml, pyproject.toml,
-        '--skip', 'csrc/**,tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,.github/**,typos.toml',
-        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe'
-      ]
-      additional_dependencies:
-        - tomli
-- repo: https://github.com/google/yapf
-  rev: v0.43.0
-  hooks:
-  - id: yapf
-    args: [--in-place, --verbose]
-    # Keep the same list from yapfignore here to avoid yapf failing without any inputs
-    exclude: '(.github|benchmarks|examples|docs)/.*'
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.11.7
+  rev: v0.14.0
   hooks:
-  - id: ruff
+  - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.32.0
+  rev: v1.38.1
   hooks:
   - id: typos
-    args: [
-      "--force-exclude",
-      "--exclude", "csrc/**"
-    ]
-- repo: https://github.com/PyCQA/isort
-  rev: 6.0.1
-  hooks:
-  - id: isort
+    args: [--force-exclude]
 # - repo: https://github.com/pre-commit/mirrors-clang-format
-#   rev: v20.1.3
+#   rev: v21.1.2
 #   hooks:
 #   - id: clang-format
-#     files: ^csrc/.*\.(cpp|hpp|cc|hh|cxx|hxx)$
+#     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
 #     types_or: [c++]
-#     args: [--style=google, --verbose]
-- repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.29
+#     args: [--style=file, --verbose]
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
   hooks:
-  - id: pymarkdown
-    args: [fix]
+  - id: markdownlint
+    args: [--fix]
+    exclude: '.*\.inc\.md'
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -68,33 +44,33 @@ repos:
   #   language: system
   #   types: [python]
   #   stages: [pre-commit] # Don't run in CI
-  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.10
-    entry: tools/mypy.sh 1 "3.10"
-    # Use system python because vllm installation is required
-    language: system
-    types: [python]
-    stages: [manual] # Only run in CI
-  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.11
-    entry: tools/mypy.sh 1 "3.11"
-    # Use system python because vllm installation is required
-    language: system
-    types: [python]
-    stages: [manual] # Only run in CI
-  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.12
-    entry: tools/mypy.sh 1 "3.12"
-    # Use system python because vllm installation is required
-    language: system
-    types: [python]
-    stages: [manual] # Only run in CI
-  # FIXME: enable shellcheck
+  # FIXME: Re-enable shellcheck
   # - id: shellcheck
   #   name: Lint shell scripts
-  #   entry: tools/shellcheck.sh
+  #   entry: tools/pre_commit/shellcheck.sh
   #   language: script
   #   types: [shell]
+  # - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  #   name: Run mypy for Python 3.10
+  #   entry: tools/mypy.sh 1 "3.10"
+  #   # Use system python because vllm installation is required
+  #   language: system
+  #   types: [python]
+  #   stages: [manual] # Only run in CI
+  # - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  #   name: Run mypy for Python 3.11
+  #   entry: tools/mypy.sh 1 "3.11"
+  #   # Use system python because vllm installation is required
+  #   language: system
+  #   types: [python]
+  #   stages: [manual] # Only run in CI
+  # - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  #   name: Run mypy for Python 3.12
+  #   entry: tools/mypy.sh 1 "3.12"
+  #   # Use system python because vllm installation is required
+  #   language: system
+  #   types: [python]
+  #   stages: [manual] # Only run in CI
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/png-lint.sh
@@ -130,7 +106,7 @@ repos:
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'
     language: system
     verbose: true
     pass_filenames: false
