@@ -21,7 +21,6 @@ import torch
 from vllm.v1.worker.gpu.spec_decode.eagle import EagleSpeculator
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm_ascend.worker.v2.attn_utils import make_attention_mask
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
