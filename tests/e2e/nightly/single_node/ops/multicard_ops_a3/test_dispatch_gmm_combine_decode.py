@@ -275,8 +275,6 @@ class FusionOp(DecodeMoeOps):
                                                 torch_npu.Format.FRACTAL_NZ)
         gmm2_weight = torch_npu.npu_format_cast(gmm2_weight,
                                                 torch_npu.Format.FRACTAL_NZ)
-        gmm1_weight_scale = gmm1_weight_scale.float()
-        gmm2_weight_scale = gmm2_weight_scale.float()
 
         if self.dynamic_eplb:
             self.gmm1_weight = [
