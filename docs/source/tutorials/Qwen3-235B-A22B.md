@@ -450,7 +450,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 "kv_role": "kv_producer",
 "kv_port": "30000",
 "engine_id": "0",
-"kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector",
+"kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
 "kv_connector_extra_config": {
       "use_ascend_direct": true,
       "prefill": {
@@ -516,7 +516,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 "kv_role": "kv_consumer",
 "kv_port": "30100",
 "engine_id": "1",
-"kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector",
+"kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
 "kv_connector_extra_config": {
       "use_ascend_direct": true,
       "prefill": {
@@ -583,7 +583,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 "kv_role": "kv_consumer",
 "kv_port": "30100",
 "engine_id": "1",
-"kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector",
+"kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
 "kv_connector_extra_config": {
       "use_ascend_direct": true,
       "prefill": {

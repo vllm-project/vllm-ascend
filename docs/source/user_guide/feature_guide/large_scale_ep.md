@@ -164,7 +164,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
       "kv_parallel_size": "1",
       "kv_port": "20001",
       "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector"
+      "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
     }'
     --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
 ```
@@ -231,7 +231,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
         "kv_parallel_size": "1",
         "kv_port": "20001",
         "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector"
+        "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
         }' \
     --additional-config '{"enable_weight_nz_layout":true}'
 ```
@@ -436,7 +436,7 @@ In the PD separation scenario, we provide a optimized configuration.
       "kv_parallel_size": "1",
       "kv_port": "20001",
       "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector"
+      "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
     }'
 ```
 
@@ -459,7 +459,7 @@ In the PD separation scenario, we provide a optimized configuration.
       "kv_parallel_size": "1",
       "kv_port": "20001",
       "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.kv_p2p.mooncake_connector"
+      "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector"
     }'
 ```
 

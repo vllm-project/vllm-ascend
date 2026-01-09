@@ -80,7 +80,7 @@ def create_vllm_config(
     kv_transfer_config = KVTransferConfig(
         kv_connector="MooncakeConnectorV1",
         kv_role="kv_both",
-        kv_connector_module_path="vllm_ascend.distributed.kv_p2p.mooncake_connector")
+        kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector")
     return VllmConfig(scheduler_config=scheduler_config,
                       model_config=model_config,
                       cache_config=cache_config,
