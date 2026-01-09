@@ -37,7 +37,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer)
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 logger = init_logger(__name__)
@@ -184,6 +183,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                                                   None, layer)
             return quant_method
         if isinstance(layer, FusedMoE):
+            # Delayed import to avoid circular import
+            from vllm_ascend.ops.fused_moe.fused_moe import (
+                AscendUnquantizedFusedMoEMethod)
+
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)

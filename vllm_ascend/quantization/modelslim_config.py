@@ -37,8 +37,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 from .methods import get_scheme_class
@@ -353,6 +351,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
+                # Delayed import to avoid circular import
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
                 return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping, layer)
@@ -363,6 +363,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
+                # Delayed import to avoid circular import
+                from vllm_ascend.ops.fused_moe.fused_moe import (
+                    AscendUnquantizedFusedMoEMethod)
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping, layer)
