@@ -287,13 +287,14 @@ class AscendMLAMetadataBuilder:
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
+        is_ubatch_mode: bool = False,
     ) -> AscendMLAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold,is_ubatch_mode=is_ubatch_mode)
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 

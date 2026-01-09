@@ -251,8 +251,8 @@ class NPUWorker(WorkerBase):
             try:
                 while not self._ffn_shutdown_event.is_set():
                     # Execute FFN computation
-                    is_ubatch = self.recv_is_ubatch()
-                    self.model_runner.execute_model(scheduler_output=None,is_ubatch=is_ubatch)
+                    is_ubatch = self.model_runner.connector.recv_is_ubatch()
+                    self.model_runner.execute_model(scheduler_output=None, is_ubatch=is_ubatch)
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
                 raise
@@ -506,9 +506,3 @@ class NPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
     
-    def recv_is_ubatch(self):
-        rank = self.model_runner.connector.process_group.rank_in_group
-        world_size = self.model_runner.connector.process_group.world_size
-        src = (rank - 1) % world_size
-        is_ubatch = self.model_runner.connector.process_group.recv_object(src)
-        return is_ubatch

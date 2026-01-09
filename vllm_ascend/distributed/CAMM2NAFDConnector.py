@@ -29,21 +29,6 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm_ascend.utils import npu_stream_switch_within_graph
 logger = init_logger(__name__)
 
-# # TODO(yxj):move to ascend ,use kwargs 
-# @dataclass
-# class CAMM2NAFDConnectorMetadata:
-#     def __init__(self):
-#         self.topk_idx = None
-#         self.topk_weights = None
-#         self.moe_expert_num = 0
-#         self.shared_expert_num = 0
-#         self.scale = None
-#         self.handle = None
-#         self.quant_mode = 0
-#         self.aiv_num = 0
-#         self.batch_size = 0
-#         self.h = 0
-#         self.k = 0
 
 class CAMM2NAFDConnector(AFDConnectorBase):
     def __init__(self,
@@ -113,46 +98,37 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         ffn_ranks = [i for i in range(0, self.ffn_size)]
         attn_ranks = [i for i in range(self.ffn_size, self.ffn_size + self.attn_size)]
 
-        # # 所有FFN和前min_size的Attention参与p2p通信
-        # # 所有FFN: world_rank in [0, ffn_size), 前min_size个Attention: world_rank in [ffn_size, ffn_size+min_size)
-        # if self.rank < self.ffn_size or (self.rank >= self.ffn_size and self.rank < self.ffn_size + self.min_size):
-        #     self.p2p_pg = init_afd_process_group(
-        #         backend="gloo",
-        #         init_method=(
-        #             f"tcp://{self.config.afd_config.afd_host}"
-        #             f":{self.config.afd_config.afd_port}"
-        #         ),
-        #         world_size=self.ffn_size + self.min_size,
-        #         rank=self.p2p_rank,
-        #         group_name="p2p"
-        #     )
+        # 所有FFN和前min_size的Attention参与p2p通信
+        # 所有FFN: world_rank in [0, ffn_size), 前min_size个Attention: world_rank in [ffn_size, ffn_size+min_size)
+        import datetime
+        timeout = datetime.timedelta(seconds=300)
+        if self.is_vaild_rank_for_inequal_AF(self.rank):
+            self.p2p_pg = init_afd_process_group(
+                backend="gloo",
+                init_method=(
+                    f"tcp://{self.config.afd_config.afd_host}"
+                    f":{self.config.afd_config.afd_port}"
+                ),
+                world_size=self.ffn_size + self.min_size,
+                rank=self.p2p_rank,
+                group_name="p2p",
+                timeout=timeout # TODO(yxj):use timeout set
+            )
 
-        # # 前min_size的Attention向多个FFN发送metadata（1对多映射）
-        # # attn_i 向所有 ffn_j (其中 j % min_size == i) 发送
-        # if self.rank >= self.ffn_size and self.rank < self.ffn_size + self.min_size:
-        #     local_attn_rank = self.rank - self.ffn_size
-        #     dst = local_attn_rank
-        #     while dst < self.ffn_size:
-        #         self.dst_list.append(dst)
-        #         dst += self.min_size
-        # print(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
-        #             f"dst_list={self.dst_list}, cam connector initialized")
-        # logger.debug(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
-        #             f"dst_list={self.dst_list}, cam connector initialized")
+        # 前min_size的Attention向多个FFN发送metadata（1对多映射）
+        # attn_i 向所有 ffn_j (其中 j % min_size == i) 发送
+        if self.is_attn_top_min_size_rank(self.rank):
+            local_attn_rank = self.rank - self.ffn_size
+            dst = local_attn_rank
+            while dst < self.ffn_size:
+                self.dst_list.append(dst)
+                dst += self.min_size
+        print(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
+                    f"dst_list={self.dst_list}, cam connector initialized")
+        logger.debug(f"[CAM] world_rank={self.rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
+                    f"dst_list={self.dst_list}, cam connector initialized")
         
-        default_pg_switcher = DefaultProcessGroupSwitcher(
-            _get_default_group(), self.afd_pg)
-        # TODO(yxj):m2n ae_group is different
-        with default_pg_switcher:
-            sub_group_ranks = []
-            for i in range(len(ffn_ranks)):
-                ranks = list([attn_ranks[i], ffn_ranks[i]])
-                sub_group_ranks.append(ranks)
-            self.process_group = init_model_parallel_group(sub_group_ranks,
-                                                 self.rank,
-                                                 backend="hccl",
-                                                 group_name="ae")
-
+       
         logger.info("m2n connector initialized")
 
         self.comm_stream = None
@@ -181,23 +157,13 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                          topk_idx:torch.Tensor, 
                          metadata: AFDConnectorMetadata,
                          ubatch_idx: int = 0) -> Any:
-        # if not self.use_aclgraph and self.ffn_size <= self.rank < self.ffn_size + self.min_size:
-        #     for dst in self.dst_list:
-        #         self.send_metadata(metadata,dst,self.p2p_pg)
-        if not self.use_aclgraph:
-            print(f'send_attn_output start rank:{self.rank}')
-            dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-            print(f'send_attn_output dst is {dst}')
-            self.process_group.send_object(metadata,dst)
-        curr_stream = torch.npu.current_stream()
-        with npu_stream_switch_within_graph(curr_stream, self.comm_stream, self.config.afd_config.is_multistream):
-            output = torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
-                                                    self.hccl_comm_name,
-                                                    self.hccl_comm_name2,
-                                                    self.rank,
-                                                    self.ffn_size,
-                                                    self.attn_size)
-        return output
+        return torch.ops.vllm.cam_send_attn_output(hidden_states, topk_weights, topk_idx,
+                                                self.hccl_comm_name,
+                                                self.hccl_comm_name2,
+                                                self.rank,
+                                                self.ffn_size,
+                                                self.attn_size)
+
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata, ubatch_idx: int = 0) -> torch.Tensor:
@@ -241,15 +207,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
     
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: CAMM2NAFDConnectorMetadata, ubatch_idx: int = 0) -> Any: 
-        # afdConnectorMetadata = None
-        # if not self.use_aclgraph and self.rank >= self.attn_size:
-        #     afdConnectorMetadata = self.recv_metadata()
         afdmetadata = None
-        if not self.use_aclgraph:
-            src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-            afdmetadata = self.process_group.recv_object(src)
-            print(f'recv_attn_output start rank:{self.rank}')
-
         batch_size = metadata.batch_size
         h = metadata.h
         k = metadata.k
@@ -272,31 +230,34 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         
         return output1, afdmetadata
     
-    def send_is_ubatch(self,is_ubatch):
-        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-        self.process_group.send_object(is_ubatch,dst)
-        
-    #TODO(yxj):to support inequal AF
-    def send_metadata(self,data,dst,group):
-        # Serialize object to tensor and get the size as well
-        object_tensor = torch.frombuffer(pickle.dumps(data), dtype=torch.uint8)
-
-        size_tensor = torch.tensor([object_tensor.numel()],
-                                    dtype=torch.long,
-                                    device="cpu")
-        # Send object size
-        torch.distributed.send(size_tensor,
-                                dst=dst,
-                                group=group)
-
-        # Send object
-        torch.distributed.send(object_tensor,
-                                dst=dst,
-                                group=group)
+    def is_vaild_rank_for_inequal_AF(self,rank):
+        # Only support ffn rank < attn rank
+        return ((rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size)
     
-    #TODO(yxj):to support inequal AF
-    def recv_metadata(self):
-        src = self.p2p_rank % self.min_size
+    def is_attn_top_min_size_rank(self,rank):
+        # Only support ffn rank < attn rank
+        return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size)
+        
+    def send_is_ubatch(self,data):
+        for dst in self.dst_list:
+            # Serialize object to tensor and get the size as well
+            object_tensor = torch.frombuffer(pickle.dumps(data), dtype=torch.uint8)
+
+            size_tensor = torch.tensor([object_tensor.numel()],
+                                        dtype=torch.long,
+                                        device="cpu")
+            # Send object size
+            torch.distributed.send(size_tensor,
+                                    dst=dst,
+                                    group=self.p2p_pg)
+
+            # Send object
+            torch.distributed.send(object_tensor,
+                                    dst=dst,
+                                    group=self.p2p_pg)
+    
+    def recv_is_ubatch(self):
+        src = self.p2p_rank % self.min_size + self.ffn_size
         print(f'src in recv_metadata is {src}')
         print(f'self.p2p_rank in recv_metadata is {self.p2p_rank}')
         print(f'self.min_size in recv_metadata is {self.min_size}')
@@ -315,14 +276,12 @@ class CAMM2NAFDConnector(AFDConnectorBase):
 
         rank_object = torch.distributed.recv(object_tensor,
                                             src=src,
-                                            group=group)
+                                            group=self.p2p_pg)
 
         assert rank_object == rank_size, (
             "Received object sender rank does not match the size sender rank.")
 
         data = pickle.loads(object_tensor.numpy().tobytes())
-        print(f'recv_attn_output afdConnectorMetadata success')
-        
         return data
 
 def cam_send_attn_output_impl(hidden_states: torch.Tensor,
