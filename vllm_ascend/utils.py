@@ -848,9 +848,11 @@ def speculative_enable_dispatch_gmm_combine_decode(
         return True
     speculative_method = getattr(vllm_config.speculative_config, "method",
                                  None)
-    if speculative_method in [None, "ngram", "suffix"]:
+    # Now eagle3 doesn't use MOE Arch
+    if speculative_method in [None, "ngram", "suffix", "eagle3"]:
         return True
-    if speculative_method in ["eagle", "eagle3"]:
+    # Now eagle may use MOE Arch(DeepSeek)
+    if speculative_method in ["eagle"]:
         return False
     if speculative_method == "mtp":
         mtp_quant_type = getattr(vllm_config.model_config.hf_text_config,
