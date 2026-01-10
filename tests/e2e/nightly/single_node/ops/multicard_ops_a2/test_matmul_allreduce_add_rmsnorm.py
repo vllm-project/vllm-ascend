@@ -2,19 +2,24 @@ import gc
 import os
 
 import numpy as np
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu
 import torchair
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
+                               get_ascend_device_type)
 
 config = torchair.CompilerConfig()
 config.mode = "reduce-overhead"
 npu_backend = torchair.get_npu_backend(compiler_config=config)
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
+
+# Number of NPU cards required for this test
+REQUIRED_NPU_COUNT = 4
 
 global_rank_id = 0
 
@@ -125,8 +130,12 @@ def worker(rank, ep_world_size, batch_size, m, k, n):
 
 
 @torch.inference_mode()
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A2
+    or torch.npu.device_count() < REQUIRED_NPU_COUNT,
+    reason=f"Test requires at least {REQUIRED_NPU_COUNT} A2 NPU cards")
 def test_matmul_allreduce_add_rmsnorm_kernel():
-    ep_world_size = 4
+    ep_world_size = REQUIRED_NPU_COUNT
     batch_size = 1
     m = 10000
     k = 1024
