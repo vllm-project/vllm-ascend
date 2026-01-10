@@ -29,32 +29,26 @@ Usage:
 
 from typing import Any
 
-# Import all scheme modules to trigger registration via @register_scheme decorator
-# Note: Add new quantization modules here to register them
-from . import w4a4_flatquant  # noqa: F401
-from . import w4a8  # noqa: F401
-from . import w4a16  # noqa: F401
-from . import w8a8_dynamic  # noqa: F401
-from . import w8a8_mxfp8  # noqa: F401
-from . import w8a8_pdmix  # noqa: F401
-from . import w8a8_static  # noqa: F401
-from . import w8a16  # noqa: F401
 # Import base classes
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
+# Import all scheme classes for external access
+from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
+from .w4a8 import (AscendW4A8DynamicFusedMoEMethod,
+                   AscendW4A8DynamicLinearMethod)
+from .w4a16 import AscendW4A16FusedMoEMethod
+from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
+                           AscendW8A8DynamicLinearMethod)
+from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
+                         AscendW8A8PDMixLinearMethod)
+from .w8a8_static import AscendW8A8LinearMethod
+from .w8a16 import AscendW8A16LinearMethod
 
 
 def is_mx_quant_type(instance: Any) -> bool:
-    """Checks if the quantization method is a microscaling (MX) type.
-    
-    Args:
-        instance: The quantization method instance to check.
-        
-    Returns:
-        True if the instance is an MX quantization type, False otherwise.
-    """
-    from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+    """Checks if the quantization method is a microscaling (MX) type."""
     MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod, )
     return isinstance(instance, MX_QUANT_TYPES)
 
@@ -69,4 +63,16 @@ __all__ = [
     "get_scheme_class",
     # Utility functions
     "is_mx_quant_type",
+    # Scheme classes
+    "AscendW8A8LinearMethod",
+    "AscendW8A8DynamicLinearMethod",
+    "AscendW8A8DynamicFusedMoEMethod",
+    "AscendW8A8MXFP8DynamicLinearMethod",
+    "AscendW8A8PDMixLinearMethod",
+    "AscendW8A8PDMixFusedMoeMethod",
+    "AscendW8A16LinearMethod",
+    "AscendW4A8DynamicLinearMethod",
+    "AscendW4A8DynamicFusedMoEMethod",
+    "AscendW4A16FusedMoEMethod",
+    "AscendW4A4FlatQuantDynamicLinearMethod",
 ]
