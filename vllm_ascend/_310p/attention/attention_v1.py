@@ -1,35 +1,37 @@
 import torch
 import torch_npu
 
-from vllm_ascend.utils import aligned_16, nd_to_nz_2d, ACL_FORMAT_FRACTAL_NZ
-from vllm_ascend.attention.attention_v1 import (
-    AscendAttentionBackend as _BaseBackend,
-    AscendAttentionBackendImpl as _BaseImpl,
-    AscendAttentionState,
-)
 from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
-from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310P
+from vllm_ascend._310p.attention.metadata_builder import \
+    AscendAttentionMetadataBuilder310P
+from vllm_ascend.attention.attention_v1 import \
+    AscendAttentionBackend as _BaseBackend
+from vllm_ascend.attention.attention_v1 import \
+    AscendAttentionBackendImpl as _BaseImpl
+from vllm_ascend.attention.attention_v1 import (AscendAttentionMetadataBuilder,
+                                                AscendAttentionState)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, aligned_16, nd_to_nz_2d
 
 
 class AscendAttentionBackend310(_BaseBackend):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
-        
+
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int,
-                           num_kv_heads: int, head_size: int):
-        return (2, num_blocks, (num_kv_heads * head_size) // 16, block_size, 16)
+    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int,
+                           head_size: int):
+        return (2, num_blocks, (num_kv_heads * head_size) // 16, block_size,
+                16)
 
     @staticmethod
     def get_impl_cls():
         return AscendAttentionBackendImpl310
-    
+
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
         return AscendAttentionMetadataBuilder310P
-
 
 
 class AscendMLABackend310(AscendAttentionBackend310):
@@ -41,18 +43,19 @@ class AscendSFABackend310(AscendAttentionBackend310):
 
 
 class AscendAttentionBackendImpl310(_BaseImpl):
-    
+
     def forward_paged_attention(self, query, attn_metadata, output):
         if attn_metadata.seq_lens.device != query.device:
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
-                device=query.device, non_blocking=True
-            )
+                device=query.device, non_blocking=True)
         return super().forward_paged_attention(query, attn_metadata, output)
 
-    def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata, output):
+    def _forward_prefill_310p_fallback(self, query, key, value, attn_metadata,
+                                       output):
         real_tokens = int(attn_metadata.seq_lens.sum().item())
 
-        query, key, value, output = (aligned_16(t) for t in (query, key, value, output))
+        query, key, value, output = (aligned_16(t)
+                                     for t in (query, key, value, output))
 
         seq_len = attn_metadata.seq_lens
         if seq_len.dtype != torch.int32:
@@ -94,7 +97,6 @@ class AscendAttentionBackendImpl310(_BaseImpl):
         out_real = output[:real_tokens, :, :]
         return out_real
 
-
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             output = self.forward_paged_attention(query, attn_metadata, output)
@@ -104,7 +106,8 @@ class AscendAttentionBackendImpl310(_BaseImpl):
             q = query[:num_tokens]
             k = key[:num_tokens]
             v = value[:num_tokens]
-            out = self._forward_prefill_310p_fallback(q, k, v, attn_metadata, output)
+            out = self._forward_prefill_310p_fallback(q, k, v, attn_metadata,
+                                                      output)
             output[:num_tokens] = out
-    
+
         return output
