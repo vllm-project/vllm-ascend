@@ -62,14 +62,17 @@ set(VLLM_ASCEND_CUSTOM_OP
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
-    ${KERNEL_FILES}/bgmv_expand.cpp
-    ${KERNEL_FILES}/bgmv_shrink.cpp
-    ${KERNEL_FILES}/sgmv_expand.cpp
-    ${KERNEL_FILES}/sgmv_shrink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bgmv_expand.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bgmv_shrink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sgmv_expand.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sgmv_shrink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
 if(SOC_VERSION STREQUAL "ASCEND310P3")
+    message(STATUS "310P hardware detected: disabling MLAPO operators")
+    message(STATUS "310P hardware detected: excluding batch_matmul_transpose operators")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE})
 endif()
 
