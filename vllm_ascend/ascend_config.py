@@ -108,8 +108,12 @@ class AscendConfig:
                     decode_tp_size = min(decode_tp_size, num_kv_head)
                     self.pd_head_ratio = prefill_tp_size // decode_tp_size
                 except Exception:
-                    raise AssertionError(
-                        "Can not get num_key_value_heads from model_config")
+                    raise ValueError(
+                        "The text_config extracted from the model config does not have "
+                        "`num_key_value_heads` attribute. This indicates a mismatch "
+                        "between the model config and vLLM's expectations. Please "
+                        "ensure that the model config is compatible with vLLM."
+                    )
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError(

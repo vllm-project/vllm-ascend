@@ -20,6 +20,7 @@ Qwen3-Omni-30B-A3B-Thinking.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-R1.md
+GLM4.x.md
 Kimi-K2-Thinking
 PaddleOCR-VL
 pd_colocated_mooncake_multi_instance
