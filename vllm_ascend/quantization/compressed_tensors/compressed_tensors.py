@@ -83,6 +83,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         target_scheme_map = cls._quantization_scheme_map_from_config(
             config=config)
 
+        if "Linear" in target_scheme_map and "FusedMoE" not in target_scheme_map:
+            target_scheme_map["FusedMoE"] = target_scheme_map["Linear"]
+
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
@@ -236,7 +239,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         if weight_quant is not None:
             if self._is_w4a16(weight_quant):
-                return AscendW4A16FusedMoEMethod()
+                return AscendW4A16FusedMoEMethod(weight_quant)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")

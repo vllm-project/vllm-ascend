@@ -4,7 +4,53 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.w4a16 import (AscendW4A16FusedMoEMethod,
+                                            get_quant_description,
                                             pack_to_int32, unpack_from_int32)
+
+
+class TestGetQuantDescription(TestBase):
+    group_size = 32
+    symmetric = True
+
+    def setUp(self):
+        self.mock_vllm_config = Mock()
+        self.mock_weight_quant = Mock(
+            group_size=self.group_size,
+            symmetric=self.symmetric,
+        )
+
+    def test_get_quant_description_with_ascend_quant_method(self):
+        quant_description = dict(
+            quant_method="ascend",
+            group_size=self.group_size,
+            symmetric=self.symmetric,
+        )
+        self.mock_vllm_config.quant_config = Mock(
+            quant_description=quant_description)
+
+        result = get_quant_description(self.mock_vllm_config,
+                                       self.mock_weight_quant)
+
+        self.assertEqual(result, quant_description)
+
+    def test_get_quant_description_with_compressed_tensors_quant_method(self):
+        quant_description = dict(quant_method="compressed-tensors")
+        self.mock_vllm_config.quant_config = Mock(
+            quant_description=quant_description)
+
+        result = get_quant_description(self.mock_vllm_config,
+                                       self.mock_weight_quant)
+
+        self.assertEqual(result, self.mock_weight_quant.__dict__)
+
+    def test_get_quant_description_with_not_implemented_quant_method(self):
+        quant_description = dict(quant_method="not-implemented")
+        self.mock_vllm_config.quant_config = Mock(
+            quant_description=quant_description)
+
+        with self.assertRaises(NotImplementedError):
+            get_quant_description(self.mock_vllm_config,
+                                  self.mock_weight_quant)
 
 
 class TestUnpackFromInt32(TestBase):
@@ -45,16 +91,12 @@ class TestPackToInt32(TestBase):
         "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
     )
     def test_pack_to_int32_int8(self, mock_npu_convert_weight_to_int4pack):
-        mock_npu_convert_weight_to_int4pack.return_value = torch.zeros(
-            (2, 4), dtype=torch.int32)
-
-        weight = torch.zeros((2, 8, 16), dtype=torch.int8)
+        weight = torch.zeros((2, 8, 8), dtype=torch.int8)
         result = pack_to_int32(weight)
 
-        self.assertEqual(result.dtype, torch.int32)
         mock_npu_convert_weight_to_int4pack.assert_not_called()
-
-        self.assertEqual(result.shape, torch.Size([2, 8, 4]))
+        self.assertEqual(result.dtype, torch.int32)
+        self.assertEqual(result.shape, torch.Size([2, 8, 2]))
 
     @patch(
         "vllm_ascend.quantization.w4a16.torch_npu.npu_convert_weight_to_int4pack"
@@ -62,14 +104,15 @@ class TestPackToInt32(TestBase):
     def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
 
         def mock_convert_weight(weight):
-            return weight
+            return weight[..., :weight.shape[-1] // 8]
 
         mock_npu_convert_weight_to_int4pack.side_effect = mock_convert_weight
         weight = torch.zeros((2, 8, 8), dtype=torch.int32)
         result = pack_to_int32(weight)
 
+        mock_npu_convert_weight_to_int4pack.assert_called_once()
         self.assertEqual(result.dtype, torch.int32)
-        self.assertEqual(result.shape, weight.shape)
+        self.assertEqual(result.shape, torch.Size([2, 8, 1]))
 
     def test_pack_to_int32_assertion_dim(self):
         with self.assertRaises(AssertionError):
@@ -106,9 +149,12 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()
-        mock_vllm_config.quant_config = Mock(quant_description={
-            "group_size": self.group_size,
-        })
+        mock_vllm_config.quant_config = Mock(
+            quant_description={
+                "quant_method": "ascend",
+                "group_size": self.group_size,
+                "symmetric": True
+            })
         mock_get_current_vllm_config.return_value = mock_vllm_config
 
         self.quant_method = AscendW4A16FusedMoEMethod()
@@ -118,6 +164,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertEqual(self.quant_method.num_bits, 4)
         self.assertEqual(self.quant_method.pack_factor, 8)
         self.assertEqual(self.quant_method.group_size, self.group_size)
+        self.assertEqual(self.quant_method.symmetric, True)
         self.assertFalse(self.quant_method.dynamic_eplb)
 
     def test_get_weight(self):
@@ -164,12 +211,10 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
                          (self.experts, 2))
 
         self.assertEqual(param_dict["w13_weight_offset"].dtype, torch.bfloat16)
-        self.assertEqual(param_dict["w13_weight_offset"].shape,
-                         expected_w13_scale_shape)
+        self.assertEqual(param_dict["w13_weight_offset"].shape, (1, ))
 
         self.assertEqual(param_dict["w2_weight_offset"].dtype, torch.bfloat16)
-        self.assertEqual(param_dict["w2_weight_offset"].shape,
-                         expected_w2_scale_shape)
+        self.assertEqual(param_dict["w2_weight_offset"].shape, (1, ))
 
     def build_layer(self):
         """Build a mock layer for testing"""
@@ -200,10 +245,10 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
                                                    requires_grad=False)
 
         layer.w13_weight_offset = torch.nn.Parameter(torch.zeros(
-            w13_scale_shape, dtype=torch.bfloat16),
+            1, dtype=torch.bfloat16),
                                                      requires_grad=False)
         layer.w2_weight_offset = torch.nn.Parameter(torch.zeros(
-            w2_scale_shape, dtype=torch.bfloat16),
+            1, dtype=torch.bfloat16),
                                                     requires_grad=False)
 
         layer.w13_weight_shape = torch.nn.Parameter(torch.tensor(
@@ -244,15 +289,9 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
                          torch.Size([8, 4, 64]))
         self.assertEqual(layer.w2_weight_scale.data.shape,
                          torch.Size([8, 1, 128]))
-        self.assertEqual(layer.w13_weight_offset.data.shape,
-                         torch.Size([8, 4, 64]))
-        self.assertEqual(layer.w2_weight_offset.data.shape,
-                         torch.Size([8, 1, 128]))
 
         self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
         self.assertTrue(layer.w2_weight_scale.data.is_contiguous())
-        self.assertTrue(layer.w13_weight_offset.data.is_contiguous())
-        self.assertTrue(layer.w2_weight_offset.data.is_contiguous())
 
     def test_process_weights_after_loading_without_transpose(self):
         layer = self.build_layer()
