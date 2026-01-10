@@ -56,13 +56,13 @@ def generate_global_placement(n_expert, ep_size, n_redundant):
     return torch.tensor(groups, dtype=torch.int32)
 
 
-def init_eplb_config(ascend_config, layer_id, moe_config):
-    expert_map_path = ascend_config.expert_map_path
+def init_eplb_config(eplb_config, layer_id, moe_config):
+    expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
     global_placement = None
-    eplb_enable = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
-    n_redundant = ascend_config.init_redundancy_expert if eplb_enable else 0
+    eplb_enable = eplb_config.dynamic_eplb
+    n_redundant = eplb_config.num_redundant_experts if eplb_enable else 0
     if expert_map_path:
         if not (os.path.exists(expert_map_path)
                 and os.access(expert_map_path, os.R_OK)):
@@ -83,6 +83,7 @@ def init_eplb_config(ascend_config, layer_id, moe_config):
                                                      n_redundant)
 
     if ep_size == 1:
+        assert not eplb_enable, "EPLB must used in expert parallelism."
         return None, None, n_redundant
     global_expert_map = []
     for rankid in range(ep_size):
