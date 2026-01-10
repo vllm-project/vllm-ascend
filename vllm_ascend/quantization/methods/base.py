@@ -17,9 +17,17 @@
 """Abstract base classes for Ascend quantization schemes."""
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
 import torch
+
+
+class QuantType(Enum):
+    """Quantization type enum for MoE schemes."""
+    NONE = 0
+    W8A8 = 1
+    W4A8 = 2
 
 
 class AscendLinearScheme(ABC):
@@ -121,7 +129,14 @@ class AscendMoEScheme(ABC):
     
     Subclasses must implement get_weight(), get_dynamic_quant_param(),
     and apply() methods.
+    
+    Attributes:
+        quant_type: The quantization type for this scheme. Subclasses should
+                   override this class attribute to declare their quant type.
     """
+
+    # Default quant type - subclasses should override this
+    quant_type: QuantType = QuantType.NONE
 
     @abstractmethod
     def get_weight(self, num_experts: int,

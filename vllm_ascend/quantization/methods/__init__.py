@@ -29,21 +29,20 @@ Usage:
 
 from typing import Any
 
+# Import all scheme modules to trigger registration via @register_scheme decorator
+# Note: Add new quantization modules here to register them
+from . import w4a4_flatquant  # noqa: F401
+from . import w4a8  # noqa: F401
+from . import w4a16  # noqa: F401
+from . import w8a8_dynamic  # noqa: F401
+from . import w8a8_mxfp8  # noqa: F401
+from . import w8a8_pdmix  # noqa: F401
+from . import w8a8_static  # noqa: F401
+from . import w8a16  # noqa: F401
 # Import base classes
-from .base import AscendLinearScheme, AscendMoEScheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
-from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
-from .w4a8 import (AscendW4A8DynamicFusedMoEMethod,
-                   AscendW4A8DynamicLinearMethod)
-from .w4a16 import AscendW4A16FusedMoEMethod
-from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                           AscendW8A8DynamicLinearMethod)
-from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
-                         AscendW8A8PDMixLinearMethod)
-from .w8a8_static import AscendW8A8LinearMethod
-from .w8a16 import AscendW8A16LinearMethod
 
 
 def is_mx_quant_type(instance: Any) -> bool:
@@ -55,6 +54,7 @@ def is_mx_quant_type(instance: Any) -> bool:
     Returns:
         True if the instance is an MX quantization type, False otherwise.
     """
+    from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
     MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod, )
     return isinstance(instance, MX_QUANT_TYPES)
 
@@ -63,28 +63,10 @@ __all__ = [
     # Base classes
     "AscendLinearScheme",
     "AscendMoEScheme",
+    "QuantType",
     # Registry functions
     "register_scheme",
     "get_scheme_class",
     # Utility functions
     "is_mx_quant_type",
-    # W8A8 static
-    "AscendW8A8LinearMethod",
-    # W8A8 dynamic
-    "AscendW8A8DynamicLinearMethod",
-    "AscendW8A8DynamicFusedMoEMethod",
-    # W8A8 MXFP8
-    "AscendW8A8MXFP8DynamicLinearMethod",
-    # W8A8 PDMix
-    "AscendW8A8PDMixLinearMethod",
-    "AscendW8A8PDMixFusedMoeMethod",
-    # W8A16
-    "AscendW8A16LinearMethod",
-    # W4A8
-    "AscendW4A8DynamicLinearMethod",
-    "AscendW4A8DynamicFusedMoEMethod",
-    # W4A16
-    "AscendW4A16FusedMoEMethod",
-    # W4A4 FlatQuant
-    "AscendW4A4FlatQuantDynamicLinearMethod",
 ]

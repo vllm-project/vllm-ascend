@@ -32,7 +32,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
                                                         zero_experts_compute)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
@@ -107,6 +107,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
 @register_scheme("W8A8_DYNAMIC", "moe")
 class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W8A8_DYNAMIC."""
+
+    # Declare the quantization type for this scheme
+    quant_type: QuantType = QuantType.W8A8
 
     def __init__(self):
         self.ep_group = get_ep_group()

@@ -29,7 +29,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
@@ -201,6 +201,9 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W4A8_DYNAMIC."""
+
+    # Declare the quantization type for this scheme
+    quant_type: QuantType = QuantType.W4A8
 
     def __init__(self):
         self.ep_group = get_ep_group()
