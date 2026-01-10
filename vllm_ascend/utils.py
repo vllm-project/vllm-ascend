@@ -1017,6 +1017,13 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
+def o_shard_enable() -> bool:
+    layer_sharding = get_ascend_config().layer_sharding
+    if layer_sharding is None:
+        return False
+    return "o_proj" in layer_sharding
+
+
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
