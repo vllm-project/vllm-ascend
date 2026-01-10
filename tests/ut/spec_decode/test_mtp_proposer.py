@@ -41,6 +41,9 @@ class TestMtpProposer:
         config.model_config.dtype = torch.float16
         config.model_config.max_model_len = 2048
         config.model_config.uses_mrope = False
+        config.model_config.hf_config = None
+        config.parallel_config.tensor_parallel_size = 1
+        config.speculative_config.draft_tensor_parallel_size = 1
         config.model_config.hf_text_config = None
 
         config.load_config = None
