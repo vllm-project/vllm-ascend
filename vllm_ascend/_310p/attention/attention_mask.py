@@ -1,4 +1,4 @@
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 import vllm_ascend.attention.attention_mask as _base_mask
@@ -17,8 +17,8 @@ class _AttentionMaskBuilder310P:
     def __init__(self, device: torch.device):
         self._base = _BASE_BUILDER(device)
 
-        self._fp16_mask_cache = None
-        self._fp16_mask_cached_len = 0
+        self._fp16_mask_cache: Optional[torch.Tensor] = None
+        self._fp16_mask_cached_len: int = 0
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
@@ -31,6 +31,7 @@ class _AttentionMaskBuilder310P:
         if self._fp16_mask_cache is None or max_seq_len > self._fp16_mask_cached_len:
             self._fp16_mask_cache = _gen_causal_additive_mask_fp16(max_seq_len, self.device)
             self._fp16_mask_cached_len = max_seq_len
+        assert self._fp16_mask_cache is not None
         return self._fp16_mask_cache[:max_seq_len, :max_seq_len].contiguous()
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
