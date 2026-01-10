@@ -1,0 +1,166 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3_reranker.md:1
+msgid "Qwen3-Reranker"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:4
+msgid ""
+"The Qwen3 Reranker model series is the latest proprietary model of the "
+"Qwen family, specifically designed for text embedding and ranking tasks. "
+"Building upon the dense foundational models of the Qwen3 series, it "
+"provides a comprehensive range of text embeddings and reranking models in"
+" various sizes (0.6B, 4B, and 8B). This guide describes how to run the "
+"model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of "
+"vLLM Ascend support the model."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:6
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:8
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:10
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:12
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:14
+msgid ""
+"`Qwen3-Reranker-8B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-8B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:15
+msgid ""
+"`Qwen3-Reranker-4B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-4B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:16
+msgid ""
+"`Qwen3-Reranker-0.6B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:18
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:20
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:21
+msgid ""
+"You can use our official docker image to run `Qwen3-Reranker` series "
+"models."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:22
+msgid ""
+"Start the docker image on your node, refer to [using "
+"docker](../installation.md#set-up-using-docker)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:24
+msgid ""
+"if you don't want to use the docker image as above, you can also build "
+"all from source:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:25
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../installation.md)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:27
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:29
+msgid ""
+"Using the Qwen3-Reranker-8B model as an example, first run the docker "
+"container with the following command:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:31
+msgid "Online Inference"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:37
+msgid "Once your server is started, you can send request with follow examples."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:39
+msgid "requests demo + formatting query & document"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:79
+#: ../../source/tutorials/Qwen3_reranker.md:156
+msgid ""
+"If you run this script successfully, you will see a list of scores "
+"printed to the console, similar to this:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:85
+msgid "Offline Inference"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:162
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:164
+msgid ""
+"Run performance of `Qwen3-Reranker-8B` as an example. Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/) for more "
+"details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:167
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3_reranker.md:173
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result. With this tutorial, the performance result is:"
+msgstr ""
+

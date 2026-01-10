@@ -1,0 +1,371 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/DeepSeek-R1.md:1
+msgid "DeepSeek-R1"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:5
+msgid ""
+"DeepSeek-R1 is a high-performance Mixture-of-Experts (MoE) large language"
+" model developed by DeepSeek Company. It excels in complex logical "
+"reasoning, mathematical problem-solving, and code generation. By "
+"dynamically activating its expert networks, it delivers exceptional "
+"performance while maintaining computational efficiency. Building upon R1,"
+" DeepSeek-R1-W8A8 is a fully quantized version of the model. It employs "
+"8-bit integer (INT8) quantization for both weights and activations, which"
+" significantly reduces the model's memory footprint and computational "
+"requirements, enabling more efficient deployment and application in "
+"resource-constrained environments. This article takes the deepseek- "
+"R1-W8A8 version as an example to introduce the deployment of the R1 "
+"series models."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:8
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:10
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:12
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:14
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:16
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:18
+msgid ""
+"`DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) "
+"nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:20
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:22
+msgid "Verify Multi-node Communication(Optional)"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:24
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../installation.md#verify-multi-node-communication)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:26
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:28
+msgid ""
+"You can using our official docker image to run `DeepSeek-R1-W8A8` "
+"directly."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:30
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:69
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:71
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:72
+msgid "Service-oriented  Deployment"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:74
+msgid ""
+"`DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas "
+"800 A2 (64G × 8)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md
+msgid "DeepSeek-R1-W8A8 A3 series"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:120
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:122
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_ENABLE_MLAPO=1` enables a "
+"fusion operator that can significantly improve performance, though it "
+"requires more NPU memory. It is therefore recommended to enable this "
+"option when sufficient NPU memory is available."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:123
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` "
+"enables balance scheduling. This may help increase output throughput and "
+"reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios."
+" Furthermore, enabling this feature is not recommended in scenarios where"
+" PD is separated."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:124
+msgid ""
+"For single-node deployment, we recommend using `dp4tp4` instead of "
+"`dp2tp8`."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:125
+msgid ""
+"`--max-model-len` specifies the maximum context length - that is, the sum"
+" of input and output tokens for a single request. For performance testing"
+" with an input length of 3.5K and output length of 1.5K, a value of "
+"`16384` is sufficient, however, for precision testing, please set it at "
+"least `35000`."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:126
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:127
+msgid ""
+"If you use the w4a8 weight, more memory will be allocated to kvcache, and"
+" you can try to increase system throughput to achieve greater throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md
+msgid "DeepSeek-R1-W8A8 A2 series"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:132
+msgid "Run the following scripts on two nodes respectively."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:134
+msgid "**Node 0**"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:180
+msgid "**Node 1**"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:232
+msgid "Prefill-Decode Disaggregation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:234
+msgid ""
+"We recommend using DeepSeek-V3.1 for deployment: "
+"[DeepSeek-V3.1](./DeepSeek-V3.1.md)."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:236
+msgid "This solution has been tested and demonstrates excellent performance."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:238
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:240
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:253
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:255
+msgid "Here are two accuracy evaluation methods."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:257
+#: ../../source/tutorials/DeepSeek-R1.md:287
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:259
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:261
+msgid ""
+"After execution, you can get the result, here is the result of "
+"`DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "aime2024dataset"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "80.00"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "gpqadataset"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:130
+msgid "72.22"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:268
+msgid "Using Language Model Evaluation Harness"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:270
+msgid ""
+"As an example, take the `gsm8k` dataset as a test dataset, and run "
+"accuracy evaluation of `DeepSeek-R1-W8A8` in online mode."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:272
+msgid ""
+"Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) "
+"for `lm_eval` installation."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:274
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:284
+msgid "After execution, you can get the result."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:286
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:289
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:291
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:293
+msgid "Run performance evaluation of `DeepSeek-R1-W8A8` as an example."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:295
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:297
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:298
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:299
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:300
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:302
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/DeepSeek-R1.md:309
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+

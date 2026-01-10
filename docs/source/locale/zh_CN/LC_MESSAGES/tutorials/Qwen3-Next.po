@@ -1,0 +1,288 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen3-Next.md:1
+msgid "Qwen3-Next"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:5
+msgid ""
+"The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high"
+" sparsity. Compared to the MoE architecture of Qwen3, it has introduced "
+"key improvements in aspects such as the hybrid attention mechanism and "
+"multi-token prediction mechanism, enhancing the training and inference "
+"efficiency of the model under long contexts and large total parameter "
+"scales."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:7
+msgid ""
+"This document will present the core verification steps of the model, "
+"including supported features, environment preparation, as well as "
+"accuracy and performance evaluation. Qwen3 Next is currently using Triton"
+" Ascend, which is in the experimental phase. In subsequent versions, its "
+"performance related to stability and accuracy may change, and performance"
+" will be continuously optimized."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:9
+msgid "The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1`."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:11
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:13
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:15
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:17
+msgid "Weight Preparation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:19
+msgid ""
+"Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: "
+"[Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3"
+"-Next-80B-A3B-Instruct/tree/main)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:21
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:23
+msgid ""
+"If the machine environment is an Atlas 800I A3(64G*16), the deployment "
+"approach stays identical."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:25
+msgid "Run docker container"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:54
+msgid ""
+"The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-"
+"ascend) which is currently experimental. In future versions, there may be"
+" behavioral changes related to stability, accuracy, and performance "
+"improvement."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:56
+msgid "Install Triton Ascend"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:58
+msgid ""
+"The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required "
+"when you run Qwen3 Next, please follow the instructions below to install "
+"it and its dependency."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:60
+msgid "Install the Ascend BiSheng toolkit, execute the command:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:69
+msgid "Install Triton Ascend:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:75
+msgid "Inference"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md
+msgid "Online Inference"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:81
+msgid "Run the following script to start the vLLM server on multi-NPU:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:87
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md
+msgid "Offline Inference"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:106
+msgid "Run the following script to execute offline inference on multi-NPU:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:144
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:152
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:154
+#: ../../source/tutorials/Qwen3-Next.md:166
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:156
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:158
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3"
+"-Next-80B-A3B-Instruct` in `vllm-ascend:0.13.0rc1` for reference only."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "version"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "vllm-api-general-chat"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "gsm8k"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "-"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "gen"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:104
+msgid "95.53"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:164
+msgid "Performance"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:168
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:170
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:172
+msgid "Run performance evaluation of `Qwen3-Next` as an example."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:174
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:176
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:177
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:178
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:179
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:181
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:188
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:190
+msgid "The performance result is:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:192
+msgid "**Hardware**: A3-752T, 2 node"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:194
+msgid "**Deployment**: TP4 + Full Decode Only"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:196
+msgid "**Input/Output**: 2k/2k"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:198
+msgid "**Concurrency**: 32"
+msgstr ""
+
+#: ../../source/tutorials/Qwen3-Next.md:200
+msgid "**Performance**: 580tps, TPOT 54ms"
+msgstr ""
+

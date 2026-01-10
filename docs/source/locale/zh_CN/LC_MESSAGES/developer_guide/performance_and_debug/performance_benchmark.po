@@ -7,82 +7,317 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:1
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:1
 msgid "Performance Benchmark"
 msgstr "性能基准"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:2
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:2
 msgid ""
-"This document details the benchmark methodology for vllm-ascend, aimed at "
-"evaluating the performance under a variety of workloads. To maintain "
+"This document details the benchmark methodology for vllm-ascend, aimed at"
+" evaluating the performance under a variety of workloads. To maintain "
 "alignment with vLLM, we use the [benchmark](https://github.com/vllm-"
 "project/vllm/tree/main/benchmarks) script provided by the vllm project."
 msgstr ""
-"本文档详细说明了 vllm-ascend 的基准测试方法，旨在评估其在多种工作负载下的性能。为了与 vLLM 保持一致，我们使用 vllm 项目提供的 "
-"[benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) 脚本。"
+"本文档详细说明了 vllm-ascend 的基准测试方法，旨在评估其在多种工作负载下的性能。为了与 vLLM 保持一致，我们使用 vllm "
+"项目提供的 [benchmark](https://github.com/vllm-"
+"project/vllm/tree/main/benchmarks) 脚本。"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:4
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:4
+#, fuzzy
 msgid ""
-"**Benchmark Coverage**: We measure offline e2e latency and throughput, and "
-"fixed-QPS online serving benchmarks, for more details see [vllm-ascend "
-"benchmark scripts](https://github.com/vllm-project/vllm-"
+"**Benchmark Coverage**: We measure offline E2E latency and throughput, "
+"and fixed-QPS online serving benchmarks. For more details, see [vllm-"
+"ascend benchmark scripts](https://github.com/vllm-project/vllm-"
 "ascend/tree/main/benchmarks)."
 msgstr ""
 "**基准测试覆盖范围**：我们测量离线端到端延迟和吞吐量，以及固定 QPS 的在线服务基准测试。更多详情请参见 [vllm-ascend "
-"基准测试脚本](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)。"
+"基准测试脚本](https://github.com/vllm-project/vllm-"
+"ascend/tree/main/benchmarks)。"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:6
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:6
 msgid "1. Run docker container"
 msgstr "1. 运行 docker 容器"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:31
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:32
 msgid "2. Install dependencies"
 msgstr "2. 安装依赖项"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:38
-msgid "3. (Optional)Prepare model weights"
-msgstr "3.（可选）准备模型权重"
-
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:39
-msgid ""
-"For faster running speed, we recommend downloading the model in advance："
-msgstr "为了更快的运行速度，建议提前下载模型："
-
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:44
-msgid ""
-"You can also replace all model paths in the [json](https://github.com/vllm-"
-"project/vllm-ascend/tree/main/benchmarks/tests) files with your local paths:"
-msgstr ""
-"你也可以将 [json](https://github.com/vllm-project/vllm-"
-"ascend/tree/main/benchmarks/tests) 文件中的所有模型路径替换为你的本地路径："
-
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:60
-msgid "4. Run benchmark script"
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:40
+#, fuzzy
+msgid "3. Run basic benchmarks"
 msgstr "4. 运行基准测试脚本"
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:61
-msgid "Run benchmark script:"
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:41
+msgid ""
+"This section introduces how to perform performance testing using the "
+"benchmark suite built into VLLM."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:43
+msgid "3.1 Dataset"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:44
+msgid ""
+"VLLM supports a variety of (datasets)[https://github.com/vllm-"
+"project/vllm/blob/main/vllm/benchmarks/datasets.py]."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Dataset"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Online"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Offline"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Data Path"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "ShareGPT"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "✅"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid ""
+"`wget "
+"https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "ShareGPT4V (Image)"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid ""
+"`wget https://huggingface.co/datasets/Lin-"
+"Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note"
+" that the images need to be downloaded separately. For example, to "
+"download COCO's 2017 Train images:<br>`wget "
+"http://images.cocodataset.org/zips/train2017.zip`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "ShareGPT4Video (Video)"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "BurstGPT"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid ""
+"`wget "
+"https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Sonnet (deprecated)"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Local file: `benchmarks/sonnet.txt`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Random"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`synthetic`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "RandomMultiModal (Image/Video)"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "🟡"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "🚧"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "RandomForReranking"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Prefix Repetition"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-VisionArena"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`lmarena-ai/VisionArena-Chat`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-MMVU"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`yale-nlp/MMVU`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-InstructCoder"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`likaixin/InstructCoder`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-AIMO"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid ""
+"`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-"
+"CoT`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-Other"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-MTBench"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`philschmid/mt-bench`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "HuggingFace-Blazedit"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "`vdaita/edit_5k_char`, `vdaita/edit_10k_char`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Spec Bench"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid ""
+"`wget https://raw.githubusercontent.com/hemingkx/Spec-"
+"Bench/refs/heads/main/data/spec_bench/question.jsonl`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Custom"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:8
+msgid "Local file: `data.jsonl`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:74
+msgid ""
+"The datasets mentioned above are all links to datasets on huggingface. "
+"The dataset's `dataset-name` should be set to `hf`. For local `dataset-"
+"path`, please set `hf-name` to its Hugging Face ID like"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:84
+#, fuzzy
+msgid "3.2 Run basic benchmark"
+msgstr "4. 运行基准测试脚本"
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:86
+msgid "3.2.1 Online serving"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:88
+msgid "First start serving your model:"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:94
+#, fuzzy
+msgid "Then run the benchmarking script:"
 msgstr "运行基准测试脚本："
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:66
-msgid "After about 10 mins, the output is as shown below:"
-msgstr "大约 10 分钟后，输出如下所示："
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:109
+msgid "If successful, you will see the following output:"
+msgstr ""
 
-#: ../../developer_guide/performance_and_debug/performance_benchmark.md:176
-msgid ""
-"The result json files are generated into the path `benchmark/results` These "
-"files contain detailed benchmarking results for further analysis."
-msgstr "结果 json 文件会生成到路径 `benchmark/results`。这些文件包含了用于进一步分析的详细基准测试结果。"
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:138
+msgid "3.2.2 Offline Throughput Benchmark"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:149
+msgid "If successful, you will see the following output"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:158
+msgid "3.2.4 Multi-Modal Benchmark"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:207
+msgid "3.2.5 Embedding Benchmark"
+msgstr ""
+
+#~ msgid "3. (Optional)Prepare model weights"
+#~ msgstr "3.（可选）准备模型权重"
+
+#~ msgid ""
+#~ "For faster running speed, we recommend"
+#~ " downloading the model in advance："
+#~ msgstr "为了更快的运行速度，建议提前下载模型："
+
+#~ msgid ""
+#~ "You can also replace all model "
+#~ "paths in the [json](https://github.com/vllm-"
+#~ "project/vllm-ascend/tree/main/benchmarks/tests) files "
+#~ "with your local paths:"
+#~ msgstr ""
+#~ "你也可以将 [json](https://github.com/vllm-project/vllm-"
+#~ "ascend/tree/main/benchmarks/tests) 文件中的所有模型路径替换为你的本地路径："
+
+#~ msgid "After about 10 mins, the output is as shown below:"
+#~ msgstr "大约 10 分钟后，输出如下所示："
+
+#~ msgid ""
+#~ "The result json files are generated "
+#~ "into the path `benchmark/results` These "
+#~ "files contain detailed benchmarking results"
+#~ " for further analysis."
+#~ msgstr "结果 json 文件会生成到路径 `benchmark/results`。这些文件包含了用于进一步分析的详细基准测试结果。"
+

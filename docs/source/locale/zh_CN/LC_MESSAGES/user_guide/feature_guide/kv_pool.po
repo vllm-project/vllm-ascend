@@ -1,0 +1,272 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1
+msgid "Ascend Store Deployment Guide"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:3
+msgid "Environmental Dependencies"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:5
+#: ../../source/user_guide/feature_guide/kv_pool.md:26
+msgid "Software:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:6
+msgid "Python >= 3.10, < 3.12"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:7
+msgid "CANN == 8.3.rc2"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:8
+msgid "PyTorch == 2.8.0, torch-npu == 2.8.0"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:9
+msgid "vLLM：main branch"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:10
+msgid "vLLM-Ascend：main branch"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:12
+msgid "KV Pool Parameter Description"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:13
+msgid ""
+"**kv_connector_extra_config**: Additional Configurable Parameters for "
+"Pooling.   **lookup_rpc_port**: Port for RPC Communication Between "
+"Pooling Scheduler Process and Worker Process: Each Instance Requires a "
+"Unique Port Configuration.   **load_async**: Whether to Enable "
+"Asynchronous Loading. The default value is false.   **backend**: Set the "
+"storage backend for kvpool, with the default being mooncake."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:18
+msgid "Environment Variable Configuration"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:19
+msgid ""
+"To guarantee uniform hash generation, it is required to synchronize the "
+"PYTHONHASHSEED environment variable across all nodes upon enabling KV "
+"Pool."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:25
+msgid "Example of using Mooncake as a KV Pool backend"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:27
+msgid "Check NPU network configuration:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:29
+msgid ""
+"Ensure that the hccn.conf file exists in the environment. If using "
+"Docker, mount it into the container."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:35
+msgid "Install Mooncake"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:37
+msgid ""
+"Mooncake is the serving platform for Kimi, a leading LLM service provided"
+" by Moonshot AI.   Installation and Compilation Guide: https://github.com"
+"/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries.   First, "
+"we need to obtain the Mooncake project. Refer to the following command:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:45
+msgid "(Optional) Replace go install url if the network is poor"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:52
+msgid "Install mpi"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:58
+msgid "Install the relevant dependencies. The installation of Go is not required."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:64
+msgid "Compile and install"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:74
+msgid "Set environment variables"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:76
+msgid "**Note:**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:78
+msgid "Adjust the Python path according to your specific Python installation"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:79
+msgid ""
+"Ensure `/usr/local/lib` and `/usr/local/lib64` are in your "
+"`LD_LIBRARY_PATH`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:85
+msgid "Run Mooncake Master"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:87
+msgid "1.Configure mooncake.json"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:89
+msgid ""
+"The environment variable **MOONCAKE_CONFIG_PATH** is configured to the "
+"full path where mooncake.json is located."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:101
+msgid ""
+"**metadata_server**: Configured as **P2PHANDSHAKE**.   **protocol:** Must"
+" be set to 'Ascend' on the NPU. **device_name**: \"\" "
+"**master_server_address**: Configured with the IP and port of the master "
+"service.   **global_segment_size**: Registered memory size per card to "
+"the KV Pool."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:107
+msgid "2.Start mooncake_master"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:109
+msgid "Under the mooncake folder:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:115
+msgid ""
+"`eviction_high_watermark_ratio` determines the watermark where Mooncake "
+"Store will perform eviction，and `eviction_ratio` determines the portion "
+"of stored objects that would be evicted."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:117
+msgid "PD Disaggregation Scenario"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:119
+msgid "1.Run `prefill` Node and `decode` Node"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:121
+msgid ""
+"Using `MultiConnector` to simultaneously utilize both "
+"`MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` "
+"performs kv_transfer, while `AscendStoreConnector` serves as the prefix-"
+"cache node."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:123
+msgid "`prefill` Node："
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:129
+msgid "The content of the multi_producer.sh script:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:196
+msgid "`decode` Node："
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:202
+msgid "The content of multi_consumer.sh:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:260
+msgid ""
+"Currently, the key-value pool in PD Disaggregate only stores the kv cache"
+" generated by the Prefill node by default. In models using MLA, it is now"
+" supported that the Decode node stores the kv cache for use by the "
+"Prefill node, enabled by adding `consumer_is_to_put: true` to the "
+"AscendStoreConnector. If the Prefill node enables PP, `prefill_pp_size` "
+"or `prefill_pp_layer_partition` also needs to be set. Example as follows:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:276
+msgid "2、Start proxy_server."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:287
+msgid "Change localhost to your actual IP address."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:289
+msgid "3.Run Inference"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:291
+msgid ""
+"Configure the localhost, port, and model weight path in the command to "
+"your own settings."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:293
+#: ../../source/user_guide/feature_guide/kv_pool.md:352
+msgid "Short question:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:299
+#: ../../source/user_guide/feature_guide/kv_pool.md:358
+msgid "Long question:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:305
+msgid "Colocation Scenario"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:307
+msgid "1.Run Mixed Department Script"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:313
+msgid "Content of mixed_department.sh:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:348
+msgid "2.Run Inference"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:350
+msgid ""
+"Configure the localhost, port, and model weight path in the command to "
+"your own settings. The requests sent will only go to the port where the "
+"mixed deployment script is located, and there is no need to start a "
+"separate proxy."
+msgstr ""
+

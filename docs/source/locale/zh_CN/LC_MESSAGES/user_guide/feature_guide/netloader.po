@@ -1,0 +1,343 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/netloader.md:1
+msgid "Netloader Guide"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:3
+msgid ""
+"This guide provides instructions for using **Netloader** as a weight-"
+"loader plugin for acceleration in **vLLM Ascend**."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:9
+msgid ""
+"Netloader leverages high-bandwidth peer-to-peer (P2P) transfers between "
+"NPU cards to load model weights. It is implemented as a plugin (via the "
+"`register_model_loader` API added in vLLM 0.10). The workflow is:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:11
+msgid "A **server** preloads a model."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:12
+msgid "A new **client** instance requests weight transfer."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:13
+msgid ""
+"After validating that the model and partitioning match, the client uses "
+"HCCL collective communication (send/recv) to receive weights in the same "
+"order as stored in the model."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:15
+msgid ""
+"The server runs alongside normal inference tasks via sub-threads and via "
+"`stateless_init_torch_distributed_process_group` in vLLM. The client thus"
+" takes over weight initialization without needing to load from storage."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:17
+msgid "Flowchart"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:19
+msgid "![netloader flowchart](./images/netloader_flowchart.png)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:19
+msgid "netloader flowchart"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:21
+msgid "Timing Diagram"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:23
+msgid "![netloader timing diagram](./images/netloader_timing_diagram.png)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:23
+msgid "netloader timing diagram"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:25
+msgid "Application Scenarios"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:27
+msgid ""
+"**Reduce startup latency**: By reusing already loaded weights and "
+"transferring them directly between NPU cards, Netloader cuts down model "
+"loading time vs conventional remote/local pull strategies."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:28
+msgid ""
+"**Relieve network & storage load**: Avoid repeated downloads of weight "
+"files from remote repositories, thus reducing pressure on central storage"
+" and network traffic."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:29
+msgid ""
+"**Improve resource utilization & lower cost**: Faster loading allows less"
+" reliance on standby compute nodes; resources can be scaled up/down more "
+"flexibly."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:30
+msgid ""
+"**Enhance business continuity & high availability**: In failure recovery,"
+" new instances can quickly take over without long downtime, improving "
+"system reliability and user experience."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:34
+msgid "Usage"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:36
+msgid ""
+"To enable Netloader, pass `--load-format=netloader` and provide "
+"configuration via `--model-loader-extra-config` (as a JSON string). Below"
+" are the supported configuration fields:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Field Name"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Type"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Description"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Allowed Values / Notes"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**SOURCE**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "List"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+#, python-brace-format
+msgid ""
+"Weighted data sources. Each item is a map with `device_id` and `sources`,"
+" specifying the rank and its endpoints (IP:port). <br>Example: "
+"`{\"SOURCE\": [{\"device_id\": 0, \"sources\": "
+"[\"10.170.22.152:19374\"]}, {\"device_id\": 1, \"sources\": "
+"[\"10.170.22.152:11228\"]}]}` <br>If omitted or empty, fallback to "
+"default loader. The SOURCE here is second priority."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "A list of objects with keys `device_id: int` and `sources: List[str]`"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**MODEL**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "String"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "The model name, used to verify consistency between client and server."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Defaults to the `--model` argument if not specified."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**LISTEN_PORT**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Integer"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Base port for the server listener."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid ""
+"The actual port = `LISTEN_PORT + RANK`. If omitted, a random valid port "
+"is chosen. Valid range: 1024–65535. If out of range, that server instance"
+" won’t open a listener."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**INT8_CACHE**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Behavior for handling int8 parameters in quantized models."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid ""
+"One of `[\"hbm\", \"dram\", \"no\"]`. <br> - `hbm`: copy original int8 "
+"parameters to high-bandwidth memory (HBM) (may cost a lot of HBM). <br> -"
+" `dram`: copy to DRAM. <br> - `no`: no special handling (may lead to "
+"divergence or unpredictable behavior). Default: `\"no\"`."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**INT8_CACHE_NAME**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Names of parameters to which `INT8_CACHE` is applied (i.e. filtering)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Default: `None` (means no filtering—all parameters)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**OUTPUT_PREFIX**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Prefix for writing per-rank listener address/port files in server mode."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+#, python-brace-format
+msgid ""
+"If set, each rank writes to `{OUTPUT_PREFIX}{RANK}.txt` (text), content ="
+" `IP:Port`."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "**CONFIG_FILE**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid "Path to a JSON file specifying the above configuration."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md
+msgid ""
+"If provided, the SOURCE inside this file has **first priority** "
+"(overrides SOURCE in other configs)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:50
+msgid "Example Commands & Placeholders"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:52
+msgid "Replace parts in `` `<...>` `` before running."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:54
+msgid "Server"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:65
+msgid "Client"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:80
+msgid "Placeholder Descriptions"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:82
+msgid "`<model_file>`: Path to the model file"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:83
+msgid "`<model_name>`: Model name (must match between server & client)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:84
+msgid "`<port>`: Base listening port on server"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:85
+msgid ""
+"`<server_IP>` + `<server_Port>`: IP and port of the Netloader server "
+"(from server log)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:86
+msgid ""
+"`<device_id_diff_from_server>`: Client device ID (must differ from "
+"server’s)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:87
+msgid "`<client_port>`: Port on which client listens"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:89
+msgid ""
+"After startup, you can test consistency by issuing inference requests "
+"with temperature = 0 and comparing outputs."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:93
+msgid "Note & Caveats"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:95
+msgid ""
+"If Netloader is used, **each worker process** must bind a listening port."
+" That port may be user-specified or assigned randomly. If user-specified,"
+" ensure it is available."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:96
+msgid ""
+"Netloader requires extra HBM memory to establish HCCL connections (i.e. "
+"`HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient "
+"capacity (e.g. via `--gpu-memory-utilization`)."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/netloader.md:97
+msgid ""
+"It is recommended to set `VLLM_SLEEP_WHEN_IDLE=1` to mitigate unstable or"
+" slow connections/transmissions. Related info: [vLLM Issue "
+"#16660](https://github.com/vllm-project/vllm/issues/16660), [vLLM PR "
+"#16226](https://github.com/vllm-project/vllm/pull/16226)."
+msgstr ""
+

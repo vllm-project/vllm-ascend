@@ -1,0 +1,457 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:1
+msgid "Expert Parallelism Load Balancer (EPLB)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:3
+msgid "Why We Need EPLB?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:4
+msgid ""
+"When using Expert Parallelism (EP), different experts are assigned to "
+"different NPUs. Given that the load of various experts may vary depending"
+" on the current workload, it is crucial to maintain balanced loads across"
+" different NPUs. We adopt a redundant experts strategy by duplicating "
+"heavily-loaded experts. Then, we heuristically pack these duplicated "
+"experts onto NPUs to ensure load balancing across them. Moreover, thanks "
+"to the group-limited expert routing used in MoE models, we also attempt "
+"to place experts of the same group on the same node to reduce inter-node "
+"data traffic, whenever possible."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:6
+msgid ""
+"To facilitate reproduction and deployment, Vllm Ascend supported deployed"
+" EP load balancing algorithm in `vllm_ascend/eplb/core/policy`. The "
+"algorithm computes a balanced expert replication and placement plan based"
+" on the estimated expert loads. Note that the exact method for predicting"
+" expert loads is outside the scope of this repository. A common method is"
+" to use a moving average of historical statistics."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:8
+msgid "![eplb](../../assets/eplb.png)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:8
+msgid "eplb"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:9
+msgid "How to Use EPLB?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:10
+msgid ""
+"Please refer to the EPLB section of the user guide for detailed "
+"information: [How to Use "
+"EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:12
+msgid "How It Works?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:13
+msgid "**EPLB Module Architecture**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:36
+msgid ""
+"**1. Adaptor Module**   *Handles registration and adaptation for "
+"different MoE model types*"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:38
+msgid ""
+"`abstract_adaptor.py`   Abstract base class defining unified registration"
+" interfaces for EPLB adapters"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:40
+msgid ""
+"`vllm_adaptor.py`   Implementation supporting Qwen3-MoE and DeepSeek "
+"models, standardizing parameter handling for policy algorithms"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:43
+msgid ""
+"**2. Core Module**   *Implements core algorithms, updates, and "
+"asynchronous processing*"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:45
+msgid ""
+"**Policy Submodule**   *Load balancing algorithms with factory pattern "
+"instantiation*"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:47
+msgid ""
+"`policy_abstract.py`   Abstract class for load balancing strategy "
+"interfaces"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:49
+msgid ""
+"`policy_dynamic_ep.py`   Default implementation of open-source EPLB paper"
+" algorithm"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:51
+msgid ""
+"`policy_dynamic_ep_v2.py`   Enhanced version optimizing expert swaps for "
+"low-bandwidth devices (e.g., A2)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:53
+msgid ""
+"`policy_flashlb.py`   Threshold-based adjustment reducing operational "
+"costs through layer-wise fluctuation detection"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:55
+msgid ""
+"`policy_factory.py`   Strategy factory for automatic algorithm "
+"instantiation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:58
+msgid ""
+"`eplb_device_transfer_loader.py`   Manages expert table/weight "
+"transmission and updates"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:60
+msgid "`eplb_utils.py`   Utilities for expert table initialization and mapping"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:62
+msgid ""
+"`eplb_worker.py`   Asynchronous algorithm orchestration and result "
+"processing"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:65
+msgid "**3. System Components**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:66
+msgid ""
+"`eplb_updator.py`   Central coordinator for load balancing during "
+"inference workflows"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:68
+msgid "`utils.py`   General utilities for EPLB interface registration"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:71
+msgid "*Key Optimizations:*"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:72
+msgid "Maintained original structure while improving technical clarity"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:73
+msgid "Standardized terminology"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:74
+msgid "Enhanced algorithm differentiation through concise descriptors"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:75
+msgid "Improved scoping through hierarchical presentation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:76
+msgid "Preserved file/class relationships while optimizing readability"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:78
+msgid "Default Algorithm"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:79
+msgid "Hierarchical Load Balancing"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:80
+msgid ""
+"When the number of server nodes evenly divides the number of expert "
+"groups, we use the hierarchical load balancing policy to leverage group-"
+"limited expert routing. We first pack the expert groups onto nodes "
+"evenly, ensuring balanced loads across different nodes. Then, we "
+"replicate the experts within each node. Finally, we pack the replicated "
+"experts onto individual NPUs to ensure load balancing across them. The "
+"hierarchical load balancing policy can be used in the prefilling stage "
+"with a smaller expert-parallel size."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:82
+msgid "Global Load Balancing"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:83
+msgid ""
+"In other cases, we use the global load balancing policy, which replicates"
+" experts globally regardless of expert groups, and packs the replicated "
+"experts onto individual NPUs. This policy can be adopted in the decoding "
+"stage with a larger expert-parallel size."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:85
+msgid "Add a New EPLB Policy"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:86
+msgid ""
+"If you want to add a new eplb policy to vllm_ascend, you must follow "
+"these steps:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:87
+msgid ""
+"Inherit the `EplbPolicy` abstract class of `policy_abstract.py`  and "
+"override the `rebalance_experts` interface, ensuring consistent input "
+"parameters `current_expert_table`, `expert_workload` and return types "
+"`newplacement`. For example:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:113
+msgid ""
+"To add a new EPLB algorithm, include the policy type and its "
+"corresponding implementation class in the `PolicyFactory` of "
+"`policy_factory.py`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:115
+msgid "Add a New MoE Model"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:116
+msgid "**Implementation Guide for Model Integration**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:118
+msgid "**Adapter File Modification**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:119
+msgid "Inherit or modify `vllm_ascend/eplb/adaptor/vllm_adaptor.py`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:120
+msgid "Add processing logic for key parameters:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:121
+msgid "`num_dense_layers`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:122
+msgid "`global_expert_num`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:123
+msgid "`num_roe_layers`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:124
+msgid "Ensure parameter synchronization in the `model_register` function."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:126
+msgid "For example:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:128
+msgid "Modify `__init__` of `vllm_adaptor.py` to add a new moe model eplb params:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:136
+msgid ""
+"Modify `model_register` of `vllm_adaptor.py` to register eplb params for "
+"new moe model:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:143
+msgid "**MoE Feature Integration**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:144
+msgid "Extend `vllm_ascend/eplb/utils.py` with MoE-specific methods"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:145
+msgid "Implement required functionality for expert routing or weight management"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:147
+msgid "**Registration Logic Update**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:148
+msgid "Add patch logic within the `model_register` function"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:149
+msgid "Maintain backward compatibility with existing model types"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:151
+msgid "**Validation & Testing**"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:152
+msgid "Verify parameter consistency across layers"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:153
+msgid "Test cross-device communication for expert tables"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:154
+msgid "Benchmark against baseline implementations (e.g., Qwen3-MoE)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:156
+msgid "*Key Implementation Notes:*"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:157
+msgid "Preserve existing interface contracts in abstract classes"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:158
+msgid "Use decorators for non-intrusive patch integration"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:159
+msgid "Leverage `eplb_utils.py` for shared expert mapping operations"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:160
+msgid "DFX"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:161
+msgid "Parameter Validation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:162
+msgid "Integer Parameters"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:163
+msgid ""
+"All integer input parameters must explicitly specify their maximum and "
+"minimum values and be subject to valid value validation. For example, "
+"`num_iterations_eplb_update` must be greater than 0:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:178
+msgid "File Path"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:179
+msgid ""
+"The file path for EPLB must be checked for legality, such as whether the "
+"file path is valid and whether it has appropriate read and write "
+"permissions. For example:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:205
+msgid "Function Specifications"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:206
+msgid "Initialization Function"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:207
+msgid ""
+"All EPLB parameters must be initialized by default during initialization,"
+" with specified parameter types and default values for proper handling."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:209
+msgid "General Functions"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:210
+msgid ""
+"All method arguments must specify parameter types and default values, and"
+" functions must include default return value handling for default "
+"arguments. It is recommended to use `try-except` blocks to handle the "
+"function body, specifying the type of exception captured and the failure "
+"handling (e.g., logging exceptions or returning a failure status)."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:212
+msgid "Consistency"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:213
+msgid "Expert Map"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:214
+msgid ""
+"The expert map must be globally unique during initialization and update. "
+"In a multi-node scenario during initialization, distributed communication"
+" should be used to verify the consistency of expert maps across each "
+"rank. If they are inconsistent, the user should be notified which ranks "
+"have inconsistent maps. During the update process, if only a few layers "
+"or the expert table of a certain rank has been changed, the updated "
+"expert table must be synchronized with the EPLB's context to ensure "
+"global consistency."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:217
+msgid "Expert Weight"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:218
+msgid ""
+"When updating expert weights, ensure that the memory allocated for the "
+"expert weights has been released, or that the expert (referring to the "
+"old version) is no longer in use."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:220
+msgid "Limitation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/eplb_swift_balancer.md:221
+msgid ""
+"Before using EPLB, start the script and add `export "
+"DYNAMIC_EPLB=\"true\"`. Before performing load data collection (or "
+"performance data collection), start the script and add `export "
+"EXPERT_MAP_RECORD=\"true\"`."
+msgstr ""
+

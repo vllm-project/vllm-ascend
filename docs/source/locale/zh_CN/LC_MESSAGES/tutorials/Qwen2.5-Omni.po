@@ -1,0 +1,303 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:1
+msgid "Qwen2.5-Omni-7B"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:3
+msgid "Introduction"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:5
+msgid ""
+"Qwen2.5-Omni is an end-to-end multimodal model designed to perceive "
+"diverse modalities, including text, images, audio, and video, while "
+"simultaneously generating text and natural speech responses in a "
+"streaming manner."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:7
+msgid ""
+"The `Qwen2.5-Omni` model was supported since `vllm-ascend:v0.11.0rc0`. "
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-NPU and multi-NPU deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:9
+msgid "Supported Features"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:11
+msgid ""
+"Refer to [supported "
+"features](../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:13
+msgid ""
+"Refer to [feature guide](../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:15
+msgid "Environment Preparation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:17
+msgid "Model Weight"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:19
+msgid ""
+"`Qwen2.5-Omni-3B`(BF16): [Download model "
+"weight](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:20
+msgid ""
+"`Qwen2.5-Omni-7B`(BF16): [Download model "
+"weight](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:22
+msgid "Following examples use the 7B version deafultly."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:24
+msgid "Installation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:26
+msgid "You can using our official docker image to run `Qwen2.5-Omni` directly."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:28
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:65
+msgid "Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:67
+msgid "Single-node Deployment"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:69
+msgid "Single NPU (Qwen2.5-Omni-7B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:72
+msgid ""
+"The env `LOCAL_MEDIA_PATH` which allowing API requests to read local "
+"images or videos from directories specified by the server file system. "
+"Please note this is a security risk. Should only be enabled in trusted "
+"environments."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:90
+msgid ""
+"Now vllm-ascend docker image should contain vllm[audio] build part, if "
+"you encounter *audio not supported issue* by any chance, please re-build "
+"vllm with [audio] flag."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:98
+msgid ""
+"`--allowed-local-media-path` is optional, only set it if you need infer "
+"model with local media file"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:100
+msgid ""
+"`--gpu-memory-utilization` should not be set manually only if yous know "
+"what this parameter aims to."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:102
+msgid "Multiple NPU (Qwen2.5-Omni-7B)"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:121
+msgid ""
+"`--tensor_parallel_size` no need to set for this 7B model, but if you "
+"really need tensor parallel, tp size can be one of `1\\2\\4`"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:123
+msgid "Prefill-Decode Disaggregation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:125
+msgid "Not supported yet"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:127
+msgid "Functional Verification"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:129
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:137
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:165
+msgid ""
+"If you query the server successfully, you can see the info shown below "
+"(client):"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:171
+msgid "Accuracy Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:173
+msgid "Qwen2.5-Omni on vllm-ascend has been test on AISBench."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:175
+#: ../../source/tutorials/Qwen2.5-Omni.md:188
+msgid "Using AISBench"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:177
+msgid ""
+"Refer to [Using "
+"AISBench](../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:179
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen2.5"
+"-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "dataset"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "platform"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "metric"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "mode"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "vllm-api-stream-chat"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "textVQA"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "A2"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "accuracy"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "gen_base64"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "83.47"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "A3"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:89
+msgid "84.04"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:186
+msgid "Performance Evaluation"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:190
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:192
+msgid "Using vLLM Benchmark"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:194
+msgid "Run performance evaluation of `Qwen2.5-Omni-7B` as an example."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:196
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:198
+msgid "There are three `vllm bench` subcommand:"
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:199
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:200
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:201
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:203
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr ""
+
+#: ../../source/tutorials/Qwen2.5-Omni.md:209
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+

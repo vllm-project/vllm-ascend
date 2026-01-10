@@ -1,0 +1,348 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:1
+msgid "Disaggregated-prefill"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:3
+msgid "Why disaggregated-prefill?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:5
+msgid ""
+"This feature addresses the need to optimize the **Time Per Output Token "
+"(TPOT)** and **Time To First Token (TTFT)** in large-scale inference "
+"tasks. The motivation is two-fold:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:7
+msgid ""
+"**Adjusting Parallel Strategy and Instance Count for P and D Nodes**   "
+"Using the disaggregated-prefill strategy, this feature allows the system "
+"to flexibly adjust the parallelization strategy (e.g., data parallelism "
+"(dp), tensor parallelism (tp), and expert parallelism (ep)) and the "
+"instance count for both P (Prefiller) and D (Decoder) nodes. This leads "
+"to better system performance tuning, particularly for **TTFT** and "
+"**TPOT**."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:10
+msgid ""
+"**Optimizing TPOT**   Without disaggregated-prefill strategy, prefill "
+"tasks are inserted during decoding, which results in inefficiencies and "
+"delays. disaggregated-prefill solves this by allowing for better control "
+"over the system’s **TPOT**. By managing chunked prefill tasks "
+"effectively, the system avoids the challenge of determining the optimal "
+"chunk size and provides more reliable control over the time taken for "
+"generating output tokens."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:15
+msgid "Usage"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:17
+msgid ""
+"vLLM Ascend currently supports two types of connectors for handling KV "
+"cache management:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:18
+msgid "**MooncakeConnector**: D nodes pull KV cache from P nodes."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:19
+msgid ""
+"**MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a "
+"layered manner."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:21
+msgid ""
+"For step-by-step deployment and configuration, refer to the following "
+"guide:   [https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https"
+"://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:26
+msgid "How It Works"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:28
+msgid "1. Design Approach"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:30
+msgid ""
+"Under the disaggregated-prefill, a global proxy receives external "
+"requests, forwarding prefill to P nodes and decode to D nodes; the KV "
+"cache (key–value cache) is exchanged between P and D nodes via peer-to-"
+"peer (P2P) communication."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:32
+msgid "2. Implementation Design"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:34
+msgid ""
+"Our design diagram is shown below, illustrating the pull and push schemes"
+" respectively. ![alt text](../../assets/disaggregated_prefill_pull.png) "
+"![alt text](../../assets/disaggregated_prefill_push.png)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:34
+msgid "alt text"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:38
+msgid "Mooncake Connector:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:40
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:48
+msgid "The request is sent to the Proxy’s `_handle_completions` endpoint."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:41
+msgid ""
+"The Proxy calls `select_prefiller` to choose a P node and forwards the "
+"request, configuring `kv_transfer_params` with `do_remote_decode=True`, "
+"`max_tokens=1`, and `min_tokens=1`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:42
+msgid ""
+"After the P node’s scheduler finishes prefill, `update_from_output` "
+"invokes the schedule connector’s `request_finished` to defer KV cache "
+"release, constructs `kv_transfer_params` with `do_remote_prefill=True`, "
+"and returns to the Proxy."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:43
+msgid ""
+"The Proxy calls `select_decoder` to choose a D node and forwards the "
+"request."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:44
+msgid ""
+"On the D node, the scheduler marks the request as "
+"`RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls "
+"`kv_connector_no_forward` to pull the remote KV cache, then notifies the "
+"P node to release KV cache and proceeds with decoding to return the "
+"result."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:46
+msgid "Mooncake Layerwise Connector:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:49
+msgid ""
+"The Proxy calls `select_decoder` to choose a D node and forwards the "
+"request, configuring `kv_transfer_params` with `do_remote_prefill=True` "
+"and setting the `metaserver` endpoint."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:50
+msgid ""
+"On the D node, the scheduler uses `kv_transfer_params` to mark the "
+"request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV "
+"cache, then calls `kv_connector_no_forward` to send a request to the "
+"metaserver and waits for the KV cache transfer to complete."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:51
+msgid ""
+"The Proxy’s `metaserver` endpoint receives the request, calls "
+"`select_prefiller` to choose a P node, and forwards it with "
+"`kv_transfer_params` set to `do_remote_decode=True`, `max_tokens=1`, and "
+"`min_tokens=1`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:52
+msgid ""
+"During processing, the P node’s scheduler pushes KV cache layer-wise; "
+"once all layers pushing is complete, it releases the request and notifies"
+" the D node to begin decoding."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:53
+msgid "The D node performs decoding and returns the result."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:55
+msgid "3. Interface Design"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:57
+msgid ""
+"Taking MooncakeConnector as an example, the system is organized into "
+"three primary classes:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:58
+msgid "**MooncakeConnector**: Base class that provides core interfaces."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:59
+msgid ""
+"**MooncakeConnectorScheduler**: Interface for scheduling the connectors "
+"within the engine core, responsible for managing KV cache transfer "
+"requirements and completion."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:60
+msgid ""
+"**MooncakeConnectorWorker**: Interface for managing KV cache registration"
+" and transfer in worker processes."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:62
+msgid "4. Specifications Design"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:64
+msgid ""
+"This feature is flexible and supports various configurations, including "
+"setups with MLA and GQA models. It is compatible with A2 and A3 hardware "
+"configurations and facilitates scenarios involving both equal and unequal"
+" TP setups across multiple P and D nodes."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "Feature"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "Status"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "A2"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "🟢 Functional"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "A3"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "equal TP configuration"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "unequal TP configuration"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "MLA"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md
+msgid "GQA"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:75
+msgid "🟢 Functional: Fully operational, with ongoing optimizations."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:76
+msgid "🔵 Experimental: Experimental support, interfaces and functions may change."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:77
+msgid "🚧 WIP: Under active development, will be supported soon."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:78
+msgid ""
+"🟡 Planned: Scheduled for future implementation (some may have open "
+"PRs/RFCs)."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:79
+msgid "🔴 NO plan/Deprecated: No plan or deprecated by vLLM."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:83
+msgid "DFX Analysis"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:85
+msgid "1. Config Parameter Validation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:87
+msgid ""
+"Validate KV transfer config by checking whether the kv_connector type is "
+"supported and whether kv_connector_module_path exists and is loadable. On"
+" transfer failures, emit clear error logs for diagnostics."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:89
+msgid "2. Port Conflict Detection"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:91
+msgid ""
+"Before startup, perform a port-usage check on configured ports (e.g., "
+"rpc_port, metrics_port, http_port/metaserver) by attempting to bind. If a"
+" port is already in use, fail fast and log an error."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:93
+msgid "3. PD Ratio Validation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:95
+msgid ""
+"Under non-symmetric PD scenarios, validate the P-to-D tp ratio against "
+"expected and scheduling constraints to ensure correct and reliable "
+"operation."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:99
+msgid "Limitations"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:101
+msgid ""
+"Heterogeneous P and D nodes are not supported—for example, running P "
+"nodes on A2 and D nodes on A3."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/disaggregated_prefill.md:103
+msgid ""
+"In non-symmetric TP configurations, only cases where the P nodes have a "
+"higher TP degree than the D nodes and the P TP count is an integer "
+"multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % "
+"D_tp = 0)."
+msgstr ""
+

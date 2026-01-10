@@ -1,0 +1,626 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:1
+msgid "Prepare inputs for model forwarding"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:3
+msgid "Purpose"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:4
+msgid "Information required to perform model forward pass:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:5
+msgid "the inputs"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:6
+msgid "the corresponding attention metadata of the inputs"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:8
+msgid "The following diagram shows what we should prepare for model inference."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:18
+msgid ""
+"Therefore, as long as we have these two pieces of information mentioned "
+"above, we can perform the model's forward propagation."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:20
+msgid ""
+"This document will explain **how we obtain the inputs and their "
+"corresponding attention metadata**."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:22
+msgid "Overview"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:23
+msgid "1. Obtain inputs"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:24
+msgid "The workflow of obtaining inputs:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:25
+msgid ""
+"Get `token positions`: relative position of each token within its request"
+" sequence."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:27
+msgid "Get `token indices`: index of each scheduled token in the token table."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:29
+msgid ""
+"Get `Token IDs`: using token indices to retrieve the Token IDs from "
+"**token id table**."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:31
+msgid ""
+"At last, these `Token IDs` are required to be fed into a model, and also,"
+" `positions` should be sent into the model to create `Rope` (Rotary "
+"positional embedding). Both of them are the inputs of the model."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:33
+msgid ""
+"**Note**: The `Token IDs` are the inputs of a model, so we also call them"
+" `Inputs IDs`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:35
+msgid "2. Build inputs attention metadata"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:36
+msgid "A model requires these attention metadata during the forward pass:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:37
+msgid ""
+"`query start location`: start and end location of each request "
+"corresponding to the scheduled tokens."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:38
+msgid ""
+"`sequence length`: length of each request including both computed tokens "
+"and newly scheduled tokens."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:39
+msgid "`number of computed tokens`: number of computed tokens for each request."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:40
+msgid "`number of requests`: number of requests in this batch."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:41
+msgid "`number of tokens`: total number of scheduled tokens in this batch."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:42
+msgid ""
+"**`block table`**: translates the logical address (within its sequence) "
+"of each block to its global physical address in the device's memory."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:43
+msgid ""
+"`max query len`: the longest scheduled tokens length in this request "
+"batch."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:44
+msgid ""
+"`slot mapping`: indices of each token that input token will be stored "
+"into."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:45
+msgid ""
+"`attention mask`: mask matrix applied to attention scores before softmax "
+"to control which tokens can attend to each other (usually a causal "
+"attention)."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:47
+msgid "Before start"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:48
+msgid "There are mainly three types of variables."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:49
+msgid ""
+"token level: represents one attribute corresponding to each scheduled "
+"token, so the length of this variable is the number of scheduled tokens"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:50
+msgid ""
+"request level: represents one attribute of each scheduled request, whose "
+"length usually is the number of scheduled requests. (`query start "
+"location` is a special case, which has one more element)"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:51
+msgid "system level:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:52
+msgid ""
+"**Token IDs table**: stores the token IDs (i.e. the inputs of a model) of"
+" each request. The shape of this table is `(max num request, max model "
+"len)`. Here, `max num request` is the maximum count of concurrent "
+"requests allowed in a forward batch and `max model len` is the maximum "
+"token count that can be handled at one request sequence in this model."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:53
+msgid ""
+"**Block table**: translates the logical address (within its sequence) of "
+"each block to its global physical address in the device's memory. The "
+"shape of this table is `(max num request, max model len / block size)`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:55
+msgid ""
+"**Note**: Both of these two tables are come from the `_update_states` "
+"method before **preparing inputs**. You can take a look if you need more "
+"inspiration."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:57
+msgid "Tips"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:58
+msgid ""
+"Simply put, a `token ID` is an **integer** (usually `int32`), which "
+"represents a token. Example of `Token ID`:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:78
+msgid "Go through details"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:79
+msgid "Assumptions:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:80
+msgid "maximum number of  tokens can be scheduled at once: 10"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:81
+msgid "`block size`: 2"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:82
+msgid ""
+"Totally schedule 3 requests. Their prompt lengths are 3, 2, and 8 "
+"respectively."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:83
+msgid ""
+"`max model length`: 12 (the maximum token count can be handled at one "
+"request sequence in a model)."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:85
+msgid ""
+"These assumptions are configured in the beginning when starting vLLM. "
+"They are not fixed, so you can manually set them."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:86
+msgid "Step 1: All requests in the prefill phase"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:88
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:190
+msgid "Obtain inputs"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:89
+#, python-brace-format
+msgid ""
+"As the maximum number of tokens that can be schedules is 10, the "
+"scheduled tokens of each request can be represented as `{'0': 3, '1': 2, "
+"'2': 5}`. Note that`request_2` uses chunked prefill, leaving 3 prompt "
+"tokens unscheduled."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:91
+msgid "1. Get token positions:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:92
+msgid ""
+"First, determine which request each token belongs to: tokens 0–2 are "
+"assigned to **request_0**, tokens 3–4 to **request_1**, and tokens 5–9 to"
+" **request_2**. To represent this mapping, we use `request indices`, for "
+"example, `request indices`: `[0, 0, 0, 1, 1, 2, 2, 2, 2, 2]`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:94
+msgid ""
+"For each request, use **the number of computed tokens** + **the relative "
+"position of current scheduled tokens** (`request_0: [0 + 0, 0 + 1, 0 + "
+"2]`, `request_1: [0 + 0, 0 + 1]`, `request_2: [0 + 0, 0 + 1,..., 0 + 4]`)"
+" and then concatenate them together (`[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`)."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:96
+msgid ""
+"Note: there is more efficient way (using `request indices`) to create "
+"positions in actual code."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:98
+msgid ""
+"Finally, `token positions` can be obtained as `[0, 1, 2, 0, 1, 0, 1, 2, "
+"3, 4]`. This variable is **token level**."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:100
+msgid "2. Get token indices:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:101
+msgid ""
+"The shape of the current **Token IDs table** is `(max num request, max "
+"model len)`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:103
+msgid ""
+"Why these `T_3_5`, `T_3_6`, `T_3_7` are in this table without being "
+"scheduled?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:104
+msgid ""
+"We fill all Token IDs in one request sequence to this table at once, but "
+"we only retrieve the tokens we scheduled this time. Then we retrieve the "
+"remain Token IDs next time."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:116
+msgid "Note that`T_x_x` is an `int32`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:118
+msgid ""
+"Let's say `M = max model len`. Then we can use `token positions` together"
+" with `request indices` of each token to construct `token indices`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:120
+msgid ""
+"So `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 "
+"* M, 0 + 2 * M, 1 + 2 * M, 2 + 2 * M, 3 + 2 * M, 4 + 2 * M]` = `[0, 1, 2,"
+" 12, 13, 24, 25, 26, 27, 28]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:122
+msgid "3. Retrieve the Token IDs"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:123
+msgid ""
+"We use `token indices` to select out the corresponding `Input IDs` from "
+"the token table. The pseudocode is as follows:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:129
+msgid "As mentioned before, we refer to these `Token IDs` as `Input IDs`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:130
+msgid ""
+"`Input IDs` = `[T_0_0, T_0_1, T_0_2, T_1_0, T_1_1, T_2_0, T_2_1, T_3_2, "
+"T_3_3, T_3_4]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:132
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:213
+msgid "Build inputs attention metadata"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:133
+msgid ""
+"In the current **Block Table**, we use the first block (i.e. block_0) to "
+"mark the unused block. The shape of the block is `(max num request, max "
+"model len / block size)`, where `max model len / block size = 12 / 2 = "
+"6`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:145
+msgid "The KV cache block in the device memory is like:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:151
+msgid ""
+"Let's say `K = max model len / block size = 6`, and we can get token "
+"`device block number`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:153
+msgid "The workflow of achieving slot mapping:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:154
+msgid "Get `block table indices` using `K`, `positions` and `request indices`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:156
+msgid ""
+"Purpose: For each token, it could be used to select `device block number`"
+" from `block table`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:158
+msgid "Get `device block number` using `block table indices`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:160
+msgid ""
+"Purpose: `device block number` indicates which device block each token "
+"belongs to."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:162
+msgid "Get `block offsets` using `positions` and `block size`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:164
+msgid ""
+"Purpose: `block offsets` indicates the offsets of each token within a "
+"block."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:166
+msgid "construct `slot mapping` using `device block number` and `block offsets`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:168
+msgid "Purpose: we can use `slot mapping` to store Token IDs into token slots."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:170
+msgid "Details:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:171
+msgid ""
+"(**Token level**) Use a simple formula to calculate `block table "
+"indices`: `request indices * K + positions / block size`. So it equal to "
+"`[0 * 6 + 0 / 2, 0 * 6 + 1 / 2, 0 * 6 + 2 / 2, 1 * 6 + 0 / 2, 1 * 6 + 1 /"
+" 2, 2 * 6 + 0 / 2, 2 * 6 + 1 / 2, 2 * 6 + 2 / 2, 2 * 6 + 3 / 2, 2 * 6 + 4"
+" / 2] = [0, 0, 1, 6, 6, 12, 12, 13, 13, 14]`. This could be used to "
+"select `device block number` from `block table`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:172
+msgid ""
+"(**Token level**) Use `block table indices` to select out `device block "
+"number` for each scheduled token. The Pseudocode is `block_numbers = "
+"block_table[block_table_indices]`. So `device block number=[1, 1, 2, 3, "
+"3, 4, 4, 5, 5, 6]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:173
+msgid ""
+"(**Token level**) `block offsets` could be computed by `block offsets = "
+"positions % block size = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0]`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:174
+msgid ""
+"At last, use `block offsets` and `device block number` to create `slot "
+"mapping`: `device block number * block size + block_offsets = [2, 3, 4, "
+"6, 7, 8, 9, 10, 11, 12]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:176
+msgid "(**Request level**) As we know the scheduled token count is `[3, 2, 5]`:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:178
+msgid ""
+"(**Request level**) Use prefix sum to calculate `query start location`: "
+"`[0, 3, 5, 10]`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:179
+msgid ""
+"(**Request level**) All tokens in step 1 are in the prefill stage, and "
+"the computed tokens count is 0; then `sequence length` = `[3, 2, 5]`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:180
+msgid ""
+"(**Request level**) As mentioned above, `number of computed tokens` are "
+"all 0s: `[0, 0, 0]`."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:181
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:246
+msgid "`number of requests`: `3`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:182
+msgid "(**Request level**) `number of tokens`: `[3, 2, 5]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:183
+msgid "`max query len`: `5`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:184
+msgid "(**Token level**) `slot mapping`: `[2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:185
+msgid ""
+"`attention mask`: For all requests that initiate a prefill process, we "
+"simply create only one mask matrix for reuse across different requests. "
+"The shape of this mask matrix is `5 * 5`:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:187
+msgid "Step 2: Chunked prefill"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:188
+msgid ""
+"In Step 2, we no longer provide explanations or perform calculations; "
+"instead, we directly present the final result."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:191
+#, python-brace-format
+msgid "Scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:193
+msgid "`request indices`: `[0, 1, 2, 2, 2]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:194
+msgid "`token positions`: `[3, 2, 5, 6, 7]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:196
+msgid "Current **Token IDs table**:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:208
+msgid ""
+"**Note**: **T_0_3**, **T_1_2** are new Token IDs of **request_0** and "
+"**request_1** respectively. They are sampled from the output of the "
+"model."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:210
+msgid "`token indices`: `[3, 14, 29, 30, 31]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:211
+msgid "`Input IDs`: `[T_0_3, T_1_2, T_3_5, T_3_6, T_3_7]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:214
+msgid ""
+"We allocate the blocks `7` and `8` to `request_1` and `request_2` "
+"respectively, as they need more space in device to store KV cache "
+"following token generation or chunked prefill."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:216
+msgid "Current **Block Table**:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:228
+msgid "KV cache block in the device memory:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:234
+msgid "(**Token level**) `block table indices`: `[1, 7, 14, 15, 15]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:235
+msgid "(**Token level**) `device block number`: `[2, 7, 6, 8, 8]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:236
+msgid "(**Token level**) `block offsets`: `[1, 0, 1, 0, 1]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:237
+msgid "(**Token level**) `slot mapping`: `[5, 14, 13, 16, 17]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:239
+msgid "Scheduled token count:`[1, 1, 3]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:240
+msgid "`query start location`: `[0, 1, 2, 5]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:242
+msgid "`sequence length`: `[4, 3, 8]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:244
+msgid "`number of computed tokens`: `[3, 2, 5]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:248
+msgid "`max query len`: `3`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:250
+msgid "`slot mapping`: `[5, 14, 13, 16, 17]`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:252
+msgid "`attention mask`: `5 * 8`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:254
+msgid "Each token has a `1 * 8` vector, and there are 5 scheduled tokens."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:256
+msgid "At last"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:257
+msgid ""
+"If you understand the step_1 and step_2, you will know the all following "
+"steps."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/ModelRunner_prepare_inputs.md:259
+msgid ""
+"Hope this document can help you better understand how vLLM prepares "
+"inputs for model forwarding. If you have any good idea, welcome to "
+"contribute to us."
+msgstr ""
+

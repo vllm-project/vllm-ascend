@@ -1,0 +1,350 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:1
+msgid "Optimization and Tuning"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:3
+msgid ""
+"This guide aims to help users to improve vllm-ascend performance on "
+"system level. It includes OS configuration, library optimization, "
+"deployment guide and so on. Any feedback is welcome."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:5
+msgid "Preparation"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:7
+msgid "Run the container:"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:31
+msgid "Configure your environment:"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:49
+msgid "Install vllm and vllm-ascend:"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:61
+msgid ""
+"Please follow the [Installation Guide](https://vllm-"
+"ascend.readthedocs.io/en/latest/installation.html) to make sure vLLM and "
+"vllm-ascend are installed correctly."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:64
+msgid ""
+"Make sure your vLLM and vllm-ascend are installed after your python "
+"configuration is completed, because these packages will build binary "
+"files using python in current environment. If you install vLLM and vllm-"
+"ascend before completing section 1.1, the binary files will not use the "
+"optimized python."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:67
+msgid "Optimizations"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:69
+msgid "1. Compilation Optimization"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:71
+msgid "1.1. Install optimized `python`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:73
+msgid ""
+"Python supports **LTO** and **PGO** optimization starting from version "
+"`3.6` and above, which can be enabled at compile time. And we have "
+"offered optimized `python` packages directly to users for the sake of "
+"convenience. You can also reproduce the `python` build following this "
+"[tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)"
+" according to your specific scenarios."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:101
+msgid "2. OS Optimization"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:103
+msgid "2.1. jemalloc"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:105
+msgid ""
+"**jemalloc** is a memory allocator that improves performance for multi-"
+"thread scenarios and can reduce memory fragmentation. jemalloc uses local"
+" thread memory manager to allocate variables, which can avoid lock "
+"competition between threads and can hugely optimize performance."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:117
+msgid "2.2. Tcmalloc"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:119
+msgid ""
+"**Tcmalloc (Thread Caching Malloc)** is a universal memory allocator that"
+" improves overall performance while ensuring low latency by introducing a"
+" multi-level cache structure, reducing mutex competition and optimizing "
+"large object processing flow. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:140
+msgid "3. `torch_npu` Optimization"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:142
+msgid ""
+"Some performance tuning features in `torch_npu` are controlled by "
+"environment variables. Some features and their related environment "
+"variables are shown below."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:144
+msgid "Memory optimization:"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:155
+msgid "Scheduling optimization:"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:166
+msgid "4. CANN Optimization"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:168
+msgid "4.1. HCCL Optimization"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:170
+msgid ""
+"There are some performance tuning features in HCCL, which are controlled "
+"by environment variables."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:172
+msgid ""
+"You can configure HCCL to use \"AIV\" mode to optimize performance by "
+"setting the environment variable shown below. In \"AIV\" mode, the "
+"communication is scheduled by AI vector core directly with RoCE, instead "
+"of being scheduled by AI CPU."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:179
+msgid ""
+"Plus, there are more features for performance optimization in specific "
+"scenarios, which are shown below."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:181
+msgid ""
+"`HCCL_INTRA_ROCE_ENABLE`: Use RDMA link instead of SDMA link between two "
+"8Ps as the mesh interconnect link. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html)."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:182
+msgid ""
+"`HCCL_RDMA_TC`: Use this var to configure traffic class of RDMA NIC. Find"
+" more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html)."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:183
+msgid ""
+"`HCCL_RDMA_SL`: Use this var to configure service level of RDMA NIC. Find"
+" more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html)."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:184
+msgid ""
+"`HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data "
+"between two NPUs. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html)."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:186
+msgid "5. OS Optimization"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:188
+msgid ""
+"This section describes operating system–level optimizations applied on "
+"the host machine (bare metal or Kubernetes node) to improve performance "
+"stability, latency, and throughput for inference workloads."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:191
+msgid ""
+"These settings must be applied on the host OS and with root privileges. "
+"not inside containers."
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:194
+msgid "5.1"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:196
+msgid "Set CPU Frequency Governor to `performance`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:202
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:217
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:236
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:257
+msgid "Purpose"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:203
+msgid "Forces all CPU cores to run under the `performance` governor"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:204
+msgid "Disables dynamic frequency scaling (e.g., `ondemand`, `powersave`)"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:206
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:221
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:240
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:260
+msgid "Benefits"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:207
+msgid "Keeps CPU cores at maximum frequency"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:208
+msgid "Reduces latency jitter"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:209
+msgid "Improves predictability for inference workloads"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:211
+msgid "5.2 Disable Swap Usage"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:219
+msgid "Minimizes the kernel’s tendency to swap memory pages to disk"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:223
+msgid "Prevents severe latency spikes caused by swapping"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:224
+msgid "Improves stability for large in-memory models"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:226
+msgid "Notes"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:227
+msgid "For inference workloads, swap can introduce second-level latency"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:228
+msgid "Recommended values are `0` or `1`"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:230
+msgid "5.3 Disable Automatic NUMA Balancing"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:238
+msgid "Disables the kernel’s automatic NUMA page migration mechanism"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:242
+msgid "Prevents background memory page migrations"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:243
+msgid "Reduces unpredictable memory access latency"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:244
+msgid "Improves performance stability on NUMA systems"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:246
+msgid "Recommended For"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:247
+msgid "Multi-socket servers"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:248
+msgid "Ascend / NPU deployments with explicit NUMA binding"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:249
+msgid "Systems with manually managed CPU and memory affinity"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:251
+msgid "5.4 Increase Scheduler Migration Cost"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:258
+msgid "Increases the cost for the scheduler to migrate tasks between CPU cores"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:261
+msgid "Reduces frequent thread migration"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:262
+msgid "Improves CPU cache locality"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:263
+msgid "Lowers latency jitter for inference workloads"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:265
+msgid "Parameter Details"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:266
+msgid "Unit: nanoseconds (ns)"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:267
+msgid "Typical recommended range: 50000–100000"
+msgstr ""
+
+#: ../../source/developer_guide/performance_and_debug/optimization_and_tuning.md:268
+msgid "Higher values encourage threads to stay on the same CPU core"
+msgstr ""
+

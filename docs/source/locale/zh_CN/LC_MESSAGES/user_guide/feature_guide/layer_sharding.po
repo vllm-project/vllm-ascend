@@ -1,0 +1,159 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:5
+msgid "Overview"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:7
+msgid ""
+"**Layer Shard Linear** is a memory-optimization feature designed for "
+"large language model (LLM) inference. It addresses the high memory "
+"pressure caused by **repeated linear operators across many layers** that "
+"share identical structure but have distinct weights."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:9
+msgid ""
+"Instead of replicating all weights on every device, **Layer Shard Linear "
+"shards the weights of a \"series\" of such operators across the NPU "
+"devices in a communication group**:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:10
+msgid ""
+"The **i-th layer's linear weight** is stored **only on device `i % K`**, "
+"where `K` is the number of devices in the group."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:11
+msgid ""
+"Other devices hold a lightweight **shared dummy tensor** during "
+"initialization and fetch the real weight **on-demand via asynchronous "
+"broadcast** during the forward pass."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:13
+msgid ""
+"As illustrated in the figure below, this design enables broadcast to "
+"reach weights: while the current layer (e.g., MLA or MOE) is being "
+"computed, the system **asynchronously broadcasts the next layer's "
+"weight** in the background. Because the attention computation in the MLA "
+"module is sufficiently latency-bound, the weight transfer for `o_proj` is"
+" **fully overlapped with computation**, making the communication "
+"**latency-free from the perspective of end-to-end inference**."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:15
+msgid ""
+"This approach **preserves exact computational semantics** while "
+"**significantly reducing NPU memory footprint**, especially critical for:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:16
+msgid "Extremely deep architectures (e.g., DeepSeek-V3/R1 with 61 layers);"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:17
+msgid ""
+"Models using **[DSA-CP](https://github.com/vllm-project/vllm-"
+"ascend/pull/4702)** or **[FlashComm2](https://github.com/vllm-project"
+"/vllm-ascend/pull/4188)**, where the full `O` (output) projection matrix "
+"must reside in memory per layer;"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:18
+msgid ""
+"Scenarios where **attention computation latency fully overlaps** (hides) "
+"the communication cost of weight broadcasting."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:22
+msgid "Flowchart"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:23
+msgid "![layer shard](./images/layer_sharding.png)"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:23
+msgid "layer shard"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:25
+msgid ""
+"**Figure.** Layer Shard Linear workflow: weights are sharded by layer "
+"across devices (top), and during forward execution (bottom), asynchronous"
+" broadcast pre-fetches the next layer's weight while the current layer "
+"computes—enabling zero-overhead weight loading."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:29
+msgid "Getting Started"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:31
+msgid ""
+"To enable **Layer Shard Linear**, specify the target linear layers using "
+"the `--additional-config` argument when launching your inference job. For"
+" example, to shard the `o_proj` and `q_b_proj` layers, use:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:41
+msgid "Supported Scenarios"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:43
+msgid ""
+"This feature can be enabled in any scenario, but delivers the greatest "
+"benefit in the following cases:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:45
+msgid "FlashComm2-enabled"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:47
+msgid ""
+"When using [FlashComm2](https://github.com/vllm-project/vllm-"
+"ascend/pull/4188), the full output projection (`o_proj`) matrix must be "
+"resident in memory for each layer. Layer sharding significantly reduces "
+"memory pressure by distributing these weights across devices."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:49
+#: ../../source/user_guide/feature_guide/layer_sharding.md:64
+msgid "**Example configuration:**"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:60
+msgid "DSA-CP-enabled"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:62
+msgid ""
+"With [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702), "
+"both `q_b_proj` and `o_proj` layers require large weight matrices to be "
+"stored per layer. Sharding these layers across NPUs helps fit extremely "
+"deep models (e.g., 61-layer architectures) into limited device memory."
+msgstr ""
+

@@ -1,0 +1,86 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-08 20:28+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:1
+msgid "Adding a custom aclnn operation"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:3
+msgid ""
+"This document describes how to add a custom aclnn operation to vllm-"
+"ascend."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:5
+msgid "How custom aclnn operation works in vllm-ascend?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:7
+msgid ""
+"Custom aclnn operations are built and installed into "
+"`vllm_ascend/cann_ops_custom` directory during the build process of vllm-"
+"ascend. Then the aclnn operators are bound to `torch.ops._C_ascend` "
+"module, enabling users to invoke them in vllm-ascend python code."
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:9
+msgid "To enable custom operations, use the following code:"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:17
+msgid "How to add a custom aclnn operation?"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:19
+msgid "Create a new operation folder under `csrc` directory"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:20
+msgid ""
+"Create `op_host` and `op_kernel` directories for host and kernel source "
+"code"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:21
+msgid ""
+"Add build options in `csrc/build_aclnn.sh` for supported SOC. Note that "
+"multiple ops should be separated with `;`, i.e. `CUSTOM_OPS=op1;op2;op3`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:22
+msgid ""
+"Bind aclnn operators to torch.ops._C_ascend module in "
+"`csrc/torch_binding.cpp`"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:23
+msgid ""
+"Write a meta implementation in `csrc/torch_binding_meta.cpp` for op being"
+" captured into aclgraph"
+msgstr ""
+
+#: ../../source/developer_guide/feature_guide/add_custom_aclnn_op.md:25
+msgid ""
+"After a successful build of vllm-ascend, the custom aclnn operation can "
+"be invoked in python code."
+msgstr ""
+
