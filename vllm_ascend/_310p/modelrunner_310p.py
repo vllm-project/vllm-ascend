@@ -4,7 +4,6 @@ from typing import Any, Dict
 
 import torch
 import torch_npu
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
