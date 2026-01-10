@@ -83,6 +83,9 @@ jobs:
           - name: multi-node-qwen-vl-disagg-pd
             config_file_path: Qwen3-VL-235B-disagg-pd.yaml
             size: 2
+          - name: multi-node-deepseek-r1-w8a8-pcp-across-machine
+            config_file_path: DeepSeek-R1-W8A8-PCP-ACROSS-MACHINE.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
