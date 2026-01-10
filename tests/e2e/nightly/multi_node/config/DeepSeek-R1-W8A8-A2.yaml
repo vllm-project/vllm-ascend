@@ -9,7 +9,7 @@ env_common:
   HCCL_INTRA_ROCE_ENABLE: 0
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   VLLM_USE_MODELSCOPE: true
-  HCCL_BUFFSIZE: 1024
+  HCCL_BUFFSIZE: 200
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
@@ -28,13 +28,13 @@ deployment:
       --no-enable-prefix-caching
       --max-num-seqs 16
       --tensor-parallel-size 4
-      --max-model-len 36864
-      --max-num-batched-tokens 6000
+      --max-model-len 16384
+      --max-num-batched-tokens 4096
       --enable-expert-parallel
       --async-scheduling
       --trust-remote-code
       --quantization ascend
-      --gpu-memory-utilization 0.9
+      --gpu-memory-utilization 0.92
       --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
       --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 
@@ -50,13 +50,13 @@ deployment:
       --no-enable-prefix-caching
       --max-num-seqs 16
       --tensor-parallel-size 4
-      --max-model-len 36864
-      --max-num-batched-tokens 6000
+      --max-model-len 16384
+      --max-num-batched-tokens 4096
       --enable-expert-parallel
       --async-scheduling
       --trust-remote-code
       --quantization ascend
-      --gpu-memory-utilization 0.9
+      --gpu-memory-utilization 0.92
       --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
       --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 benchmarks:
