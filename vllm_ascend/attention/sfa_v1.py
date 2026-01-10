@@ -108,6 +108,7 @@ class AscendSFAMetadata:
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     sfa_cp_context: Optional[SfaCpContext] = None
+    reshape_cache_event: torch.npu.Event = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -369,6 +370,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sfa_cp = enable_dsa_cp()
         self.local_num_heads = self.num_heads
         self.vllm_config = get_current_vllm_config()
+        self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         if self.enable_sfa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
             self.layer_sharding_kwargs = []
@@ -897,11 +899,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             k = get_tp_group().all_gather(k, 0)
 
         if kv_cache is not None:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
             torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, k.shape[-1]),
                                              attn_metadata.slot_mapping.view(
                                                  -1, 1),
                                              k.view(-1,
                                                     k.shape[-1]))  # b, s, n, d
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
 
         weights, _ = self.weights_proj(x)
         weights = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
