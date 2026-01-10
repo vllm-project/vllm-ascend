@@ -200,6 +200,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         metadata_cls: type[AscendMLAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
+        self.kv_cache_spec = kv_cache_spec
         self.metadata_cls = (metadata_cls if metadata_cls is not None else
                              AscendMLAMetadata)
         self.vllm_config = vllm_config
