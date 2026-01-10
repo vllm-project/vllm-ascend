@@ -2,12 +2,13 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
-from vllm_ascend.worker.worker import NPUWorker
-from vllm_ascend.utils import is_310p
 from vllm_ascend._310p.modelrunner_310p import NPUModelRunner310
+from vllm_ascend.utils import is_310p
+from vllm_ascend.worker.worker import NPUWorker
 
 
 class NPUWorker310(NPUWorker):
+
     def init_device(self):
         self.device = self._init_device()
 

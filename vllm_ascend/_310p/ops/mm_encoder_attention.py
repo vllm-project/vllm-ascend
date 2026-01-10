@@ -1,17 +1,16 @@
+import einops
 import torch
 import torch.nn.functional as F
-import einops
 import torch_npu
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.mm_encoder_attention import (
-    AscendMMEncoderAttention as _Base,
-    MIN_PAD_SIZE,
-    MAX_PAD_SIZE,
-)
+from vllm_ascend.ops.mm_encoder_attention import MAX_PAD_SIZE, MIN_PAD_SIZE
+from vllm_ascend.ops.mm_encoder_attention import \
+    AscendMMEncoderAttention as _Base
 
 
 class AscendMMEncoderAttention310(_Base):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -28,12 +27,10 @@ class AscendMMEncoderAttention310(_Base):
         kv_len = key.size(1)
 
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
-        
-        enable_pad = (
-            envs_ascend.USE_OPTIMIZED_MODEL
-            and self.head_size > MIN_PAD_SIZE
-            and self.head_size < MAX_PAD_SIZE
-        )
+
+        enable_pad = (envs_ascend.USE_OPTIMIZED_MODEL
+                      and self.head_size > MIN_PAD_SIZE
+                      and self.head_size < MAX_PAD_SIZE)
 
         origin_shape = q.shape[-1]
         if enable_pad:
@@ -52,12 +49,16 @@ class AscendMMEncoderAttention310(_Base):
 
         if cu_seqlens is None:
             cu_seqlens = torch.arange(
-                0, (bsz + 1) * q_len, step=q_len,
-                dtype=torch.int32, device=query.device,
+                0,
+                (bsz + 1) * q_len,
+                step=q_len,
+                dtype=torch.int32,
+                device=query.device,
             )
 
         total_q_tokens = bsz * q_len
-        context_flat = q.new_empty((total_q_tokens, self.num_heads, q.shape[-1]))
+        context_flat = q.new_empty(
+            (total_q_tokens, self.num_heads, q.shape[-1]))
 
         st = 0
         seg_lens = torch.diff(cu_seqlens).to("cpu", dtype=torch.int64).tolist()
@@ -65,7 +66,7 @@ class AscendMMEncoderAttention310(_Base):
             seg_len = int(seg_len)
             ed = st + seg_len
 
-            q_i = q[st:ed].unsqueeze(0)   # [1, S, H, D]
+            q_i = q[st:ed].unsqueeze(0)  # [1, S, H, D]
             k_i = k[st:ed].unsqueeze(0)
             v_i = v[st:ed].unsqueeze(0)
 
@@ -73,7 +74,9 @@ class AscendMMEncoderAttention310(_Base):
             kvs = int(k_i.shape[1])
 
             out_i = torch_npu.npu_prompt_flash_attention(
-                q_i, k_i, v_i,
+                q_i,
+                k_i,
+                v_i,
                 input_layout="BSND",
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
@@ -85,7 +88,7 @@ class AscendMMEncoderAttention310(_Base):
             st = ed
 
         context_flat = context_flat[..., :origin_dim]
-        context_layer = einops.rearrange(
-            context_flat, "(b s) h d -> b s h d", b=bsz
-        ).contiguous()
+        context_layer = einops.rearrange(context_flat,
+                                         "(b s) h d -> b s h d",
+                                         b=bsz).contiguous()
         return context_layer
