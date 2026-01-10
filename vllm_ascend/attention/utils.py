@@ -36,58 +36,13 @@ def enable_cp():
 
 
 @dataclass
-class AscendMetadataForPrefill:
-
-    @dataclass
-    class AscendPCPMetadata:
-        q_head_idx: torch.Tensor = None
-        q_tail_idx: torch.Tensor = None
-        kv_with_q_head_nomask_idx: torch.Tensor = None
-        kv_with_q_head_mask_idx: torch.Tensor = None
-        kv_with_q_tail_nomask_idx: torch.Tensor = None
-        kv_with_q_tail_mask_idx: torch.Tensor = None
-        attn_mask_seqlens: torch.Tensor = None
-        head_attn_nomask_seqlens: torch.Tensor = None
-        tail_attn_nomask_seqlens: torch.Tensor = None
-        q_full_idx: torch.Tensor = None
-        pcp_prefill_mask: torch.Tensor = None
-
-    @dataclass
-    class ChunkedContextMetadata:
-        actual_chunk_seq_lengths: torch.Tensor
-        actual_seq_lengths_kv: torch.Tensor
-        starts: torch.Tensor
-        chunk_seq_mask_filtered_indices: torch.Tensor
-        chunked_req_mask: Optional[list[bool]] = None
-        local_context_lens_allranks: Optional[list[list[int]]] = None
-        cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
-        kv_inverse_idx_for_chunk: Optional[list[int]] = None
-        batch_chunk_seq_mask: Optional[list[bool]] = None
-
-    """ Prefill Specific Metadata for Ascend"""
-    pcp_metadata: Optional[AscendPCPMetadata] = None
-    pcp_allgather_restore_idx: Optional[List[int]] = None
-    chunked_context: Optional[ChunkedContextMetadata] = None
-    block_tables: torch.Tensor = None
-    actual_seq_lengths_q: torch.Tensor = None
-
-
-@dataclass
-class AscendMetadataForDecode:
-    """ Decode Specific Metadata for Ascend"""
-    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
-    batch_seq_mask: torch.Tensor = None
-    block_tables: torch.Tensor = None
-
-
-@dataclass
 # class AscendCommonLongSequenceMetadata:
 class AscendPrefillContextParallelMetadata:
     pcp_allgather_restore_idx: torch.Tensor = None
 
     cp_kv_recover_idx_for_chunk: torch.Tensor = None
 
-    num_actual_tokens_pcp_padded: Optional[int] = None
+    num_actual_tokens_pcp_padded: int = 0
 
     num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
 
@@ -110,8 +65,6 @@ class AscendPrefillContextParallelMetadata:
     tail_attn_nomask_seqlens: torch.Tensor = None
 
     q_full_idx: torch.Tensor = None
-
-    pcp_prefill_mask: torch.Tensor = None
 
     # original query_lens before pcp split
     query_lens_pcp_full_cpu: torch.Tensor = None
@@ -137,10 +90,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     actual_seq_lengths_q: list[int] = field(default_factory=list)
 
     positions: torch.Tensor = None
-
-    attn_mask: torch.Tensor = None
-
-    spec_attn_mask: torch.Tensor = None
 
     attn_state: Any = None
 
@@ -168,13 +117,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
             decode_token_per_req=self.decode_token_per_req,
-            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
-            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            # NOTE: keep all tokens for block_table_tensor and slot_mapping otherwise
+            # there will be error about shape mismatch during reshape and cache.
+            # This is really strange since vLLM slices them as well
+            block_table_tensor=self.block_table_tensor,
+            slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions[:num_actual_tokens],
-            attn_mask=self.attn_mask,
-            spec_attn_mask=self.spec_attn_mask,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=num_actual_tokens,

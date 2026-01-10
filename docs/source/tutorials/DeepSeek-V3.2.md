@@ -19,7 +19,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 - `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
 - `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 - `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
-- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot)
+- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -36,17 +36,19 @@ We strongly recommend you to install triton ascend package to speed up the infer
 
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is for better performance, please follow the instructions below to install it and its dependency.
 
-Source the Ascend BiSheng toolkit, execute the command:
+Install the Ascend BiSheng toolkit, execute the command:
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/8.3.RC2/bisheng_toolkit/set_env.sh
+BISHENG_NAME="Ascend-BiSheng-toolkit_$(uname -i)_20260105.run"
+BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
+wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
+export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
 ```
 
 Install Triton Ascend:
 
 ```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
-pip install triton_ascend-3.2.0.dev2025110717-cp311-cp311-manylinux_2_27_aarch64.whl
+python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
 ```
 
 :::
@@ -454,10 +456,10 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 4 \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 6, 8]}' \
+            --max-num-batched-tokens 12 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
             --trust-remote-code \
-            --max-num-seqs 1 \
+            --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
             --async-scheduling \
@@ -479,7 +481,8 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }'
+            }' \
+            --additional-config '{"recompute_scheduler_enable" : true}'
         ```
 
     4. Decode node 1
@@ -532,11 +535,11 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 4 \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[2, 4, 6, 8]}' \
+            --max-num-batched-tokens 12 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
             --trust-remote-code \
             --async-scheduling \
-            --max-num-seqs 1 \
+            --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
             --quantization ascend \
@@ -557,7 +560,8 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }'
+            }' \
+            --additional-config '{"recompute_scheduler_enable" : true}'
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
@@ -639,6 +643,16 @@ lm_eval \
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
+The performance result is:  
+
+**Hardware**: A3-752T, 4 node
+
+**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4
+
+**Input/Output**: 64k/3k
+
+**Performance**: 533tps, TPOT 32ms
+
 ### Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example.
@@ -657,12 +671,8 @@ export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the performance evaluation result. With this tutorial, the performance result is:
+## Function Call
 
-**Hardware**: A3-752T, 4 node
+The function call feature is supported from v0.13.0rc1 on. Please use the latest version.
 
-**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4
-
-**Input/Output**: 64k/3k
-
-**Performance**: 255tps, TPOT 23ms
+Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html#tool-calling-example) for details.

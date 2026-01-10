@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Union
 
 # Third Party
+from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
@@ -56,7 +57,11 @@ class MooncakeBackend(Backend):
     def put(self, keys: list[str], addrs: list[list[int]],
             sizes: list[list[int]]):
         try:
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            config = ReplicateConfig()
+            config.preferred_segment = self.local_seg
+            config.prefer_alloc_in_same_node = True
+            res = self.store.batch_put_from_multi_buffers(
+                keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to put key {keys},res:{res}")
@@ -66,7 +71,8 @@ class MooncakeBackend(Backend):
     def get(self, keys: list[str], addrs: list[list[int]],
             sizes: list[list[int]]):
         try:
-            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+            res = self.store.batch_get_into_multi_buffers(
+                keys, addrs, sizes, True)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to get key {keys}, res:{res}")
@@ -76,7 +82,6 @@ class MooncakeBackend(Backend):
 
 @dataclass
 class MooncakeStoreConfig:
-    local_hostname: str
     metadata_server: str
     global_segment_size: Union[int, str]
     local_buffer_size: int
@@ -89,7 +94,6 @@ class MooncakeStoreConfig:
         with open(file_path) as file:
             config = json.load(file)
         return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size",

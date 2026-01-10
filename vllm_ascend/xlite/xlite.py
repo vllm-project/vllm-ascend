@@ -61,7 +61,7 @@ class LlamaXliteModel(XliteModel):
         xlite_model.embed = params_dict.get(model_prefix +
                                             "model.embed_tokens.weight")
         xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
-        if vllm_config.model_config.hf_config.tie_word_embeddings:
+        if vllm_config.model_config.hf_text_config.tie_word_embeddings:
             xlite_model.head = xlite_model.embed
         else:
             xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
@@ -118,7 +118,7 @@ class LlamaXliteModel(XliteModel):
         return (xlite_model, freq_cis, config.hidden_size, dtype)
 
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_text_config
         if hasattr(hf_config, "text_config"):
             hf_config = hf_config.text_config
         config = ModelConfig()
@@ -143,7 +143,7 @@ class LlamaXliteModel(XliteModel):
         config.moe_tp_size = 1
 
         config.attn_type = AttnMHA
-        config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ
+        config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len
@@ -255,19 +255,30 @@ class XliteWrapper:
         ]
 
         if not with_prefill or self.full_mode:
-            batch = attn_metadata.num_prefills + attn_metadata.num_decodes
+            # TODO: When vllm_ascend enables graph mode, attn_metadata.num_decodes
+            # will be padded in decode requests. Therefore, it is first fixed using
+            # num_decode_tokens. However, in the future, when MTP is enabled, there
+            # may be cases where a single request involves multiple tokens, which
+            # will need to be solved.
+            num_decodes = attn_metadata.num_decode_tokens
+            num_prefills = attn_metadata.num_prefills
+            batch = num_prefills + num_decodes
             seq_lens = attn_metadata.seq_lens[:batch]
-            query_lens = attn_metadata.query_start_loc_cpu[
-                1:] - attn_metadata.query_start_loc_cpu[:-1]
+            seq_tensor = torch.cat([
+                torch.tensor([0]),
+                torch.tensor(attn_metadata.actual_seq_lengths_q)
+            ],
+                                   dim=0)
+            query_lens = seq_tensor[1:] - seq_tensor[:-1]
             query_lens = query_lens[:batch]
             cached_lens = seq_lens - query_lens
 
             xlite_attn_metadata = ModelAttnMeta()
             xlite_attn_metadata.lens = query_lens.tolist()
             xlite_attn_metadata.cached_lens = cached_lens.tolist()
-            xlite_attn_metadata.is_prefills = [
-                False
-            ] * attn_metadata.num_decodes + [True] * attn_metadata.num_prefills
+            xlite_attn_metadata.is_prefills = [False] * num_decodes + [
+                True
+            ] * num_prefills
             xlite_attn_metadata.block_tables = attn_metadata.block_tables.cpu(
             ).tolist()
 

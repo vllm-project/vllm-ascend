@@ -45,7 +45,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
-from .utils import get_quant_method
+from .utils import get_quant_method, is_mx_quant_type
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -116,7 +116,7 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
+        model_type = vllm_config.model_config.hf_text_config.model_type
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
@@ -173,7 +173,15 @@ class AscendQuantConfig(QuantizationConfig):
                         "are quantized. All shards of fused layers "
                         "to have the same precision.")
         else:
-            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
+            # NOTE: In GLM4.6, the MTP draft model shares the same LM head weigthts
+            # with the main model. Therefore, before `load_weights()` runs, some parameter
+            # names may not include the expected prefix and may appear only with the
+            # ".head" suffix. This can trigger a load-time error, so here we replace the
+            # key with "lm_head.weight".
+            key = prefix + '.weight'
+            if key not in self.quant_description and ".head" in prefix:
+                key = 'lm_head.weight'
+            is_skipped = self.quant_description[key] == "FLOAT"
 
         assert is_skipped is not None
         return is_skipped
@@ -298,6 +306,12 @@ packed_modules_model_mapping = {
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     },
+    "longcat_flash": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    },
 }
 
 
@@ -387,7 +401,8 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name \
+                or is_mx_quant_type(self.quant_method):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
 
@@ -514,6 +529,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -524,9 +540,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         return self.quant_method.apply(
             layer, x, router_logits, top_k, renormalize, use_grouped_topk,
             global_num_experts, expert_map, topk_group, num_expert_group,
-            custom_routing_function, scoring_func, e_score_correction_bias,
-            is_prefill, enable_force_load_balance, log2phy,
-            global_redundant_expert_num, **kwargs)
+            custom_routing_function, scoring_func, routed_scaling_factor,
+            e_score_correction_bias, is_prefill, enable_force_load_balance,
+            log2phy, global_redundant_expert_num, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
@@ -535,6 +551,11 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         # TODO: implement this function
         pass
+
+    @property
+    def supports_eplb(self):
+        supports_eplb = getattr(self.quant_method, "supports_eplb", False)
+        return supports_eplb
 
 
 class AscendEmbeddingMethod(AscendLinearMethod):

@@ -34,6 +34,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "use_layerwise", False)
+        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -55,7 +57,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
             )
 
             assert self.connector_worker is not None
-            if vllm_config.parallel_config.rank == 0 and self.kv_role != "kv_consumer":
+            if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker,
                                                      vllm_config,
                                                      self.use_layerwise)
@@ -121,7 +123,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if self.kv_role == "kv_consumer":
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             # Don't do save if the role is kv_consumer
             return
 
@@ -134,20 +136,9 @@ class AscendStoreConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        meta = self._get_connector_metadata()
-        done_sending, done_recving = self.connector_worker.get_finished()
-        sended_and_finished: set[str] = set()
-        for item in list(self.sended_but_unfinished_reqs):
-            if item not in meta.unfinished_request_ids:
-                sended_and_finished.add(item)
-                self.sended_but_unfinished_reqs.remove(item)
-        for item in done_sending:
-            if item in meta.unfinished_request_ids:
-                self.sended_but_unfinished_reqs.add(item)
-            else:
-                sended_and_finished.add(item)
-
-        return sended_and_finished, done_recving
+        done_sending, done_recving = self.connector_worker.get_finished(
+            finished_req_ids)
+        return done_sending, done_recving
 
 
 class LookupKeyServer:
