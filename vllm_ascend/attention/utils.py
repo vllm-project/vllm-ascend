@@ -102,6 +102,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
 
+    backup: Optional[dict] = None
+
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int,
                  num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -130,7 +132,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_input_tokens=num_actual_tokens,
             prefill_context_parallel_metadata=self.
             prefill_context_parallel_metadata,
-            max_seq_len=self.max_seq_len)
+            max_seq_len=self.max_seq_len,
+            backup=self.backup)
 
 
 def filter_chunked_req_indices(
