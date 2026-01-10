@@ -66,6 +66,15 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
+      - name: Checkout PR 5682
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          echo "Fetching PR 5682..."
+          git fetch origin pull/5682/head:pr5682
+          git checkout pr5682
+          echo "Checked out PR 5682 successfully."
+          echo "Current Commit: $(git rev-parse HEAD)"
+
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace
         run: |
@@ -143,5 +152,3 @@ jobs:
           # ignore test_dispatch_ffn_combine until the test is fixed
           pytest -sv ${{ inputs.tests }} \
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
-
-
