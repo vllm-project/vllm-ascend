@@ -219,12 +219,10 @@ class EagleProposer(VllmEagleProposer):
             # TODO: check which one should we use, ChunkedPrefill or SpecDecoding
             if self.vllm_config.model_config.use_mla:
                 attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.SpecDecoding
-                )
+                    common_attn_metadata, AscendAttentionState.SpecDecoding)
             else:
                 attn_metadata_eagle = builder.build_for_graph_capture(
-                    common_attn_metadata, AscendAttentionState.ChunkedPrefill
-                )
+                    common_attn_metadata, AscendAttentionState.ChunkedPrefill)
             attn_metadata = {}
             for layer_name in self.attn_layer_names:
                 attn_metadata[layer_name] = attn_metadata_eagle
@@ -261,8 +259,7 @@ class EagleProposer(VllmEagleProposer):
                 previous_hidden_states = self.hidden_states[:num_tokens]
 
                 positions, previous_hidden_states = self.maybe_pad_and_reduce(
-                    positions, previous_hidden_states
-                )
+                    positions, previous_hidden_states)
 
                 self.model(
                     input_ids=input_ids,
@@ -403,8 +400,7 @@ class EagleProposer(VllmEagleProposer):
             max_query_len = common_attn_metadata.max_query_len
             uniform_decode_query_len = 1 + self.num_speculative_tokens
             uniform_decode = (
-                max_query_len in list(
-                    range(1, uniform_decode_query_len + 1))
+                max_query_len in list(range(1, uniform_decode_query_len + 1))
                 and scheduler_output.total_num_scheduled_tokens
                 == self.runner.input_batch.num_reqs * uniform_decode_query_len)
 
@@ -842,8 +838,7 @@ class EagleProposer(VllmEagleProposer):
                 else:
                     input_ids = self.input_ids[:input_batch_size]
                     inputs_embeds = None
-                _positions = self._get_positions(
-                    input_batch_size)
+                _positions = self._get_positions(input_batch_size)
                 hidden_states = self.hidden_states[:input_batch_size]
 
                 # split hidden states along sequence dimension
@@ -858,8 +853,7 @@ class EagleProposer(VllmEagleProposer):
 
                 self.maybe_update_attn_params(input_batch_size)
                 _positions, hidden_states = self.maybe_all_gather_and_unpad(
-                    _positions, last_hidden_states, hidden_states
-                )
+                    _positions, last_hidden_states, hidden_states)
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
