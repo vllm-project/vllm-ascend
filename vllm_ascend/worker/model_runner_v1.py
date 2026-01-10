@@ -1503,6 +1503,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.vllm_config,
                     num_tokens=num_input_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    with_prefill=self.with_prefill,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
@@ -2216,6 +2217,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.vllm_config,
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    with_prefill=with_prefill,
                     in_profile_run=is_profile,
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
