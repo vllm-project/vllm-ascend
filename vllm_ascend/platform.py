@@ -384,12 +384,12 @@ class NPUPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config):
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
         if is_310p():
-            default_attn_backend = "vllm_ascend._310p.attention.AscendAttentionBackend310"
+            default_attn_backend = "vllm_ascend._310p.attention.attention_v1.AscendAttentionBackend310"
             backend_map_310 = {
                 #@TODO 310p unable to use MLA/SFA, the key maybe ALWAYS (False, False)
-                (True, False): "vllm_ascend._310p.attention.AscendMLABackend310",
+                (True, False): "vllm_ascend._310p.attention.attention_v1.AscendMLABackend310",
                 (False, False): "vllm_ascend._310p.attention.attention_v1.AscendAttentionBackend310",
-                (True, True): "vllm_ascend._310p.attention.AscendSFABackend310",
+                (True, True): "vllm_ascend._310p.attention.attention_v1.AscendSFABackend310",
             }
             return backend_map_310.get(key, default_attn_backend)
         backend_map = {
