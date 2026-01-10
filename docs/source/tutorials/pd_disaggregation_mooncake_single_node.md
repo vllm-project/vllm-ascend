@@ -27,7 +27,7 @@ for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
 for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
 ```
 
-2. Check NPU network configuration:
+2. Check NPU HCCN Configuration:
 
 Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -39,6 +39,20 @@ cat /etc/hccn.conf
 
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g;done
+```
+
+4. Cross-Node PING Test
+
+```bash
+# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+```
+
+5. Check NPU TLS Configuration
+
+```bash
+# The tls settings should be consistent across all nodes
+for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
 ```
 
 ## Run with Docker
