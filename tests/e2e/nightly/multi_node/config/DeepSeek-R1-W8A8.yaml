@@ -3,11 +3,12 @@ model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
 env_common:
+  HCCL_OP_EXPANSION_MODE: AIV
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 10
+  OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
@@ -36,6 +37,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
+          --no-enable-prefix-caching
           --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -55,7 +57,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"recompute_scheduler_enable":true}'
 
   -
     server_cmd: >
@@ -74,6 +76,7 @@ deployment:
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
+          --no-enable-prefix-caching
           --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -93,7 +96,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+          '{"recompute_scheduler_enable":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -113,7 +116,9 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --no-enable-prefix-caching
         --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -132,7 +137,11 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true}'
+        '{"recompute_scheduler_enable":true,
+        "enable_shared_expert_dp":true,
+        "multistream_overlap_shared_expert":true,
+        "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}
+        }'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -151,7 +160,9 @@ deployment:
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --no-enable-prefix-caching
         --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -170,7 +181,11 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true}'
+        '{"recompute_scheduler_enable":true,
+        "enable_shared_expert_dp":true,
+        "multistream_overlap_shared_expert":true,
+        "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}
+        }'
 benchmarks:
   perf:
     case_type: performance
