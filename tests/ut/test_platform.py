@@ -55,7 +55,7 @@ class TestNPUPlatform(TestBase):
         self.assertTrue(self.platform.is_sleep_mode_available())
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser(self, mock_quant_config,
                                                  mock_adapt_patch):
         mock_parser = MagicMock()
@@ -71,7 +71,7 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_without_parser(self, mock_quant_config,
                                                     mock_adapt_patch):
         self.platform.pre_register_and_update(None)
@@ -79,7 +79,7 @@ class TestNPUPlatform(TestBase):
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser_no_quant_action(
             self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
@@ -90,7 +90,7 @@ class TestNPUPlatform(TestBase):
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.quant_config.AscendQuantConfig")
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_existing_ascend_quant(
             self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
