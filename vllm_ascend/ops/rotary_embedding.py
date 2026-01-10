@@ -27,8 +27,8 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
-                               get_ascend_device_type, has_rope, is_vl_model)
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
+                               has_rope, is_vl_model)
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -166,8 +166,7 @@ def get_cos_and_sin_slice():
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
-    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
-    )
+    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0
 
 
 def _rope_forward_oot(

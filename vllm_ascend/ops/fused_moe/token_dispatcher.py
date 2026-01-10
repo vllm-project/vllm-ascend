@@ -230,7 +230,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expand_scales": expand_scales
         }
 
-        group_list_type = 0
+        group_list_type = 0  # `cumsum` mode
 
         return TokenDispatchResult(hidden_states=expand_x,
                                    dynamic_scale=dynamic_scale,
@@ -353,6 +353,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
+        group_list_type = 1  # `count` mode
         sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
             torch.ops._C_ascend.npu_moe_init_routing_custom(
                 hidden_states,
@@ -360,14 +361,13 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                 scale=pertoken_scale,
                 active_num=num_tokens * self.top_k,
                 expert_num=global_num_experts,
-                expert_tokens_num_type=1,
+                expert_tokens_num_type=group_list_type,
                 expert_tokens_num_flag=True,
                 active_expert_range=[first_expert_idx, last_expert_idx],
                 quant_mode=1
                 if self.with_quant and pertoken_scale is None else -1,
             ))
         expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 1  # `count` mode
         context_metadata = {
             "topk_weights": topk_weights,
             "expanded_row_idx": expanded_row_idx
@@ -503,7 +503,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             hidden_states=global_input_tokens,
             dynamic_scale=dynamic_scale_final,
             group_list=tokens_per_expert,
-            group_list_type=1,
+            group_list_type=1,  # `count` mode
             context_metadata=context_metadata,
         )
 

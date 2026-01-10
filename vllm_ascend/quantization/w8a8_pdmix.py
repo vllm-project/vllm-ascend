@@ -36,7 +36,6 @@ class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
     def process_weights_after_loading(self, layer):
         AscendW8A8LinearMethod.process_weights_after_loading(
             cast(AscendW8A8LinearMethod, self), layer)
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.is_kv_consumer = self.kv_transfer_config is not None and self.kv_transfer_config.is_kv_consumer
 
 
