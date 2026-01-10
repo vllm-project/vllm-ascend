@@ -106,7 +106,8 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (AscendDeviceType, ProfileExecuteDuration,
                                enable_sp, get_ascend_device_type, is_moe_model,
                                lmhead_tp_enable, maybe_trans_nz,
-                               set_weight_prefetch_method, vllm_version_is)
+                               set_weight_prefetch_method, vllm_version_is,
+                               check_and_adjust_hidden_states_type)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -1560,12 +1561,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.debugger.stop()
                         self.debugger.step()
                     return pool_output
-                # Sometimes, after the model is compiled through the AOT backend,
-                # the model output may become a list containing only one Tensor object.
-                if isinstance(hidden_states, list) and \
-                        len(hidden_states) == 1 and \
-                        isinstance(hidden_states[0], torch.Tensor):
-                    hidden_states = hidden_states[0]
+                hidden_states = check_and_adjust_hidden_states_type(hidden_states)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             if broadcast_pp_output:
@@ -2257,14 +2253,9 @@ class NPUModelRunner(GPUModelRunner):
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         # TODO: need to rum a dummy sampler for generate task
-        # Sometimes, after the model is compiled through the AOT backend,
-        # the model output may become a list containing only one Tensor object.
-        if isinstance(hidden_states, list) and \
-            len(hidden_states) == 1 and \
-            isinstance(hidden_states[0], torch.Tensor):
-            hidden_states = hidden_states[0]
-            hidden_states = hidden_states[logit_indices]
-            output = self.model.compute_logits(hidden_states)
+        hidden_states = check_and_adjust_hidden_states_type(hidden_states)
+        hidden_states = hidden_states[logit_indices]
+        output = self.model.compute_logits(hidden_states)
         return output
 
     def profile_run(self) -> None:

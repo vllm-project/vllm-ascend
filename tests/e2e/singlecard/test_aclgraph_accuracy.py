@@ -126,7 +126,9 @@ def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
             "cudagraph_mode": "FULL_DECODE_ONLY"
         },
         "additional_config": {
-            "enable_npugraph_ex": True
+            "npugraph_ex_config": {
+                "enable": True
+            }
         },
     }
     gen_and_valid(runner_kwargs=runner_kwargs,

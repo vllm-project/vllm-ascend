@@ -17,7 +17,8 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
+from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
+                               check_and_adjust_hidden_states_type)
 
 
 class MtpProposer(EagleProposer):
@@ -348,6 +349,7 @@ class MtpProposer(EagleProposer):
                     hidden_states = self.model(input_ids=input_ids,
                                                positions=positions,
                                                hidden_states=hidden_states)
+                    hidden_states = check_and_adjust_hidden_states_type(hidden_states)
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not self.use_sparse:
                         self._update_full_graph_params(forward_context,
