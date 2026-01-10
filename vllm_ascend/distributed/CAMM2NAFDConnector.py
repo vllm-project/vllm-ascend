@@ -245,7 +245,8 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         src = self.p2p_rank % self.min_size + self.ffn_size
         
         size_tensor = torch.empty(1, dtype=torch.long, device="npu")
-        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)    
+        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)  
+        print(f'yxj debug size_tensor is {size_tensor},size_tensor.item() is {size_tensor.item()}')  
         object_tensor_npu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="npu")
         rank_object = torch.distributed.recv(object_tensor_npu, src=src, group=self.p2p_pg)
         
@@ -279,6 +280,7 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
         get_forward_context().cam_afdconnector_data = cam_afdconnector_data
 
     cam_metadata = get_forward_context().cam_afdconnector_data
+    print(f'yxj debug cam_metadata.batch_size in cam_send_attn_output_impl is {cam_metadata.batch_size}')
     batch_size = cam_metadata.batch_size
     h = cam_metadata.h
     k = cam_metadata.k
