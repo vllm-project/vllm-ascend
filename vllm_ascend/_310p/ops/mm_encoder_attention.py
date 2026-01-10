@@ -26,7 +26,6 @@ class AscendMMEncoderAttention310(_Base):
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
-        is_reshaped = query.dim() == 4
 
         q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
         
