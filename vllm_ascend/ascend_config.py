@@ -123,10 +123,8 @@ class AscendConfig:
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_config_and_validate(
             self, vllm_config)
-        npugraph_ex_config = additional_config.get(
-            "npugraph_ex_config", {})
-        self.npugraph_ex_config = NpugraphExConfig(
-            **npugraph_ex_config)
+        npugraph_ex_config = additional_config.get("npugraph_ex_config", {})
+        self.npugraph_ex_config = NpugraphExConfig(**npugraph_ex_config)
         # We find that _npu_paged_attention still performs better than
         # npu_fused_infer_attention_score in some cases. We allow to execute
         # _npu_paged_attention in this cases. This should be removed once
@@ -231,6 +229,7 @@ class AscendCompilationConfig:
         """
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = HAS_TRITON or fuse_qknorm_rope
+
 
 class NpugraphExConfig:
 

@@ -29,8 +29,7 @@ from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
-from vllm_ascend.ascend_config import (NpugraphExConfig,
-                                       get_ascend_config)
+from vllm_ascend.ascend_config import NpugraphExConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
@@ -118,8 +117,8 @@ def npugraph_ex_compile(
         uniform_decode_query_len = num_spec_tokens + 1
         max_num_tokens = vllm_config.scheduler_config.max_num_seq * uniform_decode_query_len
         decode_cudagraph_batch_sizes = [
-            x for x in vllm_config.compilation_config.cudagraph_capture_size if
-            max_num_tokens >= x >= uniform_decode_query_len
+            x for x in vllm_config.compilation_config.cudagraph_capture_size
+            if max_num_tokens >= x >= uniform_decode_query_len
         ]
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 

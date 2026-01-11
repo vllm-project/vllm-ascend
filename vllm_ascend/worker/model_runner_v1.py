@@ -1105,6 +1105,7 @@ class NPUModelRunner(GPUModelRunner):
                 inputs_embeds=inputs_embeds,
                 **self._init_model_kwargs())
 
+        hidden_states = check_and_adjust_hidden_states_type(hidden_states)
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
             and not self.use_sparse:
