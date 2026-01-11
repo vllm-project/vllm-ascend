@@ -36,7 +36,7 @@ MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
 
 @pytest.mark.parametrize("model_name", MODELS)
 def test_qwen3_next_mtp_acceptance_tp4(model_name):
-    golden = [0.85, 0.46, 0.19]
+    golden = [0.91, 0.73, 0.58]
 
     example_prompts = [
         "Hello, my name is",
