@@ -467,38 +467,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         post_process_after_loading_for_shard_weight_series(
                             layer)
             else:
-                ##################### TODO: To be integrated ---zzhx10 ######
-                # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj weight for prefill stage.
-                if AscendSFAImpl.o_proj_full_pool is None:
-                    sample = self.o_proj.weight
-                    AscendSFAImpl.o_proj_full_pool = torch.empty(
-                        (sample.shape[0] * self.tp_size, sample.shape[1]),
-                        dtype=sample.dtype,
-                        device=sample.device)
-                # we should save parameters for tp mode
-                self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
-                self.o_proj_tp_aclnn_input_scale = self.o_proj.aclnn_input_scale.clone(
-                ).detach()
-                self.o_proj_tp_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.clone(
-                ).detach()
-                self.o_proj_tp_aclnn_input_offset = self.o_proj.aclnn_input_offset.clone(
-                ).detach()
-                # initially switch to tp mode for graph capture
-                self.o_proj.weight.set_(self.o_proj_tp_weight)
-                self.o_proj.aclnn_input_scale.set_(
-                    self.o_proj_tp_aclnn_input_scale)
-                self.o_proj.aclnn_input_scale_reciprocal.set_(
-                    self.o_proj_tp_aclnn_input_scale_reciprocal)
-                self.o_proj.aclnn_input_offset.set_(
-                    self.o_proj_tp_aclnn_input_offset)
-                # wo should also save parameters for full mode
-                self.o_proj_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(
-                    self.tp_size)
-                self.o_proj_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(
-                    self.tp_size)
-                self.o_proj_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(
-                    self.tp_size)
-                #######################
+                self._init_o_proj_tp_full_params()
 
         if self.enable_mlapo:
             quant_method = getattr(
@@ -960,40 +929,18 @@ class AscendSFAImpl(MLAAttentionImpl):
                            enabled=self.enable_prefetch)
 
         if self.enable_sfa_cp and not self.enable_sfa_cp_prefill_only:
-            # Gather o_proj weight from all tp ranks
-            if should_shard_weight:
-                # wait for all-gather o_proj weight
-                if o_proj_full_work is not None:
-                    o_proj_full_work.wait()
-                # switch o_proj into full mode
-                self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
-                self.o_proj.aclnn_input_scale.set_(
-                    self.o_proj_full_aclnn_input_scale)
-                self.o_proj.aclnn_input_scale_reciprocal.set_(
-                    self.o_proj_full_aclnn_input_scale_reciprocal)
-                self.o_proj.aclnn_input_offset.set_(
-                    self.o_proj_full_aclnn_input_offset)
-                # apply o_proj quant method
-                output[...] = self.o_proj.quant_method.quant_method.apply(
-                    self.o_proj, attn_output)
-                # switch o_proj back to tp mode
-                self.o_proj.weight.set_(self.o_proj_tp_weight)
-                self.o_proj.aclnn_input_scale.set_(
-                    self.o_proj_tp_aclnn_input_scale)
-                self.o_proj.aclnn_input_scale_reciprocal.set_(
-                    self.o_proj_tp_aclnn_input_scale_reciprocal)
-                self.o_proj.aclnn_input_offset.set_(
-                    self.o_proj_tp_aclnn_input_offset)
-                return output_padded
-            else:
-                # All-to-all for o_proj input activations in decode scenario
-                send = attn_output.view(
-                    -1, self.tp_size,
-                    self.num_heads * self.v_head_dim).permute(1, 0, 2).reshape(
-                        -1, self.num_heads * self.v_head_dim)
-                attn_output = torch.empty_like(send)
-                torch.distributed.all_to_all_single(
-                    attn_output, send, group=get_tp_group().device_group)
+            # handle o_proj weight switch and forward
+            result = self._handle_o_proj_weight_switch_and_forward(
+                attn_output=attn_output,
+                output=output,
+                output_padded=output_padded,
+                o_proj_full_work=o_proj_full_work,
+                should_shard_weight=should_shard_weight)
+            # If result is output_padded (Full-mode completed), return immediately
+            if result is output_padded:
+                return result
+            # Otherwise, update attn_output with TP-mode all-to-all processed tensor
+            attn_output = result
 
         output[...] = self.o_proj(attn_output)[0]
 
@@ -1103,3 +1050,93 @@ class AscendSFAImpl(MLAAttentionImpl):
             sparse_count=2048,
             sparse_mode=3)
         return topk_indices
+
+    def sh_init_o_proj_tp_full_params(self):
+        """
+        Initialize TP-mode and Full-mode parameters for o_proj weight, 
+        preparing for weight switching in PD mix stage.
+        
+        For PD mix stage:
+        - Use original TP o_proj weight for decode phase
+        - Need full-gather o_proj weight from all TP ranks for prefill phase
+        """
+        if AscendSFAImpl.o_proj_full_pool is None:
+            sample = self.o_proj.weight
+            AscendSFAImpl.o_proj_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, sample.shape[1]),
+                dtype=sample.dtype,
+                device=sample.device)
+
+        # Save TP-mode parameters (original sharded weights)
+        self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
+        self.o_proj_tp_aclnn_input_scale = self.o_proj.aclnn_input_scale.clone(
+        ).detach()
+        self.o_proj_tp_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.clone(
+        ).detach()
+        self.o_proj_tp_aclnn_input_offset = self.o_proj.aclnn_input_offset.clone(
+        ).detach()
+
+        # Initially switch to TP mode for graph capture
+        self.o_proj.weight.set_(self.o_proj_tp_weight)
+        self.o_proj.aclnn_input_scale.set_(self.o_proj_tp_aclnn_input_scale)
+        self.o_proj.aclnn_input_scale_reciprocal.set_(
+            self.o_proj_tp_aclnn_input_scale_reciprocal)
+        self.o_proj.aclnn_input_offset.set_(self.o_proj_tp_aclnn_input_offset)
+
+        # Precompute Full-mode quantization parameters by repeating TP parameters across all TP ranks
+        self.o_proj_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(
+            self.tp_size)
+        self.o_proj_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(
+            self.tp_size)
+        self.o_proj_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(
+            self.tp_size)
+
+    def _handle_o_proj_weight_switch_and_forward(
+            self, attn_output: torch.Tensor, output: torch.Tensor,
+            output_padded: torch.Tensor,
+            o_proj_full_work: Optional[torch.distributed.Work],
+            should_shard_weight: bool) -> Optional[torch.Tensor]:
+        """
+        Handle o_proj weight switching between TP-mode and Full-mode, and execute forward computation.
+        """
+        # Gather o_proj weight from all TP ranks for Full-mode computation
+        if should_shard_weight:
+            # Wait for the completion of o_proj weight all-gather operation
+            if o_proj_full_work is not None:
+                o_proj_full_work.wait()
+
+            # Switch o_proj to Full-mode (gathered weight from all TP ranks)
+            self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
+            self.o_proj.aclnn_input_scale.set_(
+                self.o_proj_full_aclnn_input_scale)
+            self.o_proj.aclnn_input_scale_reciprocal.set_(
+                self.o_proj_full_aclnn_input_scale_reciprocal)
+            self.o_proj.aclnn_input_offset.set_(
+                self.o_proj_full_aclnn_input_offset)
+
+            # Apply quantization method and execute forward computation
+            output[...] = self.o_proj.quant_method.quant_method.apply(
+                self.o_proj, attn_output)
+
+            # Switch o_proj back to TP-mode for subsequent decode operations
+            self.o_proj.weight.set_(self.o_proj_tp_weight)
+            self.o_proj.aclnn_input_scale.set_(
+                self.o_proj_tp_aclnn_input_scale)
+            self.o_proj.aclnn_input_scale_reciprocal.set_(
+                self.o_proj_tp_aclnn_input_scale_reciprocal)
+            self.o_proj.aclnn_input_offset.set_(
+                self.o_proj_tp_aclnn_input_offset)
+
+            return output_padded
+        else:
+            # For decode scenario: perform all-to-all communication on o_proj input activations
+            # Reshape for all-to-all: [batch * seq, tp_size, head_dim] -> [tp_size, batch * seq, head_dim]
+            send = attn_output.view(-1, self.tp_size, self.num_heads *
+                                    self.v_head_dim).permute(1, 0, 2).reshape(
+                                        -1, self.num_heads * self.v_head_dim)
+
+            attn_output = torch.empty_like(send)
+            torch.distributed.all_to_all_single(
+                attn_output, send, group=get_tp_group().device_group)
+
+            return attn_output
