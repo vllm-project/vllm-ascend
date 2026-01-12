@@ -21,15 +21,11 @@
 Run `pytest tests/e2e/multicard/long_sequence/test_prefix_caching.py`
 """
 
-import os
 from typing import Any, Dict
 
 import pytest
 
 from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
-from vllm_ascend.utils import vllm_version_is
-
-os.environ["HCCL_BUFFSIZE"] = "768"
 
 MODELS = [
     "vllm-ascend/Qwen3-30B-A3B-W8A8", "deepseek-ai/DeepSeek-V2-Lite-Chat"
