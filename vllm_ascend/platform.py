@@ -35,7 +35,7 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY, AscendDeviceType, get_ascend_device_type,
     update_aclgraph_sizes, update_cudagraph_capture_sizes,
     update_default_aclgraph_sizes, check_kv_extra_config)
-from vllm_ascend.config.utils import is_moe_model, is_vl_model, enable_sp
+from vllm_ascend.config.utils import is_vl_model, enable_sp
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig

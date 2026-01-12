@@ -35,7 +35,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.config.utils import enable_sp, is_moe_model, is_vl_model
+from vllm_ascend.config.utils import enable_sp, is_moe_model
 from vllm_ascend.config.vllm_ascend import (WeightPrefetchConfig,
                                             get_ascend_config)
 

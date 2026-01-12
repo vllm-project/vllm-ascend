@@ -19,6 +19,7 @@ def _is_contain_expert(config: Any):
                 return True
     return False
 
+
 def is_moe_model(vllm_config: Any):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
