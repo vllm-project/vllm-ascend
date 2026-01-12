@@ -35,6 +35,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.spec_decode import init_speculator
 
 logger = init_logger(__name__)
 
@@ -52,12 +53,21 @@ class NPUModelRunner(GPUModelRunner):
         del self.req_states
         del self.input_buffers
         del self.sampler
+        del self.speculator
 
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
             vllm_config,
             device,
         )
+
+        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
+        # init_speculator will return AscendEagleSpeculator when eagle is used.
+        # so here we just call init_speculator to reinitialize speculator.
+        if self.speculative_config is not None:
+            self.speculator = init_speculator(self.vllm_config, self.device)
+        else:
+            self.speculator = None
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
         self.req_states: AscendRequestState = AscendRequestState(

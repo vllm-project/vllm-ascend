@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/sample/spec_decode/eagle.py.
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/sample/spec_decode/eagle.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -30,8 +30,11 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 class AscendEagleSpeculator(EagleSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        """Override GPU EagleSpeculator.__init__ for Ascend NPUs.
+        attnention metadata building in Ascend backend needs more information,
+        such as seq_lens_cpu from input_batch, so we need to override __init__.
+        """
         with triton_op_wrapper():
-
             super().__init__(vllm_config, device)
         # when in decode phase of eagle speculator, we need some value in
         # main model's input_batch. so we keep a reference here.
