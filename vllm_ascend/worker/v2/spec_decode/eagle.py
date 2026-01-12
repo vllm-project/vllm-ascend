@@ -57,6 +57,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         """
         self.input_batch = input_batch
         # wrap build_attn_metadata to use Ascend attention metadata building.
+        # so we can call super().propose() directly.
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -122,8 +123,8 @@ class AscendEagleSpeculator(EagleSpeculator):
         # attn_metadata is build in vllm's super class.
         # We need to update attn_state for each layer's metadata.
         for metadata in attn_metadata.values():
-            metadata["attn_state"] = attn_state
-            metadata["seq_lens_cpu"] = seq_lens_cpu
+            metadata.attn_state = attn_state
+            metadata.seq_lens_cpu = seq_lens_cpu
 
     def _get_seq_lens_cpu(self) -> torch.Tensor:
         """Get seq_lens_cpu from input_batch."""

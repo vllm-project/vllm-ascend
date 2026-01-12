@@ -174,7 +174,8 @@
 #
 # ** 6. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`
+#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
 #    How：

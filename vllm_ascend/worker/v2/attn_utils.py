@@ -67,6 +67,9 @@ def build_attn_metadata(
     max_query_len = int(query_start_loc_cpu.max())
     seq_lens_cpu = torch.from_numpy(seq_lens_np)
     max_seq_len = int(seq_lens_cpu.max())
+    # torch_npu._reshape_and_cache operator requires slot_mappings to
+    # be torch.int32.
+    slot_mappings = slot_mappings.to(torch.int32)
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
