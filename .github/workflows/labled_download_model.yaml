@@ -30,6 +30,10 @@ jobs:
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           pip install modelscope
 
+      - name: Show Current Disk Usage
+        run: |
+          df -h /root/.cache | grep -v Filesystem | \
+          awk '{print "Mount point: "$6, "Total: "$2, "Used: "$3, "Available: "$4, "Usage: "$5}'
       - name: Checkout PR branch
         uses: actions/checkout@v6
         with:
