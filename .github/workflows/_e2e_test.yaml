@@ -104,8 +104,9 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
           # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
           # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
-          # torch 2.8 doesn't work with lora, fix me
           pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_llama32_lora.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_qwen3_multi_loras.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_profile_execute_duration.py
@@ -215,7 +216,6 @@ jobs:
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_external_launcher.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_full_graph_mode.py
-          # torch 2.8 doesn't work with lora, fix me
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_ilama_lora_tp2.py
           
 
