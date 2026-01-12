@@ -752,7 +752,8 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.events[4].append(mock_event)
         self.graph_params.handles[4].append(MagicMock())
 
-    @patch('torch.npu.graph_task_update_end', )
+    @patch(
+        'torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
     @patch('torch_npu.atb.npu_multi_head_latent_attention', MagicMock())
     def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end):
@@ -810,7 +811,8 @@ class TestPCPDCPGraphParams(TestBase):
 
         _mock_graph_task_end.assert_called_once()
 
-    @patch('torch.npu.graph_task_update_end', )
+    @patch(
+        'torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
     @patch('torch_npu.npu_fused_infer_attention_score.out', MagicMock())
     def test_update_attn_dcp_pcp_params(self, _mock_graph_task_end):

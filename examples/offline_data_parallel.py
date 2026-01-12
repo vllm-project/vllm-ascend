@@ -68,6 +68,7 @@ from vllm.utils.network_utils import get_open_port
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+
 def parse_args():
     import argparse
 
@@ -126,6 +127,7 @@ def cleanup_env_and_memory():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
 
 def main(
     model,
@@ -207,6 +209,7 @@ def main(
     sleep(5)
     del llm
     cleanup_env_and_memory()
+
 
 if __name__ == "__main__":
     args = parse_args()

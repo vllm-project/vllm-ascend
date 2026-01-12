@@ -129,8 +129,8 @@ def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
         for expert_idx in range(num_original_expert):
             physical_expert_idxs = log2phy[layer_idx][expert_idx]
             physical_expert_idxs = physical_expert_idxs.flatten()
-            physical_expert_idxs = physical_expert_idxs[
-                physical_expert_idxs != -1]
+            physical_expert_idxs = physical_expert_idxs[physical_expert_idxs !=
+                                                        -1]
             for physical_expert_idx in physical_expert_idxs:
                 opt_workload[physical_expert_idx] += workload[layer_idx][
                     expert_idx] / len(physical_expert_idxs)

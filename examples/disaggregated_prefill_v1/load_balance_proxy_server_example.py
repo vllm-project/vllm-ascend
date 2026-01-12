@@ -125,7 +125,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, List, Tuple, Dict
+from typing import Any, Dict, List, Tuple
 
 import httpx
 from fastapi import FastAPI, Request
@@ -173,12 +173,15 @@ class ServerState:
         # Removed individual server lock - will use global locks instead
 
     def __eq__(self, other):
-        self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
-        other_host = other.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+        self_host = self.host.replace("localhost", "0.0.0.0").replace(
+            "127.0.0.1", "0.0.0.0")
+        other_host = other.host.replace("localhost", "0.0.0.0").replace(
+            "127.0.0.1", "0.0.0.0")
         return self_host == other_host and str(self.port) == str(other.port)
 
     def __hash__(self):
-        self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
+        self_host = self.host.replace("localhost", "0.0.0.0").replace(
+            "127.0.0.1", "0.0.0.0")
         return hash((self_host, str(self.port)))
 
     def __repr__(self):
@@ -315,11 +318,12 @@ class ProxyState:
         return request_length
 
     async def add_instances(
-            self, instance_type: str, instances: List[ServerState]
-    ) -> Tuple[List[str], List[str]]:
+            self, instance_type: str,
+            instances: List[ServerState]) -> Tuple[List[str], List[str]]:
         added_nodes, waiting_nodes = [], []
         for server in instances:
-            is_valid = await self.node_listener.check_instance_status(server.client)
+            is_valid = await self.node_listener.check_instance_status(
+                server.client)
             if is_valid and instance_type == InstanceType.PREFILL:
                 self.add_prefillers([server])
                 added_nodes.append(str(server))
@@ -328,7 +332,8 @@ class ProxyState:
                 added_nodes.append(str(server))
             else:
                 node = str(server)
-                self.node_listener.waiting_nodes[node] = (instance_type, server, 0)
+                self.node_listener.waiting_nodes[node] = (instance_type,
+                                                          server, 0)
                 waiting_nodes.append(node)
         return added_nodes, waiting_nodes
 
@@ -338,7 +343,8 @@ class ProxyState:
             if server not in self.prefillers:
                 self.prefillers.append(server)
                 # prefiller_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.prefiller_heap, (0, num_prefillers + idx, server))
+                heapq.heappush(self.prefiller_heap,
+                               (0, num_prefillers + idx, server))
         self.print_status(f"Add prefiller instances: {instances}.")
 
     def add_decoders(self, instances: List[ServerState]) -> None:
@@ -347,14 +353,19 @@ class ProxyState:
             if server not in self.decoders:
                 self.decoders.append(server)
                 # decoder_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.decoder_heap, (0, num_decoders + idx, server))
+                heapq.heappush(self.decoder_heap,
+                               (0, num_decoders + idx, server))
         self.print_status(f"Add decoder instances: {instances}.")
 
     def remove_prefillers(self, instances: List[ServerState]) -> None:
         instances_to_remove = set(instances)
-        self.prefillers = [server for server in self.prefillers if server not in instances_to_remove]
+        self.prefillers = [
+            server for server in self.prefillers
+            if server not in instances_to_remove
+        ]
         prefiller_heap_copy = self.prefiller_heap.copy()
-        prefiller_heap_copy.sort(key=lambda x: x[1])  # sorted by key: prefiller_idx
+        prefiller_heap_copy.sort(
+            key=lambda x: x[1])  # sorted by key: prefiller_idx
         prefiller_heap = []
         idx = 0
         for priority, _, server in prefiller_heap_copy:
@@ -369,9 +380,13 @@ class ProxyState:
 
     def remove_decoders(self, instances: List[ServerState]) -> None:
         instances_to_remove = set(instances)
-        self.decoders = [server for server in self.decoders if server not in instances_to_remove]
+        self.decoders = [
+            server for server in self.decoders
+            if server not in instances_to_remove
+        ]
         decoder_heap_copy = self.decoder_heap.copy()
-        decoder_heap_copy.sort(key=lambda x: x[1])  # sorted by key: decoder_idx
+        decoder_heap_copy.sort(
+            key=lambda x: x[1])  # sorted by key: decoder_idx
         decoder_heap = []
         idx = 0
         for priority, _, server in decoder_heap_copy:
@@ -396,16 +411,20 @@ proxy_state = None
 
 
 class NodeListener:
+
     def __init__(self, proxy):
         self.proxy_state = proxy
         self.waiting_nodes: Dict[str, Tuple[str, Any, int]] = {}
-        self.listening_thread = threading.Thread(target=self._node_listener, daemon=True)
+        self.listening_thread = threading.Thread(target=self._node_listener,
+                                                 daemon=True)
         self.listening_thread.start()
 
     def _node_listener(self) -> None:
         while True:
-            for node, (instance_type, server, check_times) in list(self.waiting_nodes.items()):
-                is_valid = asyncio.run(self.check_instance_status(server.client))
+            for node, (instance_type, server,
+                       check_times) in list(self.waiting_nodes.items()):
+                is_valid = asyncio.run(
+                    self.check_instance_status(server.client))
                 print(f"Checking instance {node}...")
                 check_times += 1
                 if is_valid:
@@ -418,7 +437,8 @@ class NodeListener:
                     print(f"Instance {node} was not added to the proxy.")
                     self.waiting_nodes.pop(node)
                 else:
-                    self.waiting_nodes[node] = (instance_type, server, check_times)
+                    self.waiting_nodes[node] = (instance_type, server,
+                                                check_times)
             time.sleep(global_args.waiting_retry_interval)
 
     @staticmethod
@@ -461,10 +481,11 @@ def parse_args():
         type=float,
         default=0.001,
         help="Base delay (seconds) for exponential backoff retries")
-    parser.add_argument("--max-waiting-retries",
-                        type=int,
-                        default=3,
-                        help="Maximum number of retries for waiting nodes to be started")
+    parser.add_argument(
+        "--max-waiting-retries",
+        type=int,
+        default=3,
+        help="Maximum number of retries for waiting nodes to be started")
     parser.add_argument(
         "--waiting-retry-interval",
         type=float,
@@ -727,8 +748,7 @@ async def _handle_completions(api: str, request: Request):
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
-                            logger.debug(
-                                f"Skipping chunk: {chunk}")
+                            logger.debug(f"Skipping chunk: {chunk}")
                             yield chunk
                             continue
                         if not chunk_str:
@@ -739,8 +759,7 @@ async def _handle_completions(api: str, request: Request):
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             # if chunk is [done], skip it.
-                            logger.debug(
-                                f"Skipping chunk: {chunk_str}")
+                            logger.debug(f"Skipping chunk: {chunk_str}")
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
@@ -751,16 +770,12 @@ async def _handle_completions(api: str, request: Request):
                         choice = choices[0]
                         delta = choice.get("delta") or {}
                         message = choice.get("message") or {}
-                        content = (
-                                delta.get("content")
-                                or message.get("content")
-                                or choice.get("text")
-                                or ""
-                                )
+                        content = (delta.get("content")
+                                   or message.get("content")
+                                   or choice.get("text") or "")
                         generated_token += content
 
-                        stop_reason = choice.get(
-                            "stop_reason")
+                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
                         completion_tokens = (completion_tokens + 1) if stream_flag else \
                             (completion_tokens + usage.get("completion_tokens"))
@@ -782,8 +797,7 @@ async def _handle_completions(api: str, request: Request):
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
-                                choice["message"][
-                                    "content"] = generated_token
+                                choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
                             chunk = json.dumps(chunk_json).encode("utf-8")
@@ -825,13 +839,15 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
                   f"{[str(server) for server in instances]}."
 
         if instance_type not in [InstanceType.PREFILL, InstanceType.DECODE]:
-            return {"error": f"Instance type {instance_type} is not supported. "
-                             f"Only support '{InstanceType.PREFILL}' and '{InstanceType.DECODE}'."}
+            return {
+                "error":
+                f"Instance type {instance_type} is not supported. "
+                f"Only support '{InstanceType.PREFILL}' and '{InstanceType.DECODE}'."
+            }
 
         if adjust_mode == "add":
             added_nodes, waiting_nodes = await proxy_state.add_instances(
-                instance_type, instances
-            )
+                instance_type, instances)
             if waiting_nodes:
                 all_msg = f"{adjust_mode} {instance_type} instances: {added_nodes}. " \
                           f"Instances {waiting_nodes} are waiting to be added."
@@ -841,9 +857,12 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
             else:
                 proxy_state.remove_decoders(instances)
         return {
-            "message": all_msg,
-            "current_prefill_instances": [str(prefiller) for prefiller in proxy_state.prefillers],
-            "current_decode_instances": [str(decoder) for decoder in proxy_state.decoders]
+            "message":
+            all_msg,
+            "current_prefill_instances":
+            [str(prefiller) for prefiller in proxy_state.prefillers],
+            "current_decode_instances":
+            [str(decoder) for decoder in proxy_state.decoders]
         }
     except Exception as e:
         logger.error(f"Failed to {adjust_mode} instances: {e}")

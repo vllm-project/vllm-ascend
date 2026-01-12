@@ -25,6 +25,7 @@ from vllm.utils.mem_constants import GiB_bytes
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+
 def main():
     prompt = "How are you?"
 

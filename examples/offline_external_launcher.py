@@ -63,10 +63,10 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
+from safetensors.torch import load_file
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel, get_tp_group) 
-from safetensors.torch import load_file
+    destroy_distributed_environment, destroy_model_parallel, get_tp_group)
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
@@ -75,9 +75,12 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def patch_vllm_moe_model_weight_loader(model):
-    model = getattr(model, "model", None) or getattr(model, "language_model", None)
+    model = getattr(model, "model", None) or getattr(model, "language_model",
+                                                     None)
     if model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
+        raise ValueError(
+            "The provided model does not have a valid 'model' or 'language_model' attribute."
+        )
     for layer in model.layers:
         mlp_attr = "mlp"
         mlp = getattr(layer, mlp_attr)
@@ -145,28 +148,40 @@ def parse_args():
     parser.add_argument("--enable-sleep-mode",
                         action="store_true",
                         help="Enable sleep mode for the engine.")
-    parser.add_argument("--temperature",
-                        type=float,
-                        default=0.8,
-                        help="Float that controls the randomness of the sampling.")
-    parser.add_argument("--model-weight-gib",
-                        type=float,
-                        default=None,
-                        help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).")
-    parser.add_argument("--sleep-mode-level",
-                        type=int,
-                        choices=[1, 2],
-                        default=1,
-                        help="Sleep mode level: 1 or 2. This example of level 2 is only supported for dense model.")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.8,
+        help="Float that controls the randomness of the sampling.")
+    parser.add_argument(
+        "--model-weight-gib",
+        type=float,
+        default=None,
+        help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).")
+    parser.add_argument(
+        "--sleep-mode-level",
+        type=int,
+        choices=[1, 2],
+        default=1,
+        help=
+        "Sleep mode level: 1 or 2. This example of level 2 is only supported for dense model."
+    )
 
     args = parser.parse_args()
     if args.enable_sleep_mode:
         if args.model_weight_gib is None or args.temperature != 0:
-            parser.error("model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set.")
+            parser.error(
+                "model-weight-gib must be provided, and temperature must be zero when enable-sleep-mode is set."
+            )
         if args.model_weight_gib <= 0:
-            parser.error("model-weight-gib must be greater than 0 when enable-sleep-mode is set.")
-        if args.model == parser.get_default("model") and args.model_weight_gib is None:
-            parser.error("model-weight-gib must be provided for default model when enable-sleep-mode is set.")
+            parser.error(
+                "model-weight-gib must be greater than 0 when enable-sleep-mode is set."
+            )
+        if args.model == parser.get_default(
+                "model") and args.model_weight_gib is None:
+            parser.error(
+                "model-weight-gib must be provided for default model when enable-sleep-mode is set."
+            )
 
     return args
 
@@ -248,7 +263,8 @@ def main(
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
         if rank == 0:
             # cmp output
-            assert outputs[0].outputs[0].text == outputs_after_wakeup[0].outputs[0].text
+            assert outputs[0].outputs[0].text == outputs_after_wakeup[
+                0].outputs[0].text
             print("Sleep and wake up successfully!!")
 
     for i, output in enumerate(outputs):
