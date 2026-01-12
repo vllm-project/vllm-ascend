@@ -1154,8 +1154,9 @@ class MooncakeConnectorWorker:
             num_p_block_heads = max(
                 1, self.num_key_value_heads // self._prefill_tp_size)
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
-        self.local_remote_block_port_mapping = None
-        self.remote_port_send_num: dict[int, int] = {}
+        self.local_remote_block_port_mapping: dict[
+            str, Optional[List[List[int]]]] = {}
+        self.remote_port_send_num: dict[str, dict[int, int]] = {}
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1453,16 +1454,20 @@ class MooncakeConnectorWorker:
                         remote_port_send_num[remote_port] += 1
             return remote_port_send_num
 
-        if self.local_remote_block_port_mapping is None:
+        if meta.remote_engine_id not in self.local_remote_block_port_mapping:
+            self.local_remote_block_port_mapping[meta.remote_engine_id] = None
+        if self.local_remote_block_port_mapping[meta.remote_engine_id] is None:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings(
             )
-            self.local_remote_block_port_mapping = local_remote_block_port_mappings[
-                self.handshake_port]
-            self.remote_port_send_num = get_remote_port_send_num(
-                local_remote_block_port_mappings)
+            self.local_remote_block_port_mapping[
+                meta.remote_engine_id] = local_remote_block_port_mappings[
+                    self.handshake_port]
+            self.remote_port_send_num[
+                meta.remote_engine_id] = get_remote_port_send_num(
+                    local_remote_block_port_mappings)
 
         local_remote_block_port_mapping = copy.deepcopy(
-            self.local_remote_block_port_mapping)
+            self.local_remote_block_port_mapping[meta.remote_engine_id])
 
         num_external_blocks = math.ceil(meta.num_external_tokens /
                                         self.block_size)
@@ -1568,7 +1573,8 @@ class MooncakeConnectorWorker:
                                 pcp_dcp_rank][i],
                             offset=i,
                             tp_num_need_pulls=self.tp_num_need_pulls,
-                            remote_port_send_num=self.remote_port_send_num,
+                            remote_port_send_num=self.remote_port_send_num[
+                                meta.remote_engine_id],
                             all_task_done=(
                                 pcp_dcp_rank
                                 == len(remote_handshake_port_list) - 1

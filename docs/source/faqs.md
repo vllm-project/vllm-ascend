@@ -67,7 +67,7 @@ docker images | grep vllm-ascend
 
 ### 3. What models does vllm-ascend supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_models.html).
+Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -80,7 +80,7 @@ There are many channels that you can communicate with our community developers /
 
 ### 5. What features does vllm-ascend V1 supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html).
+Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
@@ -104,7 +104,7 @@ vllm-ascend is a hardware plugin for vLLM. Basically, the version of vllm-ascend
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. Take [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
@@ -112,13 +112,13 @@ Currently, w8a8, w4a8 and w4a4 quantization methods are already supported by vll
 
 ### 10. How to run a W8A8 DeepSeek model?
 
-Follow the [inference tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace the model with DeepSeek.
+Follow the [inference tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/multi_node.html) and replace the model with DeepSeek.
 
 ### 11. How is vllm-ascend tested?
 
 vllm-ascend is tested in three aspects, functions, performance, and accuracy.
 
-- **Functional test**: We added CI, including part of vllm's native unit tests and vllm-ascend's own unit tests. On vllm-ascend's test, we test basic functionalities, popular model availability, and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) through E2E test.
+- **Functional test**: We added CI, including part of vllm's native unit tests and vllm-ascend's own unit tests. On vllm-ascend's test, we test basic functionalities, popular model availability, and [supported features](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html) through E2E test.
 
 - **Performance test**: We provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for E2E performance benchmark, which can be easily re-routed locally. We will publish a perf website to show the performance test results for each pull request.
 

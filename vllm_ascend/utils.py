@@ -1017,6 +1017,13 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
+def o_shard_enable() -> bool:
+    layer_sharding = get_ascend_config().layer_sharding
+    if layer_sharding is None:
+        return False
+    return "o_proj" in layer_sharding
+
+
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1165,20 +1172,13 @@ def singleton(cls):
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
-
     vllm_config = get_current_vllm_config()
-    if vllm_config is None:
-        return False
-
-    model_config = getattr(vllm_config, "model_config", None)
-    if model_config is None:
-        return False
-
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    if hf_text_config is None:
-        return False
-
-    return hasattr(hf_text_config, "index_topk")
+    is_ds_v32 = hasattr(
+        vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk")
+    if is_ds_v32 and enable_sp():
+        return True
+    return False
 
 
 @lru_cache(maxsize=1)
