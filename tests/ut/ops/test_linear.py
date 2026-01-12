@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm import config
 
-from tests.ut.base import TestBase
 import vllm_ascend.config.vllm_ascend as ascend_config
+from tests.ut.base import TestBase
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.linear import (AscendMergedColumnParallelLinear,
                                     AscendReplicatedLinear,

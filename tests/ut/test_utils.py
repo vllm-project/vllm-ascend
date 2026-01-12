@@ -22,6 +22,7 @@ import torch
 from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
                          VllmConfig)
 
+import vllm_ascend.config.utils
 from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
@@ -218,9 +219,9 @@ class TestUtils(TestBase):
             model_config=test_model_config,
             compilation_config=test_compilation_config,
             parallel_config=test_parallel_config)
-        utils.update_aclgraph_sizes(test_vllm_config)
+        vllm_ascend.config.utils.update_aclgraph_sizes(test_vllm_config)
         os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
-        utils.update_aclgraph_sizes(test_vllm_config)
+        vllm_ascend.config.utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
 
         self.assertEqual(

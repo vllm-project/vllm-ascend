@@ -28,11 +28,10 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.config.utils import enable_sp
+from vllm_ascend.config.utils import enable_sp, prefill_context_parallel_enable
 from vllm_ascend.config.vllm_ascend import get_ascend_config
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
-from vllm_ascend.utils import (npu_stream_switch,
-                               prefill_context_parallel_enable)
+from vllm_ascend.utils import (npu_stream_switch)
 
 
 class QuantType(Enum):

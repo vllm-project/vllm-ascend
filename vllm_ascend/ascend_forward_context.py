@@ -11,10 +11,9 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.config.utils import enable_sp, is_moe_model
+from vllm_ascend.config.utils import enable_sp, is_moe_model, flashcomm2_enable
 from vllm_ascend.config.vllm_ascend import get_ascend_config
-from vllm_ascend.utils import (AscendDeviceType, flashcomm2_enable,
-                               get_ascend_device_type, has_layer_idx,
+from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type, has_layer_idx,
                                speculative_enable_dispatch_gmm_combine_decode)
 
 
