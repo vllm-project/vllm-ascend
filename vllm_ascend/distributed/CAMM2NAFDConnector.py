@@ -30,6 +30,14 @@ from vllm.forward_context import ForwardContext, get_forward_context
 logger = init_logger(__name__)
 
 
+_hf_config_global = None
+_max_num_reqs_global = None
+
+def init_global_config(hf_config, max_num_reqs):
+    global _hf_config_global, _max_num_reqs_global
+    _hf_config_global = hf_config
+    _max_num_reqs_global = max_num_reqs
+                
 class CAMM2NAFDConnector(AFDConnectorBase):
     def __init__(self,
                  rank: int,
@@ -40,6 +48,13 @@ class CAMM2NAFDConnector(AFDConnectorBase):
         self.local_rank = local_rank
         self._initialized = False
         self.config = config
+        self.hf_config = config.model_config.hf_config
+        self.scheduler_config = config.scheduler_config
+        decode_max_num_seqs = getattr(self.scheduler_config,
+                                      'decode_max_num_seqs', 0)
+        self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
+                                decode_max_num_seqs)
+        init_global_config(self.hf_config,self.max_num_reqs)
         self.attn_size = 0
         self.ffn_size = 0
         self.use_aclgraph = self._use_aclgraph()
@@ -265,17 +280,21 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               attn_size: int) -> torch.Tensor:
     ubatch_idx = get_forward_context().ubatch_idx
     if get_forward_context().cam_afdconnector_data is None:
+        moe_expert_num = _hf_config_global.n_routed_experts
+        batch_size = _max_num_reqs_global
+        h = _hf_config_global.hidden_size
+        k = _hf_config_global.num_experts_per_tok
         cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
-            moe_expert_num = 64,
-            shared_expert_num = 0,
-            scale = None,
-            handle = None,
-            quant_mode = 0,
-            aiv_num = 48,
-            batch_size = 20,
-            h = 2048,
-            k = 8
-        )
+                    moe_expert_num = moe_expert_num,
+                    shared_expert_num = 0,
+                    scale = None,
+                    handle = None,
+                    quant_mode = 0,
+                    aiv_num = 48,
+                    batch_size = batch_size,
+                    h = h,
+                    k = k
+                )
         get_forward_context().cam_afdconnector_data = cam_afdconnector_data
 
     cam_metadata = get_forward_context().cam_afdconnector_data
