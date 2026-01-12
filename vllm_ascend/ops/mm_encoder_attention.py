@@ -117,27 +117,23 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             k = F.pad(k, (0, pad_len), mode="constant", value=0)
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
-        context_layer = torch.empty_like(q)
-
         if cu_seqlens is None:
             cu_seqlens = torch.arange(0, (bsz + 1) * q_len,
                                       step=q_len,
                                       dtype=torch.int32,
                                       device=query.device)
+        cu_seqlens = cu_seqlens.cpu().tolist()
 
-        cu_seqlens = torch.diff(cu_seqlens).to("cpu")
-
-        # operator requires pta version >= 2.5.1
-        torch_npu._npu_flash_attention_unpad(
+        context_layer = torch_npu.npu_fusion_attention(
             query=q,
             key=k,
             value=v,
-            seq_len=cu_seqlens,
-            scale_value=self.head_size**-0.5,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=context_layer,
-        )
+            head_num=self.num_heads,
+            input_layout="TND",
+            scale=self.head_size**-0.5,
+            actual_seq_qlen=cu_seqlens,
+            actual_seq_kvlen=cu_seqlens,
+        )[0]
 
         if enable_pad:
             context_layer = context_layer[..., :origin_shape]
