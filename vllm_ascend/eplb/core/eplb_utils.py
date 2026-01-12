@@ -122,15 +122,6 @@ def generate_log2phy_map(global_expert_map, ep_rank):
     return log2phy_map
 
 
-def moe_load_async_stream() -> torch_npu.npu.Stream:
-    global _MOE_LOAD_ASYNC_STREAM
-    if _MOE_LOAD_ASYNC_STREAM is None:
-        # when this function is called before any stream is set,
-        # we return the default stream.
-        _MOE_LOAD_ASYNC_STREAM = torch_npu.npu.Stream()
-    return _MOE_LOAD_ASYNC_STREAM
-
-
 class EPLBParamUtils:
 
     @staticmethod

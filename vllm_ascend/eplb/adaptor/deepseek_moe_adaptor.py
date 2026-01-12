@@ -28,6 +28,6 @@ class DeepSeekMoeAdaptor(VllmEplbAdaptor):
     @staticmethod
     def model_register(model, model_config):
         VllmEplbAdaptor.model_register(model)
-        config = model_config.hf_config
+        config = model_config.hf_text_config
         model.num_dense_layers = config.first_k_dense_replace
         model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
