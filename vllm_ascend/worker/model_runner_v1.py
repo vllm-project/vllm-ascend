@@ -1267,7 +1267,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
                                               total_num_scheduled_tokens)
-        logger.info(f"enable_dbo= {enable_dbo}")
 
         # Get info across DP ranks.
         # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,

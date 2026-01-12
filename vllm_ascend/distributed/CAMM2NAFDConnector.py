@@ -30,13 +30,6 @@ from vllm.forward_context import ForwardContext, get_forward_context
 logger = init_logger(__name__)
 
 
-_hf_config_global = None
-_max_num_reqs_global = None
-
-def init_global_config(hf_config, max_num_reqs):
-    global _hf_config_global, _max_num_reqs_global
-    _hf_config_global = hf_config
-    _max_num_reqs_global = max_num_reqs
                 
 class CAMM2NAFDConnector(AFDConnectorBase):
     def __init__(self,
@@ -54,7 +47,6 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                       'decode_max_num_seqs', 0)
         self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
                                 decode_max_num_seqs)
-        init_global_config(self.hf_config,self.max_num_reqs)
         self.attn_size = 0
         self.ffn_size = 0
         self.use_aclgraph = self._use_aclgraph()
@@ -170,7 +162,11 @@ class CAMM2NAFDConnector(AFDConnectorBase):
                                                 self.hccl_comm_name2,
                                                 self.rank,
                                                 self.ffn_size,
-                                                self.attn_size)
+                                                self.attn_size,
+                                                self.hf_config.n_routed_experts,
+                                                self.max_num_reqs,
+                                                self.hf_config.hidden_size,
+                                                self.hf_config.num_experts_per_tok)
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata, ubatch_idx: int = 0) -> torch.Tensor:
@@ -256,6 +252,7 @@ class CAMM2NAFDConnector(AFDConnectorBase):
             
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor_npu, dst=dst, group=self.p2p_pg)
+            
     def recv_is_ubatch(self):        
         src = self.p2p_rank % self.min_size + self.ffn_size
         
@@ -277,13 +274,13 @@ def cam_send_attn_output_impl(hidden_states: torch.Tensor,
                               hccl_comm_name2: str,
                               rank: int,
                               ffn_size: int,
-                              attn_size: int) -> torch.Tensor:
+                              attn_size: int,
+                              moe_expert_num:int,
+                              batch_size:int,
+                              h:int,
+                              k:int) -> torch.Tensor:
     ubatch_idx = get_forward_context().ubatch_idx
     if get_forward_context().cam_afdconnector_data is None:
-        moe_expert_num = _hf_config_global.n_routed_experts
-        batch_size = _max_num_reqs_global
-        h = _hf_config_global.hidden_size
-        k = _hf_config_global.num_experts_per_tok
         cam_afdconnector_data = CAMM2NAFDConnectorMetadata(
                     moe_expert_num = moe_expert_num,
                     shared_expert_num = 0,
@@ -332,7 +329,11 @@ def cam_send_attn_output_fake_impl(hidden_states: torch.Tensor,
                                     hccl_comm_name2: str,
                                     rank: int,
                                     ffn_size: int,
-                                    attn_size: int) -> torch.Tensor:
+                                    attn_size: int,
+                                    moe_expert_num:int,
+                                    batch_size:int,
+                                    h:int,
+                                    k:int) -> torch.Tensor:
     return hidden_states
 
 def cam_recv_ffn_output_impl(hidden_states: torch.Tensor,
