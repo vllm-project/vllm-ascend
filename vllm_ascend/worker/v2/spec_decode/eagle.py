@@ -106,7 +106,9 @@ class AscendEagleSpeculator(EagleSpeculator):
         # attn_metadata is None in profile_run and dummy_run.
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
-                attn_meta["seq_lens_cpu"] = attn_meta["seq_lens_cpu"] + 1
+                # seq_lens in AscendMetadata is a cpu tensor.
+                attn_meta.seq_lens = attn_meta.seq_lens + 1
+                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
         return last_hidden_states, hidden_states
 
     def _update_decode_attn_metadata(
