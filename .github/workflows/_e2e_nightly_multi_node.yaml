@@ -69,35 +69,12 @@ jobs:
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:
         KUBECONFIG: /tmp/kubeconfig
-        KUBECTL: /root/.cache/.kube/kubectl
         NAMESPACE: vllm-project
         LEADER_POD: vllm-0
-        RESULT_FILE: /root/.cache/tests/ret_${{ inputs.soc_version }}
     steps:
-        - name: Install system denpendencies
-          run: |
-           # configure apt and pip source
-           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-           pip install jinja2-cli
-
-        - name: Install kubectl
-          run: |
-            # Install kubectl
-            arch=$(uname -m)
-
-            if echo "$arch" | grep -qiE "arm|aarch64"; then
-              echo "Detected ARM architecture: $arch"
-              KUBECTL="$KUBECTL"_arm
-            fi
-            install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
-
-            # Verify kubectl installation
-            kubectl version --client=true
-
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
@@ -110,8 +87,6 @@ jobs:
           run: |
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
-            # clear log directory
-            rm -fr $RESULT_FILE
 
         - name: Clear resources
           run: |
@@ -157,10 +132,6 @@ jobs:
             replicas="${{ inputs.replicas }}"
             image="${{ inputs.image }}"
             config_file_path="${{ inputs.config_file_path }}"
-            vllm_version="${{ inputs.vllm_version }}"
-            vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
-            vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
-            result_file_path="$RESULT_FILE"
             fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
             echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
@@ -174,19 +145,17 @@ jobs:
 
             if [ "${{ inputs.soc_version }}" = "a3" ]; then
               npu_per_node=16
+              TEMPLATE_FILE="tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2"
             else
               npu_per_node=8
+              TEMPLATE_FILE="tests/e2e/nightly/multi_node/scripts/lws-a2.yaml.jinja2"
             fi
 
-            jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
+            jinja2 $TEMPLATE_FILE \
               -D size="$size" \
               -D replicas="$replicas" \
               -D image="$image" \
               -D config_file_path="$config_file_path" \
-              -D vllm_version="$vllm_version" \
-              -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
-              -D vllm_ascend_ref="$vllm_ascend_ref" \
-              -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
               -D fail_tag="$fail_tag" \
               --outfile lws.yaml
