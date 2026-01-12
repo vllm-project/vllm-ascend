@@ -917,14 +917,14 @@ __aicore__ inline void SparseFlashAttentionMla<SFAT>::CalcSinnerTopKBegin(RunInf
     int32_t blockLen = blockEnd - blockBegin;
     sparseLen += (blockLen > static_cast<int32_t>(curOffsetInSparseBlock)) ? blockLen - curOffsetInSparseBlock : 0;
 
-    bool firstVaildFlag = false;
+    bool firstValidFlag = false;
     if (curTopKIdx > 0) {
         info.curTopKIdx = curTopKIdx;
         info.curOffsetInSparseBlock = curOffsetInSparseBlock;
     } else if (curTopKIdx == 0 && sparseLen > 0) {
         info.curTopKIdx = curTopKIdx;
         info.curOffsetInSparseBlock = 0;
-        firstVaildFlag = true;
+        firstValidFlag = true;
     }
     
     for (uint64_t topkIdx = curTopKIdx + 1; topkIdx < validCount; topkIdx++) {
@@ -938,10 +938,10 @@ __aicore__ inline void SparseFlashAttentionMla<SFAT>::CalcSinnerTopKBegin(RunInf
         if (blockBegin >= info.threshold) {
             continue;
         }
-        if (firstVaildFlag == false && curTopKIdx == 0) {
+        if (firstValidFlag == false && curTopKIdx == 0) {
             info.curTopKIdx = topkIdx;
             info.curOffsetInSparseBlock = 0;
-            firstVaildFlag = true;
+            firstValidFlag = true;
         }
         uint64_t blockEnd = (blockBegin + constInfo.sparseBlockSize > info.threshold) ? info.threshold : blockBegin + constInfo.sparseBlockSize;
         uint64_t blockLen = blockEnd - blockBegin;
