@@ -102,8 +102,11 @@ class AscendEagleSpeculator(EagleSpeculator):
             attn_metadata,
             num_tokens_across_dp,
         )
-        for attn_meta in attn_metadata.values():
-            attn_meta["seq_lens_cpu"] = attn_meta["seq_lens_cpu"] + 1
+
+        # attn_metadata is None in profile_run and dummy_run.
+        if attn_metadata is not None:
+            for attn_meta in attn_metadata.values():
+                attn_meta["seq_lens_cpu"] = attn_meta["seq_lens_cpu"] + 1
         return last_hidden_states, hidden_states
 
     def _update_decode_attn_metadata(
