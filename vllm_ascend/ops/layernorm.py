@@ -20,10 +20,10 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
-from vllm.forward_context import get_forward_context
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 class AscendRMSNorm(RMSNorm):
@@ -56,8 +56,9 @@ class AscendRMSNorm(RMSNorm):
         if residual is not None:
             if x.size(0) != residual.size(0):
                 sp_enabled = get_forward_context().sp_enabled
-                assert sp_enabled is True, ("Currently, this situation only occurs "
-                                            "when sp is enabled")
+                assert sp_enabled is True, (
+                    "Currently, this situation only occurs "
+                    "when sp is enabled")
                 pad_size = get_forward_context().pad_size
                 if pad_size > 0:
                     residual = F.pad(residual, (0, 0, 0, pad_size))

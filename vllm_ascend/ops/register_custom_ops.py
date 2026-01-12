@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.distributed import (get_dp_group, get_ep_group,
-                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
@@ -26,7 +25,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
     except AssertionError:
         return x
 
-    if forward_context.is_multimodal_model and is_first_allgather:  
+    if forward_context.is_multimodal_model and is_first_allgather:
         return x
     sp_enabled = forward_context.sp_enabled
     if sp_enabled and label:

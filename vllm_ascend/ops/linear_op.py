@@ -53,8 +53,8 @@ from vllm.distributed import (split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
