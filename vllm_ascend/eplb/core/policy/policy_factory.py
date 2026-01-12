@@ -20,9 +20,9 @@ class PolicyFactory:
             0:
             RandomLoadBalance,  # RandomLoadBalance: shuffle last physical expert on NPU 1 and 3
             1:
-            DynamicEplb,  # Dynamic EPLB policy: overall expert replacement based on current moe load
+            DefaultEplb,  # Dynamic EPLB policy: overall expert replacement based on current moe load
             2:
-            DynamicEplbV2,  # Dynamic EPLB policy V2:  expert replacement with constrained number of expert shuffle
+            SwiftBalanceEplb,  # Dynamic EPLB policy V2:  expert replacement with constrained number of expert shuffle
             3:
             FlashLB,  # FlashLB EPLB policy: expert replacement based on Joint Optimization, Multi-Shot Enhancement and Incremental Adjustment
         }
