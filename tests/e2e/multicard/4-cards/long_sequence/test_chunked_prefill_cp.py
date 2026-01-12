@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/multicard/long_sequence/test_chunked_prefill.py`.
+Run `pytest tests/e2e/multicard/long_sequence/test_chunked_prefill_cp.py`.
 """
 
 import os
