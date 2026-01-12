@@ -58,7 +58,7 @@ pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pyt
 VLLM_USE_MODELSCOPE=true
 ```
 
-Please follow the [Installation Guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
+Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
 
 :::{note}
 Make sure your vLLM and vllm-ascend are installed after your python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.

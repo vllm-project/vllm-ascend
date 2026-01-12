@@ -37,7 +37,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 - 🔴 NO plan/Deprecated: No plan or deprecated by vLLM.
 
 [v1_user_guide]: https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html
-[multimodal]: https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_npu_multimodal.html
+[multimodal]: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/single_npu_multimodal.html
 [guided_decoding]: https://github.com/vllm-project/vllm-ascend/issues/177
 [multilora]: https://github.com/vllm-project/vllm-ascend/issues/396
 [v1 multilora]: https://github.com/vllm-project/vllm-ascend/pull/893
