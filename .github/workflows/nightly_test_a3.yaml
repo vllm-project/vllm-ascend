@@ -83,6 +83,9 @@ jobs:
           - name: multi-node-qwen-vl-disagg-pd
             config_file_path: Qwen3-VL-235B-disagg-pd.yaml
             size: 2
+          - name: multi-node-kimi-k2-instruct-w8a8
+            config_file_path: Kimi-K2-Instruct-W8A8.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -144,6 +147,9 @@ jobs:
           - name: qwen3-next-w8a8
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/single_node/models/test_qwen3_next_w8a8.py
+          - name: kimi-k2-thinking
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/single_node/models/test_kimi_k2_thinking.py
           # TODO: Replace deepseek3.2-exp with deepseek3.2 after nightly tests pass
           # - name: deepseek3_2-exp-w8a8
           #   os: linux-aarch64-a3-16
