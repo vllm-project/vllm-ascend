@@ -263,7 +263,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_gpu=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
-            seq_lens_cpu=self.input_buffers.seq_lens_cpu,
+            seq_lens_np=self.input_buffers.seq_lens_np,
             block_tables=block_tables,
             # torch_npu._reshape_and_cache operator requires slot_mappings to
             # be torch.int32.
