@@ -22,6 +22,8 @@ on:
     branches:
       - 'main'
       - '*-dev'
+      - 'releases/v*'
+
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -70,7 +72,7 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
-              - '.github/workflows/vllm_ascend_test_pr_light.yaml'
+              - '.github/workflows/pr_test_light.yaml'
 
   ut:
     needs: [lint, changes]
