@@ -108,13 +108,14 @@ Note that vLLM Ascend will only be released for a certain vLLM release version, 
 
 Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend version branch and supports its latest version (such as 0.7.3), as shown below:
 
-| Branch     | State        | Note                                                     |
-| ---------- | ------------ | -------------------------------------------------------- |
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.12.0 tag |
-| v0.11.0-dev| Maintained   | CI commitment for vLLM 0.11.0 version |
-| v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version                     |
-| v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version                     |
-| v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev                                   |
+| Branch           | State        | Note                                                     |
+| -----------------| ------------ | -------------------------------------------------------- |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM 0.12.0 tag   |
+| releases/v0.13.0 | Maintained   | CI commitment for vLLM 0.13.0 version                    |
+| v0.11.0-dev      | Maintained   | CI commitment for vLLM 0.11.0 version                    |
+| v0.9.1-dev       | Maintained   | CI commitment for vLLM 0.9.1 version                     |
+| v0.7.3-dev       | Maintained   | CI commitment for vLLM 0.7.3 version                     |
+| v0.7.1-dev       | Unmaintained | Replaced by v0.7.3-dev                                   |
 
 ### Feature branches
 
